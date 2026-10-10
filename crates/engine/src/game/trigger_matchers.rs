@@ -1583,6 +1583,7 @@ pub(super) fn matching_damage_done_events(
             .iter()
             .find(|source| source.object_id == src)
             .map(|source| source.incarnation),
+        target_incarnation: None,
     })
     .collect()
 }
@@ -9548,6 +9549,7 @@ mod tests {
             is_combat: false,
             excess: 0,
             source_incarnation: None,
+            target_incarnation: None,
         };
         assert!(match_damage_done(
             &event,
@@ -9617,6 +9619,7 @@ mod tests {
             is_combat: true,
             excess: 0,
             source_incarnation: None,
+            target_incarnation: None,
         };
         let blocker_damage = GameEvent::DamageDealt {
             source_id: source,
@@ -9625,6 +9628,7 @@ mod tests {
             is_combat: true,
             excess: 0,
             source_incarnation: None,
+            target_incarnation: None,
         };
         let nonblocking_creature_damage = GameEvent::DamageDealt {
             source_id: source,
@@ -9633,6 +9637,7 @@ mod tests {
             is_combat: true,
             excess: 0,
             source_incarnation: None,
+            target_incarnation: None,
         };
 
         assert!(
@@ -9741,6 +9746,7 @@ mod tests {
             is_combat: false,
             excess: 0,
             source_incarnation: None,
+            target_incarnation: None,
         };
         let trigger_source_context = test_trigger_source_context(&state, trigger_source);
 
@@ -9807,6 +9813,7 @@ mod tests {
             is_combat: false,
             excess: 0,
             source_incarnation: None,
+            target_incarnation: None,
         };
         let trigger_source_context = test_trigger_source_context(&state, trigger_source);
 
@@ -9864,6 +9871,7 @@ mod tests {
             is_combat: true,
             excess: 0,
             source_incarnation: None,
+            target_incarnation: None,
         };
         let trigger_source_context = test_trigger_source_context(&state, trigger_source);
 
@@ -10125,6 +10133,7 @@ mod tests {
             is_combat: true,
             excess: 0,
             source_incarnation: None,
+            target_incarnation: None,
         };
         assert!(
             !match_damage_done(
@@ -10313,6 +10322,7 @@ mod tests {
             is_combat: true,
             excess: 0,
             source_incarnation: None,
+            target_incarnation: None,
         };
         assert!(match_damage_done(
             &to_creature,
@@ -10330,6 +10340,7 @@ mod tests {
             is_combat: true,
             excess: 0,
             source_incarnation: None,
+            target_incarnation: None,
         };
         assert!(!match_damage_done(
             &to_player,
@@ -10346,6 +10357,7 @@ mod tests {
             is_combat: true,
             excess: 0,
             source_incarnation: None,
+            target_incarnation: None,
         };
         assert!(!match_damage_done(
             &to_noncreature,
@@ -10395,6 +10407,7 @@ mod tests {
             is_combat: true,
             excess: 0,
             source_incarnation: None,
+            target_incarnation: None,
         };
         assert!(match_damage_done(
             &to_pw,
@@ -10410,6 +10423,7 @@ mod tests {
             is_combat: true,
             excess: 0,
             source_incarnation: None,
+            target_incarnation: None,
         };
         assert!(!match_damage_done(
             &to_player,
@@ -10484,6 +10498,7 @@ mod tests {
             is_combat: true,
             excess: 0,
             source_incarnation: None,
+            target_incarnation: None,
         };
         assert!(
             match_damage_done(
@@ -10503,6 +10518,7 @@ mod tests {
             is_combat: true,
             excess: 0,
             source_incarnation: None,
+            target_incarnation: None,
         };
         assert!(
             !match_damage_done(
@@ -10522,6 +10538,7 @@ mod tests {
             is_combat: true,
             excess: 0,
             source_incarnation: None,
+            target_incarnation: None,
         };
         assert!(
             match_damage_done(
@@ -10577,6 +10594,7 @@ mod tests {
             is_combat: true,
             excess: 0,
             source_incarnation: None,
+            target_incarnation: None,
         };
         assert!(match_damage_done(
             &to_opp,
@@ -10592,6 +10610,7 @@ mod tests {
             is_combat: true,
             excess: 0,
             source_incarnation: None,
+            target_incarnation: None,
         };
         assert!(!match_damage_done(
             &to_opp_creature,
@@ -10650,6 +10669,7 @@ mod tests {
             is_combat: true,
             excess: 0,
             source_incarnation: None,
+            target_incarnation: None,
         };
         assert!(match_damage_done(
             &to_player,
@@ -10666,6 +10686,7 @@ mod tests {
             is_combat: true,
             excess: 0,
             source_incarnation: None,
+            target_incarnation: None,
         };
         assert!(!match_damage_done(
             &to_creature,
@@ -14458,6 +14479,7 @@ mod tests {
                 is_combat,
                 excess: 0,
                 source_incarnation: None,
+                target_incarnation: None,
             };
             assert!(match_damage_done(
                 &event,
@@ -14481,6 +14503,7 @@ mod tests {
             is_combat: false,
             excess: 0,
             source_incarnation: None,
+            target_incarnation: None,
         };
         assert!(!match_damage_done(
             &event,
@@ -14503,6 +14526,7 @@ mod tests {
             is_combat: true,
             excess: 0,
             source_incarnation: None,
+            target_incarnation: None,
         };
         assert!(!match_damage_done(
             &event,
@@ -14525,6 +14549,7 @@ mod tests {
             is_combat: false,
             excess: 0,
             source_incarnation: None,
+            target_incarnation: None,
         };
         assert!(match_damage_done(
             &event,
@@ -14555,6 +14580,7 @@ mod tests {
             is_combat: true,
             excess: 0,
             source_incarnation: None,
+            target_incarnation: None,
         };
 
         assert!(!match_damage_received(
@@ -14586,6 +14612,7 @@ mod tests {
             is_combat: false,
             excess: 0,
             source_incarnation: None,
+            target_incarnation: None,
         };
 
         assert!(match_damage_received(
@@ -14620,6 +14647,7 @@ mod tests {
             is_combat: false,
             excess: 0,
             source_incarnation: None,
+            target_incarnation: None,
         };
         assert!(!match_damage_done(
             &event,
@@ -14636,6 +14664,7 @@ mod tests {
             is_combat: false,
             excess: 0,
             source_incarnation: None,
+            target_incarnation: None,
         };
         assert!(match_damage_done(
             &event_opp,
@@ -14684,6 +14713,7 @@ mod tests {
             is_combat: true,
             excess: 0,
             source_incarnation: None,
+            target_incarnation: None,
         };
         assert!(
             !match_damage_done(
@@ -14703,6 +14733,7 @@ mod tests {
             is_combat: true,
             excess: 0,
             source_incarnation: None,
+            target_incarnation: None,
         };
         assert!(
             match_damage_done(
@@ -14740,6 +14771,7 @@ mod tests {
             is_combat: false,
             excess: 0,
             source_incarnation: None,
+            target_incarnation: None,
         };
         assert!(!match_damage_done(
             &event,
@@ -14767,6 +14799,7 @@ mod tests {
                 is_combat: false,
                 excess: 0,
                 source_incarnation: None,
+                target_incarnation: None,
             };
             assert!(
                 match_damage_done(
@@ -14794,6 +14827,7 @@ mod tests {
                 is_combat: false,
                 excess: 0,
                 source_incarnation: None,
+                target_incarnation: None,
             };
             assert!(match_damage_done(
                 &event,
@@ -14836,6 +14870,7 @@ mod tests {
                 is_combat: false,
                 excess: 0,
                 source_incarnation: None,
+                target_incarnation: None,
             };
             assert_eq!(
                 match_damage_received(
@@ -14890,6 +14925,7 @@ mod tests {
                 is_combat: true,
                 excess: 0,
                 source_incarnation: None,
+                target_incarnation: None,
             };
             assert_eq!(
                 match_damage_received(
@@ -14937,6 +14973,7 @@ mod tests {
             is_combat: false,
             excess: 0,
             source_incarnation: None,
+            target_incarnation: None,
         };
         assert!(
             !match_damage_received(
@@ -14955,6 +14992,7 @@ mod tests {
             is_combat: false,
             excess: 0,
             source_incarnation: None,
+            target_incarnation: None,
         };
         assert!(match_damage_received(
             &self_damage,
@@ -15008,6 +15046,7 @@ mod tests {
             is_combat: false,
             excess: 0,
             source_incarnation: None,
+            target_incarnation: None,
         };
         assert!(
             match_damage_received(
@@ -15026,6 +15065,7 @@ mod tests {
             is_combat: false,
             excess: 0,
             source_incarnation: None,
+            target_incarnation: None,
         };
         assert!(
             !match_damage_received(
@@ -15074,6 +15114,7 @@ mod tests {
             is_combat: false,
             excess: 0,
             source_incarnation: None,
+            target_incarnation: None,
         };
         assert!(
             !match_damage_received(
@@ -15122,6 +15163,7 @@ mod tests {
             is_combat: true,
             excess: 0,
             source_incarnation: None,
+            target_incarnation: None,
         };
         assert!(
             match_damage_received(
@@ -15148,6 +15190,7 @@ mod tests {
             is_combat: true,
             excess: 0,
             source_incarnation: None,
+            target_incarnation: None,
         };
         assert!(
             !match_damage_received(
@@ -15167,6 +15210,7 @@ mod tests {
             is_combat: true,
             excess: 0,
             source_incarnation: None,
+            target_incarnation: None,
         };
         assert!(
             !match_damage_received(
@@ -15201,6 +15245,7 @@ mod tests {
             is_combat: false,
             excess: 0,
             source_incarnation: None,
+            target_incarnation: None,
         };
         assert!(
             !match_damage_received(
@@ -15219,6 +15264,7 @@ mod tests {
             is_combat: false,
             excess: 0,
             source_incarnation: None,
+            target_incarnation: None,
         };
         assert!(
             match_damage_received(
@@ -15253,6 +15299,7 @@ mod tests {
             is_combat: false,
             excess: 0,
             source_incarnation: None,
+            target_incarnation: None,
         };
         assert!(
             !match_damage_received(
@@ -15271,6 +15318,7 @@ mod tests {
             is_combat: false,
             excess: 0,
             source_incarnation: None,
+            target_incarnation: None,
         };
         assert!(
             match_damage_received(
@@ -15322,6 +15370,7 @@ mod tests {
             is_combat: false,
             excess: 0,
             source_incarnation: None,
+            target_incarnation: None,
         };
         assert!(match_damage_received(
             &event,
@@ -15337,6 +15386,7 @@ mod tests {
             is_combat: false,
             excess: 0,
             source_incarnation: None,
+            target_incarnation: None,
         };
         assert!(!match_damage_received(
             &own_event,
@@ -15364,6 +15414,7 @@ mod tests {
                 is_combat: false,
                 excess: 0,
                 source_incarnation: None,
+                target_incarnation: None,
             };
             assert_eq!(
                 match_damage_done(
@@ -15965,6 +16016,7 @@ mod tests {
             is_combat: false,
             excess: 3,
             source_incarnation: None,
+            target_incarnation: None,
         };
         assert!(match_excess_damage(
             &event,
@@ -15986,6 +16038,7 @@ mod tests {
             is_combat: false,
             excess: 3,
             source_incarnation: None,
+            target_incarnation: None,
         };
         assert!(!match_excess_damage(
             &event,
@@ -16007,6 +16060,7 @@ mod tests {
             is_combat: false,
             excess: 0,
             source_incarnation: None,
+            target_incarnation: None,
         };
         assert!(!match_excess_damage(
             &event,
@@ -16028,6 +16082,7 @@ mod tests {
             is_combat: true,
             excess: 1,
             source_incarnation: None,
+            target_incarnation: None,
         };
         assert!(match_excess_damage_all(
             &event,
@@ -16049,6 +16104,7 @@ mod tests {
             is_combat: false,
             excess: 0,
             source_incarnation: None,
+            target_incarnation: None,
         };
         assert!(!match_excess_damage_all(
             &event,
@@ -16071,6 +16127,7 @@ mod tests {
             is_combat: true,
             excess: 2,
             source_incarnation: None,
+            target_incarnation: None,
         };
         assert!(!match_excess_damage_all(
             &event,
@@ -16123,6 +16180,7 @@ mod tests {
             is_combat: false,
             excess: 2,
             source_incarnation: None,
+            target_incarnation: None,
         };
         let non_matching = GameEvent::DamageDealt {
             source_id: ObjectId(99),
@@ -16131,6 +16189,7 @@ mod tests {
             is_combat: false,
             excess: 2,
             source_incarnation: None,
+            target_incarnation: None,
         };
 
         assert!(match_excess_damage_all(
@@ -16196,6 +16255,7 @@ mod tests {
             is_combat: true,
             excess: 0,
             source_incarnation: None,
+            target_incarnation: None,
         };
         let to_planeswalker = GameEvent::DamageDealt {
             source_id,
@@ -16204,6 +16264,7 @@ mod tests {
             is_combat: true,
             excess: 0,
             source_incarnation: None,
+            target_incarnation: None,
         };
         let to_player = GameEvent::DamageDealt {
             source_id,
@@ -16212,6 +16273,7 @@ mod tests {
             is_combat: true,
             excess: 0,
             source_incarnation: None,
+            target_incarnation: None,
         };
 
         assert!(

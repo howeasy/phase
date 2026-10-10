@@ -310,6 +310,7 @@ fn ezio_combat_damage_trigger_does_not_fire_when_damaged_player_above_10() {
         is_combat: true,
         excess: 0,
         source_incarnation: None,
+        target_incarnation: None,
     };
     process_triggers(&mut state, &[event]);
 
@@ -394,6 +395,7 @@ fn ezio_combat_damage_trigger_fires_when_damaged_player_at_or_below_10() {
         is_combat: true,
         excess: 0,
         source_incarnation: None,
+        target_incarnation: None,
     };
     process_triggers(&mut state, &[event]);
     super::drain_order_triggers_with_identity(&mut state);
@@ -464,6 +466,7 @@ fn ezio_verbatim_oracle_text_does_not_eliminate_damaged_player_above_10_life() {
         is_combat: true,
         excess: 0,
         source_incarnation: None,
+        target_incarnation: None,
     };
     process_triggers(&mut state, &[event]);
     super::drain_order_triggers_with_identity(&mut state);
@@ -584,6 +587,7 @@ fn ezio_verbatim_oracle_text_eliminates_damaged_player_when_optional_paid() {
         is_combat: true,
         excess: 0,
         source_incarnation: None,
+        target_incarnation: None,
     };
     process_triggers(&mut state, &[event]);
     super::drain_order_triggers_with_identity(&mut state);
@@ -698,6 +702,7 @@ fn vanilla_creature_combat_damage_does_not_seed_freerunning_ledger() {
         is_combat: true,
         excess: 0,
         source_incarnation: None,
+        target_incarnation: None,
     };
     process_triggers(&mut state, &[event]);
 
@@ -749,6 +754,7 @@ fn assassin_creature_combat_damage_seeds_freerunning_ledger() {
         is_combat: true,
         excess: 0,
         source_incarnation: None,
+        target_incarnation: None,
     };
     process_triggers(&mut state, &[event]);
 
@@ -788,6 +794,7 @@ fn typed_creature_combat_damage_seeds_prowl_creature_type_ledger() {
         is_combat: true,
         excess: 0,
         source_incarnation: None,
+        target_incarnation: None,
     };
     process_triggers(&mut state, &[event]);
 
@@ -822,6 +829,7 @@ fn noncombat_damage_does_not_seed_prowl_ledger() {
         is_combat: false,
         excess: 0,
         source_incarnation: None,
+        target_incarnation: None,
     };
     process_triggers(&mut state, &[event]);
 
@@ -861,6 +869,7 @@ fn damage_observer_fires_once_per_event() {
         is_combat: false,
         excess: 0,
         source_incarnation: None,
+        target_incarnation: None,
     };
 
     process_triggers(&mut state, &[event]);
@@ -2026,6 +2035,7 @@ fn wayta_doubles_damage_caused_triggers() {
         is_combat: false,
         excess: 0,
         source_incarnation: None,
+        target_incarnation: None,
     };
 
     process_triggers(&mut state, &[event]);

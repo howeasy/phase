@@ -2728,6 +2728,7 @@ mod tests {
             is_combat: false,
             excess: 0,
             source_incarnation: None,
+            target_incarnation: None,
         };
         assert_eq!(categorize(&event), LogCategory::Life);
     }
@@ -2741,6 +2742,7 @@ mod tests {
             is_combat: true,
             excess: 0,
             source_incarnation: None,
+            target_incarnation: None,
         };
         assert_eq!(categorize(&event), LogCategory::Combat);
     }
@@ -3039,6 +3041,7 @@ mod tests {
                     is_combat: true,
                     excess: 0,
                     source_incarnation: None,
+                    target_incarnation: None,
                 },
                 GameEvent::CombatDamageDealtToPlayer {
                     player_id: PlayerId(1),
@@ -3079,6 +3082,7 @@ mod tests {
                 is_combat: true,
                 excess: 0,
                 source_incarnation: None,
+                target_incarnation: None,
             },
             GameEvent::CombatDamageDealtToPlayer {
                 player_id: PlayerId(1),
@@ -3148,6 +3152,7 @@ mod tests {
                     is_combat: false,
                     excess: 0,
                     source_incarnation: None,
+                    target_incarnation: None,
                 },
             ],
             &state,
@@ -3359,6 +3364,7 @@ mod tests {
                     is_combat: false,
                     excess: 0,
                     source_incarnation: None,
+                    target_incarnation: None,
                 },
                 LogImportance::Essential,
                 LogTone::Negative,

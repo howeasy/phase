@@ -880,6 +880,14 @@ pub(crate) fn apply_damage_after_replacement(
         // CR 400.7: the incarnation captured with the damage context, as the
         // damage record below uses.
         source_incarnation: ctx.source_incarnation,
+        // CR 400.7: the recipient's incarnation at the moment it was dealt damage.
+        target_incarnation: match t {
+            TargetRef::Object(object_id) => state
+                .objects
+                .get(object_id)
+                .map(|object| object.incarnation),
+            TargetRef::Player(_) => None,
+        },
     });
 
     // CR 120.1: Record damage for "was dealt damage by" condition queries.
@@ -7248,6 +7256,7 @@ mod tests {
             is_combat: true,
             excess: 0,
             source_incarnation: None,
+            target_incarnation: None,
         });
 
         let ability = ResolvedAbility::new(

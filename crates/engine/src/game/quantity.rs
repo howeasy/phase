@@ -4118,6 +4118,40 @@ fn zone_population_ids(state: &GameState, zone: Zone, filter: &TargetFilter) -> 
     }
 }
 
+/// Candidates for `ObjectCountDistinct`: the union over `filter`'s Boolean
+/// branches of each branch's own population, kept only when the branch matches
+/// the object through the zone-aware, owner-scoped matcher (CR 400.3). Applying
+/// the match per branch is what keeps a card-qualified branch from admitting a
+/// non-card object that only a sibling object-qualified branch's population
+/// contains (CR 108.2 + CR 109.1).
+fn distinct_object_candidate_ids(
+    state: &GameState,
+    filter: &TargetFilter,
+    zone: Zone,
+    filter_ctx: &FilterContext<'_>,
+) -> Vec<ObjectId> {
+    let mut seen = HashSet::new();
+    let mut out = Vec::new();
+    for branch in filter_disjunctive_branches(filter, FilterTermRole::Predicate) {
+        let combined = TargetFilter::And {
+            filters: branch.iter().map(|term| term.filter.clone()).collect(),
+        }
+        .normalized();
+        for id in filter_candidate_universe(state, &combined) {
+            if seen.contains(&id) {
+                continue;
+            }
+            if crate::game::filter::matches_target_filter_for_zone(
+                state, id, zone, &combined, filter_ctx,
+            ) {
+                seen.insert(id);
+                out.push(id);
+            }
+        }
+    }
+    out
+}
+
 fn filter_zone_object_ids(state: &GameState, filter: &TargetFilter) -> Vec<ObjectId> {
     let zones = filter.extract_zones();
     let zones = if zones.is_empty() {
@@ -4795,26 +4829,13 @@ fn resolve_ref(
             // distinct on that axis (preserving the legacy invariant).
             let mut signatures: std::collections::HashSet<Vec<Vec<String>>> =
                 std::collections::HashSet::new();
-            // CR 108.2 + CR 109.1: distinct qualities among the cards in the
-            // zone when the filter names cards; generic queries see every object.
-            for id in zone_population_ids(state, zone, filter) {
-                // CR 400.3 + CR 109.5 + CR 108.4a: graveyard/hand/library
-                // membership is owner-scoped, not controller-scoped, so a
-                // stale `obj.controller` left by a control-change effect
-                // (e.g. a stolen creature that dies into its owner's
-                // graveyard) must not exclude the object from its owner's
-                // "your graveyard" query. Route through the zone-aware
-                // authority rather than the plain controller-scoped
-                // `matches_target_filter`.
-                if !crate::game::filter::matches_target_filter_for_zone(
-                    state,
-                    id,
-                    zone,
-                    filter,
-                    &filter_ctx,
-                ) {
-                    continue;
-                }
+            // CR 108.2 + CR 109.1 + CR 400.3: each Boolean branch ranges over its
+            // OWN candidate population (cards only when the branch names cards)
+            // and is matched with the zone-aware, owner-scoped matcher, so a
+            // non-card object can never pass a card branch through the raw
+            // `Card` type match, and graveyard/hand/library membership stays
+            // owner-scoped rather than controller-scoped.
+            for id in distinct_object_candidate_ids(state, filter, zone, &filter_ctx) {
                 let Some(obj) = state.objects.get(&id) else {
                     continue;
                 };
@@ -12810,6 +12831,7 @@ mod tests {
             is_combat: true,
             excess: 0,
             source_incarnation: None,
+            target_incarnation: None,
         });
 
         let expr = QuantityExpr::Ref {
@@ -20149,6 +20171,7 @@ mod tests {
             is_combat: false,
             excess: 0,
             source_incarnation: None,
+            target_incarnation: None,
         });
         let expr = QuantityExpr::Ref {
             qty: QuantityRef::EventContextAmount,
@@ -20234,6 +20257,7 @@ mod tests {
             is_combat: false,
             excess: 0,
             source_incarnation: None,
+            target_incarnation: None,
         });
         let expr = QuantityExpr::Ref {
             qty: QuantityRef::EventContextAmount,
@@ -20256,6 +20280,7 @@ mod tests {
             is_combat: false,
             excess: 0,
             source_incarnation: None,
+            target_incarnation: None,
         });
         let expr = QuantityExpr::Ref {
             qty: QuantityRef::EventContextAmount,
@@ -20291,6 +20316,7 @@ mod tests {
             is_combat: false,
             excess: 0,
             source_incarnation: None,
+            target_incarnation: None,
         });
         let expr = QuantityExpr::Ref {
             qty: QuantityRef::EventContextAmount,
@@ -20314,6 +20340,7 @@ mod tests {
             is_combat: true,
             excess: 0,
             source_incarnation: None,
+            target_incarnation: None,
         });
         let expr = QuantityExpr::Ref {
             qty: QuantityRef::EventContextAmount,
@@ -20338,6 +20365,7 @@ mod tests {
             is_combat: true,
             excess: 0,
             source_incarnation: None,
+            target_incarnation: None,
         });
         let expr = QuantityExpr::Ref {
             qty: QuantityRef::EventContextAmount,
@@ -20459,6 +20487,7 @@ mod tests {
             is_combat: true,
             excess: 0,
             source_incarnation: None,
+            target_incarnation: None,
         });
         let expr = QuantityExpr::Ref {
             qty: QuantityRef::Power {
@@ -20678,6 +20707,7 @@ mod tests {
             is_combat: true,
             excess: 0,
             source_incarnation: None,
+            target_incarnation: None,
         });
 
         let mut ability = ResolvedAbility::new(
@@ -20765,6 +20795,7 @@ mod tests {
             is_combat: false,
             excess: 0,
             source_incarnation: None,
+            target_incarnation: None,
         });
 
         let mut ability = ResolvedAbility::new(
@@ -23971,6 +24002,7 @@ mod tests {
             is_combat: true,
             excess: 0,
             source_incarnation: None,
+            target_incarnation: None,
         });
 
         // No targets: an untargeted damage trigger, which is exactly the shape
@@ -24388,6 +24420,53 @@ mod exile_card_population_tests {
             },
             3,
         );
+    }
+
+    /// Boolean branches own their populations: `Or(red cards in exile, blue
+    /// objects in exile)` counts the red CARD and the blue generic object, but
+    /// not the red retained copy (neither a card nor blue). Ordinary and
+    /// distinct counts agree.
+    #[test]
+    fn mixed_or_object_and_distinct_counts_apply_membership_per_branch() {
+        use crate::types::mana::ManaColor;
+        let filter = TargetFilter::Or {
+            filters: vec![
+                TargetFilter::Typed(TypedFilter::card().properties(vec![
+                    FilterProp::HasColor {
+                        color: ManaColor::Red,
+                    },
+                    FilterProp::InZone { zone: Zone::Exile },
+                ])),
+                TargetFilter::Typed(TypedFilter::new(TypeFilter::Any).properties(vec![
+                    FilterProp::HasColor {
+                        color: ManaColor::Blue,
+                    },
+                    FilterProp::InZone { zone: Zone::Exile },
+                ])),
+            ],
+        };
+        let mut board = board();
+        assert_non_cards_in_exile(&board);
+        let red_card = *board
+            .state
+            .exile
+            .iter()
+            .find(|id| board.state.objects[*id].name == "Exiled Sorcery")
+            .expect("the real card");
+        board.state.objects.get_mut(&red_card).unwrap().color = vec![ManaColor::Red];
+        board.state.objects.get_mut(&board.copy).unwrap().color = vec![ManaColor::Red];
+        board.state.objects.get_mut(&board.token).unwrap().color = vec![ManaColor::Blue];
+
+        let object_count = QuantityRef::ObjectCount {
+            filter: filter.clone(),
+        };
+        let distinct_count = QuantityRef::ObjectCountDistinct {
+            filter,
+            qualities: vec![SharedQuality::Name],
+        };
+        // Red card + blue generic object; the red non-card copy matches neither.
+        assert_eq!(read(&board, object_count), 2);
+        assert_eq!(read(&board, distinct_count), 2);
     }
 
     #[test]

@@ -15882,6 +15882,7 @@ mod tests {
                 is_combat: false,
                 excess: 0,
                 source_incarnation: None,
+                target_incarnation: None,
             });
             let event = ProposedEvent::Damage {
                 source_id: ObjectId(11),

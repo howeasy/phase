@@ -470,6 +470,7 @@ fn devour_uses_previous_effect_count_not_outer_event_amount() {
         is_combat: false,
         excess: 0,
         source_incarnation: None,
+        target_incarnation: None,
     });
     let event_amount = QuantityExpr::Ref {
         qty: QuantityRef::EventContextAmount,
@@ -520,6 +521,7 @@ fn devour_uses_previous_effect_count_not_outer_event_amount() {
         is_combat: false,
         excess: 0,
         source_incarnation: None,
+        target_incarnation: None,
     });
     crate::game::engine::apply_as_current(&mut empty, GameAction::SelectCards { cards: vec![] })
         .unwrap();

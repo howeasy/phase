@@ -264,6 +264,7 @@ mod tests {
             is_combat: true,
             excess: 0,
             source_incarnation: None,
+            target_incarnation: None,
         });
 
         // Ability controlled by P0, targeting TriggeringPlayer (P1 — the

@@ -288,6 +288,7 @@ fn replay_installs_recorded_defender_when_ambient_derivation_diverges() {
         is_combat: false,
         excess: 0,
         source_incarnation: None,
+        target_incarnation: None,
     });
 
     // Non-vacuity probe, VERIFIED APPLIED: run the live authority in this exact

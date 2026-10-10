@@ -18537,6 +18537,7 @@ pub mod tests {
             is_combat: false,
             excess: 0,
             source_incarnation: None,
+            target_incarnation: None,
         };
         let event_batch = vec![
             player_one_hit.clone(),
@@ -18548,6 +18549,7 @@ pub mod tests {
                 is_combat: false,
                 excess: 0,
                 source_incarnation: None,
+                target_incarnation: None,
             },
             GameEvent::DamageDealt {
                 source_id: other,
@@ -18556,6 +18558,7 @@ pub mod tests {
                 is_combat: false,
                 excess: 0,
                 source_incarnation: None,
+                target_incarnation: None,
             },
             GameEvent::DamageDealt {
                 source_id: hero,
@@ -18564,6 +18567,7 @@ pub mod tests {
                 is_combat: false,
                 excess: 0,
                 source_incarnation: None,
+                target_incarnation: None,
             },
         ];
 
@@ -18597,6 +18601,7 @@ pub mod tests {
                 is_combat: false,
                 excess: 0,
                 source_incarnation: None,
+                target_incarnation: None,
             }],
             "a matching noncombat player hit must remain a positive group"
         );
@@ -19991,6 +19996,7 @@ pub mod tests {
                 is_combat,
                 excess: 0,
                 source_incarnation: None,
+                target_incarnation: None,
             };
             collect_pending_triggers(&mut state, &[event])
                 .into_iter()
@@ -27123,6 +27129,7 @@ pub mod tests {
             is_combat: false,
             excess: 0,
             source_incarnation: None,
+            target_incarnation: None,
         };
         let events = vec![hit(own_a), hit(theirs), hit(own_b)];
         let DelayedTriggerMatch {
@@ -28750,6 +28757,7 @@ pub mod tests {
                 is_combat: true,
                 excess: 0,
                 source_incarnation: None,
+                target_incarnation: None,
             }],
         );
 
@@ -31117,6 +31125,7 @@ pub mod tests {
             is_combat: true,
             excess: 0,
             source_incarnation: None,
+            target_incarnation: None,
         };
         assert!(check_trigger_condition(
             &state,
@@ -31134,6 +31143,7 @@ pub mod tests {
             is_combat: true,
             excess: 0,
             source_incarnation: None,
+            target_incarnation: None,
         };
         assert!(!check_trigger_condition(
             &state,
@@ -31151,6 +31161,7 @@ pub mod tests {
             is_combat: true,
             excess: 0,
             source_incarnation: None,
+            target_incarnation: None,
         };
         assert!(!check_trigger_condition(
             &state,
@@ -31536,6 +31547,7 @@ pub mod tests {
             is_combat: true,
             excess: 0,
             source_incarnation: None,
+            target_incarnation: None,
         };
 
         // BUG REGRESSION: must be FALSE — creature A took no excess damage even
@@ -31584,6 +31596,7 @@ pub mod tests {
             is_combat: true,
             excess: 3,
             source_incarnation: None,
+            target_incarnation: None,
         };
         assert!(
             check_trigger_condition(

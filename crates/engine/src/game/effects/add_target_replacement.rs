@@ -1349,6 +1349,7 @@ mod tests {
             is_combat: true,
             excess: 0,
             source_incarnation: None,
+            target_incarnation: None,
         });
 
         let replacement = ReplacementDefinition::new(ReplacementEvent::DamageDone)
@@ -1419,6 +1420,7 @@ mod tests {
             is_combat: true,
             excess: 0,
             source_incarnation: None,
+            target_incarnation: None,
         });
 
         let replacement = ReplacementDefinition::new(ReplacementEvent::DamageDone)

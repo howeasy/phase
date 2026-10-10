@@ -32943,6 +32943,7 @@ mod sacrifice_cost_context_identity_tests {
             is_combat: false,
             excess: 0,
             source_incarnation: None,
+            target_incarnation: None,
         });
         // CR 120.1 + CR 109.4: The damage recipient is a separate event referent.
         let event_controller: TargetFilter = TypedFilter::creature()

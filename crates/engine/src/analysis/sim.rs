@@ -287,6 +287,7 @@ mod tests {
                 is_combat: false,
                 excess: 0,
                 source_incarnation: None,
+                target_incarnation: None,
             },
             GameEvent::CombatDamageDealtToPlayer {
                 player_id: PlayerId(1),

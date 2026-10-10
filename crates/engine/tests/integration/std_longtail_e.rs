@@ -267,6 +267,7 @@ fn contested_game_ball_attacker_gains_control_and_untaps() {
         is_combat: true,
         excess: 0,
         source_incarnation: None,
+        target_incarnation: None,
     });
     let attacker_lki = runner.state().objects[&attacker].snapshot_for_mana_spent();
     runner.state_mut().lki_cache.insert(attacker, attacker_lki);

@@ -150,6 +150,7 @@ fn ghyrson_does_not_trigger_when_ghyrson_is_the_damage_source() {
         is_combat: false,
         excess: 0,
         source_incarnation: None,
+        target_incarnation: None,
     };
 
     process_triggers(runner.state_mut(), &[event]);

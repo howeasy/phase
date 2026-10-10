@@ -688,6 +688,7 @@ mod tests {
                 is_combat: true,
                 excess: 0,
                 source_incarnation: None,
+                target_incarnation: None,
             }),
             ..Default::default()
         };

@@ -67,6 +67,7 @@ fn you_may_have_that_player_discard_still_asks_the_controller() {
             is_combat: true,
             excess: 0,
             source_incarnation: None,
+            target_incarnation: None,
         }],
     );
 
@@ -354,6 +355,7 @@ fn a_delayed_any_opponent_permission_fans_out_in_apnap_order_at_the_delayed_trig
             is_combat: true,
             excess: 0,
             source_incarnation: None,
+            target_incarnation: None,
         }],
     );
     runner.advance_until_stack_empty();

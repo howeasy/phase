@@ -1280,6 +1280,14 @@ pub enum GameEvent {
         /// object.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         source_incarnation: Option<u64>,
+        /// CR 400.7: the incarnation of the object that was dealt the damage, when
+        /// the recipient is an object. Immutable per event instance, so a trigger
+        /// that reads "that creature" (the recipient role) can tell the damaged
+        /// object from a later incarnation at the same `ObjectId` even when an
+        /// identical damage event follows. `None` for a player recipient and on
+        /// legacy events.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        target_incarnation: Option<u64>,
     },
     /// CR 615: Damage was prevented (by a prevention shield or protection).
     /// Enables "when damage is prevented" triggers.
@@ -2177,6 +2185,7 @@ mod tests {
             is_combat: false,
             excess: 0,
             source_incarnation: None,
+            target_incarnation: None,
         };
         let serialized = serde_json::to_string(&event).unwrap();
         let deserialized: GameEvent = serde_json::from_str(&serialized).unwrap();

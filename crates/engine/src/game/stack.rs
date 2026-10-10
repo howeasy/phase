@@ -6289,6 +6289,7 @@ mod tests {
             is_combat: true,
             excess: 0,
             source_incarnation: None,
+            target_incarnation: None,
         };
         let description =
             "Whenever this creature deals combat damage to a player, you may destroy target artifact or enchantment that player controls."
@@ -15023,6 +15024,7 @@ mod tests {
             is_combat: true,
             excess: 0,
             source_incarnation: None,
+            target_incarnation: None,
         });
         state.stack.push_back(StackEntry {
             id: source,

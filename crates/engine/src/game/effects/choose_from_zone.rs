@@ -2153,6 +2153,7 @@ mod tests {
                 is_combat: true,
                 excess: 0,
                 source_incarnation: None,
+                target_incarnation: None,
             };
             process_triggers(state, std::slice::from_ref(&event));
             crate::game::stack::resolve_top(state, &mut Vec::new());

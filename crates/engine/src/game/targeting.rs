@@ -901,46 +901,22 @@ fn event_source_is_live_incarnation(
 
 /// CR 400.7 + CR 120.1: whether the live permanent `obj` is the very object a
 /// damage event dealt damage to (the recipient role, `EventTarget`), as opposed
-/// to a later incarnation at the same `ObjectId`. The event itself stamps only
-/// the dealer, so the recipient's own incarnation is read from the damage ledger
-/// entry for this very instance (`DamageRecord::target_incarnation`): the
-/// records matching the event's dealer incarnation, recipient, amount and
-/// combat-ness. When no record exists (legacy state, a synthetic event) or none
-/// stamped a recipient, identity cannot be established and the live object is
-/// accepted, exactly as for any event that records no incarnation. A recipient
-/// that left and returned matches no stamped record and is rejected.
+/// to a later incarnation at the same `ObjectId`. The recipient's incarnation is
+/// stamped on the immutable event instance itself (`target_incarnation`), so an
+/// identical later damage event cannot be mistaken for this one. An event that
+/// recorded none (legacy, a player recipient) cannot discriminate.
 fn event_recipient_is_live_incarnation(
-    state: &GameState,
     event: &GameEvent,
     obj: &crate::game::game_object::GameObject,
 ) -> bool {
-    let GameEvent::DamageDealt {
-        source_id,
-        target: TargetRef::Object(target_id),
-        amount,
-        is_combat,
-        source_incarnation,
-        ..
-    } = event
-    else {
-        return true;
-    };
-    if *target_id != obj.id {
-        return true;
+    match event {
+        GameEvent::DamageDealt {
+            target: TargetRef::Object(target_id),
+            target_incarnation: Some(incarnation),
+            ..
+        } if *target_id == obj.id => obj.incarnation == *incarnation,
+        _ => true,
     }
-    let mut stamped = state
-        .damage_dealt_this_turn
-        .iter()
-        .filter(|record| {
-            record.source_id == *source_id
-                && record.source_incarnation == *source_incarnation
-                && record.target == TargetRef::Object(*target_id)
-                && record.amount == *amount
-                && record.is_combat == *is_combat
-        })
-        .filter_map(|record| record.target_incarnation)
-        .peekable();
-    stamped.peek().is_none() || stamped.any(|incarnation| incarnation == obj.incarnation)
 }
 
 /// CR 608.2k + CR 400.7: the objects a pure event-context reference ("that
@@ -1001,7 +977,7 @@ pub(crate) fn resolve_event_referent_objects(
             };
             let live = state.objects.get(&id)?;
             let is_live = if recipient {
-                event_recipient_is_live_incarnation(state, event, live)
+                event_recipient_is_live_incarnation(event, live)
             } else {
                 event_source_is_live_incarnation(event, live)
             };
@@ -6065,6 +6041,7 @@ mod tests {
             is_combat: true,
             excess: 0,
             source_incarnation: None,
+            target_incarnation: None,
         };
         let result = extract_player_from_event(&event, &state);
         // Should return the damaged player (PlayerId(1)), not the source's controller.
@@ -6089,6 +6066,7 @@ mod tests {
             is_combat: false,
             excess: 0,
             source_incarnation: None,
+            target_incarnation: None,
         };
         let result = extract_player_from_event(&event, &state);
         assert_eq!(result, Some(PlayerId(1)));

@@ -2620,6 +2620,7 @@ mod tests {
             is_combat: true,
             excess: 0,
             source_incarnation: Some(state.objects[&dealer].incarnation),
+            target_incarnation: None,
         };
 
         let stale = damage(&state);
@@ -2637,10 +2638,11 @@ mod tests {
     }
 
     /// CR 400.7 + CR 120.1: the damage RECIPIENT role (`EventTarget`) is
-    /// validated against the recipient's own ledger stamp, never the dealer's.
-    /// An unchanged recipient whose epoch differs from the dealer's is
-    /// prepared; a recipient that blinked after the damage is not; blinking the
-    /// DEALER after the event changes neither result.
+    /// validated against the recipient incarnation stamped on THAT event, never
+    /// the dealer's. An unchanged recipient whose epoch differs from the
+    /// dealer's is prepared; a recipient that blinked after the damage is not,
+    /// even when the same dealer later deals identical damage to the returned
+    /// object; blinking the DEALER after the event changes neither result.
     #[test]
     fn become_prepared_event_target_validates_the_recipients_own_incarnation() {
         let mut state = GameState::new_two_player(42);
@@ -2651,28 +2653,20 @@ mod tests {
         for _ in 0..3 {
             state.objects.get_mut(&dealer).unwrap().bump_incarnation();
         }
-        let dealer_epoch = state.objects[&dealer].incarnation;
-        let recipient_epoch = state.objects[&recipient].incarnation;
-        assert_ne!(dealer_epoch, recipient_epoch, "fixture reach guard");
-        state
-            .damage_dealt_this_turn
-            .push_back(crate::types::game_state::DamageRecord {
-                source_id: dealer,
-                source_incarnation: Some(dealer_epoch),
-                target: TargetRef::Object(recipient),
-                target_incarnation: Some(recipient_epoch),
-                amount: 2,
-                is_combat: true,
-                ..Default::default()
-            });
-        let event = GameEvent::DamageDealt {
+        let damage = |state: &GameState| GameEvent::DamageDealt {
             source_id: dealer,
             target: TargetRef::Object(recipient),
             amount: 2,
             is_combat: true,
             excess: 0,
-            source_incarnation: Some(dealer_epoch),
+            source_incarnation: Some(state.objects[&dealer].incarnation),
+            target_incarnation: Some(state.objects[&recipient].incarnation),
         };
+        assert_ne!(
+            state.objects[&dealer].incarnation, state.objects[&recipient].incarnation,
+            "fixture reach guard"
+        );
+        let event = damage(&state);
         let ability = ResolvedAbility::new(
             Effect::BecomePrepared {
                 target: TargetFilter::EventTarget,
@@ -2683,8 +2677,8 @@ mod tests {
             PlayerId(0),
         );
 
-        // Unchanged recipient (epoch differs from the dealer's): positive.
-        // Blinking the dealer after the event does not change that.
+        // Unchanged recipient: positive. Blinking the dealer afterwards does not
+        // change that (the event's stamps are saved).
         blink(&mut state, dealer);
         state.current_trigger_event = Some(event.clone());
         let mut events = Vec::new();
@@ -2692,13 +2686,25 @@ mod tests {
         assert_eq!(became_prepared(&events), vec![recipient], "{events:?}");
         state.objects.get_mut(&recipient).unwrap().prepared = None;
 
-        // The recipient departs and returns: a new object, not prepared.
+        // The recipient departs and returns, and the same dealer then deals the
+        // identical damage to the new object: the OLD event still names the old
+        // incarnation, the NEW event names the new one.
         blink(&mut state, recipient);
+        let later_identical = damage(&state);
         state.current_trigger_event = Some(event);
         let mut events = Vec::new();
         resolve_become_prepared(&mut state, &ability, &mut events).unwrap();
         assert!(became_prepared(&events).is_empty(), "{events:?}");
         assert!(state.objects[&recipient].prepared.is_none());
+
+        state.current_trigger_event = Some(later_identical);
+        let mut events = Vec::new();
+        resolve_become_prepared(&mut state, &ability, &mut events).unwrap();
+        assert_eq!(
+            became_prepared(&events),
+            vec![recipient],
+            "new event, new object"
+        );
     }
 
     /// A bound object reference is not read from the trigger event: a nonempty
