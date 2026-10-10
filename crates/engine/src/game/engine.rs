@@ -5335,6 +5335,11 @@ fn drive_one_shortcut_cycle(
 /// `TriggerTargetSelection` arm is the only arm that consumes a CR 608.2b `Targets` pin, and the
 /// `OptionalEffectChoice` arm consumes the CR 603.5 `MayChoice` pin and carries its own seat +
 /// beat guards on top of the same `template.ok_or(..)`.
+///
+/// Second caller: `drive_loop_action_iteration`'s `OptionalEffectChoice` beat arm, which answers an
+/// in-period "you may" from the step's own template (the `MayChoice` pin `record_loop_may_pin`
+/// recorded from the loop controller's demonstrated answer), under the same seat, beat and
+/// slot-source guards.
 fn inject_pinned_answer(
     work: &mut GameState,
     template: Option<&crate::analysis::decision_template::DecisionTemplate>,
@@ -6004,8 +6009,36 @@ fn record_mana_loop_action_step(
         convoke: None,
         // Fixed in-cycle choices are appended at their own reducer arms via `record_loop_pin`.
         pins: Vec::new(),
+        // CR 732.2a: a mana ability uses no stack (CR 605.3b), so the live length is the
+        // depth this step is taken at.
+        stack_depth: state.stack.len(),
     };
+    if is_orphan_response_seed(&state.last_loop_action_sequence, &step) {
+        state.last_loop_action_sequence.clear();
+    }
     accumulate_loop_action_step(state, step);
+}
+
+/// CR 732.2a: is the lone recorded step an ORPHAN response tap that `step` supersedes?
+///
+/// A first non-mana, non-token activation records nothing (`record_non_mana_activation_accepted`
+/// clears), so a response tap taken over that unrecorded activation seeds a one-step period whose
+/// head is missing. The next lap then re-taps the SAME source at a LOWER depth, which a legal
+/// shortcut can only do if something the sequence does not contain untapped it between: the
+/// seed is the tail of the previous iteration, not the start of this one. Replacing it lets the
+/// period start at the step that actually begins the repeated sequence. Requiring the SAME action
+/// at a STRICTLY lower depth leaves every other response-seeded period alone (a differing
+/// follow-up action, e.g. a response tap over a pending spell and then the untap, is untouched).
+fn is_orphan_response_seed(
+    sequence: &[crate::types::game_state::LoopActionContext],
+    step: &crate::types::game_state::LoopActionContext,
+) -> bool {
+    matches!(
+        sequence,
+        [seed] if seed.controller == step.controller
+            && seed.action == step.action
+            && seed.stack_depth > step.stack_depth
+    )
 }
 
 /// CR 602.2 + CR 605.3b: the ACCEPTANCE authority for a non-mana activation,
@@ -6128,12 +6161,14 @@ fn activation_awaiting_target_settlement(
 /// `Err(RecastAbort)`, no offer. Gated by `samples()` (#4603 Off never writes) +
 /// `!in_simulation_probe()` (the drive must NOT grow the seq — it is COMPARED
 /// across the cover frames); Off clears (byte-identical to pre-PR-7's `= None`),
-/// a probe leaves the field untouched.
+/// a probe leaves the field untouched. `stack_depth` is the stack length BEFORE this
+/// activation's own entry (the callers capture it ahead of their handler), recorded on the step.
 fn record_non_mana_activation_accepted(
     state: &mut GameState,
     player: PlayerId,
     source_id: ObjectId,
     ability_index: usize,
+    stack_depth: usize,
 ) {
     if in_simulation_probe() {
         // Detection/materialize drive: leave the sequence byte-stable.
@@ -6169,6 +6204,7 @@ fn record_non_mana_activation_accepted(
                     convoke: None,
                     // FIX-1: pinless at capture; fixed choices appended at their apply arms.
                     pins: Vec::new(),
+                    stack_depth,
                 };
                 if continuing {
                     accumulate_loop_action_step(state, step);
@@ -6204,6 +6240,49 @@ fn record_loop_pin(
         if step.controller == controller {
             step.pins.push(pin);
         }
+    }
+}
+
+/// CR 603.5 + CR 732.2a: record the loop controller's own resolution-time "you may" answer as a
+/// `MayChoice` pin on the current period step, for `drive_loop_action_iteration`'s
+/// `OptionalEffectChoice` arm to replay. Gated like `record_loop_pin` (`samples()` and not a
+/// simulation probe); only the period controller's answers are loop choices (an opponent's "may"
+/// is ignored, so the drive meets that prompt unpinned and aborts). A DIFFERENT second answer at
+/// the same slot on the same step cannot be replayed (the arm answers every prompt of the slot
+/// from the one recorded pin), so it poisons the period; the SAME answer repeated needs no second
+/// pin. No pin is attached while only the period's FIRST step exists: that step's pins are the
+/// ones `try_offer_object_growth_shortcut` publishes as schema points, and a published
+/// `MayChoice` point is a Take/Decline toggle the object-growth drive never reads.
+fn record_loop_may_pin(
+    state: &mut GameState,
+    controller: PlayerId,
+    slot: crate::analysis::decision_template::DecisionSlot,
+    take: crate::analysis::decision_template::MayChoiceOption,
+) {
+    use crate::analysis::decision_template::PinnedDecision;
+    if !state.loop_detection.samples() || in_simulation_probe() {
+        return;
+    }
+    let period_len = state.last_loop_action_sequence.len();
+    let Some(step) = state
+        .last_loop_action_sequence
+        .last_mut()
+        .filter(|s| s.controller == controller)
+    else {
+        return;
+    };
+    let prior = step.pins.iter().find_map(|p| match p {
+        PinnedDecision::MayChoice { slot: s2, take: t } if *s2 == slot => Some(*t),
+        _ => None,
+    });
+    match prior {
+        // CR 732.2a: a second, DIFFERENT answer at one slot on one step cannot be replayed.
+        Some(prev) if prev != take => state.last_loop_action_sequence.clear(),
+        // The SAME answer repeated is already replayed by the single recorded pin.
+        Some(_) => {}
+        // SD1: the period's FIRST step is the one whose pins are published; never pin there.
+        None if period_len == 1 => {}
+        None => step.pins.push(PinnedDecision::MayChoice { slot, take }),
     }
 }
 
@@ -6401,15 +6480,19 @@ fn pinned_mana_color_for_source(
 /// path (never the top-level `apply`/reconcile boundary, so the detection hook cannot
 /// recurse), adding ZERO casting rules. EXHAUSTIVE over `WaitingFor`: any unpinned prompt
 /// ⇒ `Err(RecastAbort)` ⇒ fail-closed to manual (no silent `_` that would fabricate a
-/// bogus offer). `clone` MUST be at `Priority{ctx.controller}` with an empty stack.
+/// bogus offer). `clone` MUST be at `Priority{ctx.controller}` with the stack at the depth the
+/// previous step settled to (empty for the first step). `settle_depth` is the stack length at
+/// which this step's iteration is complete (CR 732.2a: the next step was demonstrated there).
 fn drive_loop_action_iteration(
     clone: &mut GameState,
     template: &crate::analysis::decision_template::DecisionTemplate,
     ctx: &crate::types::game_state::LoopActionContext,
     iteration: crate::analysis::decision_template::IterationIndex,
     expected_def: Option<&crate::types::ability::AbilityDefinition>,
+    settle_depth: usize,
 ) -> Result<(), RecastAbort> {
     use crate::types::game_state::LoopAction;
+    let mut settle_depth = settle_depth;
     // Dispatch the OPENER on the captured action; the beat-loop tail below is action-agnostic.
     match &ctx.action {
         // CR 400.7 + CR 601.2a: re-find the recast card LIVE in its castable zone (a fresh
@@ -6568,11 +6651,25 @@ fn drive_loop_action_iteration(
             // CR 601.2i: the spell is on the stack ⇒ pass to let it resolve; an empty stack
             // at a priority beat is the per-cycle SETTLE boundary — iteration complete.
             WaitingFor::Priority { .. } => {
-                if clone.stack.is_empty() {
+                // CR 732.2a: the next step was demonstrated with `settle_depth` objects pending. A
+                // stack already BELOW that depth cannot be brought back to it by passing priority,
+                // so the recorded depth is unreproducible here: degrade to the pre-depth rule
+                // (settle to the empty stack) and let the replayed frames' board cover and
+                // sign-check certify the period or refuse it.
+                if clone.stack.len() < settle_depth {
+                    settle_depth = 0;
+                }
+                if clone.stack.len() == settle_depth {
                     return Ok(());
                 }
                 apply_action(clone, actor, GameAction::PassPriority, None)
                     .map_err(|_| RecastAbort)?;
+            }
+            // CR 603.5 + CR 732.2a: an in-period "you may" is answered from the pin the loop
+            // controller's demonstrated answer recorded (`record_loop_may_pin`). The arm keeps the
+            // seat, beat and slot-source guards and aborts when no pin was recorded.
+            prompt @ WaitingFor::OptionalEffectChoice { .. } => {
+                inject_pinned_answer(clone, Some(template), iteration, &prompt)?;
             }
             // FIX-1 (E11) CR 605.1a + CR 608.2b: the driving mana ability's tap cost ("tap an
             // untapped legendary creature you control") — replay the recorded tap-target pin,
@@ -6676,11 +6773,23 @@ fn drive_loop_sequence_iteration(
     iteration: crate::analysis::decision_template::IterationIndex,
     expected_defs: &[Option<crate::types::ability::AbilityDefinition>],
 ) -> Result<(), RecastAbort> {
-    for (step, expected) in seq.iter().zip(expected_defs.iter()) {
-        // Each step's template carries its OWN convoke pin (only a `Recast` step has convoke; an
-        // `Activate` step yields an empty template) — build per-step so a mixed period stays honest.
+    // CR 732.2a: each step settles at the depth the NEXT step was demonstrated at, measured
+    // relative to the period's first step (saturating, so a later step at or below the first
+    // step's depth settles to the empty stack exactly as before `stack_depth` existed).
+    let base = seq.first().map_or(0, |s| s.stack_depth);
+    for (i, (step, expected)) in seq.iter().zip(expected_defs.iter()).enumerate() {
         let template = build_recast_template(step);
-        drive_loop_action_iteration(clone, &template, step, iteration, expected.as_ref())?;
+        let settle_depth = seq
+            .get(i + 1)
+            .map_or(0, |next| next.stack_depth.saturating_sub(base));
+        drive_loop_action_iteration(
+            clone,
+            &template,
+            step,
+            iteration,
+            expected.as_ref(),
+            settle_depth,
+        )?;
     }
     Ok(())
 }
@@ -11132,6 +11241,7 @@ fn apply_non_priority_pass_action(
     // the loop step once the lock has run, or puts the window back if the
     // activation is still short of its lock (a later prompt, or its settlement
     // election, whose resume accepts it instead).
+    let target_settlement_stack_depth = state.stack.len();
     let target_settlement_acceptance =
         activation_awaiting_target_settlement(state, &action).map(|identity| {
             let cleared = begin_non_mana_activation(state, identity.0);
@@ -11386,6 +11496,7 @@ fn apply_non_priority_pass_action(
                 )?
             } else {
                 // Non-mana activated ability — the acceptance authority brackets it.
+                let stack_depth = state.stack.len();
                 let cleared = begin_non_mana_activation(state, *player);
                 let wf = casting::handle_activate_ability(
                     state,
@@ -11403,7 +11514,13 @@ fn apply_non_priority_pass_action(
                     // pre-activation state. The lock accepts it.
                     restore_non_mana_activation(state, *player, cleared);
                 } else {
-                    record_non_mana_activation_accepted(state, *player, source_id, ability_index);
+                    record_non_mana_activation_accepted(
+                        state,
+                        *player,
+                        source_id,
+                        ability_index,
+                        stack_depth,
+                    );
                 }
                 wf
             }
@@ -12043,6 +12160,7 @@ fn apply_non_priority_pass_action(
                 })?,
             );
             let _ = begin_non_mana_activation(state, player);
+            let stack_depth = state.stack.len();
             match engine_casting::resume_activation_cost_election(
                 state,
                 player,
@@ -12053,7 +12171,13 @@ fn apply_non_priority_pass_action(
                 &mut events,
             )? {
                 casting::ActivationElectionResume::Continued(wf) => {
-                    record_non_mana_activation_accepted(state, player, source_id, ability_index);
+                    record_non_mana_activation_accepted(
+                        state,
+                        player,
+                        source_id,
+                        ability_index,
+                        stack_depth,
+                    );
                     *wf
                 }
                 // CR 601.2h: the elected total cannot be paid, so the activation
@@ -12805,6 +12929,16 @@ fn apply_non_priority_pass_action(
                 use crate::analysis::decision_template::{
                     DecisionSlot, LoopAnswer, LoopAnswerValue, MayChoiceOption,
                 };
+                record_loop_may_pin(
+                    state,
+                    answering_player,
+                    DecisionSlot::may(source.clone()),
+                    if accept {
+                        MayChoiceOption::Take
+                    } else {
+                        MayChoiceOption::Decline
+                    },
+                );
                 // CR 603.5 rides sub-index 1, via `DecisionSlot::may` — the SAME
                 // constructor `entry_publishes_pin_slots` publishes the gate with, so the
                 // sub-index is a literal on neither side of the journal.
@@ -13240,6 +13374,7 @@ fn apply_non_priority_pass_action(
                         .activation_ability_index
                         .map(|index| (pending.object_id, index))
                 });
+            let x_lock_stack_depth = state.stack.len();
             if let Some(prompt) = casting::lock_activation_cost_at_x(state, player, convoke_mode)? {
                 prompt
             } else {
@@ -13257,7 +13392,13 @@ fn apply_non_priority_pass_action(
                 let wf =
                     casting_costs::enter_payment_step(state, player, convoke_mode, &mut events)?;
                 if let Some((source_id, ability_index)) = x_lock_acceptance {
-                    record_non_mana_activation_accepted(state, player, source_id, ability_index);
+                    record_non_mana_activation_accepted(
+                        state,
+                        player,
+                        source_id,
+                        ability_index,
+                        x_lock_stack_depth,
+                    );
                 }
                 wf
             }
@@ -15720,7 +15861,13 @@ fn apply_non_priority_pass_action(
         if activation_cost_still_open(state, &waiting_for) {
             restore_non_mana_activation(state, player, cleared);
         } else {
-            record_non_mana_activation_accepted(state, player, source_id, ability_index);
+            record_non_mana_activation_accepted(
+                state,
+                player,
+                source_id,
+                ability_index,
+                target_settlement_stack_depth,
+            );
         }
     }
 
@@ -25422,6 +25569,7 @@ mod bounded_offer_conjunct_tests {
         state
             .last_loop_action_sequence
             .push(crate::types::game_state::LoopActionContext {
+                stack_depth: 0,
                 card_id: crate::types::identifiers::CardId(0),
                 controller: P0,
                 action: crate::types::game_state::LoopAction::Activate {

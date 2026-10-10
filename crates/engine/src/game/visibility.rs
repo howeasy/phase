@@ -10239,6 +10239,7 @@ mod tests {
                 Zone::Battlefield,
             );
             state.last_loop_action_sequence = vec![LoopActionContext {
+                stack_depth: 0,
                 card_id: CardId(4242),
                 controller: D5H_PROPOSER,
                 action: LoopAction::Recast {

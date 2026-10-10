@@ -31,7 +31,7 @@ use engine::types::game_state::{
     CastPaymentMode, GameState, LoopAction, LoopActionContext, LoopDetectionMode, WaitingFor,
 };
 use engine::types::identifiers::{CardId, ObjectId};
-use engine::types::mana::ManaType;
+use engine::types::mana::{ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
 use engine::types::zones::Zone;
@@ -636,6 +636,7 @@ fn loop_action_sequence_conditional_load_migration() {
         color: ManaColor::Blue,
     };
     let pinned_step = || LoopActionContext {
+        stack_depth: 0,
         card_id: CardId(4242),
         controller: P0,
         action: LoopAction::Activate {
@@ -716,6 +717,42 @@ fn loop_action_sequence_conditional_load_migration() {
     assert!(
         back.last_loop_action_sequence.is_empty(),
         "a missing field defaults to an empty Vec"
+    );
+
+    // (d) a step's `stack_depth` round-trips, a zero depth is omitted on the wire, and a sequence
+    //     saved before the field existed loads with every depth 0. The sequence is a real
+    //     response-timed lap (tap@0, untap@0, tap@1).
+    let mut rig = lap_rig(LapBoard {
+        synthetic: &[COPIER],
+        colorless_seed: 2,
+        ..LapBoard::BARE
+    });
+    human_lap(&mut rig, &[], true);
+    let seq = rig.runner.state().last_loop_action_sequence.clone();
+    assert_eq!(
+        seq.iter().map(|s| s.stack_depth).collect::<Vec<_>>(),
+        vec![0, 0, 1],
+        "reach guard: the lap recorded one response step"
+    );
+    let json = serde_json::to_string(&seq).expect("serialize the sequence");
+    assert_eq!(
+        json.matches("\"stack_depth\"").count(),
+        1,
+        "only the depth-1 step carries the key"
+    );
+    let back: Vec<LoopActionContext> = serde_json::from_str(&json).expect("deserialize");
+    assert_eq!(back, seq, "the depths round-trip");
+    let mut old: serde_json::Value = serde_json::from_str(&json).expect("a JSON array");
+    for step in old.as_array_mut().expect("an array") {
+        step.as_object_mut()
+            .expect("a step object")
+            .remove("stack_depth");
+    }
+    let old: Vec<LoopActionContext> = serde_json::from_value(old).expect("a key-less sequence");
+    assert_eq!(
+        old.iter().map(|s| s.stack_depth).collect::<Vec<_>>(),
+        vec![0, 0, 0],
+        "a key-less step loads at depth 0"
     );
 }
 
@@ -1337,4 +1374,1164 @@ fn a_revealed_hojo_does_not_block_the_mana_engine_shortcut() {
         return;
     }
     assert!(mana_engine_offered_beside_hojo_in(Zone::Graveyard));
+}
+
+// ---------------------------------------------------------------------------
+// Response-timed and "you may"-gated periods: Basalt Monolith + Rings of Brighthearth.
+//
+// CR 732.2a: a demonstrated loop period may contain a step taken while earlier objects are still
+// on the stack (a mana-ability response; CR 605.3b, a mana ability uses no stack) and a
+// resolution-time "you may" (CR 603.5) the loop controller answered. Each recorded step carries
+// the stack length it was taken at (`stack_depth`), so the drive replays a response at the depth it
+// was demonstrated at; the controller's own "may" answer is recorded as a `MayChoice` pin on the
+// step it was asked during, and the drive replays it.
+// ---------------------------------------------------------------------------
+
+const RINGS: &str = "Rings of Brighthearth";
+const GRIM: &str = "Grim Monolith";
+const BOLT: &str = "Lightning Bolt";
+/// A non-optional, free copier: isolates the response-timed step from any "may" prompt.
+const COPIER: &str =
+    "Whenever you activate an ability, if it isn't a mana ability, copy that ability.";
+/// The proposer's own costless resolution-time "may".
+const MAY_GAIN_ONE: &str =
+    "Whenever you activate an ability, if it isn't a mana ability, you may gain 1 life.";
+/// The opponent's resolution-time "may", triggered by the proposer's activations.
+const OPPONENT_MAY_GAIN_ONE: &str =
+    "Whenever an opponent activates an ability, if it isn't a mana ability, you may gain 1 life.";
+/// A costed "may": declining keeps the mana, accepting spends more than a lap makes.
+const MAY_PAY_FIVE: &str = "Whenever you activate an ability, if it isn't a mana ability, you may pay {5}. If you do, you gain 1 life.";
+/// One source asking two "may" questions in one resolution.
+const TWO_MAYS: &str = "Whenever you activate an ability, if it isn't a mana ability, you may gain 1 life. Then you may gain 2 life.";
+/// A token maker: its activation seeds a period on its own.
+const SERVO_MAKER: &str = "{1}: Create a 1/1 colorless Servo artifact creature token.";
+
+/// One board for the response-timed / "may"-gated period tests. Every named card is a real
+/// fixture card; the synthetic texts are artifacts built from Oracle text.
+#[derive(Clone, Copy)]
+struct LapBoard {
+    rock: &'static str,
+    power: bool,
+    rings: bool,
+    synthetic: &'static [&'static str],
+    opponent_synthetic: &'static [&'static str],
+    colorless_seed: usize,
+    rock_tapped: bool,
+    bolts: usize,
+    mountains: usize,
+}
+
+impl LapBoard {
+    /// A bare, untapped Basalt Monolith on P0's battlefield; each test overrides what it needs.
+    const BARE: Self = Self {
+        rock: BASALT,
+        power: false,
+        rings: false,
+        synthetic: &[],
+        opponent_synthetic: &[],
+        colorless_seed: 0,
+        rock_tapped: false,
+        bolts: 0,
+        mountains: 0,
+    };
+}
+
+struct LapRig {
+    runner: GameRunner,
+    rock: ObjectId,
+    rings: Option<ObjectId>,
+    mana_idx: usize,
+    untap_idx: usize,
+}
+
+/// Build `board` under `LoopDetectionMode::Interactive`. Power Artifact is attached to the rock
+/// after build (the aura attach-choice bypass); each Lightning Bolt gets one seeded red unit.
+fn lap_rig(board: LapBoard) -> LapRig {
+    let db = shared_card_db().expect("committed fixture");
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let rock = scenario.add_real_card(P0, board.rock, Zone::Battlefield, db);
+    let rings = board
+        .rings
+        .then(|| scenario.add_real_card(P0, RINGS, Zone::Battlefield, db));
+    for (i, text) in board.synthetic.iter().enumerate() {
+        scenario.add_artifact_from_oracle(P0, &format!("Synthetic {i}"), text);
+    }
+    for (i, text) in board.opponent_synthetic.iter().enumerate() {
+        scenario.add_artifact_from_oracle(P1, &format!("Opponent synthetic {i}"), text);
+    }
+    for _ in 0..board.bolts {
+        scenario.add_real_card(P0, BOLT, Zone::Hand, db);
+    }
+    for _ in 0..board.mountains {
+        scenario.add_basic_land(P0, engine::types::mana::ManaColor::Red);
+    }
+    let units: Vec<ManaUnit> =
+        (0..board.colorless_seed)
+            .map(|i| {
+                ManaUnit::new(
+                    ManaType::Colorless,
+                    ObjectId(9_900 + i as u64),
+                    false,
+                    Vec::new(),
+                )
+            })
+            .chain((0..board.bolts).map(|i| {
+                ManaUnit::new(ManaType::Red, ObjectId(9_800 + i as u64), false, Vec::new())
+            }))
+            .collect();
+    if !units.is_empty() {
+        scenario.with_mana_pool(P0, units);
+    }
+    let mut runner = scenario.build();
+    runner.state_mut().loop_detection = LoopDetectionMode::Interactive;
+    if board.power {
+        let power = place_on_battlefield(runner.state_mut(), P0, POWER, db);
+        attach_to(runner.state_mut(), power, rock);
+        assert_eq!(
+            runner.state().objects[&power].attached_to,
+            Some(rock.into()),
+            "Power Artifact must attach to the rock"
+        );
+    }
+    if board.rock_tapped {
+        runner
+            .state_mut()
+            .objects
+            .get_mut(&rock)
+            .expect("the rock is on the battlefield")
+            .tapped = true;
+    }
+    let mana_idx = mana_ability_index(runner.state(), rock).expect("the rock's mana ability");
+    let untap_idx = untap_ability_index(runner.state(), rock).expect("the rock's untap ability");
+    LapRig {
+        runner,
+        rock,
+        rings,
+        mana_idx,
+        untap_idx,
+    }
+}
+
+/// How a "you may" prompt of a lap is answered (by whichever seat the prompt names).
+#[derive(Clone, Copy)]
+enum MayAnswer {
+    Take,
+    Decline,
+    /// Accept and remember the answer for this exact trigger instance.
+    RememberTake,
+}
+
+/// One observed "you may" prompt.
+#[derive(Clone, Copy, Debug)]
+struct ObservedPrompt {
+    player: PlayerId,
+    source_id: ObjectId,
+    keyed: bool,
+    sequence_len_before: usize,
+    sequence_len_after: usize,
+}
+
+/// What one human lap observed.
+#[derive(Debug, Default)]
+struct LapRecord {
+    /// The stack length immediately before each activation of the lap, in order.
+    depths: Vec<usize>,
+    prompts: Vec<ObservedPrompt>,
+}
+
+/// One human lap: tap the rock for mana if it is untapped, activate its untap, then answer every
+/// "you may" prompt from `answers` (an unlisted prompt takes) and, when `respond` is set, tap the
+/// rock again in response to the original untap (once the stack is one above the untap's base and
+/// the rock is untapped again). Passes priority until the stack is empty or an offer surfaces.
+fn human_lap(rig: &mut LapRig, answers: &[MayAnswer], respond: bool) -> LapRecord {
+    let mut record = LapRecord::default();
+    let runner = &mut rig.runner;
+    if !runner.state().objects[&rig.rock].tapped {
+        record.depths.push(runner.state().stack.len());
+        runner
+            .act(GameAction::ActivateAbility {
+                source_id: rig.rock,
+                ability_index: rig.mana_idx,
+            })
+            .expect("tap the rock for mana");
+    }
+    let base = runner.state().stack.len();
+    record.depths.push(base);
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: rig.rock,
+            ability_index: rig.untap_idx,
+        })
+        .expect("activate the rock's untap");
+    let mut responded = false;
+    let mut answered = 0;
+    for _ in 0..60 {
+        let state = runner.state();
+        let (action, answering) = match &state.waiting_for {
+            WaitingFor::LoopShortcut { .. } => break,
+            WaitingFor::OptionalEffectChoice {
+                player,
+                source_id,
+                may_trigger_key,
+                ..
+            } => {
+                record.prompts.push(ObservedPrompt {
+                    player: *player,
+                    source_id: *source_id,
+                    keyed: may_trigger_key.is_some(),
+                    sequence_len_before: state.last_loop_action_sequence.len(),
+                    sequence_len_after: 0,
+                });
+                let answer = answers.get(answered).copied().unwrap_or(MayAnswer::Take);
+                answered += 1;
+                let action = match answer {
+                    MayAnswer::Take => GameAction::DecideOptionalEffect { accept: true },
+                    MayAnswer::Decline => GameAction::DecideOptionalEffect { accept: false },
+                    MayAnswer::RememberTake => GameAction::DecideOptionalEffectAndRemember {
+                        choice: engine::types::game_state::AutoMayChoice::Accept,
+                        scope: engine::types::game_state::MayTriggerAutoChoiceScope::ExactInstance,
+                    },
+                };
+                (action, true)
+            }
+            WaitingFor::Priority { .. } if state.stack.is_empty() => break,
+            WaitingFor::Priority { .. } => {
+                if respond
+                    && !responded
+                    && state.stack.len() == base + 1
+                    && !state.objects[&rig.rock].tapped
+                {
+                    responded = true;
+                    record.depths.push(state.stack.len());
+                    (
+                        GameAction::ActivateAbility {
+                            source_id: rig.rock,
+                            ability_index: rig.mana_idx,
+                        },
+                        false,
+                    )
+                } else {
+                    (GameAction::PassPriority, false)
+                }
+            }
+            other => panic!("unexpected prompt during the lap: {other:?}"),
+        };
+        runner.act(action).expect("a legal lap action");
+        if answering {
+            let len = runner.state().last_loop_action_sequence.len();
+            record
+                .prompts
+                .last_mut()
+                .expect("the prompt was just recorded")
+                .sequence_len_after = len;
+        }
+    }
+    record
+}
+
+/// Pass priority until the stack is empty at a priority window or an offer surfaces.
+fn settle_lap(runner: &mut GameRunner) {
+    for _ in 0..60 {
+        match &runner.state().waiting_for {
+            WaitingFor::LoopShortcut { .. } => return,
+            WaitingFor::Priority { .. } if runner.state().stack.is_empty() => return,
+            WaitingFor::Priority { .. } => {
+                runner.act(GameAction::PassPriority).expect("pass priority");
+            }
+            other => panic!("unexpected prompt while settling: {other:?}"),
+        }
+    }
+    panic!("the stack never settled");
+}
+
+/// Pass priority until the stack holds exactly `len` objects at a priority window.
+fn pass_until_stack_len(runner: &mut GameRunner, len: usize) {
+    for _ in 0..30 {
+        if runner.state().stack.len() == len
+            && matches!(runner.state().waiting_for, WaitingFor::Priority { .. })
+        {
+            return;
+        }
+        runner.act(GameAction::PassPriority).expect("pass priority");
+    }
+    panic!("the stack never reached {len} objects");
+}
+
+/// Cast a Lightning Bolt from P0's hand at P1 and keep it on the stack (P0 keeps priority).
+fn cast_bolt_at_opponent(runner: &mut GameRunner) {
+    let bolt = runner
+        .state()
+        .objects
+        .iter()
+        .filter(|(_, o)| o.name == BOLT && o.zone == Zone::Hand)
+        .map(|(id, _)| *id)
+        .min()
+        .expect("a Lightning Bolt in hand");
+    let card_id = runner.state().objects[&bolt].card_id;
+    let before = runner.state().stack.len();
+    let result = runner
+        .act(GameAction::CastSpell {
+            object_id: bolt,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("cast Lightning Bolt");
+    if matches!(result.waiting_for, WaitingFor::TargetSelection { .. }) {
+        runner
+            .act(GameAction::SelectTargets {
+                targets: vec![TargetRef::Player(P1)],
+            })
+            .expect("target the opponent");
+    }
+    assert_eq!(
+        runner.state().stack.len(),
+        before + 1,
+        "the Bolt is on the stack"
+    );
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { player } if player == P0),
+        "the caster keeps priority with the Bolt pending"
+    );
+}
+
+fn offered(runner: &GameRunner) -> bool {
+    matches!(runner.state().waiting_for, WaitingFor::LoopShortcut { .. })
+}
+
+/// `(ability_index, stack_depth)` of every recorded period step, in order.
+fn recorded_steps(runner: &GameRunner) -> Vec<(usize, usize)> {
+    runner
+        .state()
+        .last_loop_action_sequence
+        .iter()
+        .map(|step| match step.action {
+            LoopAction::Activate { ability_index, .. } => (ability_index, step.stack_depth),
+            ref other => panic!("expected an Activate step, got {other:?}"),
+        })
+        .collect()
+}
+
+fn pins_per_step(runner: &GameRunner) -> Vec<usize> {
+    runner
+        .state()
+        .last_loop_action_sequence
+        .iter()
+        .map(|step| step.pins.len())
+        .collect()
+}
+
+/// The `MayChoice` answers pinned on step `index`, with every pin's source; panics on a pin of
+/// another kind.
+fn may_pins(
+    runner: &GameRunner,
+    index: usize,
+) -> Vec<(
+    engine::types::game_state::YieldTarget,
+    engine::analysis::decision_template::MayChoiceOption,
+)> {
+    use engine::analysis::decision_template::PinnedDecision;
+    runner.state().last_loop_action_sequence[index]
+        .pins
+        .iter()
+        .map(|pin| match pin {
+            PinnedDecision::MayChoice { slot, take } => (slot.source.clone(), *take),
+            other => panic!("expected only MayChoice pins, got {other:?}"),
+        })
+        .collect()
+}
+
+/// The source object a `MayChoice` slot names.
+fn slot_object(source: &engine::types::game_state::YieldTarget) -> Option<ObjectId> {
+    match source {
+        engine::types::game_state::YieldTarget::ThisObject { source_id, .. } => Some(*source_id),
+        _ => None,
+    }
+}
+
+/// The offer's unbounded axes and published schema-point count; panics without an offer.
+fn offer_shape(runner: &GameRunner) -> (Vec<ResourceAxis>, usize) {
+    match &runner.state().waiting_for {
+        WaitingFor::LoopShortcut {
+            proposer,
+            certificate,
+            schema,
+            ..
+        } => {
+            assert_eq!(*proposer, P0, "the loop controller proposes the shortcut");
+            (certificate.unbounded.clone(), schema.points.len())
+        }
+        other => panic!("expected a CR 732.2a LoopShortcut offer, got {other:?}"),
+    }
+}
+
+fn life(runner: &GameRunner, player: PlayerId) -> i32 {
+    runner.state().players[player.0 as usize].life
+}
+
+/// ⭐ CR 732.2a + CR 603.5 + CR 707.10: real Basalt Monolith + real Rings of Brighthearth. One human
+/// lap (tap for three, pay {3} to untap, pay Rings' {2} to copy the untap, tap again in response
+/// to the original untap) nets +1 colorless and returns the board to an untapped Basalt with an
+/// empty stack, so the controller is OFFERED the mana shortcut. The period records the response
+/// tap at depth 1 and the Rings answer as a `Take` pin on the untap step only (never the first
+/// step, so the offer publishes no schema point). Revert-failing: replaying every step to the
+/// empty stack (no depth settle), dropping the drive's "may" arm, or dropping the pin each lose
+/// the offer.
+#[test]
+fn mana_engine_basalt_rings_offers_mana_advantage_shortcut() {
+    use engine::analysis::decision_template::MayChoiceOption;
+    let mut rig = lap_rig(LapBoard {
+        rings: true,
+        colorless_seed: 2,
+        ..LapBoard::BARE
+    });
+    let rings = rig.rings.expect("Rings is on the battlefield");
+    let lap = human_lap(&mut rig, &[], true);
+
+    // Reach guards: Rings asked P0 once, and the response tap happened over the original untap.
+    assert_eq!(lap.prompts.len(), 1, "Rings asked its question once");
+    assert_eq!(lap.prompts[0].player, P0);
+    assert_eq!(lap.prompts[0].source_id, rings);
+    assert_eq!(
+        lap.prompts[0].sequence_len_before, 2,
+        "Rings asks while the untap is the current step"
+    );
+    assert_eq!(lap.depths, vec![0, 0, 1], "tap, untap, response tap");
+    assert_eq!(
+        recorded_steps(&rig.runner),
+        vec![(rig.mana_idx, 0), (rig.untap_idx, 0), (rig.mana_idx, 1)],
+        "the period is [tap@0, untap@0, tap@1] with absolute depths"
+    );
+    assert!(may_pins(&rig.runner, 0).is_empty() && may_pins(&rig.runner, 2).is_empty());
+    let untap_pins = may_pins(&rig.runner, 1);
+    assert_eq!(untap_pins.len(), 1, "exactly one pin on the untap step");
+    assert_eq!(slot_object(&untap_pins[0].0), Some(rings));
+    assert_eq!(untap_pins[0].1, MayChoiceOption::Take);
+    assert_eq!(colorless(rig.runner.state(), P0), 3, "the lap nets +1");
+    match &rig.runner.state().waiting_for {
+        WaitingFor::LoopShortcut {
+            proposer,
+            certificate,
+            schema,
+            ..
+        } => {
+            assert_eq!(*proposer, P0);
+            assert_eq!(
+                certificate.unbounded,
+                vec![ResourceAxis::Mana(ManaType::Colorless)]
+            );
+            assert_eq!(certificate.win_kind, WinKind::Advantage);
+            assert!(
+                schema.points.is_empty(),
+                "the demonstrated Rings answer is not a published shortcut parameter"
+            );
+        }
+        other => panic!("expected a CR 732.2a LoopShortcut offer, got {other:?}"),
+    }
+}
+
+/// CR 732.2a + CR 732.2c: accepting the Basalt + Rings offer grants infinite colorless mana, exactly
+/// as the shipped Basalt + Power accept does.
+#[test]
+fn mana_engine_basalt_rings_accept_marks_infinite_mana() {
+    let mut rig = lap_rig(LapBoard {
+        rings: true,
+        colorless_seed: 2,
+        ..LapBoard::BARE
+    });
+    human_lap(&mut rig, &[], true);
+    assert!(offered(&rig.runner), "precondition: the offer fired");
+    assert_eq!(colorless(rig.runner.state(), P0), 3);
+    rig.runner
+        .act(GameAction::DeclareShortcut {
+            count: IterationCount::Fixed(5),
+            template: None,
+        })
+        .expect("declare shortcut");
+    assert!(
+        matches!(
+            rig.runner.state().waiting_for,
+            WaitingFor::RespondToShortcut { .. }
+        ),
+        "the opponent gets the accept-or-shorten window"
+    );
+    rig.runner
+        .act(GameAction::RespondToShortcut {
+            response: ShortcutResponse::Accept,
+        })
+        .expect("opponent accepts");
+    let state = rig.runner.state();
+    assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+    assert!(
+        state
+            .unbounded_resources
+            .get(&P0)
+            .is_some_and(|axes| axes.contains(&ResourceAxis::Mana(ManaType::Colorless))),
+        "the colorless axis is marked unbounded"
+    );
+    assert!(
+        colorless(state, P0) >= 90,
+        "the pool is topped to the infinite-mana constant, got {}",
+        colorless(state, P0)
+    );
+    assert!(state.stack.is_empty());
+    assert!(!state.objects[&rig.rock].tapped, "Basalt ends untapped");
+}
+
+/// CR 603.5 + CR 732.2a: a DECLINED Rings answer is recorded as demonstrated (a `Decline` pin on
+/// the untap step). The declined lap nets 0, so there is no offer either way; only the pin value
+/// discriminates a recorder that ignores the answer (a constant `Take`). Paired positive: R1.
+#[test]
+fn mana_engine_rings_decline_records_decline_pin() {
+    use engine::analysis::decision_template::MayChoiceOption;
+    let mut rig = lap_rig(LapBoard {
+        rings: true,
+        colorless_seed: 2,
+        ..LapBoard::BARE
+    });
+    let rings = rig.rings.expect("Rings is on the battlefield");
+    let lap = human_lap(&mut rig, &[MayAnswer::Decline], true);
+
+    assert_eq!(lap.prompts.len(), 1, "reach guard: Rings asked");
+    assert_eq!(
+        recorded_steps(&rig.runner),
+        vec![(rig.mana_idx, 0), (rig.untap_idx, 0)],
+        "no copy, so no response tap"
+    );
+    let pins = may_pins(&rig.runner, 1);
+    assert_eq!(pins.len(), 1);
+    assert_eq!(slot_object(&pins[0].0), Some(rings));
+    assert_eq!(
+        pins[0].1,
+        MayChoiceOption::Decline,
+        "the demonstrated answer"
+    );
+    assert_eq!(
+        colorless(rig.runner.state(), P0),
+        2,
+        "a declined lap nets 0"
+    );
+    assert!(!offered(&rig.runner));
+}
+
+/// CR 732.2a: Grim Monolith + Rings nets 0 (+3 -4 -2 +3), so there is no shortcut. Same lap shape,
+/// prompt and recorded depths as the offered boards: the rejection is the sign-check, not a drive
+/// abort. Paired positive: `mana_engine_grim_power_rings_offers`.
+#[test]
+fn mana_engine_grim_rings_net_zero_no_offer() {
+    let mut rig = lap_rig(LapBoard {
+        rock: GRIM,
+        rings: true,
+        colorless_seed: 6,
+        ..LapBoard::BARE
+    });
+    let lap = human_lap(&mut rig, &[], true);
+    assert_eq!(lap.prompts.len(), 1, "reach guard: Rings asked");
+    let depths: Vec<usize> = recorded_steps(&rig.runner).iter().map(|s| s.1).collect();
+    assert_eq!(depths, vec![0, 0, 1]);
+    assert_eq!(colorless(rig.runner.state(), P0), 6, "the lap nets 0");
+    assert!(!offered(&rig.runner), "a net-0 lap is not a loop");
+}
+
+/// Control for R4: Grim Monolith + attached Power Artifact + Rings nets +2 (+3 -2 -2 +3) and is
+/// OFFERED.
+#[test]
+fn mana_engine_grim_power_rings_offers() {
+    let mut rig = lap_rig(LapBoard {
+        rock: GRIM,
+        power: true,
+        rings: true,
+        colorless_seed: 6,
+        ..LapBoard::BARE
+    });
+    let lap = human_lap(&mut rig, &[], true);
+    assert_eq!(lap.prompts.len(), 1, "reach guard: Rings asked");
+    let depths: Vec<usize> = recorded_steps(&rig.runner).iter().map(|s| s.1).collect();
+    assert_eq!(depths, vec![0, 0, 1]);
+    assert_eq!(colorless(rig.runner.state(), P0), 8, "the lap nets +2");
+    assert_eq!(
+        offer_shape(&rig.runner).0,
+        vec![ResourceAxis::Mana(ManaType::Colorless)]
+    );
+}
+
+/// CR 732.2a: two cost sources compose. Basalt + Power + Rings nets +3 (+3 -1 -2 +3) and is OFFERED.
+#[test]
+fn mana_engine_basalt_power_rings_offers() {
+    let mut rig = lap_rig(LapBoard {
+        power: true,
+        rings: true,
+        colorless_seed: 6,
+        ..LapBoard::BARE
+    });
+    let lap = human_lap(&mut rig, &[], true);
+    assert_eq!(lap.prompts.len(), 1, "reach guard: Rings asked");
+    let depths: Vec<usize> = recorded_steps(&rig.runner).iter().map(|s| s.1).collect();
+    assert_eq!(depths, vec![0, 0, 1]);
+    assert_eq!(colorless(rig.runner.state(), P0), 9, "the lap nets +3");
+    assert_eq!(
+        offer_shape(&rig.runner).0,
+        vec![ResourceAxis::Mana(ManaType::Colorless)]
+    );
+}
+
+/// CR 603.5 + CR 732.2a: a REMEMBERED Rings answer is a standing instruction the drive's state clone
+/// carries, so the lap is OFFERED with no `MayChoice` pin on any step.
+#[test]
+fn mana_engine_rings_remembered_accept_offers_without_a_may_pin() {
+    let mut rig = lap_rig(LapBoard {
+        rings: true,
+        colorless_seed: 2,
+        ..LapBoard::BARE
+    });
+    let lap = human_lap(&mut rig, &[MayAnswer::RememberTake], true);
+    assert_eq!(lap.prompts.len(), 1);
+    assert!(
+        lap.prompts[0].keyed,
+        "reach guard: the prompt is rememberable"
+    );
+    assert_eq!(rig.runner.state().may_trigger_auto_choices.len(), 1);
+    assert_eq!(pins_per_step(&rig.runner), vec![0, 0, 0]);
+    assert_eq!(
+        offer_shape(&rig.runner).0,
+        vec![ResourceAxis::Mana(ManaType::Colorless)]
+    );
+}
+
+/// ⭐ CR 732.2a: a player who STARTS with Basalt tapped plays an opening lap (untap, Rings copy,
+/// response tap: -2) and then loops. The opening lap leaves a lone response tap recorded (its
+/// untap was never recorded); the second lap's tap at a lower depth replaces that orphan, so the
+/// second lap records EXACTLY the untapped-start period and is OFFERED. Revert-failing: without the
+/// orphan replacement the second lap records a four-step sequence and is not offered.
+#[test]
+fn mana_engine_tapped_start_rings_offers_on_the_second_lap() {
+    let mut rig = lap_rig(LapBoard {
+        rings: true,
+        colorless_seed: 7,
+        rock_tapped: true,
+        ..LapBoard::BARE
+    });
+    let opening = human_lap(&mut rig, &[], true);
+    assert_eq!(opening.prompts.len(), 1, "reach guard: Rings asked");
+    assert_eq!(opening.depths, vec![0, 1], "untap, then response tap");
+    assert_eq!(
+        recorded_steps(&rig.runner),
+        vec![(rig.mana_idx, 1)],
+        "reach guard: the orphan response tap is the lone recorded step"
+    );
+    assert_eq!(
+        colorless(rig.runner.state(), P0),
+        5,
+        "the opening lap nets -2"
+    );
+    assert!(!offered(&rig.runner));
+
+    let second = human_lap(&mut rig, &[], true);
+    assert_eq!(second.prompts.len(), 1);
+    assert_eq!(
+        recorded_steps(&rig.runner),
+        vec![(rig.mana_idx, 0), (rig.untap_idx, 0), (rig.mana_idx, 1)]
+    );
+    assert_eq!(
+        colorless(rig.runner.state(), P0),
+        6,
+        "the second lap nets +1"
+    );
+    assert_eq!(
+        offer_shape(&rig.runner).0,
+        vec![ResourceAxis::Mana(ManaType::Colorless)]
+    );
+
+    let mut untapped_start = lap_rig(LapBoard {
+        rings: true,
+        colorless_seed: 2,
+        ..LapBoard::BARE
+    });
+    human_lap(&mut untapped_start, &[], true);
+    assert_eq!(
+        rig.runner.state().last_loop_action_sequence,
+        untapped_start.runner.state().last_loop_action_sequence,
+        "the second tapped-start lap records the untapped-start period"
+    );
+}
+
+fn mountains_tapped(runner: &GameRunner) -> usize {
+    runner
+        .state()
+        .battlefield
+        .iter()
+        .filter(|id| {
+            let o = &runner.state().objects[id];
+            o.name == "Mountain" && o.tapped
+        })
+        .count()
+}
+
+/// CR 732.2a: the natural board — Mountains and an EMPTY pool, Rings' {2} paid by auto-tapped lands
+/// when the pool cannot — is offered too: (a) untapped Basalt with three Mountains; (b) tapped
+/// Basalt with five Mountains, offered on the second lap; (c) with Power Artifact, where the
+/// freshly tapped Basalt mana pays everything.
+#[test]
+fn mana_engine_land_funded_empty_pool_rings_offers() {
+    // (a) untapped start: tap +3, untap -3 from the pool, Rings {2} from two Mountains, tap +3.
+    let mut rig = lap_rig(LapBoard {
+        rings: true,
+        mountains: 3,
+        ..LapBoard::BARE
+    });
+    let lap = human_lap(&mut rig, &[], true);
+    assert_eq!(lap.prompts.len(), 1, "(a) reach guard: Rings asked");
+    let depths: Vec<usize> = recorded_steps(&rig.runner).iter().map(|s| s.1).collect();
+    assert_eq!(depths, vec![0, 0, 1], "(a)");
+    assert_eq!(colorless(rig.runner.state(), P0), 3, "(a)");
+    assert_eq!(
+        mountains_tapped(&rig.runner),
+        2,
+        "(a) two Mountains paid Rings"
+    );
+    assert_eq!(
+        offer_shape(&rig.runner),
+        (vec![ResourceAxis::Mana(ManaType::Colorless)], 0),
+        "(a)"
+    );
+
+    // (b) tapped start: the opening lap is paid by all five Mountains, the second is offered.
+    let mut rig = lap_rig(LapBoard {
+        rings: true,
+        mountains: 5,
+        rock_tapped: true,
+        ..LapBoard::BARE
+    });
+    let opening = human_lap(&mut rig, &[], true);
+    assert_eq!(opening.prompts.len(), 1, "(b) reach guard: Rings asked");
+    assert_eq!(recorded_steps(&rig.runner), vec![(rig.mana_idx, 1)], "(b)");
+    assert_eq!(colorless(rig.runner.state(), P0), 3, "(b)");
+    assert_eq!(mountains_tapped(&rig.runner), 5, "(b)");
+    assert!(!offered(&rig.runner), "(b) the opening lap is not offered");
+    let second = human_lap(&mut rig, &[], true);
+    assert_eq!(
+        second.prompts.len(),
+        1,
+        "(b) reach guard: Rings asked again"
+    );
+    let depths: Vec<usize> = recorded_steps(&rig.runner).iter().map(|s| s.1).collect();
+    assert_eq!(depths, vec![0, 0, 1], "(b)");
+    assert_eq!(colorless(rig.runner.state(), P0), 4, "(b)");
+    assert_eq!(
+        offer_shape(&rig.runner),
+        (vec![ResourceAxis::Mana(ManaType::Colorless)], 0),
+        "(b)"
+    );
+
+    // (c) Power Artifact: the untap costs {1}; Basalt's own mana pays it and Rings.
+    let mut rig = lap_rig(LapBoard {
+        power: true,
+        rings: true,
+        mountains: 3,
+        ..LapBoard::BARE
+    });
+    let lap = human_lap(&mut rig, &[], true);
+    assert_eq!(lap.prompts.len(), 1, "(c) reach guard: Rings asked");
+    assert_eq!(colorless(rig.runner.state(), P0), 3, "(c)");
+    assert_eq!(mountains_tapped(&rig.runner), 0, "(c) no land was needed");
+    assert_eq!(
+        offer_shape(&rig.runner),
+        (vec![ResourceAxis::Mana(ManaType::Colorless)], 0),
+        "(c)"
+    );
+}
+
+/// CR 732.2a + CR 707.10: response timing with no prompt. Basalt + a non-optional free copier: tap,
+/// untap (copied), tap again in response to the original: +3 per lap, OFFERED. The response tap
+/// must be replayed at depth 1; replayed to the empty stack, the second untap is wasted and the
+/// cover fails.
+#[test]
+fn mana_engine_response_timed_copier_offers() {
+    let mut rig = lap_rig(LapBoard {
+        synthetic: &[COPIER],
+        colorless_seed: 2,
+        ..LapBoard::BARE
+    });
+    let lap = human_lap(&mut rig, &[], true);
+    assert!(lap.prompts.is_empty(), "the copier asks nothing");
+    assert_eq!(
+        lap.depths,
+        vec![0, 0, 1],
+        "reach guard: the response tap happened"
+    );
+    assert_eq!(
+        recorded_steps(&rig.runner),
+        vec![(rig.mana_idx, 0), (rig.untap_idx, 0), (rig.mana_idx, 1)]
+    );
+    assert_eq!(colorless(rig.runner.state(), P0), 5, "the lap nets +3");
+    assert_eq!(
+        offer_shape(&rig.runner).0,
+        vec![ResourceAxis::Mana(ManaType::Colorless)]
+    );
+}
+
+/// CR 732.2a: a recorded depth the replay cannot reach (a mana ability never leaves an object on
+/// the stack) degrades to settling on the empty stack instead of losing a period that replays
+/// that way. Control: the same lap untampered is offered.
+#[test]
+fn mana_engine_unreproducible_depth_degrades_to_settle_to_empty() {
+    for tamper in [false, true] {
+        let mut rig = lap_rig(LapBoard {
+            power: true,
+            ..LapBoard::BARE
+        });
+        for ability_index in [rig.mana_idx, rig.untap_idx] {
+            rig.runner
+                .act(GameAction::ActivateAbility {
+                    source_id: rig.rock,
+                    ability_index,
+                })
+                .expect("a legal activation");
+        }
+        assert_eq!(
+            recorded_steps(&rig.runner),
+            vec![(rig.mana_idx, 0), (rig.untap_idx, 0)],
+            "reach guard: both steps recorded at depth 0"
+        );
+        if tamper {
+            // Step 0 now settles at depth 2, which its mana ability can never reach.
+            rig.runner.state_mut().last_loop_action_sequence[1].stack_depth = 2;
+        }
+        settle_lap(&mut rig.runner);
+        assert!(
+            offered(&rig.runner),
+            "tamper={tamper}: the period is still offered"
+        );
+        assert!(rig.runner.state().stack.is_empty());
+    }
+}
+
+/// CR 732.2a: a period demonstrated over an unrelated pending object (the controller's own Bolt,
+/// both steps taken over it) is still offered: depths are read relative to the first step.
+#[test]
+fn mana_engine_period_over_a_pending_spell_is_still_offered() {
+    let mut rig = lap_rig(LapBoard {
+        power: true,
+        bolts: 1,
+        ..LapBoard::BARE
+    });
+    cast_bolt_at_opponent(&mut rig.runner);
+    let lap = human_lap(&mut rig, &[], false);
+    settle_lap(&mut rig.runner);
+    assert_eq!(lap.depths, vec![1, 1]);
+    assert_eq!(
+        recorded_steps(&rig.runner),
+        vec![(rig.mana_idx, 1), (rig.untap_idx, 1)]
+    );
+    assert!(offered(&rig.runner));
+    assert_eq!(life(&rig.runner, P1), 17, "reach guard: the Bolt resolved");
+}
+
+/// CR 732.2a: `[1, 0]` — the first step over a pending Bolt, the second after it resolved — is still
+/// offered (relative depth saturates at 0), and the orphan replacement does not fire on a
+/// differing follow-up action.
+#[test]
+fn mana_engine_period_first_step_over_a_spell_then_resolved_is_still_offered() {
+    let mut rig = lap_rig(LapBoard {
+        power: true,
+        bolts: 1,
+        ..LapBoard::BARE
+    });
+    cast_bolt_at_opponent(&mut rig.runner);
+    rig.runner
+        .act(GameAction::ActivateAbility {
+            source_id: rig.rock,
+            ability_index: rig.mana_idx,
+        })
+        .expect("tap in response to the Bolt");
+    pass_until_stack_len(&mut rig.runner, 0);
+    assert_eq!(life(&rig.runner, P1), 17, "reach guard: the Bolt resolved");
+    rig.runner
+        .act(GameAction::ActivateAbility {
+            source_id: rig.rock,
+            ability_index: rig.untap_idx,
+        })
+        .expect("untap");
+    assert_eq!(
+        recorded_steps(&rig.runner),
+        vec![(rig.mana_idx, 1), (rig.untap_idx, 0)],
+        "both steps recorded"
+    );
+    settle_lap(&mut rig.runner);
+    assert!(offered(&rig.runner));
+}
+
+/// CR 732.2a: `[2, 1]` — two Bolts pending at the tap, one at the untap — is still offered.
+#[test]
+fn mana_engine_period_depth_two_then_one_is_still_offered() {
+    let mut rig = lap_rig(LapBoard {
+        power: true,
+        bolts: 2,
+        ..LapBoard::BARE
+    });
+    cast_bolt_at_opponent(&mut rig.runner);
+    cast_bolt_at_opponent(&mut rig.runner);
+    rig.runner
+        .act(GameAction::ActivateAbility {
+            source_id: rig.rock,
+            ability_index: rig.mana_idx,
+        })
+        .expect("tap over two Bolts");
+    pass_until_stack_len(&mut rig.runner, 1);
+    rig.runner
+        .act(GameAction::ActivateAbility {
+            source_id: rig.rock,
+            ability_index: rig.untap_idx,
+        })
+        .expect("untap over one Bolt");
+    assert_eq!(
+        recorded_steps(&rig.runner),
+        vec![(rig.mana_idx, 2), (rig.untap_idx, 1)]
+    );
+    settle_lap(&mut rig.runner);
+    assert!(offered(&rig.runner));
+    assert_eq!(
+        life(&rig.runner, P1),
+        14,
+        "reach guard: both Bolts resolved"
+    );
+}
+
+/// CR 732.2a: the Rings lap taken over the controller's own pending Bolt is offered: the response
+/// tap settles one object above the period's first step.
+#[test]
+fn mana_engine_rings_lap_over_a_pending_spell_offers() {
+    let mut rig = lap_rig(LapBoard {
+        rings: true,
+        colorless_seed: 2,
+        bolts: 1,
+        ..LapBoard::BARE
+    });
+    cast_bolt_at_opponent(&mut rig.runner);
+    let lap = human_lap(&mut rig, &[], true);
+    settle_lap(&mut rig.runner);
+    assert_eq!(lap.prompts.len(), 1, "reach guard: Rings asked");
+    assert_eq!(lap.depths, vec![1, 1, 2]);
+    assert_eq!(
+        recorded_steps(&rig.runner),
+        vec![(rig.mana_idx, 1), (rig.untap_idx, 1), (rig.mana_idx, 2)]
+    );
+    assert_eq!(colorless(rig.runner.state(), P0), 3, "the lap nets +1");
+    assert_eq!(life(&rig.runner, P1), 17, "reach guard: the Bolt resolved");
+    assert_eq!(
+        offer_shape(&rig.runner).0,
+        vec![ResourceAxis::Mana(ManaType::Colorless)]
+    );
+}
+
+/// CR 603.5 + CR 732.2a: the pin follows the demonstrated answer in BOTH directions. Basalt, Power
+/// and "you may pay {5}. If you do, you gain 1 life.": declined, the lap nets +2 and is OFFERED;
+/// accepted, it nets -3 and is not. A recorder that pinned a constant `Take` loses the declined
+/// offer.
+#[test]
+fn mana_engine_may_pay_pin_follows_demonstrated_answer() {
+    use engine::analysis::decision_template::MayChoiceOption;
+    for (answer, option, pool, p0_life, expect_offer) in [
+        (MayAnswer::Decline, MayChoiceOption::Decline, 7, 20, true),
+        (MayAnswer::Take, MayChoiceOption::Take, 2, 21, false),
+    ] {
+        let mut rig = lap_rig(LapBoard {
+            power: true,
+            synthetic: &[MAY_PAY_FIVE],
+            colorless_seed: 5,
+            ..LapBoard::BARE
+        });
+        let lap = human_lap(&mut rig, &[answer], false);
+        assert_eq!(lap.prompts.len(), 1, "{option:?}: reach guard: asked");
+        assert_eq!(lap.prompts[0].player, P0);
+        assert_eq!(
+            recorded_steps(&rig.runner),
+            vec![(rig.mana_idx, 0), (rig.untap_idx, 0)]
+        );
+        assert!(may_pins(&rig.runner, 0).is_empty());
+        let pins: Vec<MayChoiceOption> =
+            may_pins(&rig.runner, 1).into_iter().map(|p| p.1).collect();
+        assert_eq!(
+            pins,
+            vec![option],
+            "the untap step pins the demonstrated answer"
+        );
+        assert_eq!(colorless(rig.runner.state(), P0), pool, "{option:?}");
+        assert_eq!(life(&rig.runner, P0), p0_life, "{option:?}");
+        assert_eq!(offered(&rig.runner), expect_offer, "{option:?}");
+    }
+}
+
+/// CR 603.5 + CR 732.2a: one source asking two "may" questions on one step with the SAME answer is
+/// replayed from one pin and OFFERED (life is unbounded too).
+#[test]
+fn mana_engine_duplicate_may_slot_same_answer_replays() {
+    use engine::analysis::decision_template::MayChoiceOption;
+    let mut rig = lap_rig(LapBoard {
+        power: true,
+        synthetic: &[TWO_MAYS],
+        ..LapBoard::BARE
+    });
+    let lap = human_lap(&mut rig, &[MayAnswer::Take, MayAnswer::Take], false);
+    assert_eq!(lap.prompts.len(), 2, "reach guard: asked twice");
+    assert_eq!(lap.prompts[0].source_id, lap.prompts[1].source_id);
+    let pins: Vec<MayChoiceOption> = may_pins(&rig.runner, 1).into_iter().map(|p| p.1).collect();
+    assert_eq!(pins, vec![MayChoiceOption::Take], "one pin for the slot");
+    assert_eq!(life(&rig.runner, P0), 23);
+    assert_eq!(
+        offer_shape(&rig.runner).0,
+        vec![
+            ResourceAxis::Mana(ManaType::Colorless),
+            ResourceAxis::Life(P0)
+        ]
+    );
+}
+
+/// CR 603.5 + CR 732.2a: two DIFFERENT answers from one source on one step cannot be replayed from
+/// one pin, so the period is discarded and nothing is offered.
+#[test]
+fn mana_engine_duplicate_may_slot_differing_answers_poison_the_period() {
+    let mut rig = lap_rig(LapBoard {
+        power: true,
+        synthetic: &[TWO_MAYS],
+        ..LapBoard::BARE
+    });
+    let lap = human_lap(&mut rig, &[MayAnswer::Take, MayAnswer::Decline], false);
+    assert_eq!(lap.prompts.len(), 2, "reach guard: asked twice");
+    assert_eq!(
+        lap.prompts[0].source_id, lap.prompts[1].source_id,
+        "both questions come from one source"
+    );
+    assert_eq!(
+        lap.prompts[0].sequence_len_after, 2,
+        "reach guard: the first answer kept the period"
+    );
+    assert_eq!(
+        lap.prompts[1].sequence_len_after, 0,
+        "the differing second answer discards the period"
+    );
+    assert!(rig.runner.state().last_loop_action_sequence.is_empty());
+    assert_eq!(life(&rig.runner, P0), 21);
+    assert!(!offered(&rig.runner));
+}
+
+/// CR 603.5 + CR 732.2a: a "may" answered while the period consists of its first step only attaches
+/// no pin (the first step's pins are the ones an offer publishes) and keeps the period; one step
+/// later the same answer is pinned.
+#[test]
+fn mana_engine_may_on_the_seed_step_is_not_pinned() {
+    use engine::analysis::decision_template::MayChoiceOption;
+    for with_basalt_first in [false, true] {
+        let db = shared_card_db().expect("committed fixture");
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let basalt = scenario.add_real_card(P0, BASALT, Zone::Battlefield, db);
+        let maker = scenario
+            .add_artifact_from_oracle(P0, "Servo maker", SERVO_MAKER)
+            .id();
+        scenario.add_artifact_from_oracle(P0, "Synthetic", MAY_GAIN_ONE);
+        scenario.with_mana_pool(
+            P0,
+            (0..3)
+                .map(|i| ManaUnit::new(ManaType::Colorless, ObjectId(9_900 + i), false, Vec::new()))
+                .collect(),
+        );
+        let mut runner = scenario.build();
+        runner.state_mut().loop_detection = LoopDetectionMode::Interactive;
+        if with_basalt_first {
+            let mana_idx = mana_ability_index(runner.state(), basalt).expect("mana ability");
+            runner
+                .act(GameAction::ActivateAbility {
+                    source_id: basalt,
+                    ability_index: mana_idx,
+                })
+                .expect("tap Basalt");
+        }
+        let expected_len = if with_basalt_first { 2 } else { 1 };
+        let maker_idx = untap_ability_index(runner.state(), maker).expect("the token ability");
+        runner
+            .act(GameAction::ActivateAbility {
+                source_id: maker,
+                ability_index: maker_idx,
+            })
+            .expect("make a Servo");
+        let mut asked = false;
+        for _ in 0..30 {
+            match &runner.state().waiting_for {
+                WaitingFor::OptionalEffectChoice {
+                    may_trigger_key, ..
+                } => {
+                    assert!(may_trigger_key.is_some());
+                    assert_eq!(
+                        runner.state().last_loop_action_sequence.len(),
+                        expected_len,
+                        "reach guard: the period at the prompt"
+                    );
+                    asked = true;
+                    runner
+                        .act(GameAction::DecideOptionalEffect { accept: true })
+                        .expect("accept");
+                    break;
+                }
+                WaitingFor::Priority { .. } => {
+                    runner.act(GameAction::PassPriority).expect("pass");
+                }
+                other => panic!("unexpected prompt: {other:?}"),
+            }
+        }
+        assert!(asked, "reach guard: the synthetic asked");
+        let seq = &runner.state().last_loop_action_sequence;
+        assert_eq!(seq.len(), expected_len, "the period is kept");
+        if with_basalt_first {
+            assert!(seq[0].pins.is_empty());
+            let pins: Vec<MayChoiceOption> =
+                may_pins(&runner, 1).into_iter().map(|p| p.1).collect();
+            assert_eq!(pins, vec![MayChoiceOption::Take], "pinned one step later");
+        } else {
+            assert!(seq[0].pins.is_empty(), "no pin on the period's first step");
+        }
+    }
+}
+
+/// CR 603.5 + CR 732.2a: an OPPONENT's "may" is never a loop choice of the proposer: it is not
+/// pinned and the period is not offered (the drive meets that prompt unpinned and aborts). The
+/// paired positive is the same shape with the proposer's own "may": pinned and OFFERED.
+#[test]
+fn mana_engine_opponent_may_is_not_pinned_or_offered() {
+    let mut rig = lap_rig(LapBoard {
+        power: true,
+        opponent_synthetic: &[OPPONENT_MAY_GAIN_ONE],
+        ..LapBoard::BARE
+    });
+    let lap = human_lap(&mut rig, &[MayAnswer::Take], false);
+    assert_eq!(lap.prompts.len(), 1, "reach guard: the opponent was asked");
+    assert_eq!(lap.prompts[0].player, P1);
+    assert!(lap.prompts[0].keyed);
+    assert_eq!(
+        lap.prompts[0].sequence_len_before, 2,
+        "reach guard: asked during the proposer's untap step"
+    );
+    assert_eq!(
+        life(&rig.runner, P1),
+        21,
+        "reach guard: the answer resolved"
+    );
+    assert_eq!(
+        recorded_steps(&rig.runner),
+        vec![(rig.mana_idx, 0), (rig.untap_idx, 0)]
+    );
+    assert_eq!(pins_per_step(&rig.runner), vec![0, 0], "never pinned");
+    assert!(!offered(&rig.runner));
+
+    let mut own = lap_rig(LapBoard {
+        power: true,
+        synthetic: &[MAY_GAIN_ONE],
+        ..LapBoard::BARE
+    });
+    let lap = human_lap(&mut own, &[MayAnswer::Take], false);
+    assert_eq!(lap.prompts.len(), 1);
+    assert_eq!(lap.prompts[0].player, P0);
+    assert_eq!(pins_per_step(&own.runner), vec![0, 1]);
+    assert!(offered(&own.runner), "the proposer's own may is replayed");
 }

@@ -1407,6 +1407,18 @@ pub struct LoopActionContext {
     /// `!in_simulation_probe()`), so a genuine loop's pins match.
     #[serde(default)]
     pub pins: Vec<crate::analysis::decision_template::PinnedDecision>,
+    /// CR 732.2a: the number of objects on the stack when this step was taken, BEFORE the step's
+    /// own entry. The drive reads it RELATIVE to the period's first step (saturating at 0), so a
+    /// period demonstrated over an unrelated pending object replays from an empty stack exactly
+    /// as before this field existed, and a response step (CR 117.1b: "A player may activate an
+    /// activated ability any time they have priority") replays at the depth it was demonstrated
+    /// at. `Recast` is always 0: a recast capture overwrites the whole period, so it is the base.
+    #[serde(default, skip_serializing_if = "stack_depth_is_zero")]
+    pub stack_depth: usize,
+}
+
+fn stack_depth_is_zero(depth: &usize) -> bool {
+    *depth == 0
 }
 
 /// Serde deserialize shim for `LoopActionContext`. Accepts BOTH the current nested shape
@@ -1429,6 +1441,8 @@ struct LoopActionContextRepr {
     /// kept by the conditional load migration; `default` empty for pre-FIX-1 / pre-rename shapes.
     #[serde(default)]
     pins: Vec<crate::analysis::decision_template::PinnedDecision>,
+    #[serde(default)]
+    stack_depth: usize,
 }
 
 impl From<LoopActionContextRepr> for LoopActionContext {
@@ -1446,6 +1460,7 @@ impl From<LoopActionContextRepr> for LoopActionContext {
             // FIX-1 + FIX-3 (CONDITIONAL migration): the sequence deserializes normally, so an
             // offer-save's recorded choices round-trip; pre-FIX-1 / pre-rename shapes default empty.
             pins: r.pins,
+            stack_depth: r.stack_depth,
         }
     }
 }
@@ -36774,6 +36789,7 @@ mod tests {
         // Build the v0.24–v0.27 flat RecastContext JSON from the components' real serde reprs
         // (robust to their serialization format): from_zone/uses_buyback at top level, no `action`.
         let want = LoopActionContext {
+            stack_depth: 0,
             card_id: CardId(7),
             controller: PlayerId(1),
             action: LoopAction::Recast {
@@ -38189,6 +38205,7 @@ mod tests {
     fn persistent_axis_materialization_stash_round_trips_through_serde() {
         let mut state = GameState::new_two_player(7);
         let seq = vec![LoopActionContext {
+            stack_depth: 0,
             card_id: CardId(42),
             controller: PlayerId(0),
             action: LoopAction::Recast {

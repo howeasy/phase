@@ -468,6 +468,7 @@ fn an_unaffordable_target_reversal_keeps_the_loop_period_and_mana_undo_window() 
     r.state_mut().loop_detection = engine::types::game_state::LoopDetectionMode::On;
     let card_id = r.state().objects[&src].card_id;
     r.state_mut().last_loop_action_sequence = vec![engine::types::game_state::LoopActionContext {
+        stack_depth: 0,
         card_id,
         controller: P0,
         action: engine::types::game_state::LoopAction::Activate {
@@ -619,6 +620,78 @@ fn a_settled_lock_with_no_election_accepts_the_activation_exactly_once() {
         period + 1,
         "and not again"
     );
+}
+
+/// CR 732.2a: an activation accepted at its target-settlement lock records the stack length BEFORE
+/// its own entry: the second activation is recorded at the depth observed just before it (the
+/// first activation plus Hojo's draw trigger above it), not at the depth after its placement.
+#[test]
+fn a_settled_lock_records_its_pre_placement_stack_depth() {
+    let mut s = GameScenario::new();
+    s.at_phase(Phase::PreCombatMain);
+    library(&mut s, P0);
+    s.add_creature_from_oracle(P0, "Professor Hojo", 2, 2, HOJO);
+    let own = s.add_creature(P0, "Own", 1, 1).id();
+    // Kopala's tax on a targeted Merfolk keeps EVERY activation's cost target-dependent (Hojo's
+    // discount is spent by the first), so both are accepted at their settlement lock.
+    s.add_creature_from_oracle(P1, "Kopala, Warden of Waves", 2, 2, KOPALA)
+        .with_subtypes(vec!["Merfolk", "Wizard"]);
+    let src = s
+        .add_artifact_from_oracle(
+            P0,
+            "Engine",
+            "{3}: Tap target creature. Create a 1/1 white Soldier creature token.",
+        )
+        .id();
+    mana(&mut s, P0, 8);
+    let mut r = s.build();
+    r.state_mut().loop_detection = engine::types::game_state::LoopDetectionMode::On;
+    let mut observed = Vec::new();
+    for steps in 1..=2 {
+        observed.push(stack_len(&r));
+        act(
+            &mut r,
+            GameAction::ActivateAbility {
+                source_id: src,
+                ability_index: 0,
+            },
+        )
+        .expect("an affordable activation");
+        assert_eq!(
+            r.state().last_loop_action_sequence.len(),
+            steps - 1,
+            "not accepted before its targets settle"
+        );
+        act(
+            &mut r,
+            GameAction::SelectTargets {
+                targets: vec![object(own)],
+            },
+        )
+        .expect("targets settle, and the lock runs");
+        finish(&mut r, &[]);
+        assert_eq!(
+            r.state().last_loop_action_sequence.len(),
+            steps,
+            "one step per accepted activation"
+        );
+    }
+    assert!(
+        observed[1] > observed[0],
+        "reach guard: the second activation was taken over pending objects"
+    );
+    assert_eq!(
+        observed,
+        vec![0, 2],
+        "the first activation and Hojo's draw trigger were pending"
+    );
+    let depths: Vec<usize> = r
+        .state()
+        .last_loop_action_sequence
+        .iter()
+        .map(|step| step.stack_depth)
+        .collect();
+    assert_eq!(depths, observed);
 }
 
 /// HIGH 2's election twin: the settlement election accepts nothing at its

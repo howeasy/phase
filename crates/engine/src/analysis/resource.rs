@@ -15615,6 +15615,7 @@ mod tests {
     fn recast_ctx(uses_buyback: bool) -> crate::types::game_state::LoopActionContext {
         use crate::types::game_state::BuybackUsage;
         crate::types::game_state::LoopActionContext {
+            stack_depth: 0,
             card_id: CardId(4242),
             controller: PlayerId(0),
             action: crate::types::game_state::LoopAction::Recast {
@@ -15685,6 +15686,7 @@ mod tests {
 
     fn activate_ctx(ability_index: usize) -> crate::types::game_state::LoopActionContext {
         crate::types::game_state::LoopActionContext {
+            stack_depth: 0,
             card_id: CardId(4242),
             controller: PlayerId(0),
             action: crate::types::game_state::LoopAction::Activate {
@@ -18612,6 +18614,7 @@ mod tests {
 
         // ── half B: a real one-entry sequence naming a DIFFERENT card ⇒ relieved ──
         let ctx = LoopActionContext {
+            stack_depth: 0,
             card_id: DRIVER_CARD,
             controller: PlayerId(0),
             action: LoopAction::Recast {
@@ -18662,6 +18665,7 @@ mod tests {
         // (2) PAIRED POSITIVE. `action` is not load-bearing here (the derivation reads
         // only `card_id`); `Recast` is the cheapest to construct.
         state.last_loop_action_sequence = vec![LoopActionContext {
+            stack_depth: 0,
             card_id: CardId(64),
             controller: PlayerId(0),
             action: LoopAction::Recast {
@@ -18705,6 +18709,7 @@ mod tests {
         let owner = PlayerId(0);
         let other = PlayerId(1);
         let step = |controller: PlayerId, card_id: CardId| LoopActionContext {
+            stack_depth: 0,
             card_id,
             controller,
             action: LoopAction::Recast {
@@ -21255,6 +21260,7 @@ mod tests {
 
         fn ctx(controller: u8) -> LoopActionContext {
             LoopActionContext {
+                stack_depth: 0,
                 card_id: CardId(64),
                 controller: PlayerId(controller),
                 action: LoopAction::Recast {
@@ -28591,6 +28597,7 @@ mod tests {
         action: crate::types::game_state::LoopAction,
     ) -> crate::types::game_state::LoopActionContext {
         crate::types::game_state::LoopActionContext {
+            stack_depth: 0,
             card_id: CardId(P2_HOST.0),
             controller: P2_DRIVER,
             action,

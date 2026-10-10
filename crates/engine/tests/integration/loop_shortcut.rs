@@ -707,6 +707,7 @@ fn an_accepted_until_lethal_grant_drains_even_with_a_foreign_period_in_state() {
         .map(|o| o.card_id)
         .expect("the scenario has objects");
     runner.state_mut().last_loop_action_sequence = vec![LoopActionContext {
+        stack_depth: 0,
         card_id,
         controller: opp,
         action: LoopAction::Recast {
@@ -5372,6 +5373,7 @@ fn recorded_loop_pins_are_redacted_for_a_viewer_who_cannot_see_the_pinned_object
     let mut state = runner.state().clone();
     let card_id = state.objects[&hidden_hand].card_id;
     state.last_loop_action_sequence = vec![LoopActionContext {
+        stack_depth: 0,
         card_id,
         controller: P1,
         action: LoopAction::Recast {
@@ -7719,6 +7721,7 @@ fn template_none_against_a_pin_consuming_schema_falls_back_to_manual_play() {
     // The object-growth route's routing signal: a captured recast context. Only its PRESENCE
     // matters to the guard, which is exactly the discriminant `materialize` dispatches on.
     let recast = LoopActionContext {
+        stack_depth: 0,
         card_id: CardId(7),
         controller: P0,
         action: LoopAction::Recast {
@@ -11100,6 +11103,7 @@ fn a_proposers_own_driving_period_mints_no_bounded_offer() {
 
     // ⓑ one field reassigned.
     state.last_loop_action_sequence = vec![LoopActionContext {
+        stack_depth: 0,
         card_id: state
             .objects
             .values()
@@ -11210,6 +11214,7 @@ fn a_foreign_driving_period_neither_refuses_nor_recertifies_a_bounded_offer() {
         .expect("REACH-GUARD: ⓒ and ⓓ must differ in card identity");
 
     let step = |controller: PlayerId, card_id| LoopActionContext {
+        stack_depth: 0,
         card_id,
         controller,
         action: LoopAction::Recast {
@@ -11794,6 +11799,7 @@ fn an_accepted_bounded_grant_drains_even_with_a_foreign_period_in_state() {
     // THE INJECTION the load migration hides from every dump-driven row: an opponent's own
     // recorded period, sitting in state at the moment the grant is accepted.
     state.last_loop_action_sequence = vec![LoopActionContext {
+        stack_depth: 0,
         card_id: state
             .objects
             .values()
@@ -11897,6 +11903,7 @@ fn declining_a_shortcut_discards_only_the_decliners_own_driving_period() {
     };
     let period_of = |controller: PlayerId, state: &GameState| {
         vec![LoopActionContext {
+            stack_depth: 0,
             card_id: state
                 .objects
                 .values()
@@ -12035,6 +12042,7 @@ fn an_aborted_until_lethal_drive_discards_only_the_proposers_own_driving_period(
     };
     let period_of = |controller: PlayerId, runner: &GameRunner| {
         vec![LoopActionContext {
+            stack_depth: 0,
             card_id: runner
                 .state()
                 .objects
