@@ -1407,12 +1407,14 @@ pub struct LoopActionContext {
     /// `!in_simulation_probe()`), so a genuine loop's pins match.
     #[serde(default)]
     pub pins: Vec<crate::analysis::decision_template::PinnedDecision>,
-    /// CR 732.2a: the number of objects on the stack when this step was taken, BEFORE the step's
-    /// own entry. The drive reads it RELATIVE to the period's first step (saturating at 0), so a
-    /// period demonstrated over an unrelated pending object replays from an empty stack exactly
-    /// as before this field existed, and a response step (CR 117.1b: "A player may activate an
-    /// activated ability any time they have priority") replays at the depth it was demonstrated
-    /// at. `Recast` is always 0: a recast capture overwrites the whole period, so it is the base.
+    /// CR 732.2a: for every step except a `Recast`, the number of objects on the stack when this
+    /// step was taken, BEFORE the step's own entry. A `Recast` step always records 0, whatever the
+    /// live stack length: a recast capture overwrites the whole period, so it is the base step of
+    /// its period. The drive reads the field RELATIVE to the period's first step (saturating at 0),
+    /// so a period demonstrated over an unrelated pending object replays from an empty stack
+    /// exactly as before this field existed, and a response step (CR 117.1b: "A player may
+    /// activate an activated ability any time they have priority") replays at the depth it was
+    /// demonstrated at.
     #[serde(default, skip_serializing_if = "stack_depth_is_zero")]
     pub stack_depth: usize,
 }

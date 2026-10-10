@@ -2209,6 +2209,9 @@ fn mana_engine_unreproducible_depth_degrades_to_settle_to_empty() {
 
 /// CR 732.2a: a period demonstrated over an unrelated pending object (the controller's own Bolt,
 /// both steps taken over it) is still offered: depths are read relative to the first step.
+/// A preservation guard for a shape BASE already offered, not an orphan-seed predicate negative:
+/// its mana step is recorded onto an empty sequence, so `is_orphan_response_seed` never matches
+/// (`mana_engine_orphan_seed_needs_the_same_action_at_a_lower_depth` covers the predicate).
 #[test]
 fn mana_engine_period_over_a_pending_spell_is_still_offered() {
     let mut rig = lap_rig(LapBoard {
@@ -2229,8 +2232,9 @@ fn mana_engine_period_over_a_pending_spell_is_still_offered() {
 }
 
 /// CR 732.2a: `[1, 0]` — the first step over a pending Bolt, the second after it resolved — is still
-/// offered (relative depth saturates at 0), and the orphan replacement does not fire on a
-/// differing follow-up action.
+/// offered (relative depth saturates at 0). A preservation guard for a shape BASE already offered,
+/// not an orphan-seed predicate negative: the follow-up is the non-mana untap, recorded by
+/// `record_non_mana_activation_accepted`, which never consults `is_orphan_response_seed`.
 #[test]
 fn mana_engine_period_first_step_over_a_spell_then_resolved_is_still_offered() {
     let mut rig = lap_rig(LapBoard {
@@ -2263,6 +2267,8 @@ fn mana_engine_period_first_step_over_a_spell_then_resolved_is_still_offered() {
 }
 
 /// CR 732.2a: `[2, 1]` — two Bolts pending at the tap, one at the untap — is still offered.
+/// A preservation guard for a shape BASE already offered, not an orphan-seed predicate negative:
+/// its mana step is recorded onto an empty sequence and its follow-up is the non-mana untap.
 #[test]
 fn mana_engine_period_depth_two_then_one_is_still_offered() {
     let mut rig = lap_rig(LapBoard {
@@ -2296,6 +2302,182 @@ fn mana_engine_period_depth_two_then_one_is_still_offered() {
         14,
         "reach guard: both Bolts resolved"
     );
+}
+
+/// How the second mana step of `mana_engine_orphan_seed_needs_the_same_action_at_a_lower_depth`
+/// is taken, after a lone tap of the rock over the controller's own pending Bolt (depth 1).
+#[derive(Clone, Copy, Debug)]
+enum SecondManaStep {
+    /// A DIFFERENT mana action (a Mountain's) once the Bolt resolved: a lower depth, 0.
+    OtherSourceLower,
+    /// The SAME action (the rock untapped in place) with the Bolt still pending: an equal depth, 1.
+    SameSourceEqual,
+    /// The SAME action (the rock untapped in place) once the Bolt resolved: a lower depth, 0.
+    SameSourceLower,
+}
+
+/// CR 732.2a: the orphan-seed replacement (`is_orphan_response_seed`) supersedes a lone recorded
+/// step only when the next mana step is the SAME action at a STRICTLY lower stack depth. Each case
+/// seeds a lone tap of Basalt over the controller's own pending Bolt (depth 1) and then records a
+/// second mana step, so the predicate is consulted with exactly one step recorded: a different
+/// action at a lower depth and the same action at an equal depth both APPEND (two steps); the
+/// same action at a lower depth, the paired positive, REPLACES the seed (one step). Revert-failing:
+/// dropping the action comparison flips the different-action case to one step; `>=` in place of
+/// `>` flips the equal-depth case to one step. T1 is the real-lap positive control.
+#[test]
+fn mana_engine_orphan_seed_needs_the_same_action_at_a_lower_depth() {
+    for second in [
+        SecondManaStep::OtherSourceLower,
+        SecondManaStep::SameSourceEqual,
+        SecondManaStep::SameSourceLower,
+    ] {
+        let mut rig = lap_rig(LapBoard {
+            bolts: 1,
+            mountains: 1,
+            ..LapBoard::BARE
+        });
+        let rock_tap = LoopAction::Activate {
+            source_id: rig.rock,
+            ability_index: rig.mana_idx,
+        };
+        cast_bolt_at_opponent(&mut rig.runner);
+        rig.runner
+            .act(GameAction::ActivateAbility {
+                source_id: rig.rock,
+                ability_index: rig.mana_idx,
+            })
+            .expect("tap the rock over the Bolt");
+        let steps = |runner: &GameRunner| -> Vec<(LoopAction, usize)> {
+            runner
+                .state()
+                .last_loop_action_sequence
+                .iter()
+                .map(|step| (step.action.clone(), step.stack_depth))
+                .collect()
+        };
+        assert_eq!(
+            steps(&rig.runner),
+            vec![(rock_tap.clone(), 1)],
+            "{second:?}: reach guard: the lone seed is the rock's tap at depth 1"
+        );
+        let expected = match second {
+            SecondManaStep::OtherSourceLower => {
+                pass_until_stack_len(&mut rig.runner, 0);
+                assert_eq!(life(&rig.runner, P1), 17, "reach guard: the Bolt resolved");
+                let mountain = rig
+                    .runner
+                    .state()
+                    .battlefield
+                    .iter()
+                    .copied()
+                    .find(|id| {
+                        let o = &rig.runner.state().objects[id];
+                        o.name == "Mountain" && !o.tapped
+                    })
+                    .expect("reach guard: the Mountain is still untapped");
+                let mountain_idx =
+                    mana_ability_index(rig.runner.state(), mountain).expect("Mountain mana");
+                rig.runner
+                    .act(GameAction::ActivateAbility {
+                        source_id: mountain,
+                        ability_index: mountain_idx,
+                    })
+                    .expect("tap the Mountain");
+                let mountain_tap = LoopAction::Activate {
+                    source_id: mountain,
+                    ability_index: mountain_idx,
+                };
+                vec![(rock_tap.clone(), 1), (mountain_tap, 0)]
+            }
+            SecondManaStep::SameSourceEqual | SecondManaStep::SameSourceLower => {
+                rig.runner
+                    .state_mut()
+                    .objects
+                    .get_mut(&rig.rock)
+                    .expect("the rock is on the battlefield")
+                    .tapped = false;
+                let depth = if matches!(second, SecondManaStep::SameSourceLower) {
+                    pass_until_stack_len(&mut rig.runner, 0);
+                    assert_eq!(life(&rig.runner, P1), 17, "reach guard: the Bolt resolved");
+                    0
+                } else {
+                    1
+                };
+                assert_eq!(rig.runner.state().stack.len(), depth);
+                rig.runner
+                    .act(GameAction::ActivateAbility {
+                        source_id: rig.rock,
+                        ability_index: rig.mana_idx,
+                    })
+                    .expect("tap the rock again");
+                if depth == 0 {
+                    vec![(rock_tap.clone(), 0)]
+                } else {
+                    vec![(rock_tap.clone(), 1), (rock_tap.clone(), 1)]
+                }
+            }
+        };
+        assert_eq!(steps(&rig.runner), expected, "{second:?}");
+    }
+}
+
+/// CR 732.2b + CR 732.2c: a SHORTENED Basalt + Rings proposal is performed period by period through
+/// the sequence drive (`drive_persistent_axis_collapse`), which replays the response tap at its
+/// demonstrated depth and the Rings answer from its pin on every performed period. Shortened at k,
+/// the pool grows by exactly k (+1 per period), no unbounded axis is marked, and Basalt ends
+/// untapped with an empty stack. Revert-failing: replaying every step to the empty stack ends the
+/// first performed period with Basalt tapped, so the second aborts and k >= 2 under-delivers.
+#[test]
+fn mana_engine_basalt_rings_shortened_offer_performs_k_periods() {
+    for k in [2u32, 3] {
+        let mut rig = lap_rig(LapBoard {
+            rings: true,
+            colorless_seed: 2,
+            ..LapBoard::BARE
+        });
+        let lap = human_lap(&mut rig, &[], true);
+        assert_eq!(lap.prompts.len(), 1, "k={k}: reach guard: Rings asked");
+        assert!(offered(&rig.runner), "k={k}: reach guard: the offer fired");
+        let before = colorless(rig.runner.state(), P0);
+        assert_eq!(before, 3, "k={k}: the demonstrated lap nets +1");
+        rig.runner
+            .act(GameAction::DeclareShortcut {
+                count: IterationCount::Fixed(5),
+                template: None,
+            })
+            .expect("declare shortcut");
+        let shortener = match &rig.runner.state().waiting_for {
+            WaitingFor::RespondToShortcut { player, .. } => *player,
+            other => panic!("k={k}: expected the accept-or-shorten window, got {other:?}"),
+        };
+        rig.runner
+            .act(GameAction::RespondToShortcut {
+                response: ShortcutResponse::Shorten { at_iteration: k },
+            })
+            .expect("the named place is in range");
+        let state = rig.runner.state();
+        assert_eq!(
+            colorless(state, P0),
+            before + k as usize,
+            "k={k}: CR 732.2c: k periods are PERFORMED, +1 colorless each"
+        );
+        assert!(
+            state.unbounded_resources.get(&P0).is_none_or(|axes| !axes
+                .iter()
+                .any(|axis| matches!(axis, ResourceAxis::Mana(_)))),
+            "k={k}: a shortened advance is finite"
+        );
+        assert_eq!(
+            state.waiting_for,
+            WaitingFor::Priority { player: shortener },
+            "k={k}: the shortener holds the ending point"
+        );
+        assert!(state.stack.is_empty(), "k={k}");
+        assert!(
+            !state.objects[&rig.rock].tapped,
+            "k={k}: Basalt ends untapped"
+        );
+    }
 }
 
 /// CR 732.2a: the Rings lap taken over the controller's own pending Bolt is offered: the response

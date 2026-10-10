@@ -6648,8 +6648,8 @@ fn drive_loop_action_iteration(
                 apply_action(clone, actor, GameAction::PassPriority, None)
                     .map_err(|_| RecastAbort)?;
             }
-            // CR 601.2i: the spell is on the stack ⇒ pass to let it resolve; an empty stack
-            // at a priority beat is the per-cycle SETTLE boundary — iteration complete.
+            // CR 601.2i: the spell is on the stack ⇒ pass to let it resolve; a priority beat at this step's `settle_depth` (the empty stack for the period's last step)
+            // is the per-step SETTLE boundary — iteration complete.
             WaitingFor::Priority { .. } => {
                 // CR 732.2a: the next step was demonstrated with `settle_depth` objects pending. A
                 // stack already BELOW that depth cannot be brought back to it by passing priority,
@@ -6760,7 +6760,7 @@ fn drive_loop_action_iteration(
 
 /// P7 v3 (CR 732.2a): drive ONE full loop PERIOD — the ordered sequence of driving actions — on
 /// the clone by driving each captured step in order through `drive_loop_action_iteration` (which
-/// settles every beat to its OWN empty-stack `Priority` boundary, CR 601.2i). A 1-element
+/// settles each step at the stack depth the NEXT step was demonstrated at, read relative to the period's first step and saturating at 0, and the last step at the empty stack, CR 601.2i + CR 732.2a). A 1-element
 /// sequence is the single-action recast/token case (byte-identical to the pre-P7 single drive); a
 /// 2+ element sequence is a multi-activation engine (e.g. Basalt Monolith's off-stack mana beat,
 /// CR 605.3b, then its on-stack `{3}: Untap` beat). Each step's `expected_def` re-validates its
@@ -12929,15 +12929,16 @@ fn apply_non_priority_pass_action(
                 use crate::analysis::decision_template::{
                     DecisionSlot, LoopAnswer, LoopAnswerValue, MayChoiceOption,
                 };
+                let take = if accept {
+                    MayChoiceOption::Take
+                } else {
+                    MayChoiceOption::Decline
+                };
                 record_loop_may_pin(
                     state,
                     answering_player,
                     DecisionSlot::may(source.clone()),
-                    if accept {
-                        MayChoiceOption::Take
-                    } else {
-                        MayChoiceOption::Decline
-                    },
+                    take,
                 );
                 // CR 603.5 rides sub-index 1, via `DecisionSlot::may` — the SAME
                 // constructor `entry_publishes_pin_slots` publishes the gate with, so the
@@ -12945,11 +12946,7 @@ fn apply_non_priority_pass_action(
                 state.record_loop_answer(
                     DecisionSlot::may(source),
                     answering_player,
-                    LoopAnswer::Uniform(LoopAnswerValue::May(if accept {
-                        MayChoiceOption::Take
-                    } else {
-                        MayChoiceOption::Decline
-                    })),
+                    LoopAnswer::Uniform(LoopAnswerValue::May(take)),
                 );
             }
             engine_payment_choices::handle_optional_effect_choice(state, accept, &mut events)?
