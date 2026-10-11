@@ -11991,6 +11991,9 @@ fn finalize_cast_with_phyrexian_choices_inner(
                 && has_buyback
                 && is_token_creating)
                 .then_some(crate::types::game_state::LoopActionContext {
+                    // Always 0, whatever the live stack length (see the field doc): this capture
+                    // overwrites the period, so a Recast is the base step of its period.
+                    stack_depth: 0,
                     card_id,
                     controller: player,
                     action: crate::types::game_state::LoopAction::Recast {

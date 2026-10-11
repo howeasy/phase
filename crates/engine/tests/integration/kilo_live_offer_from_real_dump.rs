@@ -345,6 +345,7 @@ fn kilo_reinjected_pinless_history_suppresses_offer() {
     let mut pinless = Vec::new();
     for _ in 0..3 {
         pinless.push(LoopActionContext {
+            stack_depth: 0,
             card_id: relic_card,
             controller: P0,
             action: LoopAction::Activate {
@@ -355,6 +356,7 @@ fn kilo_reinjected_pinless_history_suppresses_offer() {
             pins: Vec::new(),
         });
         pinless.push(LoopActionContext {
+            stack_depth: 0,
             card_id: freed_card,
             controller: P0,
             action: LoopAction::Activate {

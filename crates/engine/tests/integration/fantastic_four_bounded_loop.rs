@@ -3817,6 +3817,7 @@ fn a_template_free_declaration_is_admitted_only_by_the_proposers_own_period() {
         probe.waiting_for.variant_name()
     };
     let step = |controller: PlayerId| LoopActionContext {
+        stack_depth: 0,
         card_id,
         controller,
         action: LoopAction::Recast {

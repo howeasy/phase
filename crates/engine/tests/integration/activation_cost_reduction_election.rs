@@ -995,6 +995,7 @@ fn an_x_lock_reversal_restores_the_mana_undo_window_and_the_loop_period() {
         let card_id = board.state().objects[&board.source].card_id;
         board.runner.state_mut().last_loop_action_sequence =
             vec![engine::types::game_state::LoopActionContext {
+                stack_depth: 0,
                 card_id,
                 controller: P0,
                 action: engine::types::game_state::LoopAction::Activate {
@@ -1423,6 +1424,7 @@ fn an_elected_activation_appends_its_loop_step_exactly_once() {
     let card_id = board.state().objects[&board.source].card_id;
     board.runner.state_mut().last_loop_action_sequence =
         vec![engine::types::game_state::LoopActionContext {
+            stack_depth: 0,
             card_id,
             controller: P0,
             action: engine::types::game_state::LoopAction::Activate {
@@ -1450,6 +1452,73 @@ fn a_reversed_activation_records_no_loop_step() {
     let result = board.elect(1).expect("a legal election");
     assert_eq!(result.disposition, ActionDisposition::Reversed);
     assert!(board.state().last_loop_action_sequence.is_empty());
+}
+
+/// The recorded `stack_depth` of each step, in order.
+fn recorded_depths(board: &Board) -> Vec<usize> {
+    board
+        .state()
+        .last_loop_action_sequence
+        .iter()
+        .map(|step| step.stack_depth)
+        .collect()
+}
+
+/// CR 732.2a: an activation accepted on its election resume records the stack length BEFORE its own
+/// entry, so the second of two stacked activations is recorded one object deep. Each accepted
+/// activation adds exactly one step (the first seeds the token-making period, the second appends).
+#[test]
+fn an_elected_activation_records_its_pre_placement_stack_depth() {
+    let mut board = loop_board(&[Modifier::Grounds, Modifier::Unfloored(2)], TOKEN_MAKER, 9);
+    let mut observed = Vec::new();
+    for steps in 1..=2 {
+        observed.push(board.state().stack.len());
+        board.activate().expect("legal");
+        board.elect(0).expect("legal");
+        assert!(board.on_stack());
+        assert_eq!(
+            board.state().last_loop_action_sequence.len(),
+            steps,
+            "one step per accepted activation"
+        );
+    }
+    assert_eq!(observed, vec![0, 1], "reach guard: the second was stacked");
+    assert_eq!(recorded_depths(&board), observed);
+}
+
+/// CR 732.2a: an activation accepted at its X lock — with an election after the announcement, and
+/// without one — records the stack length BEFORE its own entry.
+#[test]
+fn an_x_lock_acceptance_records_its_pre_placement_stack_depth() {
+    const TEXT: &str = "{X}{3}: Create X 1/1 white Soldier creature tokens.";
+    for elects in [true, false] {
+        let modifiers: &[Modifier] = if elects {
+            &[Modifier::FlooredTwo(2), Modifier::Unfloored(2)]
+        } else {
+            &[Modifier::Grounds]
+        };
+        let mut board = loop_board(modifiers, TEXT, 14);
+        let mut observed = Vec::new();
+        for steps in 1..=2 {
+            observed.push(board.state().stack.len());
+            board.activate().expect("legal");
+            board
+                .runner
+                .act(GameAction::ChooseX { value: 2 })
+                .expect("a legal X");
+            if elects {
+                board.elect(0).expect("legal");
+            }
+            assert!(board.on_stack(), "elects={elects}");
+            assert_eq!(
+                board.state().last_loop_action_sequence.len(),
+                steps,
+                "elects={elects}: one step per accepted activation"
+            );
+        }
+        assert_eq!(observed, vec![0, 1], "elects={elects}: reach guard");
+        assert_eq!(recorded_depths(&board), observed, "elects={elects}");
+    }
 }
 
 /// The placement authority names the entry its caller just pushed, even when an
