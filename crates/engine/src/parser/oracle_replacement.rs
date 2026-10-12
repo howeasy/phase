@@ -4105,10 +4105,10 @@ fn parse_enters_with_counters(
         || nom_primitives::scan_contains(work_text, "escape with");
 
     // Find "with [N] [type] counter" to extract count and counter type.
-    // For escape, the "with" follows "escapes"; for enters, it follows "enters".
-    // The payload is cut at the first "with " (unchanged). The count/type
-    // grammar below rejects the observed invalid payloads; it does not establish
-    // that this "with" belongs to the entry verb.
+    // The payload is cut at the first "with " in the line, which is not
+    // necessarily the one after "enters" / "escapes". The count/type grammar
+    // below rejects the observed invalid payloads; it does not establish that
+    // this "with" belongs to the entry verb.
     let after_with = strip_after(work_text, "with ")?;
     // Skip "an additional" if present
     let after_additional = alt((
@@ -15636,6 +15636,34 @@ mod tests {
             unless_only.condition.is_some(),
             "the unless gate reaches the condition slot"
         );
+
+        // Reach-guard: the kicker+choice shape reaches the choice branch, so the
+        // co-occurrence negative is not vacuous.
+        let kicker_only = parse_replacement_line(
+            "If this creature was kicked, it enters with your choice of a +1/+1 counter or a \
+             -1/-1 counter on it.",
+            "Fake Choice Card",
+        )
+        .expect("choice-branch kicker-only path must parse");
+        assert!(
+            matches!(
+                *kicker_only.execute.as_deref().expect("execute").effect,
+                Effect::ChooseOneOf { .. }
+            ),
+            "the choice branch built the replacement, got {:?}",
+            kicker_only.execute
+        );
+        assert!(
+            matches!(
+                kicker_only.condition,
+                Some(ReplacementCondition::CastViaKicker {
+                    variant: None,
+                    kicker_cost: None
+                })
+            ),
+            "the kicker gate reaches the condition slot, got {:?}",
+            kicker_only.condition
+        );
     }
 
     #[test]
@@ -20176,9 +20204,11 @@ mod tests {
             ))
         );
 
-        // The issue comment's synthetic line: whatever the line becomes (its
-        // dropped second placement is #9662's), no prose counter type is
-        // published.
+        // The issue comment's synthetic line: no prose counter type is
+        // published. Known #9662 residual, not asserted here: the list is
+        // rejected, so the single-counter path publishes one +1/+1 placement
+        // whose count is the "equal to" quantity (creatures you control), the
+        // charge counters are dropped, and the line reads as supported.
         let comment_line = parse_replacement_line(
             "This creature enters with a +1/+1 counter and a number of charge counters on it equal to the number of creatures you control.",
             "Synthetic Charge Line",

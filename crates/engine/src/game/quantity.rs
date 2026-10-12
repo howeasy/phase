@@ -1693,7 +1693,8 @@ pub fn resolve_quantity_with_spell(
 /// or filter reads at the strongest grade among its parts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum RecipientRead {
-    /// Never reads the recipient binding.
+    /// No recipient read recognized by this classifier; unenumerated readers
+    /// also reach this grade, so it is not proof that the binding is unused.
     Unread,
     /// Reads the recipient only as the identity that delimits a counted
     /// population: "other" (`FilterProp::Another`) or "attached to it"
