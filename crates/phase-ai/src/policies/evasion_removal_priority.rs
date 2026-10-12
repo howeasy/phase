@@ -899,8 +899,8 @@ mod tests {
         // Guard 2 — and the state genuinely TRAVERSES `project_to`'s loop to
         // the horizon `velocity_score` hardcodes. A `Confidence::Exact` result
         // here would mean the fixture had drifted into the short-circuit class,
-        // which is what makes T7 blind to the deadline; both arms below would
-        // then be vacuous.
+        // which is what makes T7 blind to the deadline; the measurement arm's
+        // cache assertion would then no longer depend on the handed deadline.
         crate::projection::projection_fixtures::assert_traverses_to(
             &state,
             P0,
