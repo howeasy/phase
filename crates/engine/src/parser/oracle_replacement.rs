@@ -5308,21 +5308,23 @@ fn parse_enters_counter_list_separator(input: &str) -> OracleResult<'_, ()> {
 }
 
 /// CR 122.6 + CR 608.2c: whether the text right after a counter noun continues
-/// the counter list with a further placement — a list separator, then either an
-/// elided element (`parse_countless_counter_element`, the list reader's own
-/// grammar) or a count (the counted element's anchor, `parse_count_expr`)
-/// followed by a counter noun reached inside the clause, before the
-/// recipient's "on". Used once the strict list reader has declined, to tell an
-/// unread later placement from a genuinely single one. A conjunct that is not a
-/// counter placement ("and you draw a card", "and with haste") does not match:
-/// it has no count anchor and is not a counter element.
+/// the counter list with a further placement — a list separator, then either a
+/// count-less counter name (`parse_enters_counter_type_noun`, the single path's
+/// own type head: a whole counter name before a singular or plural counter
+/// noun — "deathtouch counter", "wish counter", "charge counters") or a count
+/// (the counted element's anchor, `parse_count_expr`) followed by a counter
+/// noun reached inside the clause, before the recipient's "on". Used once the
+/// strict list reader has declined, to tell an unread later placement from a
+/// genuinely single one. A conjunct that is not a counter placement ("and you
+/// draw a card", "and with haste") does not match: it has no count anchor and
+/// names no counter.
 fn continues_with_unread_counter_placement(after_counter: &str) -> bool {
     let Ok((after_sep, ())) =
         preceded(opt(tag("s")), parse_enters_counter_list_separator).parse(after_counter)
     else {
         return false;
     };
-    crate::parser::oracle_effect::parse_countless_counter_element(after_sep).is_ok()
+    parse_enters_counter_type_noun(after_sep).is_ok()
         || parse_count_expr(after_sep)
             .is_some_and(|(_count, rest)| parse_counter_noun_within_clause(rest).is_ok())
 }
@@ -20015,14 +20017,19 @@ mod tests {
     ///   * a non-counter conjunct after the list ("and you draw a card")
     ///   * a conjunct naming something that is not a counter type — the guard
     ///     against `parse_strict_counter_type`'s absent `Generic` fallback
-    ///   * a PLURAL elided conjunct, which is ambiguous about whether the head
-    ///     count distributes and so fails closed rather than guessing
+    ///
+    /// A PLURAL elided conjunct ("two +1/+1 counters and trample counters on
+    /// it") is ambiguous about whether the head count distributes, so the list
+    /// reader does not read it. The whole line declines to an unsupported gap
+    /// rather than publishing only the first placement (CR 608.2c: the second
+    /// placement can't be dropped); `conjoined_counter_list_rejects_prose_element`
+    /// pins that line.
     #[test]
     fn elided_count_conjunct_does_not_over_claim() {
         // The expected leading COUNT travels with each fixture. Matching the
-        // type alone with `..` on `count` left the third row provable by a
-        // single +1/+1 — the quantity is exactly what the elided-count work
-        // touches, so it has to be asserted, not elided in the pattern.
+        // type alone with `..` on `count` would leave the quantity unasserted —
+        // the quantity is exactly what the elided-count work touches, so it has
+        // to be asserted, not elided in the pattern.
         for (text, expected_count) in [
             (
                 "This creature enters with an additional +1/+1 counter and you draw a card.",
@@ -20031,10 +20038,6 @@ mod tests {
             (
                 "This creature enters with an additional +1/+1 counter and haste on it.",
                 1,
-            ),
-            (
-                "This creature enters with two +1/+1 counters and trample counters on it.",
-                2,
             ),
         ] {
             // Every fixture is REQUIRED to parse. An earlier revision skipped a
@@ -20775,11 +20778,17 @@ mod tests {
         // second placement's "equal to" quantity, and `[(P1P1, 2)]` for the
         // companion. The third line's elided "flying counter" element reads,
         // but its recipient is not the list's "on it" terminator, so the list
-        // is rejected there too. Each whole line lands as an unsupported gap.
+        // is rejected there too. The last three second placements carry no
+        // count: a plural bare type, a singular one-word custom type, and a
+        // plural elided keyword type, none of which the list reader's elided
+        // element accepts. Each whole line lands as an unsupported gap.
         for line in [
             "This creature enters with a +1/+1 counter and a number of charge counters on it equal to the number of creatures you control.",
             "This creature enters with two +1/+1 counters and a number of charge counters on it.",
             "This creature enters with a +1/+1 counter and flying counter on this creature.",
+            "This creature enters with a +1/+1 counter and charge counters on it equal to the number of creatures you control.",
+            "This creature enters with a +1/+1 counter and wish counter on it.",
+            "This creature enters with two +1/+1 counters and trample counters on it.",
         ] {
             assert_eq!(
                 parse_replacement_line(line, "Synthetic Charge Line"),

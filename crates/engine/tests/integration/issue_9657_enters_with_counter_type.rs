@@ -36,6 +36,11 @@ const CENTAUR_VINECRASHER_ENTERS: &str = "This creature enters with a number of 
 const CHARGE_LIST_WITNESS: &str = "This creature enters with a +1/+1 counter and a number of \
                                    charge counters on it equal to the number of creatures you \
                                    control.";
+/// Synthetic companion: the second placement carries no count at all — a bare
+/// plural counter name read through the "equal to" quantity.
+const BARE_CHARGE_LIST_WITNESS: &str = "This creature enters with a +1/+1 counter and charge \
+                                        counters on it equal to the number of creatures you \
+                                        control.";
 /// Dust Animus's enters line (its Flying and Plot lines omitted).
 const DUST_ANIMUS_ENTERS: &str = "If you control five or more untapped lands, this creature \
                                   enters with two +1/+1 counters and a lifelink counter on it.";
@@ -286,7 +291,8 @@ fn unread_equal_to_count_places_no_counter() {
 
 /// CR 614.1c + CR 122.6 + CR 608.2c: an "enters with" counter list whose second
 /// placement the list reader cannot read ("a number of charge counters … equal
-/// to …") must not publish its first placement alone. Doing so dropped the
+/// to …", or the count-less "charge counters … equal to …") must not publish
+/// its first placement alone. Doing so dropped the
 /// charge counters and gave the +1/+1 placement the charge counters' count
 /// (creatures you control). The line places nothing and surfaces as an
 /// unsupported gap; Dust Animus's readable conjoined list still places both
@@ -306,20 +312,25 @@ fn unread_second_counter_placement_places_no_counter() {
         .add_creature_to_hand_from_oracle(P0, "Charge Witness", 1, 1, CHARGE_LIST_WITNESS)
         .with_mana_cost(ManaCost::generic(0))
         .id();
+    let bare_witness = scenario
+        .add_creature_to_hand_from_oracle(P0, "Bare Charge Witness", 1, 1, BARE_CHARGE_LIST_WITNESS)
+        .with_mana_cost(ManaCost::generic(0))
+        .id();
     let dust_animus = scenario
         .add_creature_to_hand_from_oracle(P0, "Dust Animus", 2, 3, DUST_ANIMUS_ENTERS)
         .with_mana_cost(ManaCost::generic(0))
         .id();
     let mut runner = scenario.build();
-    for id in [witness, dust_animus] {
+    for id in [witness, bare_witness, dust_animus] {
         runner.cast(id).resolve();
         runner.advance_until_stack_empty();
     }
 
-    // Reach guards: both resolved onto the battlefield, and the readable
+    // Reach guards: all resolved onto the battlefield, and the readable
     // conjoined list places both of its counters.
     let state = runner.state();
     assert_eq!(state.objects[&witness].zone, Zone::Battlefield);
+    assert_eq!(state.objects[&bare_witness].zone, Zone::Battlefield);
     assert_eq!(state.objects[&dust_animus].zone, Zone::Battlefield);
     let animus_counters = &state.objects[&dust_animus].counters;
     assert_eq!(
@@ -335,10 +346,12 @@ fn unread_second_counter_placement_places_no_counter() {
         "got {animus_counters:?}"
     );
 
-    assert!(
-        state.objects[&witness].counters.is_empty(),
-        "no partial counter list, got {:?}",
-        state.objects[&witness].counters
-    );
-    assert!(has_unimplemented_ability(&runner, witness));
+    for id in [witness, bare_witness] {
+        assert!(
+            state.objects[&id].counters.is_empty(),
+            "no partial counter list, got {:?}",
+            state.objects[&id].counters
+        );
+        assert!(has_unimplemented_ability(&runner, id));
+    }
 }

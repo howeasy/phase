@@ -27319,7 +27319,7 @@ fn reflexive_entry_rider_voices_all_stay_on_the_trigger_path() {
     );
     // Premise for the Winter Soldier row (#9657): its first "with" belongs to the
     // reanimated card's filter ("card with mana value less than or equal to …"),
-    // and the enters-with counter-type grammar rejects the prose payload that
+    // and the enters-with count/type grammar rejects the prose payload that
     // follows it, so the whole line is no longer claimable by the replacement
     // parser. The row still pins that the line stays on the trigger path below.
     assert!(
@@ -27328,7 +27328,7 @@ fn reflexive_entry_rider_voices_all_stay_on_the_trigger_path() {
             "Winter Soldier, Reborn Avenger"
         )
         .is_none(),
-        "Winter Soldier, Reborn Avenger: premise — the counter-type grammar rejects the \
+        "Winter Soldier, Reborn Avenger: premise — the count/type grammar rejects the \
          filter prose, so the un-scoped line is not claimable by the replacement parser"
     );
 
