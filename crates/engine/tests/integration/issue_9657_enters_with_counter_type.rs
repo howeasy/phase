@@ -6,7 +6,8 @@ use engine::types::ability::Effect;
 use engine::types::actions::GameAction;
 use engine::types::counter::CounterType;
 use engine::types::identifiers::ObjectId;
-use engine::types::mana::{ManaCost, ManaType, ManaUnit};
+use engine::types::keywords::KeywordKind;
+use engine::types::mana::{ManaColor, ManaCost, ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::zones::Zone;
 
@@ -30,6 +31,14 @@ const THOUGHT_SPONGE: &str = "This creature enters with a number of +1/+1 counte
 const CENTAUR_VINECRASHER_ENTERS: &str = "This creature enters with a number of +1/+1 counters \
                                           on it equal to the number of land cards in all \
                                           graveyards.";
+/// The #9657 issue comment's synthetic line: a conjoined counter list whose
+/// second placement is a dynamic count the list reader cannot read.
+const CHARGE_LIST_WITNESS: &str = "This creature enters with a +1/+1 counter and a number of \
+                                   charge counters on it equal to the number of creatures you \
+                                   control.";
+/// Dust Animus's enters line (its Flying and Plot lines omitted).
+const DUST_ANIMUS_ENTERS: &str = "If you control five or more untapped lands, this creature \
+                                  enters with two +1/+1 counters and a lifelink counter on it.";
 
 fn add_green(runner: &mut GameRunner, n: usize) {
     for _ in 0..n {
@@ -273,4 +282,63 @@ fn unread_equal_to_count_places_no_counter() {
         "no Fixed 1 count published"
     );
     assert!(has_unimplemented_ability(&runner, sponge));
+}
+
+/// CR 614.1c + CR 122.6 + CR 608.2c: an "enters with" counter list whose second
+/// placement the list reader cannot read ("a number of charge counters … equal
+/// to …") must not publish its first placement alone. Doing so dropped the
+/// charge counters and gave the +1/+1 placement the charge counters' count
+/// (creatures you control). The line places nothing and surfaces as an
+/// unsupported gap; Dust Animus's readable conjoined list still places both
+/// counters in the same game.
+#[test]
+fn unread_second_counter_placement_places_no_counter() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    // A creature P0 controls, so the dropped placement's "equal to" count is
+    // nonzero when it is wrongly handed to the +1/+1 placement.
+    scenario.add_creature(P0, "Bear A", 2, 2);
+    // CR 614.1c: Dust Animus's gate — five untapped lands.
+    for _ in 0..5 {
+        scenario.add_basic_land(P0, ManaColor::White);
+    }
+    let witness = scenario
+        .add_creature_to_hand_from_oracle(P0, "Charge Witness", 1, 1, CHARGE_LIST_WITNESS)
+        .with_mana_cost(ManaCost::generic(0))
+        .id();
+    let dust_animus = scenario
+        .add_creature_to_hand_from_oracle(P0, "Dust Animus", 2, 3, DUST_ANIMUS_ENTERS)
+        .with_mana_cost(ManaCost::generic(0))
+        .id();
+    let mut runner = scenario.build();
+    for id in [witness, dust_animus] {
+        runner.cast(id).resolve();
+        runner.advance_until_stack_empty();
+    }
+
+    // Reach guards: both resolved onto the battlefield, and the readable
+    // conjoined list places both of its counters.
+    let state = runner.state();
+    assert_eq!(state.objects[&witness].zone, Zone::Battlefield);
+    assert_eq!(state.objects[&dust_animus].zone, Zone::Battlefield);
+    let animus_counters = &state.objects[&dust_animus].counters;
+    assert_eq!(
+        animus_counters.get(&CounterType::Plus1Plus1).copied(),
+        Some(2),
+        "got {animus_counters:?}"
+    );
+    assert_eq!(
+        animus_counters
+            .get(&CounterType::Keyword(KeywordKind::Lifelink))
+            .copied(),
+        Some(1),
+        "got {animus_counters:?}"
+    );
+
+    assert!(
+        state.objects[&witness].counters.is_empty(),
+        "no partial counter list, got {:?}",
+        state.objects[&witness].counters
+    );
+    assert!(has_unimplemented_ability(&runner, witness));
 }

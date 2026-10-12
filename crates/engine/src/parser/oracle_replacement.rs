@@ -6,7 +6,9 @@ use crate::parser::oracle_nom::error::{oracle_err, OracleError, OracleResult};
 use nom::branch::alt;
 use nom::bytes::complete::{tag, tag_no_case, take_till, take_until, take_while1};
 use nom::character::complete::{anychar, char, multispace0, multispace1};
-use nom::combinator::{all_consuming, eof, map_opt, map_parser, opt, peek, recognize, rest, value};
+use nom::combinator::{
+    all_consuming, eof, map_opt, map_parser, not, opt, peek, recognize, rest, value,
+};
 use nom::multi::{many_till, separated_list1};
 use nom::sequence::{pair, preceded, terminated};
 use nom::Parser;
@@ -4303,6 +4305,18 @@ fn enters_with_counters_outcome(
     // `CounterType::Generic`.
     let (after_counter, counter_type) =
         parse_enters_counter_type_noun(rest).map_err(|_| EntersWithDecline::NotThisShape)?;
+    // CR 614.1c + CR 122.6 + CR 608.2c: the counters this replacement gives
+    // the entering permanent are every placement the clause prints. When the
+    // list reader declined although a further placement follows the first
+    // ("…a +1/+1 counter and a number of charge counters on it…"), publishing
+    // the first placement alone would drop the rest — and the "equal to"
+    // reader below would hand the dropped placement's quantity to the first.
+    // Decline as `NotThisShape`, not `GateFailsClosed`: no gate is involved, and
+    // no later route claims an enters-with counter list, so the line lands as
+    // an `Effect::unimplemented` gap.
+    if counter_entries.is_none() && continues_with_unread_counter_placement(after_counter) {
+        return Err(EntersWithDecline::NotThisShape);
+    }
     if let Some(combined) =
         parse_enters_base_plus_additional_for_each(after_counter, &counter_type, &count_expr)
     {
@@ -5279,18 +5293,63 @@ fn parse_counted_enters_counter_entry(input: &str) -> Option<((CounterType, Quan
 /// nom gets for free from `many0(preceded(sep, element))`; it lives here because
 /// this reader's counted element is not a pure combinator.
 fn parse_enters_counter_separator(input: &str) -> Option<&str> {
-    let (after_sep, _) = alt((
-        tag::<_, _, OracleError<'_>>(", and "),
-        tag(" and "),
-        tag(", "),
-    ))
-    .parse(input)
-    .ok()?;
+    let (after_sep, ()) = parse_enters_counter_list_separator(input).ok()?;
 
     // Post-separator position, so the elided-count form is in scope here too.
     parse_enters_counter_entry(after_sep, true)?;
 
     Some(after_sep)
+}
+
+/// The bare list separator of an "enters with" counter list. `", and "` precedes
+/// its prefix `", "` so the Oxford form is consumed whole.
+fn parse_enters_counter_list_separator(input: &str) -> OracleResult<'_, ()> {
+    value((), alt((tag(", and "), tag(" and "), tag(", ")))).parse(input)
+}
+
+/// CR 122.6 + CR 608.2c: whether the text right after a counter noun continues
+/// the counter list with a further placement — a list separator, then either an
+/// elided element (`parse_countless_counter_element`, the list reader's own
+/// grammar) or a count (the counted element's anchor, `parse_count_expr`)
+/// followed by a counter noun reached inside the clause, before the
+/// recipient's "on". Used once the strict list reader has declined, to tell an
+/// unread later placement from a genuinely single one. A conjunct that is not a
+/// counter placement ("and you draw a card", "and with haste") does not match:
+/// it has no count anchor and is not a counter element.
+fn continues_with_unread_counter_placement(after_counter: &str) -> bool {
+    let Ok((after_sep, ())) =
+        preceded(opt(tag("s")), parse_enters_counter_list_separator).parse(after_counter)
+    else {
+        return false;
+    };
+    crate::parser::oracle_effect::parse_countless_counter_element(after_sep).is_ok()
+        || parse_count_expr(after_sep)
+            .is_some_and(|(_count, rest)| parse_counter_noun_within_clause(rest).is_ok())
+}
+
+/// Consume whole words up to the counter noun ("counter" / "counters" as a
+/// whole word), failing at the recipient's "on " or at a word ending in
+/// sentence or clause punctuation — the placement must name its counter
+/// before either.
+fn parse_counter_noun_within_clause(input: &str) -> OracleResult<'_, ()> {
+    value(
+        (),
+        many_till(
+            preceded(
+                not(tag("on ")),
+                terminated(
+                    take_while1(|c: char| !matches!(c, ' ' | '.' | ',')),
+                    tag(" "),
+                ),
+            ),
+            (
+                tag("counter"),
+                opt(tag("s")),
+                peek(alt((tag(" "), tag("."), tag(","), eof))),
+            ),
+        ),
+    )
+    .parse(input)
 }
 
 /// CR 614.12a: For "your choice of <list> on it", split off the trailing
@@ -20709,32 +20768,54 @@ mod tests {
             ))
         );
 
-        // The issue comment's synthetic line: no prose counter type is
-        // published. Known #9662 residual, not asserted here: the list is
-        // rejected, so the single-counter path publishes one +1/+1 placement
-        // whose count is the "equal to" quantity (creatures you control), the
-        // charge counters are dropped, and the line reads as supported.
-        let comment_line = parse_replacement_line(
+        // CR 122.6 + CR 608.2c: the issue comment's synthetic line, and a
+        // companion with a printed head count. The list reader rejects the
+        // second element, so the single-counter path must not publish the first
+        // placement alone — that would be one +1/+1 placement counted by the
+        // second placement's "equal to" quantity, and `[(P1P1, 2)]` for the
+        // companion. The third line's elided "flying counter" element reads,
+        // but its recipient is not the list's "on it" terminator, so the list
+        // is rejected there too. Each whole line lands as an unsupported gap.
+        for line in [
             "This creature enters with a +1/+1 counter and a number of charge counters on it equal to the number of creatures you control.",
-            "Synthetic Charge Line",
-        );
-        let comment_counters = comment_line
-            .as_ref()
-            .map(put_counters_in_chain)
-            .unwrap_or_default();
-        assert!(
-            !comment_counters
-                .iter()
-                .any(|(counter_type, _)| matches!(counter_type, CounterType::Generic(_))),
-            "got {comment_counters:?}"
-        );
+            "This creature enters with two +1/+1 counters and a number of charge counters on it.",
+            "This creature enters with a +1/+1 counter and flying counter on this creature.",
+        ] {
+            assert_eq!(
+                parse_replacement_line(line, "Synthetic Charge Line"),
+                None,
+                "{line:?}: an unread second placement must not publish the first alone"
+            );
+            let parsed = parse_oracle_text(
+                line,
+                "Synthetic Charge Line",
+                &[],
+                &["Creature".to_string()],
+                &[],
+            );
+            assert!(
+                !parsed
+                    .replacements
+                    .iter()
+                    .any(|r| r.event == ReplacementEvent::Moved),
+                "{line:?}: no enters-with replacement, got {:?}",
+                parsed.replacements
+            );
+            assert!(
+                parsed
+                    .abilities
+                    .iter()
+                    .any(|a| matches!(*a.effect, Effect::Unimplemented { .. })),
+                "{line:?}: the line is an unsupported gap, got {:?}",
+                parsed.abilities
+            );
+        }
 
-        // Reach guard: a real conjoined list still reads both elements.
-        let dust_animus = parse_replacement_line(
-            "If you control five or more untapped lands, this creature enters with two +1/+1 counters and a lifelink counter on it.",
-            "Dust Animus",
-        )
-        .expect("Dust Animus parses");
+        // Reach guard: a real conjoined list still reads both elements, and the
+        // full parse publishes it as the enters-with replacement.
+        let dust_animus_line = "If you control five or more untapped lands, this creature enters with two +1/+1 counters and a lifelink counter on it.";
+        let dust_animus =
+            parse_replacement_line(dust_animus_line, "Dust Animus").expect("Dust Animus parses");
         assert_eq!(
             put_counters_in_chain(&dust_animus),
             vec![
@@ -20744,6 +20825,29 @@ mod tests {
                     QuantityExpr::Fixed { value: 1 }
                 ),
             ]
+        );
+        let dust_animus_full = parse_oracle_text(
+            dust_animus_line,
+            "Dust Animus",
+            &[],
+            &["Creature".to_string()],
+            &["Spirit".to_string()],
+        );
+        assert!(
+            dust_animus_full
+                .replacements
+                .iter()
+                .any(|r| r.event == ReplacementEvent::Moved),
+            "got {:?}",
+            dust_animus_full.replacements
+        );
+        assert!(
+            !dust_animus_full
+                .abilities
+                .iter()
+                .any(|a| matches!(*a.effect, Effect::Unimplemented { .. })),
+            "got {:?}",
+            dust_animus_full.abilities
         );
     }
 
