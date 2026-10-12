@@ -837,11 +837,14 @@ mod tests {
     ///     `projection_deadline(ExecutionMode::Interactive)`. The traversal must
     ///     also complete and cache under it.
     ///   * interactive arm — the SAME fixture under `ExecutionMode::Interactive`
-    ///     must be handed a finite budget no larger than the 15 ms cap. Red for
-    ///     passing `ctx.context.deadline` instead, which is `Deadline::none()`
-    ///     here (and in production is the planner's whole-turn budget), for a
-    ///     hardcoded `Deadline::none()`, and for any large finite budget. That
-    ///     substitution is invisible under measurement alone, because
+    ///     must be handed a finite budget, whose remaining time once the call
+    ///     returns is no more than the 15 ms cap (the cap's exact value is pinned
+    ///     by `projection_deadline_nulls_wall_clock_only_in_measurement`). Red
+    ///     for passing `ctx.context.deadline` instead, which is
+    ///     `Deadline::none()` here (and in production is the planner's
+    ///     whole-turn budget), for a hardcoded `Deadline::none()`, and for any
+    ///     finite budget large enough to outlast the traversal by more than
+    ///     15 ms. That substitution is invisible under measurement alone, because
     ///     measurement mode installs `Deadline::none()` on the context too; only
     ///     the interactive side can discriminate it. Whether the capped traversal
     ///     actually finishes inside 15 ms is host-dependent and deliberately not
