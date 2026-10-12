@@ -11114,6 +11114,158 @@ fn for_each_token_controller_subject_still_controller_owned() {
     );
 }
 
+/// CR 608.2c + CR 122.1 (#9659): the for-each put-counter arm publishes
+/// `PutCounter` only for a clause that starts with `put <article> <counter
+/// type> counter on`, where the counter type ends exactly at " counter on ".
+/// Positive reach guards come first so the hostile `is_none()` assertions
+/// can't pass on a broken arm.
+#[test]
+fn for_each_put_counter_requires_put_head_and_whole_type() {
+    use crate::types::counter::CounterType;
+
+    let clause = try_parse_for_each_effect(
+        "put a +1/+1 counter on target creature for each elf you control",
+        &mut ParseContext::default(),
+    )
+    .expect("Immaculate Magistrate's put clause must parse via the arm");
+    assert!(
+        matches!(
+            &clause.effect,
+            Effect::PutCounter {
+                counter_type: CounterType::Plus1Plus1,
+                count: QuantityExpr::Ref {
+                    qty: QuantityRef::ObjectCount { .. },
+                },
+                target: TargetFilter::Typed(_),
+            }
+        ),
+        "got {:?}",
+        clause.effect
+    );
+
+    let clause = try_parse_for_each_effect(
+        "put an ingredient counter on it for each card drawn this way",
+        &mut ParseContext::default(),
+    )
+    .expect("Communal Brewing's put clause must parse via the arm");
+    assert!(
+        matches!(
+            &clause.effect,
+            Effect::PutCounter { counter_type: CounterType::Generic(name), .. }
+                if name == "ingredient"
+        ),
+        "got {:?}",
+        clause.effect
+    );
+
+    let clause = try_parse_for_each_effect(
+        "put a loyalty counter on ~ for each creature you control",
+        &mut ParseContext::default(),
+    )
+    .expect("Huatli's put clause must parse via the arm");
+    assert!(
+        matches!(
+            &clause.effect,
+            Effect::PutCounter {
+                counter_type: CounterType::Loyalty,
+                target: TargetFilter::SelfRef,
+                ..
+            }
+        ),
+        "got {:?}",
+        clause.effect
+    );
+
+    for hostile in [
+        // verb-less
+        "foo bar counter on target creature for each creature you control",
+        // prose-led
+        "lorem ipsum foo bar counter on target creature for each creature you control",
+        // put head + multi-word counter phrase
+        "put a foo bar counter on target creature for each creature you control",
+        // subject-led enters-with rider (The Legend of Arena chapter III)
+        "it enters with an additional loyalty counter on it for each wizard you control",
+        // subject-led enters-with with a leading quantity clause
+        "this creature enters with x +1/+1 counters on it plus an additional charge counter on it for each other creature you control",
+    ] {
+        let clause = try_parse_for_each_effect(hostile, &mut ParseContext::default());
+        assert!(
+            clause.is_none(),
+            "{hostile:?} is not a put-counter instruction and must decline; got {clause:?}"
+        );
+    }
+}
+
+/// CR 614.1c + CR 122.6 (#9659): The Legend of Arena's chapter III rider "It
+/// enters with an additional loyalty counter on it for each Wizard you
+/// control" modifies how the searched planeswalker enters. It is not a
+/// `PutCounter` on the Saga with counter type "it". The rider itself is not
+/// supported yet, so it must stay an honest `Unimplemented` gap.
+#[test]
+fn legend_of_arena_chapter_iii_declines_enters_with_rider_not_putcounter() {
+    let parsed = parse_oracle_text(
+        "The Legend of Arena can be your commander.\n\
+         I, II — Create a 2/1 red Human Wizard creature token. Spells you cast this turn cost {1} less to cast for each Wizard you control.\n\
+         III — Search your library for a planeswalker card, put it onto the battlefield, then shuffle your library. It enters with an additional loyalty counter on it for each Wizard you control.",
+        "The Legend of Arena",
+        &[],
+        &["Enchantment".to_string()],
+        &["Saga".to_string()],
+    );
+    let chapter_iii = parsed
+        .triggers
+        .iter()
+        .find(|t| t.saga_chapter == Some(3))
+        .expect("chapter III trigger must parse");
+    let execute = chapter_iii
+        .execute
+        .as_deref()
+        .expect("chapter III trigger executes");
+
+    let mut effects = Vec::new();
+    let _ = crate::types::ability_visit::visit_ability_def(execute, &mut |effect| {
+        effects.push(effect.clone());
+        std::ops::ControlFlow::Continue(())
+    });
+    // Reach guards: the search and the put-onto-battlefield legs parsed.
+    assert!(
+        effects
+            .iter()
+            .any(|e| matches!(e, Effect::SearchLibrary { .. })),
+        "chapter III must search the library: {effects:#?}"
+    );
+    assert!(
+        effects.iter().any(|e| matches!(
+            e,
+            Effect::ChangeZone {
+                destination: Zone::Battlefield,
+                ..
+            }
+        )),
+        "chapter III must put the found card onto the battlefield: {effects:#?}"
+    );
+    assert!(
+        !effects
+            .iter()
+            .any(|e| matches!(e, Effect::PutCounter { .. })),
+        "the enters-with rider must not publish a PutCounter: {effects:#?}"
+    );
+    assert!(
+        effects
+            .iter()
+            .any(|e| matches!(e, Effect::Unimplemented { .. })),
+        "the unsupported enters-with rider must stay an honest gap: {effects:#?}"
+    );
+
+    assert!(
+        matches!(
+            parse_effect("Foo bar counter on target creature for each creature you control."),
+            Effect::Unimplemented { .. }
+        ),
+        "a verb-less counter clause must stay Unimplemented"
+    );
+}
+
 /// CR 701.9 + CR 603.4: "draw a card for each card you've discarded this
 /// turn" must produce a dynamic Draw count referencing the controller's
 /// per-turn discard tally, not a dropped `Fixed(1)`.
