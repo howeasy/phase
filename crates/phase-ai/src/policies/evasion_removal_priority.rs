@@ -829,8 +829,8 @@ mod tests {
     ///
     /// Both arms share one fixture and one target, and observe the deadline
     /// `velocity_score` hands `get_or_project` directly, through the test-only
-    /// `AiSession::projection_deadline_log`. Neither arm compares a traversal
-    /// against a wall clock, so the verdict does not depend on host speed:
+    /// `AiSession::projection_deadline_log`. With the intended deadlines,
+    /// neither arm requires the traversal to finish within a particular time:
     ///   * measurement arm — the handed deadline must be non-expiring
     ///     (`remaining().is_none()`). Red for `Deadline::after(0)`, for a
     ///     hardcoded `Deadline::after(TIME_CAP_MS)`, and for
@@ -838,7 +838,7 @@ mod tests {
     ///     also complete and cache under it.
     ///   * interactive arm — the SAME fixture under `ExecutionMode::Interactive`
     ///     must be handed a finite budget, whose remaining time once the call
-    ///     returns is no more than the 15 ms cap (the cap's exact value is pinned
+    ///     returns is no more than the 15 ms cap (the cap's upper bound is pinned
     ///     by `projection_deadline_nulls_wall_clock_only_in_measurement`). Red
     ///     for passing `ctx.context.deadline` instead, which is
     ///     `Deadline::none()` here (and in production is the planner's
