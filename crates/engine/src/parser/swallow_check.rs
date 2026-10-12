@@ -6286,25 +6286,63 @@ If you sang a song the whole time you were searching and shuffling, you may unta
     /// `Condition_AsLongAs` reports the rejected "as long as" guard.
     #[test]
     fn condition_as_long_as_swallow_carries_the_rejected_guard() {
-        // Torrent of Lava (MIR). The guard is bounded at the clause break, so it must not
-        // run on into the quoted granted ability that follows it.
+        // Gobsmacked (UNF). Its static-route line keeps a swallowed guard. The guard
+        // is bounded at the clause break (the comma), so it must not run on into
+        // "enchanted permanent can't attack or block".
         let parsed = parse_named(
+            "Enchant nonland permanent\nAs this Aura enters, choose a person outside the \
+             game.\nAs long as you can see the chosen person from your seat, enchanted \
+             permanent can't attack or block, and its activated abilities can't be activated.",
+            "Gobsmacked",
+            &["Enchantment"],
+        );
+        let warning = only_swallow(&parsed, "Condition_AsLongAs");
+        assert_eq!(
+            warning.gap(),
+            Some(&ClauseGap::Condition {
+                guard: "you can see the chosen person from your seat".to_string()
+            }),
+            "full warning: {warning:?}"
+        );
+
+        // Torrent of Lava (MIR): its "~ is on the stack" gate cannot be carried, so the
+        // route lands the line as a line-owned `Effect::unimplemented` and the
+        // per-unit suppression leaves no `Condition_AsLongAs` warning beside it.
+        let torrent = parse_named(
             "Torrent of Lava deals X damage to each creature without flying.\nAs long as \
              Torrent of Lava is on the stack, each creature has \"{T}: Prevent the next 1 \
              damage that would be dealt to this creature by Torrent of Lava this turn.\"",
             "Torrent of Lava",
             &["Sorcery"],
         );
-        let warning = only_swallow(&parsed, "Condition_AsLongAs");
-
-        // Removing the `trailing_guard` arm this phase adds turns this `None`: measured,
-        // the scanner has no "as long as" arm at base at all.
-        assert_eq!(
-            warning.gap(),
-            Some(&ClauseGap::Condition {
-                guard: "torrent of lava is on the stack".to_string()
+        // Reach-guard: the second line is the honest gap, owned by its line.
+        const TORRENT_GATED_LINE: &str = "As long as ~ is on the stack, each creature has \"{T}: Prevent the next 1 damage that would be dealt to ~ by ~ this turn.\"";
+        assert!(
+            torrent.abilities.iter().any(|a| {
+                a.description.as_deref() == Some(TORRENT_GATED_LINE)
+                    && a.effect.unimplemented_description().is_some()
             }),
-            "full warning: {warning:?}"
+            "{:#?}",
+            torrent.abilities
+        );
+        assert!(
+            torrent.replacements.is_empty(),
+            "{:#?}",
+            torrent.replacements
+        );
+        assert!(
+            swallows_for(&torrent, "Condition_AsLongAs").is_empty(),
+            "{:?}",
+            torrent.parse_warnings
+        );
+        // The first line's damage ability is still present.
+        assert!(
+            torrent
+                .abilities
+                .iter()
+                .any(|a| matches!(&*a.effect, Effect::DamageAll { .. })),
+            "{:#?}",
+            torrent.abilities
         );
     }
 
@@ -7071,36 +7109,55 @@ If you sang a song the whole time you were searching and shuffling, you may unta
         use crate::types::replacements::ReplacementEvent;
         use crate::types::ContinuousModification;
 
+        // CR 615.1a: Bronze Horse's gate parses, but its shield is scoped to
+        // "spells that target it", a source subject no filter expresses. The line
+        // fails closed as a line-owned `Effect::unimplemented` — the known gap —
+        // rather than shipping a shield that prevents damage from every source.
         let bronze = parse_named(
             "Trample\nAs long as you control another creature, prevent all damage that would be dealt to this creature by spells that target it.",
             "Bronze Horse",
             &["Artifact", "Creature"],
         );
         assert!(
-            !bronze
+            bronze.abilities.iter().any(|a| matches!(
+                &*a.effect,
+                Effect::Unimplemented { name, .. } if name == "prevention_source_scope"
+            )),
+            "Bronze Horse's shield line must report its source-scope gap: {:#?}",
+            bronze.abilities
+        );
+        assert!(
+            bronze
                 .replacements
                 .iter()
-                .any(|r| r.execute.as_deref().is_some_and(def_tree_has_unimplemented)),
-            "Bronze Horse replacement must parse without Unimplemented"
+                .all(|r| r.event != ReplacementEvent::DamageDone),
+            "no unscoped Bronze Horse shield may be built: {:#?}",
+            bronze.replacements
+        );
+
+        // CR 611.3: a gated "as long as" prevention is a CONTINUOUS shield — the
+        // exact `Prevention { .. }` assertion (no `PreventionOneShot`) pins the
+        // one-shot classification from leaking onto a duration-bound "as long
+        // as" shield: if an implementation misclassified this line as
+        // `PreventionOneShot` ("the next time" single opportunity, CR 615.3), the
+        // assertion fails.
+        let baldric = parse_named(
+            "As long as you have a full party, prevent all damage that would be dealt to equipped creature.",
+            "Multiclass Baldric",
+            &["Artifact", "Equipment"],
         );
         let as_long_as = "as long as";
-        // CR 611.3: Bronze Horse's "as long as" prevention is a CONTINUOUS
-        // shield — the exact `Prevention { .. }` assertion (no
-        // `PreventionOneShot`) pins the one-shot classification from leaking
-        // onto a duration-bound "as long as" shield: if an implementation
-        // misclassified this card as `PreventionOneShot` ("the next time"
-        // single opportunity, CR 615.3), the assertion fails.
         assert!(
-            bronze.replacements.iter().any(|r| {
+            baldric.replacements.iter().any(|r| {
                 r.event == ReplacementEvent::DamageDone
-                    && r.valid_card == Some(TargetFilter::SelfRef)
+                    && r.condition.is_some()
                     && matches!(r.shield_kind, ShieldKind::Prevention { .. })
                     && r.description
                         .as_deref()
                         .is_some_and(|d| d.to_ascii_lowercase().contains(as_long_as))
             }),
             "expected gated damage-prevention replacement, got {:#?}",
-            bronze.replacements
+            baldric.replacements
         );
         // CR 615.3: the Awe Strike class — "the next time [target creature]
         // would deal damage this turn, prevent that damage" — is the one-shot
@@ -7138,30 +7195,6 @@ If you sang a song the whole time you were searching and shuffling, you may unta
             "the one-shot spell sentence must NOT lower to a replacement definition, got {:#?}",
             one_shot.replacements
         );
-        // KNOWN GAP, pinned deliberately. Bronze Horse DOES report a swallowed
-        // `Condition_AsLongAs` — and did so in the shipped card data long before this
-        // change (verified against the pre-cutover full-pool export). The assertions
-        // above are why: the "as long as you control another creature" gate survives
-        // only inside `description` (a String), and is never lifted into a typed
-        // condition on the replacement. So the condition really is swallowed and the
-        // detector is right.
-        //
-        // This test previously asserted the OPPOSITE and passed — vacuously. It parses
-        // with an empty MTGJSON keyword list, so the "Trample" line fell through to an
-        // `Effect::Unimplemented`, which tripped the CARD-WIDE Unimplemented gate and
-        // silenced all fourteen detectors on the whole card. The green was the gate,
-        // not the parse. Per-unit suppression scopes that gate to the "Trample" line
-        // alone, so line 1 is now audited and the pre-existing gap is visible.
-        //
-        // Flip this assertion when the "as long as" gate is lifted into a typed
-        // replacement condition; until then it is a tripwire, not an endorsement.
-        assert!(
-            has_swallowed_detector(&bronze, "Condition_AsLongAs"),
-            "Bronze Horse's as-long-as gate is description-only, never typed: the swallow \
-             is real. Warnings: {:?}",
-            bronze.parse_warnings
-        );
-
         let helm = parse_named(
             "Equipped creature gets +2/+2.\nAs long as equipped creature is legendary, it has hexproof. (It can't be the target of spells or abilities your opponents control.)\nEquip {1}",
             "Champion's Helm",

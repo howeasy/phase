@@ -197,22 +197,56 @@ fn trigger_json(text: &str, name: &str) -> serde_json::Value {
 }
 
 #[test]
-fn unmodeled_zone_change_reflexive_with_a_where_x_referent_fails_closed() {
-    // Cait Sith, Fortune Teller (verbatim): the where-X referent no longer
-    // misbinds the pump to the exiled card, and because the "When you exile …
-    // this way" reflexive's own target timing is not modeled, the clause is
-    // honestly unsupported instead of announcing its target with the trigger.
+fn zone_change_reflexive_with_a_where_x_referent_lowers_to_the_creation_gate() {
+    // Cait Sith, Fortune Teller (verbatim): CR 603.12 — "When you exile a card
+    // this way" is a reflexive trigger, so the pump is gated by the `WhenYouDo`
+    // creation gate carrying the exile event (its target is chosen as the
+    // reflexive goes on the stack, CR 603.3d), keeps its explicit target, and
+    // the where-X still reads the exiled card.
     let json = trigger_json(CAIT_SITH_TRIGGER, "Cait Sith, Fortune Teller");
     let mut gaps = Vec::new();
     collect_effects(&json, "Unimplemented", &mut gaps);
+    assert!(gaps.is_empty(), "no strict-fail remains: {json}");
+    let parsed = parse_oracle_text(
+        CAIT_SITH_TRIGGER,
+        "Cait Sith, Fortune Teller",
+        &[],
+        &["Creature".to_string()],
+        &[],
+    );
+    let mut node = parsed.triggers[0]
+        .execute
+        .as_deref()
+        .expect("the combat trigger body");
+    while !matches!(node.effect.as_ref(), Effect::Pump { .. }) {
+        node = node.sub_ability.as_deref().expect("the pump node");
+    }
+    let condition = node.condition.as_ref().expect("the reflexive gate");
+    assert!(condition.has_when_you_do_marker(), "{condition:?}");
     assert!(
-        gaps.iter()
-            .any(|gap| gap["name"] == "zone_change_reflexive_target_timing"),
-        "{json}"
+        matches!(
+            condition.zone_changed_this_way_head(),
+            Some(AbilityCondition::ZoneChangedThisWay {
+                destination: None,
+                ..
+            })
+        ),
+        "{condition:?}"
     );
     let mut pumps = Vec::new();
     collect_effects(&json, "Pump", &mut pumps);
-    assert!(pumps.is_empty(), "no misbound pump survives: {json}");
+    assert_eq!(pumps.len(), 1, "reach guard: exactly one pump: {json}");
+    assert_eq!(
+        pumps[0]["target"],
+        serde_json::to_value(TargetFilter::Typed(
+            TypedFilter::creature().controller(ControllerRef::You)
+        ))
+        .unwrap()
+    );
+    assert_eq!(
+        pumps[0]["power"]["value"]["qty"]["scope"]["type"], "Demonstrative",
+        "the where-X reads the exiled card"
+    );
 }
 
 #[test]

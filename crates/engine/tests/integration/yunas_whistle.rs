@@ -702,54 +702,6 @@ fn generic_when_you_do_after_a_reveal_until_whiff_still_triggers() {
     assert_eq!(after, before + 2);
 }
 
-const CAIT_SITH: &str = "Lucky Slots — At the beginning of combat on your turn, scry 1, then exile the top card of your library. You may play that card this turn. When you exile a card this way, target creature you control gets +X/+0 until end of turn, where X is that card's mana value.";
-
-/// CR 603.12 (Cait Sith's 2025-06-06 ruling): its reflexive's target timing is
-/// not modeled, so the clause is honestly unsupported. Production combat
-/// trigger: no target is announced with the trigger (no early prompt), and no
-/// pump lands, while the trigger itself still scries and exiles.
-#[test]
-fn cait_sith_announces_no_target_with_its_combat_trigger() {
-    let mut scenario = GameScenario::new();
-    scenario.at_phase(Phase::PreCombatMain);
-    scenario.add_creature_from_oracle(P0, "Cait Sith, Fortune Teller", 2, 2, CAIT_SITH);
-    let bear = scenario.add_creature(P0, "Bear", 2, 2).id();
-    let top = scenario
-        .add_spell_to_library_top(P0, "Three Drop", false)
-        .with_mana_cost(ManaCost::generic(3))
-        .id();
-    let mut runner = scenario.build();
-    let mut saw_scry = false;
-    for _ in 0..16 {
-        match runner.state().waiting_for.clone() {
-            WaitingFor::TriggerTargetSelection { .. } => {
-                panic!("no target may be announced with Cait Sith's trigger")
-            }
-            WaitingFor::ScryChoice { .. } => {
-                saw_scry = true;
-                runner
-                    .act(GameAction::SelectCards { cards: vec![] })
-                    .expect("keep the scried card on top");
-            }
-            WaitingFor::Priority { .. } => {
-                if runner.state().phase == Phase::DeclareAttackers {
-                    break;
-                }
-                runner.act(GameAction::PassPriority).expect("pass");
-            }
-            _ => break,
-        }
-    }
-    let st = runner.state();
-    assert!(saw_scry, "reach guard: the combat trigger resolved");
-    assert_eq!(
-        zone(st, top),
-        Zone::Exile,
-        "reach guard: the top card was exiled"
-    );
-    assert_eq!(st.objects[&bear].power, Some(2), "no pump");
-}
-
 // ---------------------------------------------------------------------------
 // CR 701.20a: "If revealing a card causes a triggered ability to trigger, the
 // card remains revealed until that triggered ability leaves the stack."
