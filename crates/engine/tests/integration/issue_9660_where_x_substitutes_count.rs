@@ -107,6 +107,31 @@ fn enters_with_where_x_leaves_a_count_without_x() {
     assert_eq!(plus_counters(&runner, no_x), Some(2));
 }
 
+/// CR 107.3 + CR 107.3i + CR 614.1c: "where X is your Ring-bearer's power"
+/// names another permanent's stat, not the entering creature's, so "twice X"
+/// must not bind it as this creature's own power (2 here, which would give 4
+/// counters). The line is unsupported and places no counters; the readable
+/// twin on an identical 2/2 body in the same game enters with 2·3 = 6.
+#[test]
+fn enters_with_where_x_foreign_possessive_places_no_counters() {
+    const TWICE_RING_BEARER: &str = "This creature enters with twice X +1/+1 counters on it, \
+                                     where X is your Ring-bearer's power.";
+    let mut scenario = scenario_with_three_lands();
+    let mut add_two_two = |name: &str, oracle: &str| {
+        scenario
+            .add_creature_to_hand_from_oracle(P0, name, 2, 2, oracle)
+            .with_mana_cost(ManaCost::generic(0))
+            .id()
+    };
+    let possessive = add_two_two("Ring-bearer Witness", TWICE_RING_BEARER);
+    let twice = add_two_two("Twice Witness", TWICE);
+    let mut runner = scenario.build();
+    cast_all(&mut runner, &[possessive, twice]);
+
+    assert_eq!(plus_counters(&runner, twice), Some(6));
+    assert_eq!(plus_counters(&runner, possessive), None);
+}
+
 /// CR 121.1 + CR 107.3c + CR 107.3i + CR 107.1a: the draw count position
 /// already binds where-X inside the count (#9830); lock it. Not
 /// revert-failing for #9660.
