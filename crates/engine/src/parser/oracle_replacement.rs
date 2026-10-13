@@ -48,8 +48,9 @@ use super::oracle_target::{
     parse_type_phrase_folding, parse_type_phrase_union,
 };
 use super::oracle_util::{
-    first_sentence, merge_or_filters, normalize_card_name_refs, parse_count_expr, parse_number,
-    parse_ordinal, rewrite_quantity_expr_rounding, strip_after, strip_reminder_text, TextPair,
+    first_sentence, merge_or_filters, normalize_card_name_refs, parse_comparator_prefix,
+    parse_count_expr, parse_number, parse_ordinal, rewrite_quantity_expr_rounding, strip_after,
+    strip_reminder_text, TextPair,
 };
 use crate::types::ability::{
     AbilityCost, AbilityDefinition, AbilityKind, CastVariantPaid, ChoiceType, CombatDamageScope,
@@ -4297,9 +4298,20 @@ fn enters_with_counters_outcome(
     // object's `cost_x_paid` (runtime `Variable("X")` only reads trigger-event
     // sources, not the entering permanent), so rewrite X → `CostXPaid`
     // recursively inside the expression.
+    //
+    // CR 107.3: a trailing "where X is <quantity>" defines X; it is not part
+    // of the clause's count. Split it off first so the "equal to" readers see
+    // only the clause head — otherwise an "equal to" inside the definition
+    // ("where X is equal to two", "… with power greater than or equal to 2")
+    // would be read as the count.
+    let (clause_text, where_x_tail) =
+        match nom_primitives::split_once_on(work_text, ", where x is ") {
+            Ok((_, (head, tail))) => (head, Some(tail)),
+            Err(_) => (work_text, None),
+        };
     let mut count_expr = match leading_count {
         Some(count) => count,
-        None => parse_enters_counter_equal_to_quantity(work_text)
+        None => parse_enters_counter_equal_to_quantity(clause_text)
             .ok_or(EntersWithDecline::NotThisShape)?,
     };
     rewrite_variable_x_to_cost_x_paid(&mut count_expr);
@@ -4341,16 +4353,18 @@ fn enters_with_counters_outcome(
     // CR 122.6: For "a number of counters equal to [quantity]" and the
     // sibling shorthand "counters on it equal to [quantity]", parse the
     // dynamic expression.
-    if let Some(qty) = parse_enters_counter_equal_to_quantity(work_text) {
+    if let Some(qty) = parse_enters_counter_equal_to_quantity(clause_text) {
         count_expr = qty;
     }
     // CR 107.3 + CR 107.3i: "where X is <quantity>" DEFINES X — it does not
     // replace the count X appears in. Bind the definition at every X leaf of
     // the count, so the arithmetic around X survives ("twice X" → `Multiply`,
     // "half X …, rounded up" → `DivideRounded` with its rounding, "X plus one"
-    // → `Offset`) and a count that prints no X keeps its printed value. An
-    // unreadable definition is unread text of this clause and fails closed.
-    if let Ok((_, (_, where_x))) = nom_primitives::split_once_on(work_text, ", where x is ") {
+    // → `Offset`) and a count that prints no X keeps its printed value. Only an
+    // exact definition of X binds: an unreadable definition, or a comparator
+    // constraint on a chosen X ("where X is less than …"), is unread text of
+    // this clause and fails closed.
+    if let Some(where_x) = where_x_tail {
         count_expr =
             bind_enters_with_where_x(count_expr, where_x).ok_or(EntersWithDecline::NotThisShape)?;
     }
@@ -4799,10 +4813,21 @@ fn parse_enters_with_where_x_suffix(text: &str) -> Option<QuantityExpr> {
 /// CR 107.3 + CR 107.3i: bind an enters-with clause's "where X is …"
 /// definition into its count through the shared where-X authority
 /// (`apply_where_x_quantity_expression`, which substitutes every `CostXPaid` /
-/// `Variable("X")` leaf and keeps the wrappers around them). `None` when the
-/// definition does not parse — checked up front because the authority never
-/// parses a definition for a count without an X leaf.
+/// `Variable("X")` leaf and keeps the wrappers around them). Binds only an
+/// exact definition of X's value. `None` when:
+///   * the definition is a comparator constraint ("where X is less than / greater
+///     than / equal to / … or equal to <bound>"). The shared reader keeps such a
+///     tail as the chosen `Variable("X")` (Well of Lost Dreams bounds a paid X);
+///     it defines no value, so binding it here would publish the cost X as the
+///     count;
+///   * the definition does not parse — checked up front because the authority
+///     never parses a definition for a count without an X leaf.
 fn bind_enters_with_where_x(count: QuantityExpr, where_x: &str) -> Option<QuantityExpr> {
+    // Same normalization as the shared reader's comparator arm.
+    let definition = where_x.trim().trim_end_matches('.').to_ascii_lowercase();
+    if parse_comparator_prefix(&definition).is_some_and(|(_, bound)| !bound.trim().is_empty()) {
+        return None;
+    }
     parse_where_x_quantity_expression(where_x)?;
     apply_where_x_quantity_expression(count, Some(where_x))
 }
@@ -20658,6 +20683,100 @@ mod tests {
             assert!(
                 parse_replacement_line(unreadable, "Test Creature").is_none(),
                 "unreadable where-X definition must fail closed: {unreadable:?}"
+            );
+        }
+    }
+
+    /// CR 107.3 + CR 107.3i: "where X is less than / greater than / equal to /
+    /// … or equal to <bound>" constrains a chosen X; it does not define X's
+    /// value, so an enters-with count cannot bind it and the line fails closed
+    /// (rather than publishing the cost X, or reading the "equal to" inside the
+    /// definition as the count). Each readable twin, whose definition is exact,
+    /// parses, ruling out an upstream short-circuit.
+    /// SYNTHETIC: no printed card has this shape.
+    #[test]
+    fn enters_with_chosen_x_comparator_where_x_fails_closed() {
+        const READABLE: &str = "the number of creatures you control.";
+        for (head, constraint) in [
+            (
+                "This creature enters with twice X +1/+1 counters on it, where X is ",
+                "less than the mystery total.",
+            ),
+            (
+                "This creature enters with twice X +1/+1 counters on it, where X is ",
+                "equal to two.",
+            ),
+            (
+                "This creature enters with X +1/+1 counters on it, where X is ",
+                "less than the mystery total.",
+            ),
+            (
+                "This creature enters with X +1/+1 counters on it, where X is ",
+                "greater than or equal to three.",
+            ),
+            (
+                "This creature enters with two +1/+1 counters on it, where X is ",
+                "less than the mystery total.",
+            ),
+            (
+                "This creature enters with two +1/+1 counters on it, where X is ",
+                "greater than or equal to three.",
+            ),
+        ] {
+            let readable = format!("{head}{READABLE}");
+            let constrained = format!("{head}{constraint}");
+            assert!(
+                parse_replacement_line(&readable, "Test Creature").is_some(),
+                "reach guard: {readable:?} should parse"
+            );
+            assert!(
+                parse_replacement_line(&constrained, "Test Creature").is_none(),
+                "a chosen-X comparator constraint defines no X and must fail closed: \
+                 {constrained:?}"
+            );
+        }
+    }
+
+    /// CR 107.3 + CR 122.6: an "equal to" inside the where-X definition belongs
+    /// to the definition, never to the clause's count. The definition below is
+    /// read by the shared where-X reader (`ObjectCount` with a power comparison),
+    /// and its trailing "equal to 2" must not become the count (`Fixed 2`): bare
+    /// X is the definition, and "twice X" keeps its multiplier around it.
+    /// (Definitions of the form "… with power equal to 2" are not read by the
+    /// shared where-X reader, so those lines fail closed and cannot witness this.)
+    /// SYNTHETIC: no printed card has this shape.
+    #[test]
+    fn enters_with_where_x_definition_equal_to_is_not_the_count() {
+        for definition in [
+            "the number of creatures you control with power greater than or equal to 2",
+            "the number of creatures you control with power less than or equal to 2",
+        ] {
+            let defined =
+                crate::parser::oracle_effect::lower::parse_where_x_quantity_expression(definition)
+                    .unwrap_or_else(|| panic!("reach guard: {definition:?} should be readable"));
+            assert!(
+                matches!(
+                    defined,
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::ObjectCount { .. }
+                    }
+                ),
+                "reach guard: {definition:?} should read as an object count, got {defined:?}"
+            );
+            assert_eq!(
+                enters_with_count(&format!(
+                    "This creature enters with X +1/+1 counters on it, where X is {definition}."
+                )),
+                defined
+            );
+            assert_eq!(
+                enters_with_count(&format!(
+                    "This creature enters with twice X +1/+1 counters on it, where X is {definition}."
+                )),
+                QuantityExpr::Multiply {
+                    factor: 2,
+                    inner: Box::new(defined.clone()),
+                }
             );
         }
     }
