@@ -128,6 +128,17 @@ fn enters_with_where_x_foreign_possessive_places_no_counters() {
     let mut runner = scenario.build();
     cast_all(&mut runner, &[possessive, twice]);
 
+    // Reach guard: the possessive line was read as an enters-with clause and
+    // landed as an honest unimplemented gap (not silently dropped), while the
+    // readable twin parsed fully.
+    assert!(
+        runner.state().objects[&possessive].has_unimplemented_mechanics(),
+        "the foreign-possessive clause must surface as an unimplemented gap"
+    );
+    assert!(
+        !runner.state().objects[&twice].has_unimplemented_mechanics(),
+        "the readable twin must parse without a gap"
+    );
     assert_eq!(plus_counters(&runner, twice), Some(6));
     assert_eq!(plus_counters(&runner, possessive), None);
 }
