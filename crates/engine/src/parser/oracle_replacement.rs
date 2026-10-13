@@ -5308,14 +5308,17 @@ fn parse_enters_counter_list_separator(input: &str) -> OracleResult<'_, ()> {
 }
 
 /// CR 122.6 + CR 608.2c: whether the text right after a counter noun continues
-/// the counter list with a further placement — a list separator, then either a
-/// count-less counter name (`parse_enters_counter_type_noun`, the single path's
-/// own type head: a whole counter name before a singular or plural counter
-/// noun — "deathtouch counter", "wish counter", "charge counters") or a count
-/// (the counted element's anchor, `parse_count_expr`) followed by a counter
-/// noun reached inside the clause, before the recipient's "on". Used once the
-/// strict list reader has declined, to tell an unread later placement from a
-/// genuinely single one. A conjunct that is not a counter placement ("and you
+/// the counter list with a further placement — a list separator, then either
+/// any element the single-placement head accepts
+/// (`parse_enters_counter_count_head` + `parse_enters_counter_type_noun`: an
+/// optional "a number of [additional]", "[an] additional" or printed count,
+/// then a whole counter name before a singular or plural counter noun —
+/// "wish counter", "charge counters", "additional charge counters", "a number
+/// of charge counters"), or a count (`parse_count_expr`) followed by a counter
+/// noun reached inside the clause, before the recipient's "on", which also
+/// covers a counted element whose type is not a whole counter name. Used once
+/// the strict list reader has declined, to tell an unread later placement from
+/// a genuinely single one. A conjunct that is not a counter placement ("and you
 /// draw a card", "and with haste") does not match: it has no count anchor and
 /// names no counter.
 fn continues_with_unread_counter_placement(after_counter: &str) -> bool {
@@ -5324,7 +5327,8 @@ fn continues_with_unread_counter_placement(after_counter: &str) -> bool {
     else {
         return false;
     };
-    parse_enters_counter_type_noun(after_sep).is_ok()
+    let (after_head, _count) = parse_enters_counter_count_head(after_sep);
+    parse_enters_counter_type_noun(after_head).is_ok()
         || parse_count_expr(after_sep)
             .is_some_and(|(_count, rest)| parse_counter_noun_within_clause(rest).is_ok())
 }
@@ -20781,7 +20785,10 @@ mod tests {
         // is rejected there too. The last three second placements carry no
         // count: a plural bare type, a singular one-word custom type, and a
         // plural elided keyword type, none of which the list reader's elided
-        // element accepts. Each whole line lands as an unsupported gap.
+        // element accepts. The two "additional" lines' second placements open
+        // with the single-placement head's own qualifiers ("additional", "a
+        // number of additional"), which the list reader's counted element does
+        // not read. Each whole line lands as an unsupported gap.
         for line in [
             "This creature enters with a +1/+1 counter and a number of charge counters on it equal to the number of creatures you control.",
             "This creature enters with two +1/+1 counters and a number of charge counters on it.",
@@ -20789,6 +20796,8 @@ mod tests {
             "This creature enters with a +1/+1 counter and charge counters on it equal to the number of creatures you control.",
             "This creature enters with a +1/+1 counter and wish counter on it.",
             "This creature enters with two +1/+1 counters and trample counters on it.",
+            "This creature enters with a +1/+1 counter and additional charge counters on it equal to the number of creatures you control.",
+            "This creature enters with a +1/+1 counter and a number of additional charge counters on it equal to the number of creatures you control.",
         ] {
             assert_eq!(
                 parse_replacement_line(line, "Synthetic Charge Line"),
@@ -20819,6 +20828,24 @@ mod tests {
                 parsed.abilities
             );
         }
+
+        // An "an additional" second placement is a counted element the list
+        // reader does read, so that line publishes both placements.
+        let additional_charge = parse_replacement_line(
+            "This creature enters with a +1/+1 counter and an additional charge counter on it.",
+            "Synthetic Charge Line",
+        )
+        .expect("a counted \"an additional\" second element is a readable list");
+        assert_eq!(
+            put_counters_in_chain(&additional_charge),
+            vec![
+                (CounterType::Plus1Plus1, QuantityExpr::Fixed { value: 1 }),
+                (
+                    crate::types::counter::parse_counter_type("charge"),
+                    QuantityExpr::Fixed { value: 1 }
+                ),
+            ]
+        );
 
         // Reach guard: a real conjoined list still reads both elements, and the
         // full parse publishes it as the enters-with replacement.
