@@ -15,10 +15,7 @@ use nom::Parser;
 
 use super::oracle_classifier::has_enters_with_counter_tokens;
 use super::oracle_effect::become_copy_except::parse_except_clause;
-use super::oracle_effect::lower::{
-    apply_where_x_quantity_expression, parse_where_x_quantity_core,
-    parse_where_x_quantity_expression,
-};
+use super::oracle_effect::lower::{apply_where_x_quantity_expression, parse_where_x_quantity_core};
 use super::oracle_effect::{
     excise_selection_qualifier, parse_effect_chain, parse_effect_chain_with_context,
     parse_effect_clause, parse_named_choice_object, try_parse_named_choice,
@@ -4362,13 +4359,23 @@ fn enters_with_counters_outcome(
     // "half X …, rounded up" → `DivideRounded` with its rounding, "X plus one"
     // → `Offset`) and a count that prints no X keeps its printed value. A bare
     // X count keeps the enters-with where-X reader's reading of the definition;
-    // any other count binds through the shared where-X authority only for an
-    // exact, possessive-free, X-free definition. Everything else (comparator
-    // bounds, mana paid this way, a foreign possessive, an unreadable
-    // definition) is unread text of this clause and fails closed.
+    // any other count binds through the shared where-X authority only when the
+    // possessive-free core reader reads the definition and that reading does
+    // not depend on X. Everything else (comparator bounds, mana paid this way,
+    // a foreign possessive, an unreadable definition) is unread text of this
+    // clause and fails closed.
+    //
+    // List placements are #9662's: their counts do not see the where-X
+    // binding. On a list line this gate only preserves base's accept/decline
+    // (the enters-with where-X reader decides; its value is not published), so
+    // the list path is neither fixed nor widened here (CR 107.3).
     if let Some(where_x) = where_x_tail {
-        count_expr =
-            bind_enters_with_where_x(count_expr, where_x).ok_or(EntersWithDecline::NotThisShape)?;
+        let bound = if counter_entries.is_some() {
+            parse_enters_where_x_tail_quantity(where_x)
+        } else {
+            bind_enters_with_where_x(count_expr, where_x)
+        };
+        count_expr = bound.ok_or(EntersWithDecline::NotThisShape)?;
     }
     // CR 614.12: Any `Variable("X")` that survived the dynamic-quantity
     // overrides above refers to the X paid on the *entering* object's cost, not
@@ -4829,16 +4836,19 @@ fn parse_enters_where_x_tail_quantity(qty_text: &str) -> Option<QuantityExpr> {
 ///   `Offset`, ... — or a count with no X leaf) binds through the shared
 ///   where-X authority (`apply_where_x_quantity_expression`), which re-reads
 ///   the definition and substitutes it at every X leaf, keeping the wrappers.
-///   It binds only when the definition is exactly what that substitution will
-///   bind:
-///   * the possessive-free core reading must exist and must not depend on X:
-///     X := f(X) is circular and defines no value (CR 107.3 separates
+///   It binds only when the possessive-free core reading
+///   (`parse_where_x_quantity_core`) exists and does not depend on X:
+///   * the core reader is the one validated precisely so the shared reader's
+///     printed-name possessive arm — which would read "your Ring-bearer's
+///     power" as the entering permanent's own stat — is never what admits a
+///     definition; a foreign possessive has no core reading and declines;
+///   * X := f(X) is circular and defines no value (CR 107.3 separates
 ///     abilities that define the value of X from those that let their
 ///     controller choose it), so comparator bounds and "mana paid this way"
-///     decline rather than publish the cost X as the count;
-///   * the authority's own reading must equal that core reading, so its
-///     printed-name possessive arm can never bind a foreign possessive ("your
-///     Ring-bearer's power") as the entering permanent's own stat.
+///     decline rather than publish the cost X as the count.
+///
+///   The substitution then reads the definition through the shared reader,
+///   whose reading equals the core reading whenever the core one exists.
 fn bind_enters_with_where_x(count: QuantityExpr, where_x: &str) -> Option<QuantityExpr> {
     match count {
         QuantityExpr::Ref {
@@ -4850,9 +4860,6 @@ fn bind_enters_with_where_x(count: QuantityExpr, where_x: &str) -> Option<Quanti
         count => {
             let definition = parse_where_x_quantity_core(where_x)?;
             if definition.contains_x() {
-                return None;
-            }
-            if parse_where_x_quantity_expression(where_x).as_ref() != Some(&definition) {
                 return None;
             }
             apply_where_x_quantity_expression(count, Some(where_x))
@@ -20890,7 +20897,9 @@ mod tests {
             ),
         ] {
             assert_eq!(
-                parse_where_x_quantity_expression(&definition.to_lowercase()),
+                crate::parser::oracle_effect::lower::parse_where_x_quantity_expression(
+                    &definition.to_lowercase()
+                ),
                 Some(QuantityExpr::Ref { qty: source_stat }),
                 "reach guard: the shared reader reads {definition:?} as the source's own stat"
             );
@@ -20914,6 +20923,70 @@ mod tests {
         }
     }
 
+    /// CR 107.3 + CR 122.6: #9662-adjacent gate-parity pins. A conjoined counter
+    /// list publishes its own entries, whose counts do not see the where-X
+    /// binding (#9662), so on a list line the where-X tail is only an
+    /// accept/decline gate — and that gate must stay the enters-with where-X
+    /// reader's, exactly as at base. The definitions below are read by the
+    /// possessive-free core where-X reader but NOT by the enters-with reader
+    /// (probed, asserted as reach guards), so both list heads — one whose head
+    /// count prints no X ("a +1/+1 counter"), one composite ("twice X") — must
+    /// fail closed (probed: `None`) rather than publish the X entry as the cost
+    /// X. The same heads with a definition the enters-with reader reads parse
+    /// (positive reach guard; their counts are #9662's and are not asserted).
+    /// SYNTHETIC: no printed card has this shape.
+    #[test]
+    fn enters_with_counter_list_where_x_gate_matches_the_enters_reader() {
+        const HEADS: [&str; 2] = [
+            "This creature enters with a +1/+1 counter and X charge counters on it, where X is ",
+            "This creature enters with twice X +1/+1 counters and a lifelink counter on it, \
+             where X is ",
+        ];
+        const READABLE: &str = "the number of creatures you control.";
+        for head in HEADS {
+            let readable = format!("{head}{READABLE}");
+            assert!(
+                parse_replacement_line(&readable, "Test Creature").is_some(),
+                "reach guard: {readable:?} should parse"
+            );
+        }
+        let witnesses: [(&str, fn(&QuantityRef) -> bool); 3] = [
+            (
+                "the number of creatures that convoked this creature.",
+                |qty| matches!(qty, QuantityRef::ConvokedCreatureCount),
+            ),
+            ("the power of the exiled card.", |qty| {
+                matches!(qty, QuantityRef::PropertyAggregate(_))
+            }),
+            ("the number of times it was kicked.", |qty| {
+                matches!(qty, QuantityRef::KickerCount)
+            }),
+        ];
+        for (definition, core_reading) in witnesses {
+            let lower = definition.to_lowercase();
+            assert!(
+                matches!(
+                    parse_where_x_quantity_core(&lower),
+                    Some(QuantityExpr::Ref { ref qty }) if core_reading(qty)
+                ),
+                "reach guard: the core where-X reader reads {definition:?}"
+            );
+            assert_eq!(
+                parse_enters_where_x_tail_quantity(&lower),
+                None,
+                "reach guard: the enters-with where-X reader does not read {definition:?}"
+            );
+            for head in HEADS {
+                let line = format!("{head}{definition}");
+                assert!(
+                    parse_replacement_line(&line, "Test Creature").is_none(),
+                    "a counter list keeps the enters-with where-X gate and must fail \
+                     closed: {line:?}"
+                );
+            }
+        }
+    }
+
     /// CR 107.3 + CR 107.3i: a bare X count IS the where-X definition, read by
     /// the enters-with where-X reader (the reading this clause always had), so
     /// "the number of times you descended this turn" binds (probed value
@@ -20925,7 +20998,7 @@ mod tests {
     fn enters_with_bare_x_keeps_the_enters_with_where_x_reader() {
         const DESCENDED: &str = "the number of times you descended this turn.";
         assert_eq!(
-            parse_where_x_quantity_expression(DESCENDED),
+            crate::parser::oracle_effect::lower::parse_where_x_quantity_expression(DESCENDED),
             None,
             "reach guard: the shared where-X reader does not read {DESCENDED:?}"
         );
