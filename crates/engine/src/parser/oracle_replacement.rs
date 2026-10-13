@@ -48,9 +48,8 @@ use super::oracle_target::{
     parse_type_phrase_folding, parse_type_phrase_union,
 };
 use super::oracle_util::{
-    first_sentence, merge_or_filters, normalize_card_name_refs, parse_comparator_prefix,
-    parse_count_expr, parse_number, parse_ordinal, rewrite_quantity_expr_rounding, strip_after,
-    strip_reminder_text, TextPair,
+    first_sentence, merge_or_filters, normalize_card_name_refs, parse_count_expr, parse_number,
+    parse_ordinal, rewrite_quantity_expr_rounding, strip_after, strip_reminder_text, TextPair,
 };
 use crate::types::ability::{
     AbilityCost, AbilityDefinition, AbilityKind, CastVariantPaid, ChoiceType, CombatDamageScope,
@@ -4361,9 +4360,10 @@ fn enters_with_counters_outcome(
     // the count, so the arithmetic around X survives ("twice X" → `Multiply`,
     // "half X …, rounded up" → `DivideRounded` with its rounding, "X plus one"
     // → `Offset`) and a count that prints no X keeps its printed value. Only an
-    // exact definition of X binds: an unreadable definition, or a comparator
-    // constraint on a chosen X ("where X is less than …"), is unread text of
-    // this clause and fails closed.
+    // exact definition of X binds; a tail the shared reader keeps as the chosen
+    // X (comparator bounds, mana paid this way, ...) declines, as does an
+    // unreadable definition: both are unread text of this clause and fail
+    // closed.
     if let Some(where_x) = where_x_tail {
         count_expr =
             bind_enters_with_where_x(count_expr, where_x).ok_or(EntersWithDecline::NotThisShape)?;
@@ -4813,22 +4813,20 @@ fn parse_enters_with_where_x_suffix(text: &str) -> Option<QuantityExpr> {
 /// CR 107.3 + CR 107.3i: bind an enters-with clause's "where X is …"
 /// definition into its count through the shared where-X authority
 /// (`apply_where_x_quantity_expression`, which substitutes every `CostXPaid` /
-/// `Variable("X")` leaf and keeps the wrappers around them). Binds only an
-/// exact definition of X's value. `None` when:
-///   * the definition is a comparator constraint ("where X is less than / greater
-///     than / equal to / … or equal to <bound>"). The shared reader keeps such a
-///     tail as the chosen `Variable("X")` (Well of Lost Dreams bounds a paid X);
-///     it defines no value, so binding it here would publish the cost X as the
-///     count;
-///   * the definition does not parse — checked up front because the authority
+/// `Variable("X")` leaf and keeps the wrappers around them). Only an exact
+/// definition of X binds; a tail the shared reader keeps as the chosen X
+/// (comparator bounds, mana paid this way, ...) declines. `None` when:
+///   * the definition itself depends on X (`QuantityExpr::contains_x`): X := f(X)
+///     is circular, so it defines no value (CR 107.3 separates abilities that
+///     define the value of X from those that let their controller choose it),
+///     and binding it here would publish the cost X as the count;
+///   * the definition does not parse — read up front because the authority
 ///     never parses a definition for a count without an X leaf.
 fn bind_enters_with_where_x(count: QuantityExpr, where_x: &str) -> Option<QuantityExpr> {
-    // Same normalization as the shared reader's comparator arm.
-    let definition = where_x.trim().trim_end_matches('.').to_ascii_lowercase();
-    if parse_comparator_prefix(&definition).is_some_and(|(_, bound)| !bound.trim().is_empty()) {
+    let definition = parse_where_x_quantity_expression(where_x)?;
+    if definition.contains_x() {
         return None;
     }
-    parse_where_x_quantity_expression(where_x)?;
     apply_where_x_quantity_expression(count, Some(where_x))
 }
 
@@ -20734,6 +20732,57 @@ mod tests {
                 "a chosen-X comparator constraint defines no X and must fail closed: \
                  {constrained:?}"
             );
+        }
+    }
+
+    /// CR 107.3 + CR 107.3i: "where X is the [total] amount of mana paid this
+    /// way" is read by the shared where-X reader as the chosen X itself
+    /// (`Variable("X")`), and a composite over it ("two plus …") still depends
+    /// on X. A definition that depends on X defines no value, so an enters-with
+    /// count cannot bind it and the line fails closed (rather than publishing
+    /// the cost X as the count). Each readable twin, whose definition is exact,
+    /// parses, ruling out an upstream short-circuit.
+    /// SYNTHETIC: no printed card has this shape.
+    #[test]
+    fn enters_with_mana_paid_this_way_where_x_fails_closed() {
+        const READABLE: &str = "the number of creatures you control.";
+        let chosen_x = QuantityExpr::Ref {
+            qty: QuantityRef::Variable {
+                name: "X".to_string(),
+            },
+        };
+        for (definition, read_as) in [
+            ("the total amount of mana paid this way.", chosen_x.clone()),
+            ("the amount of mana paid this way.", chosen_x.clone()),
+            (
+                "two plus the total amount of mana paid this way.",
+                QuantityExpr::Offset {
+                    inner: Box::new(chosen_x.clone()),
+                    offset: 2,
+                },
+            ),
+        ] {
+            assert_eq!(
+                crate::parser::oracle_effect::lower::parse_where_x_quantity_expression(definition),
+                Some(read_as),
+                "reach guard: the shared reader reads {definition:?} through the chosen X"
+            );
+            for head in [
+                "This creature enters with X +1/+1 counters on it, where X is ",
+                "This creature enters with twice X +1/+1 counters on it, where X is ",
+            ] {
+                let readable = format!("{head}{READABLE}");
+                let chosen = format!("{head}{definition}");
+                assert!(
+                    parse_replacement_line(&readable, "Test Creature").is_some(),
+                    "reach guard: {readable:?} should parse"
+                );
+                assert!(
+                    parse_replacement_line(&chosen, "Test Creature").is_none(),
+                    "a where-X definition that depends on X defines no X and must fail \
+                     closed: {chosen:?}"
+                );
+            }
         }
     }
 
