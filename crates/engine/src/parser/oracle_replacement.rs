@@ -4331,15 +4331,6 @@ fn enters_with_counters_outcome(
     if counter_entries.is_none() && continues_with_unread_counter_placement(after_counter) {
         return Err(EntersWithDecline::NotThisShape);
     }
-    // CR 107.1a: a fractional count's rounding postmodifier prints after the
-    // counter noun and its recipient ("half X +1/+1 counters on it, rounded
-    // up"); `parse_count_expr` only sees one adjacent to the fraction, so the
-    // separated form would keep the default (down). Applied before the where-X
-    // binding below so it rewrites only the count's own fraction, never one
-    // inside the where-X definition.
-    if let Some(rounding) = parse_enters_counter_rounding_postmodifier(after_counter) {
-        rewrite_quantity_expr_rounding(&mut count_expr, rounding);
-    }
     if let Some(combined) =
         parse_enters_base_plus_additional_for_each(after_counter, &counter_type, &count_expr)
     {
@@ -4352,6 +4343,15 @@ fn enters_with_counters_outcome(
     // dynamic expression.
     if let Some(qty) = parse_enters_counter_equal_to_quantity(clause_text) {
         count_expr = qty;
+    }
+    // CR 107.1a: a fractional count's rounding postmodifier prints after the
+    // counter noun and its recipient ("half X +1/+1 counters on it, rounded
+    // up"); `parse_count_expr` only sees one adjacent to the fraction, so the
+    // separated form would keep the default (down). Apply it after selecting
+    // the final count, but before binding X, so an equal-to override cannot
+    // discard it and a fraction inside the where-X definition is unaffected.
+    if let Some(rounding) = parse_enters_counter_rounding_postmodifier(after_counter) {
+        rewrite_quantity_expr_rounding(&mut count_expr, rounding);
     }
     // CR 107.3 + CR 107.3i: "where X is <quantity>" DEFINES X — it does not
     // replace the count X appears in. Bind the definition at every X leaf of
@@ -20612,6 +20612,31 @@ mod tests {
                 rounding: RoundingMode::Down,
             }
         );
+    }
+
+    /// CR 107.1a + CR 107.3i: an equal-to count keeps the recipient's rounding
+    /// when its X leaves are bound. SYNTHETIC: no printed card has this shape.
+    #[test]
+    fn enters_with_equal_to_half_x_where_x_keeps_rounding() {
+        for (text, rounding) in [
+            (
+                "This creature enters with a number of +1/+1 counters on it, rounded up, equal to half X, where X is the number of creatures you control.",
+                RoundingMode::Up,
+            ),
+            (
+                "This creature enters with a number of +1/+1 counters on it, rounded down, equal to half X, where X is the number of creatures you control.",
+                RoundingMode::Down,
+            ),
+        ] {
+            assert_eq!(
+                enters_with_count(text),
+                QuantityExpr::DivideRounded {
+                    inner: Box::new(bare_where_x_count()),
+                    divisor: 2,
+                    rounding,
+                }
+            );
+        }
     }
 
     /// CR 107.1a: a rounding postmodifier printed after the counter noun and

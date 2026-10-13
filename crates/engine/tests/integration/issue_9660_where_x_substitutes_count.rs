@@ -92,6 +92,32 @@ fn enters_with_half_where_x_keeps_its_rounding() {
     assert_eq!(plus_counters(&runner, down), Some(1));
 }
 
+/// CR 107.1a + CR 107.3i + CR 614.1c: the equal-to count must retain the
+/// recipient's explicit rounding before X is bound. These are synthetic shapes.
+#[test]
+fn enters_with_equal_to_half_where_x_keeps_its_rounding() {
+    const UP: &str = "This creature enters with a number of +1/+1 counters on it, rounded up, \
+                      equal to half X, where X is the number of lands you control.";
+    const DOWN: &str = "This creature enters with a number of +1/+1 counters on it, rounded down, \
+                        equal to half X, where X is the number of lands you control.";
+    let mut scenario = scenario_with_three_lands();
+    let up = add_free_creature(&mut scenario, "Equal To Half Up Witness", UP);
+    let down = add_free_creature(&mut scenario, "Equal To Half Down Witness", DOWN);
+    let bare = add_free_creature(&mut scenario, "Bare Witness", BARE);
+    let mut runner = scenario.build();
+    cast_all(&mut runner, &[up, down, bare]);
+
+    for id in [up, down, bare] {
+        assert!(
+            !runner.state().objects[&id].has_unimplemented_mechanics(),
+            "the counter clause must parse without a gap"
+        );
+    }
+    assert_eq!(plus_counters(&runner, bare), Some(3));
+    assert_eq!(plus_counters(&runner, up), Some(2));
+    assert_eq!(plus_counters(&runner, down), Some(1));
+}
+
 /// CR 107.3 + CR 107.3i + CR 614.1c: a count that prints no X keeps its
 /// printed value; the bare-X sibling in the same game proves the where-X
 /// clause was read (3).
