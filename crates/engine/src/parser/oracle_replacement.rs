@@ -20950,7 +20950,8 @@ mod tests {
                 "reach guard: {readable:?} should parse"
             );
         }
-        let witnesses: [(&str, fn(&QuantityRef) -> bool); 3] = [
+        type CoreReading = fn(&QuantityRef) -> bool;
+        let witnesses: [(&str, CoreReading); 3] = [
             (
                 "the number of creatures that convoked this creature.",
                 |qty| matches!(qty, QuantityRef::ConvokedCreatureCount),
