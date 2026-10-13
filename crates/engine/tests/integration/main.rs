@@ -250,6 +250,7 @@ mod cr_annotations;
 mod crackle_with_power;
 mod craft_tithing_blade_transform;
 mod crime_tracking;
+mod crippling_fear_chosen_type_exclusion;
 mod cross_line_instead_override_branch;
 mod cross_slot_target_binding;
 mod crossway_troublemakers_attacking_keywords;
