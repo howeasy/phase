@@ -451,6 +451,7 @@ fn unread_placement_lines_are_one_gap_through_the_whole_parse() {
 /// while reporting the card supported.
 #[test]
 fn unread_placement_in_a_later_sentence_is_one_gap() {
+    let mut unexpected = Vec::new();
     for oracle in [
         "This creature enters with a +1/+1 counter on it. This creature enters with a charge \
          counter on it and a lifelink counter on it.",
@@ -460,15 +461,19 @@ fn unread_placement_in_a_later_sentence_is_one_gap() {
          counter and a lifelink counter on target creature.",
         "This creature enters with a +1/+1 counter on it. This creature enters with two charge \
          counters and a lifelink counter on it and a trample counter on it.",
+        // CR 614.12: an unsupported distributive choice keeps no readable sibling.
+        "This creature enters with a +1/+1 counter on it. Each other creature you control \
+         enters with your choice of X +1/+1 counters or X charge counters on it.",
+        "Each other creature you control enters with your choice of X +1/+1 counters or \
+         X charge counters on it. This creature enters with a +1/+1 counter on it.",
+        "This creature enters with a +1/+1 counter on it. Each other commander you control \
+         enters with your choice of X +1/+1 counters or X charge counters on it.",
     ] {
         let face = parsed_face(oracle);
-        assert_eq!(
-            sole_gap_name(&face),
-            Some("enters_with_clause"),
-            "{oracle}: one explicit gap, got {:?} / {:?}",
-            face.abilities,
-            face.replacements
-        );
+        if sole_gap_name(&face) != Some("enters_with_clause") {
+            unexpected.push((oracle, face));
+            continue;
+        }
         assert!(
             face.replacements.is_empty(),
             "{oracle}: {:?}",
@@ -476,6 +481,10 @@ fn unread_placement_in_a_later_sentence_is_one_gap() {
         );
         assert!(!card_face_gaps(&face).is_empty(), "{oracle}: unsupported");
     }
+    assert!(
+        unexpected.is_empty(),
+        "expected one enters_with_clause gap, got partial paragraphs: {unexpected:#?}"
+    );
     // Reach guards: a paragraph whose sentences are all read keeps one
     // replacement per sentence.
     for (oracle, expected) in [
@@ -486,6 +495,11 @@ fn unread_placement_in_a_later_sentence_is_one_gap() {
         ),
         (
             "This creature enters with a +1/+1 counter on it. It enters tapped.",
+            2,
+        ),
+        (
+            "This creature enters with a +1/+1 counter on it. This creature enters with your \
+             choice of X +1/+1 counters or X charge counters on it.",
             2,
         ),
     ] {
