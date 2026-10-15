@@ -2852,7 +2852,8 @@ mod tests {
 
     /// Distant Melody ("Choose a creature type. Draw a card for each permanent
     /// you control of that type."), cast and resolved up to its CR 608.2d
-    /// resolution-time creature-type prompt.
+    /// resolution-time creature-type prompt. The answer persists on the
+    /// resolving spell, so the prompt is `ExactObjectAndResolution`-bound.
     fn distant_melody_named_choice_state() -> GameState {
         use crate::types::mana::{ManaCostShard, ManaType, ManaUnit};
 
@@ -2880,8 +2881,52 @@ mod tests {
         let outcome = runner.cast(melody).resolve();
         let state = outcome.state().clone();
         assert!(
-            matches!(state.waiting_for, WaitingFor::NamedChoice { .. }),
-            "Distant Melody must halt on its creature-type prompt"
+            matches!(
+                &state.waiting_for,
+                WaitingFor::NamedChoice { source: Some(source), .. }
+                    if source.binding
+                        == crate::types::game_state::NamedChoiceSourceBinding::ExactObjectAndResolution
+            ),
+            "Distant Melody must halt on its source-bound creature-type prompt"
+        );
+        state
+    }
+
+    /// Brave the Elements ("Choose a color. White creatures you control gain
+    /// protection from the chosen color until end of turn."), cast and resolved
+    /// up to its CR 608.2d color prompt. Its `Choose` does not persist, so the
+    /// prompt carries no source.
+    fn brave_the_elements_named_choice_state() -> GameState {
+        use crate::types::mana::{ManaCostShard, ManaType, ManaUnit};
+
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(crate::types::phase::Phase::PreCombatMain);
+        let mut builder = scenario.add_spell_to_hand_from_oracle(
+            PlayerId(0),
+            "Brave the Elements",
+            true,
+            "Choose a color. White creatures you control gain protection from the chosen color until end of turn.",
+        );
+        builder.with_mana_cost(ManaCost::Cost {
+            generic: 0,
+            shards: vec![ManaCostShard::White],
+        });
+        let brave = builder.id();
+        scenario.with_mana_pool(
+            PlayerId(0),
+            vec![ManaUnit::new(ManaType::White, brave, false, vec![])],
+        );
+        let mut runner = scenario.build();
+        runner.state_mut().active_player = PlayerId(0);
+        runner.state_mut().priority_player = PlayerId(0);
+        let outcome = runner.cast(brave).resolve();
+        let state = outcome.state().clone();
+        assert!(
+            matches!(
+                &state.waiting_for,
+                WaitingFor::NamedChoice { source: None, .. }
+            ),
+            "Brave the Elements must halt on its source-less color prompt"
         );
         state
     }
@@ -2989,13 +3034,14 @@ mod tests {
     }
 
     /// U1. Every enumerated answer the hatch admits is one the real reducer
-    /// admits — for a source-less prompt (Distant Melody), a `PendingEntry`
-    /// prompt (Thriving Grove) and an `ExactObjectAndResolution` prompt (Stave
-    /// Off). The `true` assertion is the positive reach guard;
+    /// admits — for a source-less prompt (Brave the Elements), a `PendingEntry`
+    /// prompt (Thriving Grove) and `ExactObjectAndResolution` prompts (Distant
+    /// Melody, Stave Off). The `true` assertion is the positive reach guard;
     /// `pass_oracle_accepts` is the soundness check.
     #[test]
     fn named_choice_hatch_is_sound_against_the_reducer() {
         for state in [
+            brave_the_elements_named_choice_state(),
             distant_melody_named_choice_state(),
             thriving_grove_named_choice_state(),
             stave_off_named_choice_state(),
@@ -3156,26 +3202,30 @@ mod tests {
     /// asserts are reach guards; the per-method zero counters are the evidence.
     #[test]
     fn named_choice_hatch_is_wired_into_both_accept_methods() {
-        let state = distant_melody_named_choice_state();
-        let candidate = named_choice_candidates(&state)
-            .into_iter()
-            .next()
-            .expect("the prompt must enumerate ChooseOption candidates");
+        for state in [
+            brave_the_elements_named_choice_state(),
+            distant_melody_named_choice_state(),
+        ] {
+            let candidate = named_choice_candidates(&state)
+                .into_iter()
+                .next()
+                .expect("the prompt must enumerate ChooseOption candidates");
 
-        crate::game::perf_counters::reset();
-        assert!(SimulationFilter.accept(&state, &candidate));
-        assert_eq!(
-            crate::game::perf_counters::snapshot().raw_validation_state_clones,
-            0,
-            "`accept` must answer an enumerated named choice without cloning"
-        );
+            crate::game::perf_counters::reset();
+            assert!(SimulationFilter.accept(&state, &candidate));
+            assert_eq!(
+                crate::game::perf_counters::snapshot().raw_validation_state_clones,
+                0,
+                "`accept` must answer an enumerated named choice without cloning"
+            );
 
-        crate::game::perf_counters::reset();
-        assert!(SimulationFilter.accept_with_probe(&state, &candidate, None));
-        assert_eq!(
-            crate::game::perf_counters::snapshot().raw_validation_state_clones,
-            0,
-            "`accept_with_probe` must answer an enumerated named choice without cloning"
-        );
+            crate::game::perf_counters::reset();
+            assert!(SimulationFilter.accept_with_probe(&state, &candidate, None));
+            assert_eq!(
+                crate::game::perf_counters::snapshot().raw_validation_state_clones,
+                0,
+                "`accept_with_probe` must answer an enumerated named choice without cloning"
+            );
+        }
     }
 }

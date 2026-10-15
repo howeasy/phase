@@ -55,6 +55,9 @@ const DISTANT_MELODY: &str =
 const STAVE_OFF: &str =
     "Target creature gains protection from the color of your choice until end of turn.";
 
+/// Brave the Elements, verbatim.
+const BRAVE_THE_ELEMENTS: &str = "Choose a color. White creatures you control gain protection from the chosen color until end of turn.";
+
 fn chosen_options(actions: &[GameAction]) -> BTreeSet<String> {
     actions
         .iter()
@@ -266,7 +269,9 @@ fn as_enters_creature_type_choice_offers_its_domain_without_simulation() {
 }
 
 /// CR 608.2d: Distant Melody's creature-type choice, raised while the
-/// sorcery resolves.
+/// sorcery resolves. Its answer persists on the resolving spell ("that type"
+/// is read back by the draw count), so the prompt is source-bound with
+/// `ExactObjectAndResolution`.
 #[test]
 fn resolving_spell_creature_type_choice_offers_its_domain_without_simulation() {
     let mut scenario = GameScenario::new();
@@ -286,10 +291,10 @@ fn resolving_spell_creature_type_choice_offers_its_domain_without_simulation() {
 
     let outcome = runner.cast(melody).resolve();
     let state = outcome.state();
-    assert_ne!(
+    assert_eq!(
         prompt_binding(state),
-        Some(NamedChoiceSourceBinding::PendingEntry),
-        "a resolving spell's choice is not an as-enters choice"
+        Some(NamedChoiceSourceBinding::ExactObjectAndResolution),
+        "a persisting resolution-time choice binds to the exact resolving source"
     );
     let WaitingFor::NamedChoice {
         choice_type,
@@ -312,11 +317,11 @@ fn resolving_spell_creature_type_choice_offers_its_domain_without_simulation() {
     assert_offers_named_domain_without_simulation(state);
 }
 
-/// CR 608.2d: Stave Off's color choice, raised while the instant resolves. Its
-/// answer persists on the resolving spell ("the color of your choice" is read
-/// back by the protection grant), so the prompt is source-bound with
-/// `ExactObjectAndResolution` and carries its matching context — the
-/// source-bound arm the reducer answers through `bind_named_choice`.
+/// CR 608.2d: Stave Off's color choice, raised while the instant resolves. Like
+/// Distant Melody above, its answer persists on the resolving spell ("the color
+/// of your choice" is read back by the protection grant), so the prompt is
+/// source-bound with `ExactObjectAndResolution` and carries its matching
+/// context — the arm the reducer answers through `bind_named_choice`.
 ///
 /// The sibling `ResolutionContext` binding is reached in production by a
 /// `CardPredicateGuess` prompt (Gollum, Scheming Guide's opponent guess); it
@@ -367,6 +372,53 @@ fn resolving_spell_persisted_color_choice_offers_its_domain_without_simulation()
         offered,
         BTreeSet::from(["White", "Blue", "Black", "Red", "Green"]),
         "\"the color of your choice\" is any of the five colors"
+    );
+
+    assert_offers_named_domain_without_simulation(state);
+}
+
+/// CR 608.2d: Brave the Elements' color choice, raised while the instant
+/// resolves. Its `Choose` does not persist, so the prompt carries no source —
+/// the source-less arm of the named-choice hatch.
+#[test]
+fn resolving_spell_unbound_color_choice_offers_its_domain_without_simulation() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let mut builder =
+        scenario.add_spell_to_hand_from_oracle(P0, "Brave the Elements", true, BRAVE_THE_ELEMENTS);
+    builder.with_mana_cost(ManaCost::Cost {
+        generic: 0,
+        shards: vec![ManaCostShard::White],
+    });
+    let brave = builder.id();
+    scenario.with_mana_pool(
+        P0,
+        vec![ManaUnit::new(ManaType::White, brave, false, vec![])],
+    );
+    let mut runner = scenario.build();
+    with_p0_priority(&mut runner);
+
+    let outcome = runner.cast(brave).resolve();
+    let state = outcome.state();
+    assert_eq!(
+        prompt_binding(state),
+        None,
+        "a non-persisting resolution-time choice carries no source"
+    );
+    let WaitingFor::NamedChoice {
+        choice_type,
+        options,
+        ..
+    } = &state.waiting_for
+    else {
+        unreachable!("prompt_binding checked the prompt shape");
+    };
+    assert!(matches!(choice_type, ChoiceType::Color { .. }));
+    let offered: BTreeSet<&str> = options.iter().map(String::as_str).collect();
+    assert_eq!(
+        offered,
+        BTreeSet::from(["White", "Blue", "Black", "Red", "Green"]),
+        "\"choose a color\" is any of the five colors"
     );
 
     assert_offers_named_domain_without_simulation(state);
