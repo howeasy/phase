@@ -277,9 +277,10 @@ pub(crate) fn structurally_valid_tap_for_convoke_payment(
 /// `NamedChoice` arm) — so `SimulationFilter` can skip its clone-and-apply
 /// probe. Mirrors [`structurally_valid_search_selection`].
 ///
-/// This is load-bearing for creature-type prompts: against a large board each
-/// of the ~375 enumerated answers paid a full `GameState` clone to re-derive a
-/// verdict that membership alone decides.
+/// This is load-bearing for creature-type prompts: each of the several hundred
+/// enumerated answers (one per known creature type) paid a full `GameState`
+/// clone, which is costly on a large board, to re-derive a verdict that
+/// membership alone decides.
 ///
 /// CR 601.2f + CR 601.2h + CR 602.2b: while a cast or activation is in progress
 /// (`GameState::withholds_priority`), an answer precedes determining and paying
@@ -315,9 +316,9 @@ pub(crate) fn structurally_valid_named_choice_answer(
         return false;
     }
 
-    // CR 107.1a/b: card names and free-entry numbers are supplied by the
-    // player and validated by rule rather than by option membership, so they
-    // stay on the simulation.
+    // CR 201.4 + CR 107.1a/b: card names (CR 201.4) and free-entry numbers
+    // (CR 107.1a/b) are supplied by the player and validated by rule rather than
+    // by option membership, so they stay on the simulation.
     if matches!(choice_type, ChoiceType::CardName) || choice_type.free_entry().is_some() {
         return false;
     }

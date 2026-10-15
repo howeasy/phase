@@ -2920,6 +2920,51 @@ mod tests {
         state
     }
 
+    /// Stave Off ("Target creature gains protection from the color of your
+    /// choice until end of turn."), cast at a creature and resolved up to its
+    /// CR 608.2d color prompt. The answer persists on the resolving spell, so
+    /// the prompt is `ExactObjectAndResolution`-bound with a matching context.
+    fn stave_off_named_choice_state() -> GameState {
+        use crate::types::mana::{ManaCostShard, ManaType, ManaUnit};
+
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(crate::types::phase::Phase::PreCombatMain);
+        let bear = scenario
+            .add_creature(PlayerId(0), "Grizzly Bears", 2, 2)
+            .id();
+        let mut builder = scenario.add_spell_to_hand_from_oracle(
+            PlayerId(0),
+            "Stave Off",
+            true,
+            "Target creature gains protection from the color of your choice until end of turn.",
+        );
+        builder.with_mana_cost(ManaCost::Cost {
+            generic: 0,
+            shards: vec![ManaCostShard::White],
+        });
+        let stave_off = builder.id();
+        scenario.with_mana_pool(
+            PlayerId(0),
+            vec![ManaUnit::new(ManaType::White, stave_off, false, vec![])],
+        );
+        let mut runner = scenario.build();
+        runner.state_mut().active_player = PlayerId(0);
+        runner.state_mut().priority_player = PlayerId(0);
+        let outcome = runner.cast(stave_off).target_object(bear).resolve();
+        let state = outcome.state().clone();
+        assert!(
+            matches!(
+                &state.waiting_for,
+                WaitingFor::NamedChoice { source: Some(source), .. }
+                    if source.binding
+                        == crate::types::game_state::NamedChoiceSourceBinding::ExactObjectAndResolution
+                        && source.has_matching_context()
+            ),
+            "Stave Off must halt on its source-bound color prompt"
+        );
+        state
+    }
+
     fn named_choice_candidates(state: &GameState) -> Vec<CandidateAction> {
         candidate_actions(state)
             .into_iter()
@@ -2944,14 +2989,16 @@ mod tests {
     }
 
     /// U1. Every enumerated answer the hatch admits is one the real reducer
-    /// admits — for both a source-less/resolution-bound prompt (Distant Melody)
-    /// and a `PendingEntry` prompt (Thriving Grove). The `true` assertion is the
-    /// positive reach guard; `pass_oracle_accepts` is the soundness check.
+    /// admits — for a source-less prompt (Distant Melody), a `PendingEntry`
+    /// prompt (Thriving Grove) and an `ExactObjectAndResolution` prompt (Stave
+    /// Off). The `true` assertion is the positive reach guard;
+    /// `pass_oracle_accepts` is the soundness check.
     #[test]
     fn named_choice_hatch_is_sound_against_the_reducer() {
         for state in [
             distant_melody_named_choice_state(),
             thriving_grove_named_choice_state(),
+            stave_off_named_choice_state(),
         ] {
             let candidates = named_choice_candidates(&state);
             assert!(
@@ -3015,7 +3062,7 @@ mod tests {
         no_entry.pending_replacement = None;
         assert!(!hatch(&no_entry, &choose(&grove_option)));
 
-        // (d) CR 107.1a/b: free-entry and card-name prompts are validated by
+        // (d) CR 107.1a/b + CR 201.4: free-entry and card-name prompts are validated by
         // rule, not by membership — even an answer that IS in `options`.
         for choice_type in [
             ChoiceType::NumberRange {

@@ -51,6 +51,10 @@ const VANQUISHERS_BANNER: &str = "As this artifact enters, choose a creature typ
 const DISTANT_MELODY: &str =
     "Choose a creature type. Draw a card for each permanent you control of that type.";
 
+/// Stave Off, verbatim.
+const STAVE_OFF: &str =
+    "Target creature gains protection from the color of your choice until end of turn.";
+
 fn chosen_options(actions: &[GameAction]) -> BTreeSet<String> {
     actions
         .iter()
@@ -303,6 +307,66 @@ fn resolving_spell_creature_type_choice_offers_its_domain_without_simulation() {
         options.len() > 1,
         "the creature-type prompt must offer more than one type; got {}",
         options.len()
+    );
+
+    assert_offers_named_domain_without_simulation(state);
+}
+
+/// CR 608.2d: Stave Off's color choice, raised while the instant resolves. Its
+/// answer persists on the resolving spell ("the color of your choice" is read
+/// back by the protection grant), so the prompt is source-bound with
+/// `ExactObjectAndResolution` and carries its matching context — the
+/// source-bound arm the reducer answers through `bind_named_choice`.
+///
+/// The sibling `ResolutionContext` binding is reached in production by a
+/// `CardPredicateGuess` prompt (Gollum, Scheming Guide's opponent guess); it
+/// takes the same hatch arm and has no fixture here.
+#[test]
+fn resolving_spell_persisted_color_choice_offers_its_domain_without_simulation() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let bear = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
+    let mut builder = scenario.add_spell_to_hand_from_oracle(P0, "Stave Off", true, STAVE_OFF);
+    builder.with_mana_cost(ManaCost::Cost {
+        generic: 0,
+        shards: vec![ManaCostShard::White],
+    });
+    let stave_off = builder.id();
+    scenario.with_mana_pool(
+        P0,
+        vec![ManaUnit::new(ManaType::White, stave_off, false, vec![])],
+    );
+    let mut runner = scenario.build();
+    with_p0_priority(&mut runner);
+
+    let outcome = runner.cast(stave_off).target_object(bear).resolve();
+    let state = outcome.state();
+    assert_eq!(
+        prompt_binding(state),
+        Some(NamedChoiceSourceBinding::ExactObjectAndResolution),
+        "a persisting resolution-time choice binds to the exact resolving source"
+    );
+    let WaitingFor::NamedChoice {
+        choice_type,
+        options,
+        source,
+        ..
+    } = &state.waiting_for
+    else {
+        unreachable!("prompt_binding checked the prompt shape");
+    };
+    assert!(
+        source
+            .as_ref()
+            .is_some_and(|source| source.has_matching_context()),
+        "the source-bound prompt must carry its matching context"
+    );
+    assert!(matches!(choice_type, ChoiceType::Color { .. }));
+    let offered: BTreeSet<&str> = options.iter().map(String::as_str).collect();
+    assert_eq!(
+        offered,
+        BTreeSet::from(["White", "Blue", "Black", "Red", "Green"]),
+        "\"the color of your choice\" is any of the five colors"
     );
 
     assert_offers_named_domain_without_simulation(state);
