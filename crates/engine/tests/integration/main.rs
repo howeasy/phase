@@ -1767,6 +1767,7 @@ mod menace_requires_two_blockers;
 mod minimus_containment_treasure_grant;
 mod modal_enters_becomes_choice;
 mod modal_mode_labels;
+mod modal_no_repeat_resets_on_zone_change;
 mod modal_saga_chapter_runtime;
 mod modal_trigger_zero_modes;
 mod molten_core_maestro_2384;
