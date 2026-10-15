@@ -1045,6 +1045,7 @@ mod issue_934_ring_goes_south;
 mod issue_941_champions_full_party;
 mod issue_9505_exile_origin_fail_closed;
 mod issue_9657_enters_with_counter_type;
+mod issue_9658_enters_with_whole_line_claim;
 mod issue_9660_where_x_substitutes_count;
 mod issue_9662_enters_with_second_placement;
 mod issue_9775_non_controller_activation_offered;

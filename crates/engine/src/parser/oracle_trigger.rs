@@ -253,7 +253,7 @@ fn parse_self_return_origin_zone(lower: &str) -> Option<Zone> {
     .and_then(|(_, zone, _)| zone)
 }
 
-fn self_recursion_trigger_zone(
+pub(crate) fn self_recursion_trigger_zone(
     ability: &crate::types::ability::AbilityDefinition,
     source_lower: &str,
 ) -> Option<Zone> {

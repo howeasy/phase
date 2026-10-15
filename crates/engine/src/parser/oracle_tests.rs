@@ -27772,16 +27772,47 @@ fn enters_with_n_additional_counters_parses_canonical_type() {
         (counter_type.clone(), count.clone())
     }
 
-    // "that creature enters with two additional +1/+1 counters on it" (Necromantic Summons)
-    let (ct, count) = enters_counter(
-        "Put target creature card from a graveyard onto the battlefield under your control.\n\
-         Spell mastery — If there are two or more instant and/or sorcery cards in your graveyard, \
-         that creature enters with two additional +1/+1 counters on it.",
-        "Necromantic Summons",
-        &["Sorcery"],
-    );
-    assert_eq!(ct, CounterType::Plus1Plus1, "Necromantic Summons type");
-    assert_eq!(count, QuantityExpr::Fixed { value: 2 }, "count");
+    // CR 608.2c + CR 614.12: riders whose subject a preceding mover supplies are
+    // not replacements on the card. Necromantic Summons gates its rider on spell
+    // mastery and Turntimber Symbiosis on the card's mana value — neither is an
+    // "enters this way" gate the mover's entry counters can carry — so each rider
+    // is an explicit gap, never a `PutCounter` replacement on the sorcery itself.
+    for (name, oracle) in [
+        (
+            "Necromantic Summons",
+            "Put target creature card from a graveyard onto the battlefield under your control.\n\
+             Spell mastery — If there are two or more instant and/or sorcery cards in your graveyard, \
+             that creature enters with two additional +1/+1 counters on it.",
+        ),
+        (
+            "Turntimber Symbiosis",
+            "Look at the top seven cards of your library. You may put a creature card from among them \
+             onto the battlefield. If that card has mana value 3 or less, it enters with three \
+             additional +1/+1 counters on it. Put the rest on the bottom of your library in a random order.",
+        ),
+    ] {
+        let parsed = parse_oracle_text(oracle, name, &[], &["Sorcery".to_string()], &[]);
+        assert!(
+            parsed.replacements.is_empty(),
+            "{name}: the rider is not a replacement on the sorcery: {parsed:?}"
+        );
+        assert!(
+            parsed.abilities.iter().any(|ability| {
+                let mut cursor = Some(ability);
+                std::iter::from_fn(|| {
+                    let node = cursor?;
+                    cursor = node.sub_ability.as_deref();
+                    Some(node)
+                })
+                .any(|node| {
+                    node.effect
+                        .unimplemented_description()
+                        .is_some_and(|text| text.contains("enters with"))
+                })
+            }),
+            "{name}: the rider stays an explicit gap: {parsed:?}"
+        );
+    }
 
     // "it enters with two additional +1/+1 counters on it" (Heroic Return).
     //
@@ -27821,17 +27852,6 @@ fn enters_with_n_additional_counters_parses_canonical_type() {
     assert_eq!(*ct, CounterType::Plus1Plus1, "Heroic Return type");
     assert_eq!(*count, QuantityExpr::Fixed { value: 2 }, "count");
 
-    // "it enters with three additional +1/+1 counters on it" (Turntimber Symbiosis)
-    let (ct, count) = enters_counter(
-        "Look at the top seven cards of your library. You may put a creature card from among them \
-         onto the battlefield. If that card has mana value 3 or less, it enters with three \
-         additional +1/+1 counters on it. Put the rest on the bottom of your library in a random order.",
-        "Turntimber Symbiosis",
-        &["Sorcery"],
-    );
-    assert_eq!(ct, CounterType::Plus1Plus1, "Turntimber Symbiosis type");
-    assert_eq!(count, QuantityExpr::Fixed { value: 3 }, "count");
-
     // Non-P/T counter class: "it enters with three additional time counters on it" (Ravaging Riftwurm)
     let (ct, count) = enters_counter(
         "If this creature was kicked, it enters with three additional time counters on it.",
@@ -27866,17 +27886,19 @@ fn reflexive_entry_rider_voices_all_stay_on_the_trigger_path() {
          from your graveyard to the battlefield. If a creature is put onto the battlefield \
          this way, it enters with an additional +1/+1 counter on it.";
 
-    // Premise for the Passive Voice row (this is what makes its negative below
-    // non-vacuous and pins the revert): handed the WHOLE line, the replacement
-    // parser really does claim it. Only the head-scoped `enters with` gate keeps
-    // the interceptor from reaching this and dropping the reanimation instruction.
+    // Premise for the Passive Voice row: handed the WHOLE line, the replacement
+    // parser no longer claims it either (CR 614.1c + CR 608.2c, #9658: a line of
+    // several sentences is never one replacement, and the rider's pronoun names
+    // the reanimated card, not this creature). The head-scoped `enters with` gate
+    // and the whole-line gate are now two independent guards against publishing
+    // a replacement and dropping the head reanimation.
     assert!(
         crate::parser::oracle_replacement::parse_replacement_line(
             PASSIVE_VOICE,
             "Passive Voice Reanimator"
         )
-        .is_some(),
-        "Passive Voice Reanimator: premise — the un-scoped line is claimable by the \
+        .is_none(),
+        "Passive Voice Reanimator: premise — the un-scoped line is not claimable by the \
          replacement parser"
     );
     // Premise for the Winter Soldier row (#9657): its first "with" belongs to the
@@ -33837,11 +33859,16 @@ fn phylactery_lich_as_enters_object_effect_body_keeps_prior_shape() {
 }
 
 /// The static-shaped routing site runs before Priority 8. Static-shaped frame
-/// lines that a Priority-8 arm claims today (Thief of Blood's population
-/// counter removal, Arsenal Thresher's optional reveal) are declined by the
-/// gate and keep their Priority-8 replacement.
+/// lines (Thief of Blood's population counter removal, Arsenal Thresher's
+/// optional reveal) are declined by the one-shot gate and reach Priority 8.
+/// CR 614.1c + CR 608.2c: there the frame's instruction and the source
+/// enters-with sentence are two instructions; one replacement cannot carry
+/// both, and the counter count depends on the frame's result ("removed this
+/// way" / "revealed this way"), so the whole line is one `enters_with_clause`
+/// gap. At base it was a counter replacement that dropped the frame's
+/// instruction.
 #[test]
-fn static_shaped_as_enters_lines_keep_priority_eight_replacement() {
+fn static_shaped_as_enters_lines_are_one_enters_with_clause_gap() {
     for (name, oracle, line, description, keywords, types, subtypes) in [
         (
             "Thief of Blood",
@@ -33863,20 +33890,22 @@ fn static_shaped_as_enters_lines_keep_priority_eight_replacement() {
         ),
     ] {
         let parsed = parse_oracle_text(oracle, name, &keywords, &types, &subtypes);
-        let moved: Vec<&ReplacementDefinition> = parsed
-            .replacements
-            .iter()
-            .filter(|repl| repl.event == ReplacementEvent::Moved)
-            .collect();
-        assert_eq!(moved.len(), 1, "{name}: {:?}", parsed.replacements);
-        assert_eq!(moved[0].description.as_deref(), Some(description), "{name}");
         assert!(
-            matches!(
-                moved[0].execute.as_deref().map(|e| &*e.effect),
-                Some(Effect::PutCounter { .. })
-            ),
-            "{name}: {:?}",
-            moved[0].execute
+            parsed
+                .replacements
+                .iter()
+                .all(|repl| repl.event != ReplacementEvent::Moved),
+            "{name}: no replacement may carry half of the line, got {:?}",
+            parsed.replacements
+        );
+        assert!(
+            parsed.abilities.iter().any(|ability| matches!(
+                &*ability.effect,
+                Effect::Unimplemented { name, description: Some(text) }
+                    if name == "enters_with_clause" && text == description
+            )),
+            "{name}: the whole line is one enters_with_clause gap, got {:?}",
+            parsed.abilities
         );
         // Reach-guard: the static-shaped routing site sees the frame and the gate declines the body.
         assert!(
