@@ -207,40 +207,43 @@ fn choice_options_read_the_paid_x() {
 /// gap instead and the source enters with none.
 #[test]
 fn distributive_choice_gives_the_source_no_counters() {
-    const DISTRIBUTIVE: &str = "Each other creature you control enters with your choice of X \
-                                +1/+1 counters or X charge counters on it.";
-    let mut scenario = GameScenario::new();
-    scenario.at_phase(Phase::PreCombatMain);
-    let id = scenario
-        .add_creature_to_hand_from_oracle(P0, "Distributive Witness", 0, 1, DISTRIBUTIVE)
-        .with_mana_cost(ManaCost::Cost {
-            generic: 0,
-            shards: vec![ManaCostShard::X, ManaCostShard::Green],
-        })
-        .id();
-    scenario.with_mana_pool(
-        P0,
-        (0..=3)
-            .map(|_| ManaUnit::new(ManaType::Green, ObjectId(0), false, vec![]))
-            .collect(),
-    );
-    let mut runner = scenario.build();
-    runner.cast(id).x(3).resolve();
-    assert!(
-        !matches!(
-            runner.state().waiting_for,
-            WaitingFor::ChooseOneOfBranch { .. }
-        ),
-        "no counter choice is offered for the source itself"
-    );
-    runner.advance_until_stack_empty();
-    // `counters` is the reach guard: the X=3 spell resolved to the battlefield.
-    assert!(
-        counters(&runner, id).is_empty(),
-        "the source is not in its own subset: got {:?}",
-        runner.state().objects[&id].counters
-    );
-    assert!(has_unimplemented_ability(&runner, id));
+    for distributive in [
+        "Each other creature you control enters with your choice of X +1/+1 counters or X charge counters on it.",
+        "Each other commander you control enters with your choice of X +1/+1 counters or X charge counters on it.",
+    ] {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let id = scenario
+            .add_creature_to_hand_from_oracle(P0, "Distributive Witness", 0, 1, distributive)
+            .with_mana_cost(ManaCost::Cost {
+                generic: 0,
+                shards: vec![ManaCostShard::X, ManaCostShard::Green],
+            })
+            .id();
+        scenario.with_mana_pool(
+            P0,
+            (0..=3)
+                .map(|_| ManaUnit::new(ManaType::Green, ObjectId(0), false, vec![]))
+                .collect(),
+        );
+        let mut runner = scenario.build();
+        runner.cast(id).x(3).resolve();
+        assert!(
+            !matches!(
+                runner.state().waiting_for,
+                WaitingFor::ChooseOneOfBranch { .. }
+            ),
+            "{distributive}: no counter choice is offered for the source itself"
+        );
+        runner.advance_until_stack_empty();
+        // `counters` is the reach guard: the X=3 spell resolved to the battlefield.
+        assert!(
+            counters(&runner, id).is_empty(),
+            "{distributive}: the source is not in its own subset: got {:?}",
+            runner.state().objects[&id].counters
+        );
+        assert!(has_unimplemented_ability(&runner, id), "{distributive}");
+    }
     // Paired positive control: the self-subject line with the same options and
     // the same X places the chosen X counters (`choice_options_read_the_paid_x`
     // pins every branch; this pins that X=3 reaches a self choice).
@@ -277,6 +280,39 @@ fn sole_gap_name(face: &CardFace) -> Option<&str> {
             _ => None,
         },
         _ => None,
+    }
+}
+
+/// SHAPE: CR 614.12: property-only and union distributive subjects must not
+/// publish the self-only counter choice. Each self-subject twin is a reach guard.
+#[test]
+fn untyped_distributive_choice_is_an_explicit_gap() {
+    const SELF_CHOICE: &str =
+        "This creature enters with your choice of X +1/+1 counters or X charge counters on it.";
+    for oracle in [
+        "Each other commander you control enters with your choice of X +1/+1 counters or X charge counters on it.",
+        "Other commander you control enters with your choice of X +1/+1 counters or X charge counters on it.",
+        "Each commander you control enters with your choice of X +1/+1 counters or X charge counters on it.",
+        "Commanders you control enter with your choice of X +1/+1 counters or X charge counters on it.",
+        "Each other token you control enters with your choice of X +1/+1 counters or X charge counters on it.",
+        "Each other artifact or creature you control enters with your choice of X +1/+1 counters or X charge counters on it.",
+        "Each other creature or planeswalker you control enters with your choice of X +1/+1 counters or X charge counters on it.",
+        "Tokens you control enter with your choice of X +1/+1 counters or X charge counters on them.",
+    ] {
+        let control = parsed_face(SELF_CHOICE);
+        assert_eq!(control.replacements.len(), 1, "{oracle}: self twin reaches choice");
+        assert!(matches!(
+            &*control.replacements[0].execute.as_ref().expect("choice execute").effect,
+            Effect::ChooseOneOf { branches, .. } if branches.len() == 2
+        ));
+        assert!(card_face_gaps(&control).is_empty(), "{oracle}: readable twin");
+
+        let face = parsed_face(oracle);
+        assert!(sole_gap_name(&face).is_some(), "{oracle}: one explicit gap");
+        assert!(face.replacements.is_empty(), "{oracle}: no self replacement");
+        assert!(face.triggers.is_empty(), "{oracle}: no trigger fragment");
+        assert!(face.static_abilities.is_empty(), "{oracle}: no static fragment");
+        assert!(!card_face_gaps(&face).is_empty(), "{oracle}: unsupported");
     }
 }
 

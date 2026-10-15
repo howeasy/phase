@@ -4035,6 +4035,18 @@ fn parse_distributive_subject(work_text: &str) -> Option<(&str, SubjectScope)> {
     .ok()
 }
 
+/// CR 614.12: recognize an explicit or bare-plural distributive enters-with
+/// subject before checking whether its filter is supported by the typed path.
+fn recognize_enters_with_distributive_subject(work_text: &str) -> Option<(&str, SubjectScope)> {
+    parse_distributive_subject(work_text).or_else(|| {
+        // CR 614.12 + issue #7821: only the plural verb marks a bare subject;
+        // singular self-subject lines use "enters with" or "escapes with".
+        (nom_primitives::scan_contains(work_text, "enter with")
+            || nom_primitives::scan_contains(work_text, "escape with"))
+        .then_some((work_text, SubjectScope::Distributive))
+    })
+}
+
 /// Extract life payment amount from "pay N life" pattern.
 fn extract_life_payment(text: &str) -> Option<i32> {
     let after_pay = strip_after(text, "pay ")?;
@@ -4212,48 +4224,36 @@ fn enters_with_counters_outcome(
     //     artifact source simply doesn't match a Dragon type filter, so no
     //     self-application occurs here — but the class must not exclude itself.)
     //
-    // `parse_distributive_subject` strips the prefix and reports the scope, then
-    // `parse_type_phrase_folding` acts as the type detector: accept the subject iff the
-    // parse yields a typed filter with a concrete type/subtype (not the `Any`
-    // fallback). A non-type subject parses to the `[Any]` fallback and is
-    // rejected, falling through to the `SelfRef` self-ETB branch.
-    let subject = parse_distributive_subject(work_text)
-        .or_else(|| {
-            // CR 614.12 + issue #7821: bare-plural distributive subject —
-            // "Colorless creatures you control enter with two additional +1/+1
-            // counters on them" (Curator Beastie). Only the PLURAL verb marks a
-            // bare subject: singular lines are the self-ETB "~ enters with"
-            // shape or carry the explicit each/other prefix handled above; the
-            // type-validity gate below still rejects non-subject plurals.
-            (nom_primitives::scan_contains(work_text, "enter with")
-                || nom_primitives::scan_contains(work_text, "escape with"))
-            .then_some((work_text, SubjectScope::Distributive))
-        })
-        .and_then(|(subject_text, scope)| {
-            // CR 105.2a-105.2c: peel a leading color-quality word ("colorless "/
-            // "monocolored "/"multicolored ") so the type detector sees the
-            // noun and the quality survives as a filter property.
-            let (after_color, color_prop) =
-                crate::parser::oracle_static::peel_color_quality_prefix(subject_text);
-            let (filter, _) = parse_type_phrase_folding(after_color);
-            let is_valid = matches!(
-                &filter,
-                TargetFilter::Typed(TypedFilter { type_filters, .. })
-                    if !type_filters.is_empty()
-                        && type_filters.as_slice() != [TypeFilter::Any]
-            );
-            if !is_valid {
-                return None;
+    // Recognition is independent of the type-validity gate: property-only
+    // heads can yield empty type_filters, and unions need not yield Typed.
+    // The single-placement path still accepts only a concrete type/subtype;
+    // unsupported filters retain its existing SelfRef fallback.
+    let distributive_subject = recognize_enters_with_distributive_subject(work_text);
+    let subject = distributive_subject.and_then(|(subject_text, scope)| {
+        // CR 105.2a-105.2c: peel a leading color-quality word ("colorless "/
+        // "monocolored "/"multicolored ") so the type detector sees the
+        // noun and the quality survives as a filter property.
+        let (after_color, color_prop) =
+            crate::parser::oracle_static::peel_color_quality_prefix(subject_text);
+        let (filter, _) = parse_type_phrase_folding(after_color);
+        let is_valid = matches!(
+            &filter,
+            TargetFilter::Typed(TypedFilter { type_filters, .. })
+                if !type_filters.is_empty()
+                    && type_filters.as_slice() != [TypeFilter::Any]
+        );
+        if !is_valid {
+            return None;
+        }
+        let filter = match (filter, color_prop) {
+            (TargetFilter::Typed(mut tf), Some(prop)) => {
+                tf.properties.insert(0, prop);
+                TargetFilter::Typed(tf)
             }
-            let filter = match (filter, color_prop) {
-                (TargetFilter::Typed(mut tf), Some(prop)) => {
-                    tf.properties.insert(0, prop);
-                    TargetFilter::Typed(tf)
-                }
-                (other, _) => other,
-            };
-            Some((filter, scope))
-        });
+            (other, _) => other,
+        };
+        Some((filter, scope))
+    });
 
     // CR 614.12a + CR 608.2d: "~ enters with your choice of <counter-choice-list>
     // on it" — the controller chooses WHICH counter as the permanent enters, and
@@ -4335,7 +4335,7 @@ fn enters_with_counters_outcome(
         // your choice of …") names a general subset of permanents, which this
         // shape does not carry — decline rather than give the source itself the
         // chosen counters.
-        if subject.is_some() {
+        if distributive_subject.is_some() {
             return Err(EntersWithDecline::NotThisShape);
         }
         let choice = AbilityDefinition::new(
@@ -21157,9 +21157,10 @@ mod tests {
     /// CR 107.3 + CR 107.3i: "where X is <q>" defines the X of every entry that
     /// prints one, but a list publishes its entries' printed counts — an
     /// X-bearing entry would keep the cost X (`CostXPaid`) where the definition
-    /// belongs. Probed at base: each list line below parsed as supported with
-    /// `CostXPaid` entries. They fail closed now, whatever the definition, while
-    /// the X-free twin (the same list without an X entry) still parses.
+    /// belongs. At base, readable lists retained their CostXPaid entry counts,
+    /// the repeated-recipient witness published only the first placement, and
+    /// the on-him witness was already declined by #9880. All witnesses below
+    /// decline now.
     /// SYNTHETIC: no printed card has this shape.
     #[test]
     fn enters_with_counter_list_with_x_entry_and_where_x_fails_closed() {
@@ -21514,11 +21515,12 @@ mod tests {
     }
 
     /// CR 614.12: the choice replacement is built for the entering permanent
-    /// alone, so a distributive subject declines (the single path's subject
-    /// check, unchanged) instead of giving the source the chosen counters.
+    /// alone, so a recognized distributive subject declines instead of giving
+    /// the source the chosen counters. The single path's validity gate is unchanged.
     /// SYNTHETIC: no printed card has a distributive counter choice.
     #[test]
     fn enters_with_choice_with_a_distributive_subject_declines() {
+        let mut unexpected = Vec::new();
         for line in [
             "Each other creature you control enters with your choice of X +1/+1 counters or X charge counters on it.",
             "Each creature you control enters with your choice of a +1/+1 counter or a lifelink counter on it.",
@@ -21526,14 +21528,26 @@ mod tests {
             "Colorless creatures you control enter with your choice of X +1/+1 counters or X charge counters on them.",
             "Each other creature you control enters tapped with your choice of X +1/+1 counters or X charge counters on it.",
             "Each other creature you control enters with your choice of two different counters on it from among menace, deathtouch, and lifelink.",
+            "Each other commander you control enters with your choice of X +1/+1 counters or X charge counters on it.",
+            "Other commander you control enters with your choice of X +1/+1 counters or X charge counters on it.",
+            "Each commander you control enters with your choice of X +1/+1 counters or X charge counters on it.",
+            "Commanders you control enter with your choice of X +1/+1 counters or X charge counters on it.",
+            "Each other token you control enters with your choice of X +1/+1 counters or X charge counters on it.",
+            "Each other artifact or creature you control enters with your choice of X +1/+1 counters or X charge counters on it.",
+            "Each other creature or planeswalker you control enters with your choice of X +1/+1 counters or X charge counters on it.",
+            "Tokens you control enter with your choice of X +1/+1 counters or X charge counters on them.",
         ] {
-            assert_eq!(
-                enters_with_counters_outcome(&line.to_lowercase(), line).err(),
-                Some(EntersWithDecline::NotThisShape),
-                "{line:?}"
-            );
-            assert!(parse_replacement_line(line, "Test Creature").is_none(), "{line:?}");
+            if enters_with_counters_outcome(&line.to_lowercase(), line).err()
+                != Some(EntersWithDecline::NotThisShape)
+                || parse_replacement_line(line, "Test Creature").is_some()
+            {
+                unexpected.push(line);
+            }
         }
+        assert!(
+            unexpected.is_empty(),
+            "distributive choices published: {unexpected:#?}"
+        );
         // Reach guards: the self subject with the same options parses — bare,
         // kicked, tapped, escaped, and Grimdancer's from-among form.
         for line in [
