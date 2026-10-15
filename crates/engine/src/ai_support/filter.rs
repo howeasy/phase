@@ -1508,10 +1508,10 @@ fn legality_equivalence_key(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ai_support::candidate_actions;
+    use crate::ai_support::{candidate_actions, structurally_valid_named_choice_answer as hatch};
     use crate::game::layers::evaluate_layers;
     use crate::game::scenario::GameScenario;
-    use crate::types::game_state::TransientContinuousEffectBindings;
+    use crate::types::game_state::{ActivationTargetSelection, TransientContinuousEffectBindings};
     use crate::types::identifiers::ObjectIncarnationRef;
 
     /// Matrix rows 9a + 9b — the mana-role POISON scan is a PURE EXTENSION.
@@ -2087,15 +2087,16 @@ mod tests {
     use crate::game::combat::{AttackTarget, CombatState};
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        AbilityCost, AbilityDefinition, AbilityKind, Comparator, ContinuousModification, Duration,
-        Effect, FilterProp, ParitySource, ParsedCondition, QuantityExpr, QuantityRef, TargetFilter,
-        TargetRef, TypedFilter,
+        AbilityCost, AbilityDefinition, AbilityKind, ChoiceType, Comparator,
+        ContinuousModification, Duration, Effect, FilterProp, NumberDistinctness, ParitySource,
+        ParsedCondition, QuantityExpr, QuantityRef, ResolvedAbility, TargetFilter, TargetRef,
+        TypedFilter,
     };
     use crate::types::card_type::CoreType;
     use crate::types::counter::CounterMatch;
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::keywords::Keyword;
-    use crate::types::mana::ManaCost;
+    use crate::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
     use crate::types::phase::Phase;
     use crate::types::player::PlayerId;
     use crate::types::zones::Zone;
@@ -2855,8 +2856,6 @@ mod tests {
     /// resolution-time creature-type prompt. The answer persists on the
     /// resolving spell, so the prompt is `ExactObjectAndResolution`-bound.
     fn distant_melody_named_choice_state() -> GameState {
-        use crate::types::mana::{ManaCostShard, ManaType, ManaUnit};
-
         let mut scenario = GameScenario::new();
         scenario.at_phase(crate::types::phase::Phase::PreCombatMain);
         let mut builder = scenario.add_spell_to_hand_from_oracle(
@@ -2897,8 +2896,6 @@ mod tests {
     /// up to its CR 608.2d color prompt. Its `Choose` does not persist, so the
     /// prompt carries no source.
     fn brave_the_elements_named_choice_state() -> GameState {
-        use crate::types::mana::{ManaCostShard, ManaType, ManaUnit};
-
         let mut scenario = GameScenario::new();
         scenario.at_phase(crate::types::phase::Phase::PreCombatMain);
         let mut builder = scenario.add_spell_to_hand_from_oracle(
@@ -2970,8 +2967,6 @@ mod tests {
     /// CR 608.2d color prompt. The answer persists on the resolving spell, so
     /// the prompt is `ExactObjectAndResolution`-bound with a matching context.
     fn stave_off_named_choice_state() -> GameState {
-        use crate::types::mana::{ManaCostShard, ManaType, ManaUnit};
-
         let mut scenario = GameScenario::new();
         scenario.at_phase(crate::types::phase::Phase::PreCombatMain);
         let bear = scenario
@@ -3073,13 +3068,6 @@ mod tests {
     /// hatch must then refuse (`false` costs only a simulation).
     #[test]
     fn named_choice_hatch_refuses_what_the_reducer_or_cost_payment_refuses() {
-        use crate::ai_support::structurally_valid_named_choice_answer as hatch;
-        use crate::types::ability::{
-            AbilityCost, ChoiceType, Effect, NumberDistinctness, QuantityExpr, QuantityRef,
-            ResolvedAbility, TargetFilter,
-        };
-        use crate::types::game_state::ActivationTargetSelection;
-
         let melody = distant_melody_named_choice_state();
         let melody_option = first_named_option(&melody);
         assert!(hatch(&melody, &choose(&melody_option)), "premise: accepted");

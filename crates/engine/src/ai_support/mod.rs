@@ -25,15 +25,15 @@ use crate::game::priority::{standing_priority_pass, StandingPriorityPass};
 use crate::game::restrictions;
 use crate::game::triggers;
 use crate::types::ability::{
-    AbilityBlockEntry, AbilityKind, CounterCostSelection, TapCreaturesSelectionMode, TargetRef,
-    TriggerDefinition,
+    AbilityBlockEntry, AbilityKind, ChoiceType, CounterCostSelection, TapCreaturesSelectionMode,
+    TargetRef, TriggerDefinition,
 };
 use crate::types::actions::{GameAction, MulliganChoice};
 use crate::types::card_type::CoreType;
 use crate::types::events::{GameEvent, ManaTapState};
 use crate::types::game_state::{
-    AutoMayChoice, CastOfferKind, GameState, MulliganDecisionPhase, PayCostKind,
-    PendingMulliganAction, PriorityPassingMode, WaitingFor,
+    AutoMayChoice, CastOfferKind, GameState, MulliganDecisionPhase, NamedChoiceSourceBinding,
+    PayCostKind, PendingMulliganAction, PriorityPassingMode, WaitingFor,
 };
 use crate::types::identifiers::ObjectId;
 use crate::types::mana::ManaCost;
@@ -293,9 +293,6 @@ pub(crate) fn structurally_valid_named_choice_answer(
     state: &GameState,
     action: &GameAction,
 ) -> bool {
-    use crate::types::ability::ChoiceType;
-    use crate::types::game_state::NamedChoiceSourceBinding;
-
     let (
         WaitingFor::NamedChoice {
             choice_type,
