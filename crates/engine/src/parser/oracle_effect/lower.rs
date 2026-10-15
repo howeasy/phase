@@ -1,3 +1,5 @@
+use std::ops::ControlFlow;
+
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_till1, take_until};
 use nom::character::complete::{multispace0, multispace1, satisfy};
@@ -45,6 +47,8 @@ use crate::types::ability::{
     SpellStackToGraveyardReplacement, StaticCondition, StaticDefinition, SubAbilityLink,
     TargetChoiceTiming, TargetFilter, TypeFilter, TypedFilter,
 };
+use crate::types::ability_visit::nodes_mut::visit_ability_def;
+use crate::types::ability_visit::DefinitionNodeMut;
 use crate::types::counter::CounterType;
 use crate::types::game_state::{DistributionUnit, TargetSelectionConstraint};
 use crate::types::phase::Phase;
@@ -1837,6 +1841,77 @@ pub(super) fn refuse_cast_rider_on_lingering_grant(def: &mut AbilityDefinition) 
     for mode in def.mode_abilities.iter_mut() {
         refuse_cast_rider_on_lingering_grant(mode);
     }
+}
+
+/// The honest-gap name for a resolution-timed zone selection that carries an
+/// aggregate budget constraint no resolution-time authority enforces.
+pub(super) const UNENFORCED_AGGREGATE_RESOLUTION_SELECTION_GAP: &str =
+    "unenforced_aggregate_resolution_selection";
+
+/// CR 608.2d + CR 202.3 + CR 115.1: refuse a resolution-timed `ChangeZone`
+/// selection whose aggregate budget constraint has no enforcement channel.
+///
+/// The constraint is AGGREGATE: `TargetSelectionConstraint::TotalManaValue`
+/// bounds the COMBINED mana value (CR 202.3) of the whole chosen set, so it can
+/// never be folded into the per-card filter the resolution prompt is built from.
+/// Its only ENFORCEMENT site is
+/// `game::ability_utils::validate_target_constraints`, which runs on the
+/// target-ANNOUNCEMENT paths (CR 115.1 + CR 601.2c) and on the stateless
+/// legal-target enumeration; a `TargetChoiceTiming::Resolution` pick reaches
+/// neither. On the resolution route, `game::effects::change_zone` builds
+/// `WaitingFor::EffectZoneChoice` carrying cardinality and the zone/destination
+/// parameters but no aggregate budget, and `game::engine_resolution_choices`'
+/// `SelectCards` arm validates count, distinctness and set membership — neither
+/// file references `target_constraints` at all. CR 608.2d's "the player can't
+/// choose an option that's illegal" is therefore unenforceable for this clause:
+/// at starting intensity 3, two eligible mana-value-2 creature cards satisfy the
+/// per-card filter and the 0+-card cardinality while totalling 4.
+///
+/// Reporting such a card `supported` would claim a cap the engine cannot honor,
+/// so the clause is refused until the typed constraint reaches and is enforced
+/// by resolution selection. Keyed on the SHAPE — a resolution-timed `ChangeZone`
+/// zone selection carrying an aggregate budget in `target_constraints` — never on
+/// a card name, so every carrier of the shape stays honestly red.
+///
+/// `ChangeZone` alone, deliberately: it is the effect that opens the interactive
+/// `EffectZoneChoice` selection this gate is about. The mass sweep
+/// (`ChangeZoneAll`) selects nothing and so has no set for an aggregate budget to
+/// bound, and a stack-timed `ChangeZone` is a declared target set, where
+/// `validate_target_constraints` DOES enforce the cap.
+pub(super) fn refuse_unenforced_aggregate_resolution_selection(def: &mut AbilityDefinition) {
+    // The walk is the engine's single complete definition traversal
+    // (`types/ability_visit.rs`), never a second one written here: it descends
+    // `sub_ability` / `else_ability` / `mode_abilities` AND every definition an
+    // effect payload carries (a delayed trigger's body, a token's abilities, a
+    // granted static, a mode branch), which is the full set of definitions this
+    // refusal must reach.
+    //
+    // The scope is deliberately the entry point's default
+    // `ResolutionScope::IncludeRegisteredLater`, not `OwnResolutionOnly`: a
+    // registered-later ability is still EXECUTED by this definition, so an
+    // aggregate budget with no enforcement channel hiding in one is refused
+    // exactly as its chain-link sibling is. Narrowing the scope would leave
+    // those payloads silently claiming a cap nothing enforces.
+    // `ControlFlow::Break` is the walk's early-exit channel and is unused here:
+    // the refusal visits every node.
+    let _ = visit_ability_def(def, &mut |node: DefinitionNodeMut<'_>| {
+        if let DefinitionNodeMut::Ability(node) = node {
+            let aggregate_budget_selection =
+                matches!(node.target_choice_timing, TargetChoiceTiming::Resolution)
+                    && matches!(&*node.effect, Effect::ChangeZone { .. })
+                    && node.target_constraints.iter().any(|constraint| {
+                        matches!(constraint, TargetSelectionConstraint::TotalManaValue { .. })
+                    });
+            if aggregate_budget_selection {
+                let fragment = node.description.clone().unwrap_or_else(|| {
+                    "return any number of cards with total mana value X or less".to_string()
+                });
+                *node.effect =
+                    Effect::unimplemented(UNENFORCED_AGGREGATE_RESOLUTION_SELECTION_GAP, fragment);
+            }
+        }
+        ControlFlow::Continue(())
+    });
 }
 
 /// True when any def in the chain is a `RevealTop` carrying a `multi_target` spec.

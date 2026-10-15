@@ -4343,6 +4343,14 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
     // any "and ..." continuation steps.
     super::propagate_guess_branch_condition_to_continuations(&mut result);
 
+    // CR 608.2d + CR 202.3 + CR 115.1: the assembled tree is where both halves of
+    // an aggregate-budget clause first exist together — the typed constraint the
+    // parser recovered and the resolution timing it routed the pick to. A refusal,
+    // not a repair: it REPLACES an effect in place, so it runs here, after every
+    // other final-fold gate has read the assembled tree. See
+    // `refuse_unenforced_aggregate_resolution_selection`.
+    super::lower::refuse_unenforced_aggregate_resolution_selection(&mut result);
+
     result
 }
 
