@@ -1209,6 +1209,7 @@ mod mystic_forge_regression;
 mod n_or_more_creatures_attack_any_player;
 mod name_sticker_goblin;
 mod named_choice_free_entry_contract;
+mod named_choice_legal_actions;
 mod namor_attacking_that_player;
 mod narci_fable_singer_final_chapter_drain;
 mod narset_jeskai_waymaster_draw_spells_cast;

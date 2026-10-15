@@ -271,6 +271,77 @@ pub(crate) fn structurally_valid_tap_for_convoke_payment(
     }
 }
 
+/// CR 608.2d + CR 614.12a: A named choice made while an effect applies, or as a
+/// permanent enters, is announced from the prompt's enumerated domain, and the
+/// reducer accepts any member of it (`engine_resolution_choices.rs`, the
+/// `NamedChoice` arm) — so `SimulationFilter` can skip its clone-and-apply
+/// probe. Mirrors [`structurally_valid_search_selection`].
+///
+/// This is load-bearing for creature-type prompts: against a large board each
+/// of the ~375 enumerated answers paid a full `GameState` clone to re-derive a
+/// verdict that membership alone decides.
+///
+/// CR 601.2f + CR 601.2h + CR 602.2b: while a cast or activation is in progress
+/// (`GameState::withholds_priority`), an answer precedes determining and paying
+/// the total cost and could make that cost unpayable, so the simulation stays
+/// the authority there.
+///
+/// Conservative by design: `false` only costs a simulation, so any shape this
+/// does not fully model must return `false` rather than guess.
+pub(crate) fn structurally_valid_named_choice_answer(
+    state: &GameState,
+    action: &GameAction,
+) -> bool {
+    use crate::types::ability::ChoiceType;
+    use crate::types::game_state::NamedChoiceSourceBinding;
+
+    let (
+        WaitingFor::NamedChoice {
+            choice_type,
+            options,
+            source,
+            ..
+        },
+        GameAction::ChooseOption { choice },
+    ) = (&state.waiting_for, action)
+    else {
+        return false;
+    };
+
+    // CR 601.2f + CR 601.2h + CR 602.2b: an answer given mid-cast or
+    // mid-activation resumes cost determination and payment, which can fail
+    // for that answer; only the simulation observes that.
+    if state.withholds_priority() {
+        return false;
+    }
+
+    // CR 107.1a/b: card names and free-entry numbers are supplied by the
+    // player and validated by rule rather than by option membership, so they
+    // stay on the simulation.
+    if matches!(choice_type, ChoiceType::CardName) || choice_type.free_entry().is_some() {
+        return false;
+    }
+
+    if !options.iter().any(|option| option == choice) {
+        return false;
+    }
+
+    // Whole-prompt checks the reducer applies after membership: a source-bound
+    // prompt must carry its matching context, and CR 614.12a a pre-entry
+    // choice must still answer the live parked entry.
+    match source {
+        None => true,
+        Some(s) if !s.has_matching_context() => false,
+        Some(s) => match s.binding {
+            NamedChoiceSourceBinding::PendingEntry => {
+                crate::game::replacement::pending_entry_named_choice_is_live(state)
+            }
+            NamedChoiceSourceBinding::ResolutionContext
+            | NamedChoiceSourceBinding::ExactObjectAndResolution => true,
+        },
+    }
+}
+
 fn cheap_reject_candidate(state: &GameState, action: &GameAction) -> bool {
     // Ready intentionally has no current acting player, but an active consent
     // grantor may still revoke. The candidate pipeline retains the frozen actor
