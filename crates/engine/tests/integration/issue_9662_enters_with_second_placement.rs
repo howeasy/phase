@@ -308,7 +308,7 @@ fn untyped_distributive_choice_is_an_explicit_gap() {
         assert!(card_face_gaps(&control).is_empty(), "{oracle}: readable twin");
 
         let face = parsed_face(oracle);
-        assert!(sole_gap_name(&face).is_some(), "{oracle}: one explicit gap");
+        assert_eq!(sole_gap_name(&face), Some("enters_with_clause"), "{oracle}: one explicit gap");
         assert!(face.replacements.is_empty(), "{oracle}: no self replacement");
         assert!(face.triggers.is_empty(), "{oracle}: no trigger fragment");
         assert!(face.static_abilities.is_empty(), "{oracle}: no static fragment");
@@ -329,6 +329,15 @@ fn unread_placement_lines_are_one_gap_through_the_whole_parse() {
     const QUOTED_TOKENS: &str = "\"If one or more tokens would be created under your control, \
                                  twice that many of those tokens are created instead.\"";
     let witnesses = [
+        // A distributive choice must not hand its quoted rider to a later parser.
+        format!(
+            "Each other commander you control enters with your choice of X +1/+1 counters or \
+             X charge counters on it and with {QUOTED_COUNTERS}"
+        ),
+        format!(
+            "Each other creature you control enters with your choice of X +1/+1 counters or \
+             X charge counters on it and with {QUOTED_COUNTERS}"
+        ),
         // #9662: a placement after the first placement's recipient.
         format!(
             "This creature enters with a +1/+1 counter on it and a lifelink counter on target \
@@ -369,14 +378,13 @@ fn unread_placement_lines_are_one_gap_through_the_whole_parse() {
              trample counter on it and with {QUOTED_COUNTERS}"
         ),
     ];
+    let mut unexpected = Vec::new();
     for oracle in &witnesses {
         let face = parsed_face(oracle);
-        assert_eq!(
-            sole_gap_name(&face),
-            Some("enters_with_clause"),
-            "{oracle}: one explicit gap, got abilities {:?}",
-            face.abilities
-        );
+        if sole_gap_name(&face) != Some("enters_with_clause") {
+            unexpected.push((oracle, face));
+            continue;
+        }
         assert!(
             face.replacements.is_empty()
                 && face.triggers.is_empty()
@@ -388,6 +396,10 @@ fn unread_placement_lines_are_one_gap_through_the_whole_parse() {
         );
         assert!(!card_face_gaps(&face).is_empty(), "{oracle}: unsupported");
     }
+    assert!(
+        unexpected.is_empty(),
+        "expected one enters_with_clause gap, got fragments: {unexpected:#?}"
+    );
 
     // Reach guards: the same lines' readable parts still parse where nothing
     // is unread, so the gap above is the unread placement's, not a route the
@@ -397,6 +409,15 @@ fn unread_placement_lines_are_one_gap_through_the_whole_parse() {
     assert!(readable.abilities.is_empty(), "{:?}", readable.abilities);
     assert_eq!(readable.replacements.len(), 1);
     assert!(card_face_gaps(&readable).is_empty());
+    let self_choice = parsed_face(
+        "This creature enters with your choice of X +1/+1 counters or X charge counters on it.",
+    );
+    assert_eq!(self_choice.replacements.len(), 1);
+    assert!(matches!(
+        &*self_choice.replacements[0].execute.as_ref().expect("choice execute").effect,
+        Effect::ChooseOneOf { branches, .. } if branches.len() == 2
+    ));
+    assert!(card_face_gaps(&self_choice).is_empty());
     // The guard does not suppress a genuine counter or token replacement line.
     for line in [
         COUNTER_DOUBLER,

@@ -4120,7 +4120,7 @@ enum EntersWithDecline {
     /// The line is not an "enters with [counters]" payload this parser reads —
     /// later routes may claim it.
     NotThisShape,
-    /// CR 614.1c: a printed gate or counter placement cannot be carried.
+    /// CR 614.1c: a printed gate, counter placement, or choice subject cannot be carried.
     /// Consumers decide whether to preserve the decline at their boundary.
     FailsClosed(EntersWithGap),
 }
@@ -4132,9 +4132,9 @@ pub(crate) enum EntersWithGap {
     /// A printed gate is present and cannot be carried (or two gates co-occur
     /// in the single condition slot).
     Gate,
-    /// CR 122.6 + CR 608.2c: a counter placement the clause prints that no
-    /// reader reads (a further placement, or a counter list's rounding
-    /// postmodifier or X entries under a where-X definition).
+    /// CR 614.12 + CR 122.6 + CR 608.2c: a printed counter clause cannot be carried
+    /// (a further placement, list rounding or X entries under a where-X definition,
+    /// or a distributive subject the self-only counter choice cannot represent).
     Clause,
 }
 
@@ -4265,6 +4265,19 @@ fn enters_with_counters_outcome(
     // always the recipient). Runtime folds the chosen counter pre-entry via the
     // deferred-entry-events capture in `engine_replacement.rs` /
     // `engine_resolution_choices.rs`.
+    // CR 614.12: the choice replacement below is built for the entering
+    // permanent alone (`valid_card: SelfRef`, every branch on `SelfRef`). A
+    // distributive choice subject cannot be represented, even when an unread
+    // target or rider prevents the option list from parsing.
+    // Preserve this Clause decline at the general replacement boundary,
+    // replacement-sentence sequence, and Class decline fallback; earlier
+    // successful parses and independent container/effect routes remain outside
+    // this guarantee.
+    if distributive_subject.is_some() && strip_enters_with_choice_marker(after_additional).is_some()
+    {
+        return Err(EntersWithDecline::FailsClosed(EntersWithGap::Clause));
+    }
+
     let choice_branches: Option<Vec<AbilityDefinition>> = if let Some((choices, _on)) =
         strip_enters_with_choice_target(after_additional)
     {
@@ -4329,15 +4342,6 @@ fn enters_with_counters_outcome(
     };
 
     if let Some(branches) = choice_branches {
-        // CR 614.12: the choice replacement below is built for the entering
-        // permanent alone (`valid_card: SelfRef`, every branch on `SelfRef`). A
-        // distributive subject ("each other creature you control enters with
-        // your choice of …") names a general subset of permanents, which this
-        // shape does not carry — decline rather than give the source itself the
-        // chosen counters.
-        if distributive_subject.is_some() {
-            return Err(EntersWithDecline::NotThisShape);
-        }
         let choice = AbilityDefinition::new(
             AbilityKind::Spell,
             // CR 608.2d: resolution choice — controller picks the branch.
@@ -5604,9 +5608,17 @@ fn parse_counter_noun_within_clause(input: &str) -> OracleResult<'_, ()> {
     .parse(input)
 }
 
+/// Strip the marker shared by both enters-with counter-choice shapes.
+fn strip_enters_with_choice_marker(after_with: &str) -> Option<&str> {
+    tag::<_, _, OracleError<'_>>("your choice of ")
+        .parse(after_with)
+        .ok()
+        .map(|(rest, _)| rest)
+}
+
 /// CR 614.12a: For "your choice of <list> on it", split off the trailing
-/// self-referential target. Given the text AFTER "your choice of " (e.g.
-/// "a +1/+1, first strike, or vigilance counter on it."), return
+/// self-referential target. Given the text AFTER "enters with " (e.g.
+/// "your choice of a +1/+1, first strike, or vigilance counter on it."), return
 /// `Some((choices, target))` where `choices` is the disjunctive counter list
 /// ("a +1/+1, first strike, or vigilance counter") and `target` is the
 /// self-reference ("it"). Returns `None` when the target is NOT a self-reference
@@ -5616,10 +5628,7 @@ fn parse_counter_noun_within_clause(input: &str) -> OracleResult<'_, ()> {
 /// <target>", then the target (with trailing punctuation stripped) is validated
 /// against the self/object pronoun set (`it` / `~`).
 fn strip_enters_with_choice_target(after_choice: &str) -> Option<(&str, &str)> {
-    // Detect the "your choice of " marker via nom (no string dispatch).
-    let (after_marker, _) = tag::<_, _, OracleError<'_>>("your choice of ")
-        .parse(after_choice)
-        .ok()?;
+    let after_marker = strip_enters_with_choice_marker(after_choice)?;
     // Split list from trailing " on <target>".
     let (after_on, choices) = take_until::<_, _, OracleError<'_>>(" on ")
         .parse(after_marker)
@@ -5641,8 +5650,9 @@ fn strip_enters_with_choice_target(after_choice: &str) -> Option<(&str, &str)> {
 /// permanent itself. The list TRAILS the self-reference here — the mirror of
 /// `strip_enters_with_choice_target`'s "<list> on it" order.
 fn strip_enters_with_two_different_from_among(after_choice: &str) -> Option<&str> {
-    let (rest, _) = tag::<_, _, OracleError<'_>>("your choice of two different counters on ")
-        .parse(after_choice)
+    let after_marker = strip_enters_with_choice_marker(after_choice)?;
+    let (rest, _) = tag::<_, _, OracleError<'_>>("two different counters on ")
+        .parse(after_marker)
         .ok()?;
     // CR 614.12a: the recipient must be the entering permanent itself.
     let (rest, _) = alt((tag::<_, _, OracleError<'_>>("it"), tag("~")))
@@ -21515,8 +21525,8 @@ mod tests {
     }
 
     /// CR 614.12: the choice replacement is built for the entering permanent
-    /// alone, so a recognized distributive subject declines instead of giving
-    /// the source the chosen counters. The single path's validity gate is unchanged.
+    /// alone, so a recognized distributive subject yields a Clause decline instead of
+    /// giving the source the chosen counters. The single path's validity gate is unchanged.
     /// SYNTHETIC: no printed card has a distributive counter choice.
     #[test]
     fn enters_with_choice_with_a_distributive_subject_declines() {
@@ -21538,7 +21548,7 @@ mod tests {
             "Tokens you control enter with your choice of X +1/+1 counters or X charge counters on them.",
         ] {
             if enters_with_counters_outcome(&line.to_lowercase(), line).err()
-                != Some(EntersWithDecline::NotThisShape)
+                != Some(EntersWithDecline::FailsClosed(EntersWithGap::Clause))
                 || parse_replacement_line(line, "Test Creature").is_some()
             {
                 unexpected.push(line);
@@ -21546,7 +21556,7 @@ mod tests {
         }
         assert!(
             unexpected.is_empty(),
-            "distributive choices published: {unexpected:#?}"
+            "distributive choices did not preserve the Clause decline: {unexpected:#?}"
         );
         // Reach guards: the self subject with the same options parses — bare,
         // kicked, tapped, escaped, and Grimdancer's from-among form.
