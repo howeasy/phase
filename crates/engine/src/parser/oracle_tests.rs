@@ -33920,6 +33920,131 @@ fn static_shaped_as_enters_lines_are_one_enters_with_clause_gap() {
     }
 }
 
+/// CR 614.1c + CR 608.2c: Gluttonous Hellkite's trigger-prefixed line (the
+/// Priority 5-pre route) prints the trigger's own instruction and a source
+/// enters-with sentence whose count depends on it ("sacrificed this way"). One
+/// replacement cannot carry both, so the whole line is one `enters_with_clause`
+/// gap rather than a cast trigger whose body silently carries the replacement's
+/// sentence.
+#[test]
+fn trigger_prefixed_enters_with_sentence_is_one_enters_with_clause_gap() {
+    let oracle = "When you cast this spell, each player sacrifices X creatures. This creature enters with two +1/+1 counters on it for each creature sacrificed this way.\nFlying, trample";
+    let line = "When you cast this spell, each player sacrifices X creatures. This creature enters with two +1/+1 counters on it for each creature sacrificed this way.";
+    let description = "When you cast this spell, each player sacrifices X creatures. ~ enters with two +1/+1 counters on it for each creature sacrificed this way.";
+    let parsed = parse_oracle_text(
+        oracle,
+        "Gluttonous Hellkite",
+        &["Flying".into(), "Trample".into()],
+        &["Creature".into()],
+        &["Dragon".into()],
+    );
+    let gaps: Vec<&AbilityDefinition> = parsed
+        .abilities
+        .iter()
+        .filter(|ability| {
+            matches!(
+                &*ability.effect,
+                Effect::Unimplemented { name, .. } if name == "enters_with_clause"
+            )
+        })
+        .collect();
+    assert_eq!(gaps.len(), 1, "{:?}", parsed.abilities);
+    assert!(
+        matches!(
+            &*gaps[0].effect,
+            Effect::Unimplemented { description: Some(text), .. } if text == description
+        ),
+        "the whole line is the gap, got {:?}",
+        gaps[0]
+    );
+    assert!(parsed.replacements.is_empty(), "{:?}", parsed.replacements);
+    assert!(
+        parsed.triggers.is_empty(),
+        "no trigger may carry the enters-with sentence, got {:?}",
+        parsed.triggers
+    );
+    // Reach guards: the enters-with parser fails the line closed with `Clause`,
+    // and the keyword line beside it still parses.
+    assert_eq!(
+        enters_with_fails_closed(line, "Gluttonous Hellkite"),
+        Some(EntersWithGap::Clause)
+    );
+    assert_eq!(parsed.abilities.len(), 1, "{:?}", parsed.abilities);
+    assert!(
+        parsed
+            .extracted_keywords
+            .iter()
+            .any(|keyword| matches!(keyword, Keyword::Flying))
+            && parsed
+                .extracted_keywords
+                .iter()
+                .any(|keyword| matches!(keyword, Keyword::Trample)),
+        "{:?}",
+        parsed.extracted_keywords
+    );
+}
+
+/// CR 614.1c + CR 608.2c: a distributive for-each enters-with line (the
+/// Priority 7 route) the parser owns but cannot carry is one
+/// `enters_with_clause` gap; it does not fall to the static parser. Gev, Scaled
+/// Scorch's sentence beside an anthem sentence (synthetic) is the case the
+/// static parser would otherwise claim in part, keeping the anthem and dropping
+/// the enters-with sentence. A subject clause the typed filter cannot carry
+/// ("that was cast this turn", synthetic) lands on the same gap.
+#[test]
+fn for_each_enters_with_clause_line_is_one_enters_with_clause_gap() {
+    for line in [
+        "Other creatures you control enter with an additional +1/+1 counter on them for each opponent who lost life this turn. Creatures you control get +1/+1.",
+        "Each creature you control that was cast this turn enters with an additional +1/+1 counter on it for each creature you control.",
+    ] {
+        let parsed = parse_oracle_text(line, "Test Enchantment", &[], &["Enchantment".into()], &[]);
+        let gaps: Vec<&AbilityDefinition> = parsed
+            .abilities
+            .iter()
+            .filter(|ability| {
+                matches!(
+                    &*ability.effect,
+                    Effect::Unimplemented { name, description: Some(text) }
+                        if name == "enters_with_clause" && text == line
+                )
+            })
+            .collect();
+        assert_eq!(gaps.len(), 1, "{line:?}: {:?}", parsed.abilities);
+        assert_eq!(parsed.abilities.len(), 1, "{line:?}: {:?}", parsed.abilities);
+        assert!(parsed.statics.is_empty(), "{line:?}: {:?}", parsed.statics);
+        assert!(
+            parsed.replacements.iter().all(|repl| !matches!(
+                repl.event,
+                ReplacementEvent::Moved | ReplacementEvent::ChangeZone
+            )),
+            "{line:?}: {:?}",
+            parsed.replacements
+        );
+        // Reach guards: the line reaches the Priority 7 enters-with branch and
+        // fails closed with `Clause`.
+        assert!(
+            is_enters_with_counter_replacement_line(&line.to_lowercase()),
+            "{line:?}"
+        );
+        assert_eq!(
+            enters_with_fails_closed(line, "Test Enchantment"),
+            Some(EntersWithGap::Clause),
+            "{line:?}"
+        );
+    }
+    // Reach guard: the single-sentence twin stays claimed.
+    let twin = parse_oracle_text(
+        "Each other creature you control enters with an additional +1/+1 counter on it for each creature you control.",
+        "Test Enchantment",
+        &[],
+        &["Enchantment".into()],
+        &[],
+    );
+    assert_eq!(twin.replacements.len(), 1, "{twin:?}");
+    assert_eq!(twin.replacements[0].event, ReplacementEvent::ChangeZone);
+    assert!(twin.abilities.is_empty(), "{:?}", twin.abilities);
+}
+
 /// Admitted class face (CR 614.1c + CR 603.6d + CR 119.3): Lich's "As this
 /// enchantment enters, you lose life equal to your life total." is a mandatory
 /// `Moved` self replacement losing the controller's life total.

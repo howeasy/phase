@@ -4355,10 +4355,19 @@ fn try_parse_cast_this_way_enters_rider(lower: &str) -> Option<ParsedEffectClaus
 /// (CR 608.2c: the nearest antecedent). With no producer the rider stays
 /// `Effect::Unimplemented` instead of a dangling `PutCounter { ParentTarget }`.
 fn entry_counter_rider_clause(
-    lower: &str,
+    text: &str,
     condition: Option<&AbilityCondition>,
     prior: Option<&Effect>,
 ) -> Option<ParsedEffectClause> {
+    // The recognizers read the clause lowercased, without its leading sequence
+    // connector or terminal period. Built only once a producer arm holds, so a
+    // clause with no producer pays for no allocation.
+    let rider_lower = || {
+        strip_leading_sequence_connector(text)
+            .trim()
+            .trim_end_matches('.')
+            .to_lowercase()
+    };
     // The rider's lead is either kept in the clause text and peeled by the
     // recognizer ("if you cast a spell this way, " — Osteomancer Adept, no
     // clause condition) or stripped into the "if you do" performed-signal
@@ -4376,11 +4385,11 @@ fn entry_counter_rider_clause(
         }),
     ) = (prior, condition)
     {
-        return try_parse_cast_this_way_enters_rider(lower);
+        return try_parse_cast_this_way_enters_rider(&rider_lower());
     }
     match condition.zip(prior) {
         Some((condition, prior)) if lower::entry_rider_folds_into(prior, condition) => {
-            try_parse_enters_this_way_additional_counter(lower).map(parsed_clause)
+            try_parse_enters_this_way_additional_counter(&rider_lower()).map(parsed_clause)
         }
         _ => None,
     }
@@ -44178,12 +44187,8 @@ fn parse_effect_chain_ir_body(
         // the clause right before it, so it is read here, where that clause and
         // this clause's own condition are both in scope.
         let entry_rider = {
-            let lower = strip_leading_sequence_connector(&text_no_qty)
-                .trim()
-                .trim_end_matches('.')
-                .to_lowercase();
             let prior = builder.clauses().last().map(|c| &c.parsed.effect);
-            entry_counter_rider_clause(&lower, condition.as_ref(), prior)
+            entry_counter_rider_clause(&text_no_qty, condition.as_ref(), prior)
         };
         let (clause, repeat_for) = if let Some(retained_type_clause) = retained_type_clause {
             let duration_binding = retained_type_duration_binding(builder.clauses());

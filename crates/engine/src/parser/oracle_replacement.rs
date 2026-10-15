@@ -5994,30 +5994,6 @@ fn build_enters_counter_ability(entries: Vec<(CounterType, QuantityExpr)>) -> Ab
         .expect("enters counter ability requires at least one counter entry")
 }
 
-/// CR 614.1c + CR 601.2: Parse "When/Whenever you cast a [spell], [exile this
-/// card from your graveyard. ]that [subject] enters with [an additional]
-/// [count] [type] counter(s) on it[, where X is [quantity]]" into the
-/// `ChangeZone` + `PutCounter` replacement payload for this shape, plus the
-/// self-exile prelude when one is printed. Wildgrowth Archaic, Runadi,
-/// Communal Brewing and Dark Intimations share this shape; Torgal (an ordinal
-/// "your first …" head) and Boreal Outrider (an intervening "if" before the
-/// rider) do not, and are not read here.
-///
-/// CR 603.1 + CR 603.3: "whenever" is a triggered ability that goes on the
-/// stack — the entering-with-counters EFFECT (CR 614.1c/614.12) only applies
-/// once that ability resolves. This function builds only the reusable
-/// replacement PAYLOAD (the `ChangeZone`/`PutCounter` shape keyed to the spell
-/// filter); it is never returned as a top-level, object-hosted replacement.
-/// `parse_whenever_you_cast_enters_with_trigger` is the actual recognizer —
-/// it wraps this payload in `Effect::AddTargetReplacement { target: None, .. }`
-/// so the triggered ability installs a floating, filter-scoped replacement
-/// that survives the source leaving the battlefield (issue #6492 review).
-///
-/// Composition:
-///   "when[ever] you cast " → spell filter → [", " → self-exile prelude → ". "]
-///   ", that "/"that " → subject → " enters with " → count-prefix →
-///   counter-type → " counter(s) on it" [", where x is " → quantity ref]
-///   [trailing punctuation]
 /// CR 603.1: The SHAPE half of the cast-enters recognizer — everything up to and
 /// including `"enters with "`. Split out so "is this the cast-enters shape?" and
 /// "does its payload parse?" are separate questions.
@@ -6150,6 +6126,30 @@ fn parse_self_exile_prelude(prelude_text: &str) -> Option<AbilityDefinition> {
     is_self_exile.then_some(prelude)
 }
 
+/// CR 614.1c + CR 601.2: Parse "When/Whenever you cast a [spell], [exile this
+/// card from your graveyard. ]that [subject] enters with [an additional]
+/// [count] [type] counter(s) on it[, where X is [quantity]]" into the
+/// `ChangeZone` + `PutCounter` replacement payload for this shape, plus the
+/// self-exile prelude when one is printed. Wildgrowth Archaic, Runadi,
+/// Communal Brewing and Dark Intimations share this shape; Torgal (an ordinal
+/// "your first …" head) and Boreal Outrider (an intervening "if" before the
+/// rider) do not, and are not read here.
+///
+/// CR 603.1 + CR 603.3: "whenever" is a triggered ability that goes on the
+/// stack — the entering-with-counters EFFECT (CR 614.1c/614.12) only applies
+/// once that ability resolves. This function builds only the reusable
+/// replacement PAYLOAD (the `ChangeZone`/`PutCounter` shape keyed to the spell
+/// filter); it is never returned as a top-level, object-hosted replacement.
+/// `parse_whenever_you_cast_enters_with_trigger` is the actual recognizer —
+/// it wraps this payload in `Effect::AddTargetReplacement { target: None, .. }`
+/// so the triggered ability installs a floating, filter-scoped replacement
+/// that survives the source leaving the battlefield (issue #6492 review).
+///
+/// Composition:
+///   "when[ever] you cast " → spell filter → [", " → self-exile prelude → ". "]
+///   ", that "/"that " → subject → " enters with " → count-prefix →
+///   counter-type → " counter(s) on it" [", where x is " → quantity ref]
+///   [trailing punctuation]
 fn parse_whenever_you_cast_enters_with(
     norm_lower: &str,
     original_text: &str,
@@ -31209,12 +31209,16 @@ mod tests {
                 "Creatures you control with a +1/+1 counter on them enter with an additional +1/+1 counter on them for each creature you control.",
                 creatures_you_control.clone(),
             ),
+            // Shape-only synthetic: the Counters{P1P1, GE 1} property on the
+            // entering object may be false at replacement time for an object
+            // that has not already received counters. There is no corpus card,
+            // and runtime support is NOT claimed.
             (
                 "Each creature you control with a +1/+1 counter on it enters with two additional +1/+1 counters on it for each creature you control.",
-                multiply_counter_count_by_for_each(
-                    QuantityExpr::Fixed { value: 2 },
-                    creatures_you_control.clone(),
-                ),
+                QuantityExpr::Multiply {
+                    factor: 2,
+                    inner: Box::new(creatures_you_control.clone()),
+                },
             ),
         ] {
             let leaf = parse_replacement_line(line, "Test Enchantment")
@@ -31287,8 +31291,8 @@ mod tests {
         });
         let carried_by_replacement = witness.replacements.iter().any(has_counters_property);
         assert!(
-            carried_by_static || carried_by_replacement,
-            "the witness keeps its Counters subject property, got {witness:?}"
+            carried_by_static && !carried_by_replacement,
+            "the witness takes the static route with its Counters subject property, got {witness:?}"
         );
         assert!(witness
             .replacements
@@ -31336,6 +31340,10 @@ mod tests {
     /// pre-existing defect tracked outside #9658. This pin asserts only that the
     /// quote-masked sentence count keeps the line a single sentence (so it is
     /// not reclassified by this change); it does NOT assert the reading correct.
+    /// Pending the quoted-rider follow-up: Anavolver, Degavolver, Necravolver,
+    /// Rakavolver and Prison Barricade keep counters only at base and drop the
+    /// quoted granted ability (see the 'quoted rider' note near the keyword-rider
+    /// scanner).
     #[test]
     fn anavolver_quoted_rider_unchanged_from_base_pending_quoted_rider_fix() {
         let def = parse_replacement_line(
