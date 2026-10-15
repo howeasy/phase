@@ -85561,8 +85561,7 @@ fn has_unimplemented_rider(defs: &[&AbilityDefinition]) -> bool {
 /// counter on it" rider is read only under a battlefield mover whose rider is
 /// gated on an object entering this way; that rider folds into the move's
 /// entry counters. Under any other producer (or none) the rider stays an
-/// explicit gap instead of a dangling `PutCounter { ParentTarget }` (the base
-/// reading).
+/// explicit gap, never a dangling `PutCounter { ParentTarget }`.
 #[test]
 fn entry_counter_riders_are_producer_bound() {
     // Reach guard: Recommission (verbatim) still folds into its ChangeZone.
@@ -85616,9 +85615,9 @@ fn entry_counter_riders_are_producer_bound() {
 /// CR 608.2c + CR 614.1c: What Must Be Done's second mode (verbatim, MTGJSON).
 /// The rider is gated on a trailing "if it's a creature" (a card-type
 /// condition, not "enters this way"), so the battlefield-mover arm refuses it
-/// and the rider stays an explicit gap. At base it was a post-move
-/// `PutCounter { ParentTarget }`: counters put after the entry rather than as
-/// the permanent enters.
+/// and the rider stays an explicit gap. It is never a post-move
+/// `PutCounter { ParentTarget }`, which would put counters after the entry
+/// rather than as the permanent enters.
 #[test]
 fn what_must_be_done_rider_is_not_a_post_move_put() {
     let abilities = spell_chain_definitions(

@@ -4163,13 +4163,19 @@ fn parse_anaphoric_subject_lead(input: &str) -> OracleResult<'_, ()> {
 /// CR 105.2a-105.2c + CR 614.12: read a distributive subject's type phrase,
 /// peeling a leading color-quality word ("colorless "/"monocolored "/
 /// "multicolored ") so the type detector sees the noun and the quality survives
-/// as a filter property. Returns the filter, the text after the type phrase,
-/// and whether the type phrase consumed any text.
-fn read_subject_type_phrase(subject_text: &str) -> (TargetFilter, &str, bool) {
+/// as a filter property. Returns the filter and the text after the type phrase.
+/// A type phrase that reads nothing leaves the whole subject unread, the color
+/// word included, so the remainder is then `subject_text` itself and the caller
+/// can tell "read something" from the remainder's length alone.
+fn read_subject_type_phrase(subject_text: &str) -> (TargetFilter, &str) {
     let (after_color, color_prop) =
         crate::parser::oracle_static::peel_color_quality_prefix(subject_text);
     let (filter, rest) = parse_type_phrase_folding(after_color);
-    let consumed = rest.len() < after_color.len();
+    let rest = if rest.len() < after_color.len() {
+        rest
+    } else {
+        subject_text
+    };
     let filter = match (filter, color_prop) {
         (TargetFilter::Typed(mut tf), Some(prop)) => {
             tf.properties.insert(0, prop);
@@ -4177,7 +4183,7 @@ fn read_subject_type_phrase(subject_text: &str) -> (TargetFilter, &str, bool) {
         }
         (other, _) => other,
     };
-    (filter, rest, consumed)
+    (filter, rest)
 }
 
 /// CR 614.12: the subsets the typed distributive filter carries — a concrete
@@ -4210,10 +4216,11 @@ fn parse_distributive_head(text: &str) -> Option<(EntersWithSubject, EntryVerb, 
     };
     let (pre_verb, verb, after_with) =
         nom_primitives::scan_preceded(subject_text, parse_entry_verb_with)?;
-    let (filter, rest, consumed) = read_subject_type_phrase(pre_verb.trim_end());
+    let subject = pre_verb.trim_end();
+    let (filter, rest) = read_subject_type_phrase(subject);
     let scope = match prefix_scope {
         Some(scope) => scope,
-        None if consumed && verb.is_plural() => SubjectScope::Distributive,
+        None if rest.len() < subject.len() && verb.is_plural() => SubjectScope::Distributive,
         None => return None,
     };
     let filter =
@@ -4251,7 +4258,7 @@ fn skip_unread_leading_gate(input: &str) -> OracleResult<'_, &str> {
         peek(alt((tag("if "), tag("as long as ")))),
         recognize(many_till(
             terminated(is_not(","), tag(", ")),
-            peek(peek_core_enters_with_head),
+            peek_core_enters_with_head,
         )),
     )
     .parse(input)
@@ -4291,7 +4298,7 @@ fn parse_enters_with_head(text: &str) -> Option<EntersWithHead<'_>> {
         .find_map(read_gated_enters_with_head)
 }
 
-/// The three gate positions of an enters-with clause, peeled in base order
+/// The three gate positions of an enters-with clause, peeled in a fixed order
 /// (kicker, then the trailing " unless ", then the sentence-initial "if/as long
 /// as"), plus the leading text the kicker and leading-if peels consumed.
 struct PeeledEntersWithGates<'a> {
@@ -5046,7 +5053,7 @@ fn resolve_enters_with_condition(
 /// silent-keyword-drop bug this function exists to fix.
 ///
 /// The sibling QUOTED-ability rider is deliberately NOT handled here: it needs a
-/// granted-ability parse, not a keyword lookup. Five lines across four cards —
+/// granted-ability parse, not a keyword lookup. Five lines across five cards —
 /// Anavolver's {B} and Degavolver's {1}{B} halves ("Pay 3 life: Regenerate this
 /// creature."), Necravolver's {W} and Rakavolver's {1}{W} halves ("Whenever this
 /// creature deals damage, you gain that much life."), and Prison Barricade
@@ -5057,13 +5064,15 @@ fn parse_enters_with_keyword_riders(text: &str) -> Vec<crate::types::keywords::K
     let mut riders = Vec::new();
     // CR 614.1c: the rider is part of the SAME sentence as the enters-with
     // clause, so the scan is bounded to that sentence UP FRONT rather than
-    // per-candidate. Bounding only after a marker was found still let the very
-    // first `take_until` reach into a later sentence when the entering sentence
-    // carried no rider at all -- `work_text` routinely carries trailing
-    // sentences (Slumbering Trudge's "If X is 2 or less, it enters tapped."),
-    // so an unrelated later `" and with "` would be granted to this
-    // replacement. With the input clipped first, no marker outside the sentence
-    // is reachable by construction, and chaining within it still works.
+    // per-candidate. Bounding only after a marker was found would still let the
+    // very first `take_until` reach into a later sentence when the entering
+    // sentence carried no rider at all, granting an unrelated later
+    // `" and with "` to this replacement. The production caller,
+    // `enters_with_counters_outcome`, declines a multi-sentence line before it
+    // gets here, so this clip is defensive helper behavior rather than a
+    // routine path: it keeps the helper sentence-safe for any input it is
+    // handed. With the input clipped first, no marker outside the sentence is
+    // reachable by construction, and chaining within it still works.
     let mut remaining = enters_with_rider_sentence(text);
 
     while let Ok((after_rider, candidate)) = preceded(
@@ -6005,10 +6014,13 @@ fn build_enters_counter_ability(entries: Vec<(CounterType, QuantityExpr)>) -> Ab
 /// above (CR 603.1 + CR 603.3: the effect must outlive the source leaving the
 /// battlefield). Answering both from one parse keeps the grammar in one place.
 ///
-/// Two lead paths, exclusive by structure: the rider directly after the trigger
-/// condition (", that …"), or — only when no ", that " follows the condition —
-/// a self-exile prelude sentence first ("…, exile this card from your
-/// graveyard. That …", Dark Intimations).
+/// Two lead paths: the rider directly after the trigger condition (", that …"),
+/// or — only when the line contains no ", that " at all — a self-exile prelude
+/// sentence first ("…, exile this card from your graveyard. That …", Dark
+/// Intimations). The first path is taken whenever ", that " appears anywhere,
+/// so a prelude-form line whose later text also contains ", that " has its
+/// spell filter read up to that later occurrence; when that filter fails to
+/// parse, the line declines here and the prelude path is not retried.
 fn parse_cast_enters_with_prefix(norm_lower: &str) -> Option<CastEntersWithShape<'_>> {
     // Prefix. CR 603.1: "when" and "whenever" open the same triggered ability.
     let (rest, _) = alt((
@@ -20320,8 +20332,8 @@ mod tests {
     /// concrete-type guard (the word after "each " is not a card type). It is
     /// neither redirected to a typed distributive filter nor read as this object:
     /// "Each opponent enters with …" names no permanent this card is, so the line
-    /// fails closed. (At base it fell through to a `SelfRef` replacement — counters
-    /// on the source — which the text never says.)
+    /// fails closed. (It is never a `SelfRef` replacement — counters on the
+    /// source — which the text never says.)
     #[test]
     fn each_non_type_subject_fails_closed() {
         let line = "Each opponent enters with a +1/+1 counter on it.";
@@ -23273,9 +23285,9 @@ mod tests {
     /// applied AFTER a marker is selected. Here there is no marker in the
     /// entering sentence, so the very first `take_until` is what would cross the
     /// period — a per-candidate bound cannot repair that, only clipping the
-    /// scan's input to one sentence can. `work_text` really does carry trailing
-    /// sentences (Slumbering Trudge prints "If X is 2 or less, it enters
-    /// tapped."), so this is reachable, not hypothetical.
+    /// scan's input to one sentence can. The production caller declines a
+    /// multi-sentence line before reaching the scanner, so this pins the
+    /// helper's defensive sentence bound for any input it is handed.
     #[test]
     fn enters_with_keyword_rider_ignores_a_later_sentence_when_the_first_has_none() {
         // Scanner level: nothing to lift, despite a clean bare keyword rider
@@ -28158,8 +28170,8 @@ mod tests {
     /// SHAPE: CR 113.6m + CR 113.7a + CR 608.2c + CR 306.5b — Dark Intimations'
     /// second paragraph is a graveyard SpellCast trigger that exiles its source
     /// and then (a sequential sibling, not a dependent step) installs a one-shot
-    /// entry replacement for the triggering Bolas planeswalker spell. At base the
-    /// line was a `Moved`/`SelfRef` loyalty replacement on the sorcery itself.
+    /// entry replacement for the triggering Bolas planeswalker spell. It is never
+    /// a `Moved`/`SelfRef` loyalty replacement on the sorcery itself.
     #[test]
     fn dark_intimations_parses_to_a_graveyard_cast_trigger() {
         let trigger = parse_whenever_you_cast_enters_with_trigger(
@@ -28293,7 +28305,7 @@ mod tests {
         ));
     }
 
-    /// Hostile Dark-shaped rows (H1-H9). The shape half owns a line only when
+    /// Hostile Dark Intimations-shaped lines. The shape half owns a line only when
     /// its prelude is exactly a self-exile from the graveyard; a claimed line
     /// whose payload cannot be carried fails closed whole.
     #[test]
@@ -28306,7 +28318,7 @@ mod tests {
             outcome(DARK_INTIMATIONS_CAST_LINE),
             CastEntersWithOutcome::Parsed(_)
         ));
-        // H1: a trailing rider the payload cannot carry -> the whole line fails closed.
+        // A trailing rider the payload cannot carry -> the whole line fails closed.
         assert!(matches!(
             outcome(
                 "When you cast a Bolas planeswalker spell, exile this card from your graveyard. \
@@ -28314,7 +28326,7 @@ mod tests {
             ),
             CastEntersWithOutcome::ShapeUnsupported
         ));
-        // H2-H5: a prelude that is not exactly "exile this card from your graveyard".
+        // A prelude that is not exactly "exile this card from your graveyard".
         for prelude in [
             "sacrifice this card",
             "you may exile this card from your graveyard",
@@ -28357,13 +28369,13 @@ mod tests {
                 "{prelude:?}: the rider stays an explicit gap"
             );
         }
-        // H7: an immediate rider names its count and counter type; no prelude,
-        // so the trigger functions on the battlefield.
+        // An immediate rider names its count and counter type; no prelude, so
+        // the trigger functions on the battlefield.
         let CastEntersWithOutcome::Parsed(immediate) = outcome(
             "When you cast a Bolas planeswalker spell, that planeswalker enters with two \
              additional loyalty counters on it.",
         ) else {
-            panic!("H7 must parse");
+            panic!("the immediate-rider line must parse");
         };
         assert_eq!(immediate.trigger_zones, vec![Zone::Battlefield]);
         let (replacement, _) = cast_enters_install(immediate.execute.as_deref().unwrap());
@@ -28375,7 +28387,7 @@ mod tests {
                 ..
             }
         ));
-        // H8: the cast must be "you cast".
+        // The cast must be "you cast".
         assert!(matches!(
             outcome(
                 "When an opponent casts a Bolas planeswalker spell, exile this card from your \
@@ -28383,7 +28395,7 @@ mod tests {
             ),
             CastEntersWithOutcome::NotThisShape
         ));
-        // H9: an intervening "if" before the rider (the Boreal Outrider shape).
+        // An intervening "if" before the rider (the Boreal Outrider shape).
         assert!(matches!(
             outcome(
                 "When you cast a Bolas planeswalker spell, if you control a Bolas planeswalker, \
@@ -30867,8 +30879,8 @@ mod tests {
 
     /// CR 614.1c + CR 614.12a + CR 608.2c: Rescuer Sphinx's "If you do" gate is
     /// printed before the payload, in the sentence after the "As ~ enters" frame.
-    /// The base reading — an ungated, mandatory counter with the optional return
-    /// dropped — was wrong for the card. The frame's optional instruction and the
+    /// An ungated, mandatory counter with the optional return dropped is wrong
+    /// for the card. The frame's optional instruction and the
     /// gated counter are two instructions one replacement cannot carry, so the
     /// whole line is one `enters_with_clause` gap (an "As ~ enters, you may X. If
     /// you do, ~ enters with …" carrier is follow-up work).
@@ -31173,9 +31185,10 @@ mod tests {
     }
 
     /// CR 614.12 + CR 122.6: a distributive subject is read up to its entry verb,
-    /// so a "with …" qualifier in the subject cannot swallow the clause. At base
-    /// the payload was cut at the subject's own "with" ("a +1/+1 counter on it
-    /// enters with …"), giving a count of 1 and dropping the for-each scaling.
+    /// so a "with …" qualifier in the subject cannot swallow the clause. The
+    /// payload is never cut at the subject's own "with" ("a +1/+1 counter on it
+    /// enters with …"), which would give a count of 1 and drop the for-each
+    /// scaling.
     #[test]
     fn distributive_witness_leaf_and_production() {
         let creatures_you_control = QuantityExpr::Ref {
@@ -31236,7 +31249,8 @@ mod tests {
             assert_eq!(parsed.replacements.len(), 1, "{line:?}: {parsed:?}");
             assert_eq!(put_count(&parsed.replacements[0]), expected, "{line:?}");
         }
-        // Reach guards: subjects with no "with" qualifier bind the same at base.
+        // Reach guards: subjects with no "with" qualifier bind the same count
+        // and typed subject.
         for (line, another) in [
             (
                 "Each creature you control enters with an additional +1/+1 counter on it for each creature you control.",
@@ -31274,7 +31288,7 @@ mod tests {
         );
 
         // The fixed-count witness takes the static route, which keeps the
-        // Counters property on the affected filter (P5).
+        // Counters property on the affected filter.
         let witness = parse_oracle_text(
             "Each creature you control with a +1/+1 counter on it enters with an additional +1/+1 counter on it.",
             "Test Enchantment",
@@ -31334,14 +31348,13 @@ mod tests {
         assert_eq!(plain.valid_card, Some(TargetFilter::SelfRef));
     }
 
-    /// V12 — UNCHANGED FROM BASE PENDING THE QUOTED-RIDER FIX. Anavolver's {B}
-    /// half prints a counter AND a quoted granted ability ("Pay 3 life:
+    /// Pending the quoted-rider fix. Anavolver's {B} half prints a counter AND a quoted granted ability ("Pay 3 life:
     /// Regenerate this creature."); the parser keeps only the counter, a known
     /// pre-existing defect tracked outside #9658. This pin asserts only that the
     /// quote-masked sentence count keeps the line a single sentence (so it is
     /// not reclassified by this change); it does NOT assert the reading correct.
     /// Pending the quoted-rider follow-up: Anavolver, Degavolver, Necravolver,
-    /// Rakavolver and Prison Barricade keep counters only at base and drop the
+    /// Rakavolver and Prison Barricade keep only their counters and drop the
     /// quoted granted ability (see the 'quoted rider' note near the keyword-rider
     /// scanner).
     #[test]
@@ -31350,7 +31363,7 @@ mod tests {
             "If this creature was kicked with its {B} kicker, it enters with a +1/+1 counter on it and with \"Pay 3 life: Regenerate this creature.\"",
             "Anavolver",
         )
-        .expect("unchanged from base: still claimed");
+        .expect("the line is still claimed");
         assert!(matches!(
             &*def.execute.as_deref().unwrap().effect,
             Effect::PutCounter {

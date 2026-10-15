@@ -124,10 +124,10 @@ fn cast_creature_and_count(name: &str, oracle: &str, cost: ManaCost, pool: Vec<M
     outcome.counters(entered, CounterType::Plus1Plus1)
 }
 
-/// V1 — Boreal Outrider's rider names the creature spell its trigger watches,
-/// not Boreal Outrider. It is an honest gap (the snow-colour payment metric does
-/// not exist), and Boreal Outrider itself enters with no counter. At base the
-/// line was a `Moved`/`SelfRef` replacement, so Boreal entered with one.
+/// Boreal Outrider's rider names the creature spell its trigger watches, not
+/// Boreal Outrider. It is an honest gap (the snow-colour payment metric does
+/// not exist), and Boreal Outrider itself enters with no counter: the line is
+/// never a `Moved`/`SelfRef` replacement on Boreal Outrider.
 #[test]
 fn boreal_outrider_is_an_honest_gap() {
     let parsed = parse_oracle_text(
@@ -176,7 +176,7 @@ fn boreal_outrider_is_an_honest_gap() {
     );
 }
 
-/// V16 — Torgal's rider names the Human creature spell its trigger watches. The
+/// Torgal's rider names the Human creature spell its trigger watches. The
 /// trigger head is read faithfully; the body is an honest gap until the floating
 /// replacement can evaluate "Dogs and/or Wolves you control" for its installer.
 /// Torgal itself enters with no counter (its text gives it none). This test
@@ -260,10 +260,10 @@ fn torgal_is_an_honest_gap_and_does_not_count_itself() {
     );
 }
 
-/// V2 — Hosting Season's second paragraph doubles created tokens and gives each
-/// of THEM a counter; it is not a counter on Hosting Season. The line is not
+/// Hosting Season's second paragraph doubles created tokens and gives each of
+/// THEM a counter; it is not a counter on Hosting Season. The line is not
 /// claimed by the enters-with parser or by the token parser behind it, so it
-/// stays an explicit gap, and Hosting Season enters with no counter (base: one).
+/// stays an explicit gap, and Hosting Season enters with no counter.
 #[test]
 fn hosting_season_is_not_a_self_counter_replacement() {
     let parsed = parse_oracle_text(
@@ -421,10 +421,10 @@ fn pass_priority_until_stack_len(runner: &mut GameRunner, len: usize) {
     panic!("stack never reached length {len}");
 }
 
-/// V17 — Dark Intimations in its owner's graveyard: casting a Bolas planeswalker
+/// Dark Intimations in its owner's graveyard: casting a Bolas planeswalker
 /// triggers it from the graveyard, the card is exiled, and the planeswalker
-/// enters with its printed loyalty plus one. At base the line was a self
-/// replacement on the sorcery, so nothing happened.
+/// enters with its printed loyalty plus one. The line is a graveyard cast
+/// trigger, never a self replacement on the sorcery.
 #[test]
 fn dark_intimations_exiles_itself_and_adds_a_loyalty_counter() {
     let mut scenario = GameScenario::new();
@@ -440,6 +440,19 @@ fn dark_intimations_exiles_itself_and_adds_a_loyalty_counter() {
     );
     scenario.with_mana_pool(P0, colorless(1));
     let mut runner = scenario.build();
+    assert_graveyard_cast_trigger_registered(&runner, dark);
+    let outcome = runner.cast(walker).resolve();
+    assert_eq!(
+        loyalty_of(outcome.state(), "Test Bolas Walker"),
+        BOLAS_LOYALTY + 1
+    );
+    assert_eq!(outcome.zone_of(dark), Zone::Exile, "the card exiles itself");
+}
+
+/// Reach guard: the card carries its SpellCast trigger, functioning from the
+/// graveyard (CR 113.6m), so a "no trigger" outcome is the trigger's own
+/// condition or zone declining, not a missing definition.
+fn assert_graveyard_cast_trigger_registered(runner: &GameRunner, dark: ObjectId) {
     assert!(
         runner.state().objects[&dark]
             .trigger_definitions
@@ -449,15 +462,11 @@ fn dark_intimations_exiles_itself_and_adds_a_loyalty_counter() {
                 && entry.definition.trigger_zones == vec![Zone::Graveyard]),
         "reach guard: the graveyard SpellCast trigger is registered"
     );
-    let outcome = runner.cast(walker).resolve();
-    assert_eq!(
-        loyalty_of(outcome.state(), "Test Bolas Walker"),
-        BOLAS_LOYALTY + 1
-    );
-    assert_eq!(outcome.zone_of(dark), Zone::Exile, "the card exiles itself");
 }
 
 /// Hostile: a non-Bolas planeswalker does not trigger it, and the card stays.
+/// Control: a Bolas planeswalker cast afterwards in the same game does trigger
+/// it, so the non-Bolas outcome is the subtype condition declining.
 #[test]
 fn dark_intimations_ignores_a_non_bolas_planeswalker() {
     let mut scenario = GameScenario::new();
@@ -471,14 +480,31 @@ fn dark_intimations_ignores_a_non_bolas_planeswalker() {
         BOLAS_LOYALTY,
         false,
     );
-    scenario.with_mana_pool(P0, colorless(1));
+    let bolas = add_test_planeswalker(
+        &mut scenario,
+        P0,
+        "Test Bolas Walker",
+        "Bolas",
+        BOLAS_LOYALTY,
+        false,
+    );
+    scenario.with_mana_pool(P0, colorless(2));
     let mut runner = scenario.build();
+    assert_graveyard_cast_trigger_registered(&runner, dark);
     let outcome = runner.cast(walker).resolve();
     assert_eq!(
         loyalty_of(outcome.state(), "Test Jace Walker"),
         BOLAS_LOYALTY
     );
     assert_eq!(outcome.zone_of(dark), Zone::Graveyard);
+
+    let outcome = runner.cast(bolas).resolve();
+    assert_eq!(
+        loyalty_of(outcome.state(), "Test Bolas Walker"),
+        BOLAS_LOYALTY + 1,
+        "control: a Bolas planeswalker triggers the same card"
+    );
+    assert_eq!(outcome.zone_of(dark), Zone::Exile);
 }
 
 /// Hostile: CR 113.6m — the ability functions only from the graveyard. In hand
@@ -499,6 +525,7 @@ fn dark_intimations_outside_the_graveyard_does_not_trigger() {
         );
         scenario.with_mana_pool(P0, colorless(1));
         let mut runner = scenario.build();
+        assert_graveyard_cast_trigger_registered(&runner, dark);
         let outcome = runner.cast(walker).resolve();
         assert_eq!(
             loyalty_of(outcome.state(), "Test Bolas Walker"),
@@ -696,10 +723,10 @@ fn two_dark_intimations_both_apply() {
     assert_eq!(outcome.zone_of(second), Zone::Exile);
 }
 
-/// B1 #4 (synthetic, no corpus member) — a keyword-qualified distributive
-/// subject. Derived: each creature you control with flying enters with one
-/// +1/+1 counter for each creature you control; a creature without flying gets
-/// none. At base the line was `static_structure` Unimplemented (no counters).
+/// Synthetic (no corpus member): a keyword-qualified distributive subject.
+/// Derived: each creature you control with flying enters with one +1/+1
+/// counter for each creature you control; a creature without flying gets none.
+/// The line is a distributive replacement, not a `static_structure` gap.
 #[test]
 fn keyword_qualified_distributive_subject_counts_at_entry() {
     let mut scenario = GameScenario::new();

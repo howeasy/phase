@@ -33865,8 +33865,7 @@ fn phylactery_lich_as_enters_object_effect_body_keeps_prior_shape() {
 /// enters-with sentence are two instructions; one replacement cannot carry
 /// both, and the counter count depends on the frame's result ("removed this
 /// way" / "revealed this way"), so the whole line is one `enters_with_clause`
-/// gap. At base it was a counter replacement that dropped the frame's
-/// instruction.
+/// gap, never a counter replacement that drops the frame's instruction.
 #[test]
 fn static_shaped_as_enters_lines_are_one_enters_with_clause_gap() {
     for (name, oracle, line, description, keywords, types, subtypes) in [

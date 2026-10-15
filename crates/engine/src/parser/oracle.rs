@@ -6634,7 +6634,9 @@ fn parse_normalized_oracle_ir(
             }
             // Every other "… enters with …" shape here (kicker-conditional
             // "if ~ was kicked, it enters with …", external "[type] enters
-            // with …", etc.) is a genuine CR 614.1c object-hosted replacement.
+            // with …", etc.) is tried as a CR 614.1c object-hosted replacement
+            // candidate; the gate in `enters_with_counters_outcome` decides
+            // which are claimed.
             if let Some(replacement_ir) = parse_replacement_line_ir(&line, card_name) {
                 emitter.emit_at(
                     item_line,
