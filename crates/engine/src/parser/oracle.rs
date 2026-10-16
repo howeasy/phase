@@ -61,10 +61,11 @@ use super::oracle_classifier::{
     is_collect_evidence_alt_cost_pattern, is_compound_turn_limit, is_defiler_cost_pattern,
     is_enters_tapped_cant_untap_compound, is_enters_with_counter_replacement_line,
     is_enters_with_counter_trigger, is_flashback_equal_mana_cost, is_granted_static_line,
-    is_instead_replacement_line, is_opening_hand_begin_game, is_pay_life_as_colored_mana_pattern,
-    is_replacement_pattern, is_spells_alternative_cost_pattern, is_static_pattern,
-    is_vehicle_tier_line, lower_starts_with, should_defer_spell_to_effect,
-    split_flashback_trailing_self_spell_cost_reduction, strip_entry_this_way_riders,
+    is_instead_replacement_line, is_one_time_boon_grant_line, is_opening_hand_begin_game,
+    is_pay_life_as_colored_mana_pattern, is_replacement_pattern,
+    is_spells_alternative_cost_pattern, is_static_pattern, is_vehicle_tier_line, lower_starts_with,
+    should_defer_spell_to_effect, split_flashback_trailing_self_spell_cost_reduction,
+    strip_entry_this_way_riders,
 };
 use super::oracle_condition::parse_restriction_condition;
 use super::oracle_cost::{parse_oracle_cost, parse_single_cost, try_parse_cost_reduction};
@@ -1934,6 +1935,7 @@ fn quantity_ref_uses_filter_prop(qty: &QuantityRef, pred: &impl Fn(&FilterProp) 
         | QuantityRef::LandsPlayedThisTurn { .. }
         | QuantityRef::TurnsTaken
         | QuantityRef::ChosenNumber
+        | QuantityRef::NotedNumber
         | QuantityRef::PlayerChosenNumber { .. }
         | QuantityRef::DescendedThisTurn
         | QuantityRef::LoyaltyAbilitiesActivatedThisTurn { .. }
@@ -6575,8 +6577,15 @@ fn parse_normalized_oracle_ir(
         // ("… is put onto the battlefield this way, …") or comma-less rider to the
         // replacement interceptor and lost the head instruction. `None` (the line is
         // only riders) has no head to intercept either.
+        // Digital-only Alchemy (no CR entry): a one-time-boon grant line is
+        // never this interceptor's shape even when the QUOTED ability inside
+        // contains "enters with" — without the exclusion the interceptor
+        // would claim e.g. Benalish Knight-Counselor's whole trigger line as
+        // an object-hosted replacement, destroying the printed trigger and
+        // publishing a prose counter type (issue #7495).
         if has_trigger_prefix(&lower)
             && !is_enters_with_counter_trigger(&lower)
+            && !is_one_time_boon_grant_line(&lower)
             && strip_entry_this_way_riders(&lower)
                 .is_some_and(|head| scan_contains(&head, "enters with"))
         {
@@ -7198,7 +7207,16 @@ fn parse_normalized_oracle_ir(
                     i += 1;
                     continue;
                 }
-            } else if is_enters_with_counter_replacement_line(&lower) {
+                // Digital-only Alchemy (no CR entry): a one-time-boon grant line
+                // is excluded even when the QUOTED ability inside reads as an
+                // enters-with-counters replacement — routing it here feeds the
+                // wrapper to the counter grammar and publishes a prose counter
+                // type (issue #7495). Falls through to the Priority-9 spell
+                // catch-all, which parses the grant via
+                // `try_parse_boon_creation`.
+            } else if is_enters_with_counter_replacement_line(&lower)
+                && !is_one_time_boon_grant_line(&lower)
+            {
                 // CR 614.1c + CR 614.12: distributive "[Other/each] [type] you
                 // control enter(s) with [an additional] [counter] on them [for
                 // each …]" lines (Gev, Scaled Scorch) are ETB-with-counter
@@ -7475,8 +7493,13 @@ fn parse_normalized_oracle_ir(
             continue;
         }
 
-        // Priority 8: Replacement patterns
-        if is_replacement_pattern(&lower) {
+        // Priority 8: Replacement patterns. Digital-only Alchemy (no CR
+        // entry): a one-time-boon grant line is excluded even when the QUOTED
+        // ability inside carries replacement tokens ("enters", "counter") —
+        // routing it here feeds the wrapper to the counter grammar and
+        // publishes a prose counter type (issue #7495). The spell catch-all
+        // below parses the grant via `try_parse_boon_creation` instead.
+        if is_replacement_pattern(&lower) && !is_one_time_boon_grant_line(&lower) {
             // The replacement classifier correctly recognizes this prevention
             // wording, but the engine cannot yet model its continuous,
             // repeatable damage-event watcher. Preserve the precise `prevent`
@@ -9101,6 +9124,11 @@ fn resolve_guards_in_effect(effect: &mut Effect) {
         // a `resolve_guards_in_delayed_condition` arm here is the fix at that point; it is not
         // written now because it would be dead code with no reachable input.
         Effect::CreateDelayedTrigger { effect, .. } => resolve_guards_in_ability(effect, None),
+        Effect::CreateBoon { trigger, .. } => {
+            if let Some(execute) = trigger.execute.as_deref_mut() {
+                resolve_guards_in_ability(execute, None)
+            }
+        }
         Effect::FlipCoin {
             win_effect,
             lose_effect,
@@ -9364,6 +9392,7 @@ fn resolve_guards_in_effect(effect: &mut Effect) {
         | Effect::ChooseFromZone { .. }
         | Effect::RememberCard { .. }
         | Effect::NoteManaSpent
+        | Effect::NoteNumber { .. }
         | Effect::ForEachCategory { .. }
         | Effect::ChooseObjectsIntoTrackedSet { .. }
         | Effect::ChooseAndSacrificeRest { .. }
@@ -10183,6 +10212,11 @@ fn demote_lifetimes_in_effect(effect: &mut Effect) {
             }
         }
         Effect::CreateDelayedTrigger { effect, .. } => demote_lifetimes_in_ability(effect),
+        Effect::CreateBoon { trigger, .. } => {
+            if let Some(execute) = trigger.execute.as_deref_mut() {
+                demote_lifetimes_in_ability(execute)
+            }
+        }
         Effect::FlipCoin {
             win_effect,
             lose_effect,
@@ -10434,6 +10468,7 @@ fn demote_lifetimes_in_effect(effect: &mut Effect) {
         | Effect::ChooseFromZone { .. }
         | Effect::RememberCard { .. }
         | Effect::NoteManaSpent
+        | Effect::NoteNumber { .. }
         | Effect::ForEachCategory { .. }
         | Effect::ChooseObjectsIntoTrackedSet { .. }
         | Effect::ChooseAndSacrificeRest { .. }
@@ -10995,6 +11030,11 @@ fn render_effect_descriptions(effect: &mut Effect, card_name: &str) {
         } => {
             render_ability_descriptions(effect, card_name);
             render_delayed_condition_descriptions(condition, card_name);
+        }
+        // Digital-only Alchemy (no CR entry): the granted trigger carries a
+        // `description` (the quoted text) plus a full execute body.
+        Effect::CreateBoon { trigger, .. } => {
+            render_trigger_descriptions(trigger, card_name);
         }
         // CR 614.1 + CR 603.7a: the exile-instead rider arms a delayed trigger
         // (Feather, the Redeemed). Field is `on_exile`, not `rider`.
@@ -12975,9 +13015,9 @@ mod pipeline_snapshot_tests;
 mod has_unimplemented_wrapper_recursion_tests {
     use super::has_unimplemented;
     use crate::types::ability::{
-        AbilityDefinition, AbilityKind, ControllerRef, DelayedTriggerCondition, DieResultBranch,
-        Effect, NestedDefinitionEdge, PileSource, PlayerFilter, PlayerScope, QuantityExpr,
-        TargetFilter, VoteSubject, VoteTally, VoteVisibility, VoterScope,
+        AbilityDefinition, AbilityKind, ChooseOneOfKind, ControllerRef, DelayedTriggerCondition,
+        DieResultBranch, Effect, NestedDefinitionEdge, PileSource, PlayerFilter, PlayerScope,
+        QuantityExpr, TargetFilter, VoteSubject, VoteTally, VoteVisibility, VoterScope,
     };
     use crate::types::phase::Phase;
 
@@ -13138,6 +13178,7 @@ mod has_unimplemented_wrapper_recursion_tests {
             Effect::ChooseOneOf {
                 chooser: PlayerFilter::Controller,
                 branches: vec![failure()],
+                kind: ChooseOneOfKind::Ordinary,
             },
         );
         assert!(has_unimplemented(&choose_one_of), "ChooseOneOf branch");
@@ -13229,6 +13270,7 @@ mod has_unimplemented_wrapper_recursion_tests {
             Effect::ChooseOneOf {
                 chooser: PlayerFilter::Controller,
                 branches: vec![clean(), clean()],
+                kind: ChooseOneOfKind::Ordinary,
             },
         );
         assert!(!has_unimplemented(&choose_one_of), "ChooseOneOf branch");
@@ -13357,6 +13399,7 @@ mod has_unimplemented_wrapper_recursion_tests {
             Effect::ChooseOneOf {
                 chooser: PlayerFilter::Controller,
                 branches: vec![*payload("branch_one"), *payload("branch_two")],
+                kind: ChooseOneOfKind::Ordinary,
             },
         ];
 

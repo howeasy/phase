@@ -133,6 +133,7 @@ fn redact_paid_cast_cleanup_authority(waiting_for: &mut WaitingFor) {
         | WaitingFor::CopyTargetChoice { .. }
         | WaitingFor::ExploreChoice { .. }
         | WaitingFor::ReturnAsAuraTarget { .. }
+        | WaitingFor::ChooseTokenHost { .. }
         | WaitingFor::EquipTarget { .. }
         | WaitingFor::CrewVehicle { .. }
         | WaitingFor::StationTarget { .. }
@@ -4108,6 +4109,15 @@ fn redact_waiting_for_payment(waiting_for: &mut WaitingFor, hidden_ids: &HashSet
         }
         WaitingFor::MultiTargetSelection {
             pending_ability, ..
+        }
+        // CR 400.2: the batch-semantics token-host pause
+        // (`effects/token.rs` clones the raw creating ability into
+        // `pending_ability`) carries the same trigger-source payment
+        // snapshots as the multi-target pause and needs the same
+        // viewer-keyed redaction — otherwise a hidden cost-paid mana
+        // source leaks to opponents and unseated viewers.
+        | WaitingFor::ChooseTokenHost {
+            pending_ability, ..
         } => redact_ability_payment(pending_ability, hidden_ids),
         WaitingFor::RepeatDecision { ability, .. }
         | WaitingFor::ClashChooseOpponent { ability, .. }
@@ -6599,6 +6609,22 @@ mod tests {
                 }),
             ),
             (
+                // CR 400.2: the batch token-host pause carries
+                // the same trigger-source payment snapshots as the
+                // multi-target pause (production path: `effects/token.rs`
+                // clones the raw creating ability) and gets the same
+                // viewer-keyed redaction.
+                "ChooseTokenHost",
+                "/waiting_for/".to_string(),
+                2,
+                prompt(WaitingFor::ChooseTokenHost {
+                    player: owner,
+                    source_id: paid,
+                    legal_targets: Vec::new(),
+                    pending_ability: effect(),
+                }),
+            ),
+            (
                 "RepeatDecision",
                 "/waiting_for/".to_string(),
                 2,
@@ -7082,6 +7108,7 @@ mod tests {
             continuation: Some(effect()),
             replacement_applied: Default::default(),
             remaining_players: Vec::new(),
+            trigger_context: None,
         };
         assert_eq!(
             payment_arrays_under(&state, "/pending_cost_move_resume/").len(),
@@ -7253,6 +7280,7 @@ mod tests {
             ))),
             replacement_applied: Default::default(),
             remaining_players: Vec::new(),
+            trigger_context: None,
         };
 
         for viewer in [PlayerId(0), PlayerId(1)] {
