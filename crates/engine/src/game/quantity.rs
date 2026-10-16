@@ -1709,8 +1709,8 @@ pub fn resolve_quantity_with_spell(
 /// or filter reads at the strongest grade among its parts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum RecipientRead {
-    /// No recipient read recognized by this classifier; unenumerated readers
-    /// also reach this grade, so it is not proof that the binding is unused.
+    /// No recipient read the classifier can see. Filters held in game state
+    /// are graded conservatively.
     Unread,
     /// Reads the recipient only as the identity that delimits a counted
     /// population: "other" (`FilterProp::Another`) or "attached to it"
@@ -1735,114 +1735,7 @@ pub(crate) fn quantity_expr_uses_recipient(expr: &QuantityExpr) -> bool {
 pub(crate) fn quantity_expr_recipient_read(expr: &QuantityExpr) -> RecipientRead {
     match expr {
         QuantityExpr::Fixed { .. } => RecipientRead::Unread,
-        QuantityExpr::Ref { qty } => match qty {
-            QuantityRef::HandSize {
-                player: PlayerScope::RecipientController,
-            }
-            | QuantityRef::LifeTotal {
-                player: PlayerScope::RecipientController,
-            }
-            | QuantityRef::LifeLostThisTurn {
-                player: PlayerScope::RecipientController,
-            }
-            | QuantityRef::LifeGainedThisTurn {
-                player: PlayerScope::RecipientController,
-            }
-            | QuantityRef::CardsDrawnThisTurn {
-                player: PlayerScope::RecipientController,
-            }
-            | QuantityRef::CardsDiscardedThisTurn {
-                player: PlayerScope::RecipientController,
-            }
-            | QuantityRef::TokensCreatedThisTurn {
-                player: PlayerScope::RecipientController,
-                ..
-            }
-            | QuantityRef::PlayerActionsThisTurn {
-                player: PlayerScope::RecipientController,
-                ..
-            }
-            | QuantityRef::PartySize {
-                player: PlayerScope::RecipientController,
-            } => RecipientRead::Characteristics,
-            QuantityRef::ObjectCount { filter }
-            | QuantityRef::ObjectCountDistinct { filter, .. }
-            | QuantityRef::ObjectCountBySharedQuality { filter, .. }
-            | QuantityRef::DistinctCardTypes {
-                source: CardTypeSetSource::Objects { filter },
-            }
-            | QuantityRef::SharedCardTypes {
-                source: CardTypeSetSource::Objects { filter },
-            }
-            | QuantityRef::DistinctSubtypes {
-                source: CardTypeSetSource::Objects { filter },
-                ..
-            }
-            | QuantityRef::ManaSpentToCast {
-                metric:
-                    CastManaSpentMetric::FromSource {
-                        source_filter: filter,
-                    },
-                ..
-            }
-            | QuantityRef::AttackedThisTurn {
-                filter: Some(filter),
-                ..
-            } => filter_recipient_read(filter),
-            QuantityRef::ObjectColorCount {
-                scope: ObjectScope::Recipient,
-            }
-            | QuantityRef::ObjectNameWordCount {
-                scope: ObjectScope::Recipient,
-            }
-            | QuantityRef::NameStickerLetterCount {
-                stickers:
-                    NameStickerSet::OnObject {
-                        scope: ObjectScope::Recipient,
-                    },
-                letters: _,
-            }
-            | QuantityRef::ObjectTypelineComponentCount {
-                scope: ObjectScope::Recipient,
-            }
-            | QuantityRef::Power {
-                scope: ObjectScope::Recipient,
-            }
-            | QuantityRef::BasePower {
-                scope: ObjectScope::Recipient,
-            }
-            | QuantityRef::Toughness {
-                scope: ObjectScope::Recipient,
-            }
-            | QuantityRef::ObjectManaValue {
-                scope: ObjectScope::Recipient,
-            }
-            | QuantityRef::ManaSymbolsInManaCost {
-                scope: ObjectScope::Recipient,
-                ..
-            }
-            // CR 122.1 + CR 613.4c: "…for each [kind] counter on it/them" in a
-            // per-recipient continuous static counts the counters on the
-            // affected object, so the magnitude varies per recipient (Toxrill,
-            // Clamavus, Thelon of Havenwood, Luxior, Spark Rupture).
-            | QuantityRef::CountersOn {
-                scope: ObjectScope::Recipient,
-                ..
-            } => RecipientRead::Characteristics,
-            QuantityRef::Power {
-                scope: ObjectScope::CostPaidObject,
-            }
-            | QuantityRef::BasePower {
-                scope: ObjectScope::CostPaidObject,
-            }
-            | QuantityRef::Toughness {
-                scope: ObjectScope::CostPaidObject,
-            }
-            | QuantityRef::ObjectManaValue {
-                scope: ObjectScope::CostPaidObject,
-            } => RecipientRead::Unread,
-            _ => RecipientRead::Unread,
-        },
+        QuantityExpr::Ref { qty } => quantity_ref_recipient_read(qty),
         QuantityExpr::DivideRounded { inner, .. }
         | QuantityExpr::Offset { inner, .. }
         | QuantityExpr::ClampMin { inner, .. }
@@ -1857,6 +1750,229 @@ pub(crate) fn quantity_expr_recipient_read(expr: &QuantityExpr) -> RecipientRead
         QuantityExpr::Difference { left, right } => {
             quantity_expr_recipient_read(left).max(quantity_expr_recipient_read(right))
         }
+    }
+}
+
+/// Classify every reference explicitly so a new variant requires a decision.
+fn quantity_ref_recipient_read(qty: &QuantityRef) -> RecipientRead {
+    match qty {
+        QuantityRef::HandSize { player }
+        | QuantityRef::LifeTotal { player }
+        | QuantityRef::GraveyardSize { player }
+        | QuantityRef::StartingLifeTotal { player }
+        | QuantityRef::LifeLostThisTurn { player }
+        | QuantityRef::PartySize { player }
+        | QuantityRef::Speed { player }
+        | QuantityRef::LifeGainedThisTurn { player }
+        | QuantityRef::CardsDrawnThisTurn { player }
+        | QuantityRef::LandsPlayedThisTurn { player, .. }
+        | QuantityRef::PlayerChosenNumber { player }
+        | QuantityRef::LoyaltyAbilitiesActivatedThisTurn { player }
+        | QuantityRef::CardsDiscardedThisTurn { player }
+        | QuantityRef::TokensCreatedThisTurn { player, .. }
+        | QuantityRef::PlayerActionsThisTurn { player, .. }
+        | QuantityRef::SacrificedThisTurn { player, .. }
+        | QuantityRef::BattlefieldEntriesThisTurn { player, .. } => player_scope_recipient_read(player),
+        QuantityRef::Power { scope }
+        | QuantityRef::BasePower { scope }
+        | QuantityRef::Intensity { scope }
+        | QuantityRef::Toughness { scope }
+        | QuantityRef::ObjectManaValue { scope }
+        | QuantityRef::ObjectColorCount { scope }
+        | QuantityRef::ObjectNameWordCount { scope }
+        | QuantityRef::ObjectTypelineComponentCount { scope }
+        | QuantityRef::ManaSymbolsInManaCost { scope, .. }
+        // CR 122.1 + CR 613.4c: a per-recipient counter count varies with
+        // the affected object, just like its other object-scoped values.
+        | QuantityRef::CountersOn { scope, .. } => object_scope_recipient_read(scope),
+        QuantityRef::NameStickerLetterCount { stickers, .. } => match stickers {
+            NameStickerSet::OnObject { scope } => object_scope_recipient_read(scope),
+            NameStickerSet::ThatSticker => RecipientRead::Unread,
+        },
+        QuantityRef::ObjectCount { filter }
+        | QuantityRef::ObjectCountDistinct { filter, .. }
+        | QuantityRef::ObjectCountBySharedQuality { filter, .. }
+        | QuantityRef::CountersOnObjects { filter, .. }
+        | QuantityRef::EnteredThisTurn { filter }
+        | QuantityRef::DistinctCounterKindsAmong { filter } => filter_recipient_read(filter),
+        QuantityRef::FilteredTrackedSetSize { filter, .. } => filter_recipient_read(filter),
+        QuantityRef::ZoneCardCount { filter, .. }
+        | QuantityRef::AttackedThisTurn { filter, .. } => filter
+            .as_ref()
+            .map_or(RecipientRead::Unread, filter_recipient_read),
+        QuantityRef::CounterAddedThisTurn { target, .. } => filter_recipient_read(target),
+        QuantityRef::DamageDealtThisTurn { source, target, .. } => {
+            filter_recipient_read(source).max(filter_recipient_read(target))
+        }
+        QuantityRef::PropertyAggregate(aggregate) => {
+            card_type_set_source_recipient_read(aggregate.source())
+        }
+        QuantityRef::DistinctCardTypes { source }
+        | QuantityRef::SharedCardTypes { source }
+        | QuantityRef::DistinctSubtypes { source, .. }
+        | QuantityRef::DistinctColorsAmong { source } => card_type_set_source_recipient_read(source),
+        QuantityRef::PlayerCount { filter } => match filter {
+            // Only this top-level player filter preserves the quantity context.
+            PlayerFilter::PlayerAttribute { value, .. } => quantity_expr_recipient_read(value),
+            PlayerFilter::Controller
+            | PlayerFilter::Opponent
+            | PlayerFilter::DefendingPlayer
+            | PlayerFilter::OpponentLostLife
+            | PlayerFilter::OpponentGainedLife
+            | PlayerFilter::HasLostTheGame
+            | PlayerFilter::OpponentAttacked { .. }
+            | PlayerFilter::OpponentAttackingEnchantedPlayer
+            | PlayerFilter::All
+            | PlayerFilter::AllExcept { .. }
+            | PlayerFilter::HighestSpeed
+            | PlayerFilter::ZoneChangedThisWay
+            | PlayerFilter::PerformedActionThisWay { .. }
+            | PlayerFilter::OwnersOfCardsExiledBySource
+            | PlayerFilter::TriggeringPlayer
+            | PlayerFilter::OpponentOtherThanTriggering
+            | PlayerFilter::OpponentOfTriggeringPlayer
+            | PlayerFilter::OpponentOfTriggeringPlayerNotAttacked
+            | PlayerFilter::VotedFor { .. }
+            | PlayerFilter::ParentObjectTargetController
+            | PlayerFilter::ChosenPlayer { .. }
+            | PlayerFilter::ParentObjectTargetOwner
+            | PlayerFilter::TargetPlayer
+            | PlayerFilter::GrantingObjectCaster
+            | PlayerFilter::OpponentDealtDamage { .. }
+            | PlayerFilter::ControlsCount { .. }
+            | PlayerFilter::TrackedSetPossessor { .. }
+            | PlayerFilter::AnyOf { .. } => RecipientRead::Unread,
+        },
+        // These filters use records, fresh contexts, or target-slot metadata,
+        // not the live recipient binding. Sacrifice/token/entry filters above
+        // are likewise record-based; only their player scopes can read it.
+        QuantityRef::ControlledByEachPlayer { .. }
+        | QuantityRef::ZoneChangeCountThisTurn { .. }
+        | QuantityRef::ZoneChangeAggregateThisTurn { .. }
+        | QuantityRef::SpellsCastThisTurn { .. }
+        | QuantityRef::SpellsCastBeforeTriggeringSpell { .. }
+        | QuantityRef::SpellsCastThisGame { .. }
+        | QuantityRef::ManaSpentToCast { .. }
+        | QuantityRef::TargetObjectManaValue { .. }
+        | QuantityRef::EventContextPlayerCount { .. }
+        | QuantityRef::AttachmentsOnLeavingObject { .. }
+        | QuantityRef::LifeAboveStarting
+        | QuantityRef::TriggeringDiscoverValue
+        | QuantityRef::TriggeringScryLookCount
+        | QuantityRef::TriggeringScryBottomCount
+        | QuantityRef::PlayerCounter { .. }
+        | QuantityRef::TargetControllerCounter { .. }
+        | QuantityRef::Variable { .. }
+        | QuantityRef::SelfManaValue
+        | QuantityRef::TargetZoneCardCount { .. }
+        | QuantityRef::Devotion { .. }
+        | QuantityRef::CardsExiledBySource
+        | QuantityRef::ExiledCardPower { .. }
+        | QuantityRef::BasicLandTypeCount { .. }
+        | QuantityRef::TrackedSetSize
+        | QuantityRef::ExiledFromHandThisResolution
+        | QuantityRef::PreviousEffectAmount { .. }
+        | QuantityRef::PreviousEffectCount
+        | QuantityRef::UnspentMana { .. }
+        | QuantityRef::EventContextAmount
+        | QuantityRef::EventContextSourceCostX
+        | QuantityRef::EventContextSourceModesChosen
+        | QuantityRef::CrimesCommittedThisTurn
+        | QuantityRef::BendTypesThisTurn
+        | QuantityRef::TurnsTaken
+        | QuantityRef::ChosenNumber
+        | QuantityRef::DescendedThisTurn
+        | QuantityRef::SpellsCastLastTurn
+        | QuantityRef::DungeonsCompleted
+        | QuantityRef::CostXPaid
+        | QuantityRef::KickerCount
+        | QuantityRef::AdditionalCostPaymentCount
+        | QuantityRef::AdditionalCostPaymentCountFor { .. }
+        | QuantityRef::ConvokedCreatureCount
+        | QuantityRef::TimesCostPaidThisResolution
+        | QuantityRef::ColorsInCommandersColorIdentity
+        | QuantityRef::CommanderCastFromCommandZoneCount
+        | QuantityRef::CommanderManaValue { .. }
+        | QuantityRef::VoteCount { .. } => RecipientRead::Unread,
+    }
+}
+
+fn object_scope_recipient_read(scope: &ObjectScope) -> RecipientRead {
+    match scope {
+        ObjectScope::Recipient => RecipientRead::Characteristics,
+        ObjectScope::Source
+        | ObjectScope::Target
+        | ObjectScope::EventSource
+        | ObjectScope::EventTarget
+        | ObjectScope::CostPaidObject
+        | ObjectScope::Anaphoric
+        | ObjectScope::Demonstrative
+        | ObjectScope::AmassedArmy
+        | ObjectScope::OtherRevealedCard
+        | ObjectScope::OwnedLinkedExileCard
+        | ObjectScope::BatchSource
+        | ObjectScope::ChainRootTarget
+        | ObjectScope::GrantingObject
+        | ObjectScope::SpecificObject { .. } => RecipientRead::Unread,
+    }
+}
+
+fn player_scope_recipient_read(scope: &PlayerScope) -> RecipientRead {
+    match scope {
+        PlayerScope::RecipientController => RecipientRead::Characteristics,
+        PlayerScope::AllPlayers { exclude, .. } => exclude
+            .as_deref()
+            .map_or(RecipientRead::Unread, single_player_scope_recipient_read),
+        PlayerScope::Controller
+        | PlayerScope::ScopedPlayer
+        | PlayerScope::Target
+        | PlayerScope::Opponent { .. }
+        | PlayerScope::DefendingPlayer
+        | PlayerScope::ParentObjectTargetController
+        | PlayerScope::SourceChosenPlayer
+        | PlayerScope::AnyTurn
+        | PlayerScope::SpecificPlayer { .. } => RecipientRead::Unread,
+    }
+}
+
+fn single_player_scope_recipient_read(scope: &PlayerScope) -> RecipientRead {
+    match scope {
+        PlayerScope::RecipientController => RecipientRead::Characteristics,
+        // resolve_single_player_scope does not descend into aggregate exclusions.
+        PlayerScope::AllPlayers { .. }
+        | PlayerScope::Opponent { .. }
+        | PlayerScope::Controller
+        | PlayerScope::ScopedPlayer
+        | PlayerScope::Target
+        | PlayerScope::DefendingPlayer
+        | PlayerScope::ParentObjectTargetController
+        | PlayerScope::SourceChosenPlayer
+        | PlayerScope::AnyTurn
+        | PlayerScope::SpecificPlayer { .. } => RecipientRead::Unread,
+    }
+}
+
+fn card_type_set_source_recipient_read(source: &CardTypeSetSource) -> RecipientRead {
+    match source {
+        CardTypeSetSource::Objects { filter } => filter_recipient_read(filter),
+        CardTypeSetSource::AnyOf { .. } => {
+            let mut grade = RecipientRead::Unread;
+            let complete = source
+                .try_for_each_member(crate::types::ability::UNION_DEPTH_BUDGET, &mut |leaf| {
+                    grade = grade.max(card_type_set_source_recipient_read(leaf))
+                });
+            if complete {
+                grade
+            } else {
+                // An unseen member could read characteristics; do not bind an
+                // uncreated token merely because the walk was truncated.
+                RecipientRead::Characteristics
+            }
+        }
+        CardTypeSetSource::TurnJournal { .. }
+        | CardTypeSetSource::Zone { .. }
+        | CardTypeSetSource::ExiledBySource
+        | CardTypeSetSource::TrackedSet { .. } => RecipientRead::Unread,
     }
 }
 
@@ -3265,7 +3381,62 @@ fn filter_recipient_read(filter: &TargetFilter) -> RecipientRead {
             .map(filter_recipient_read)
             .max()
             .unwrap_or(RecipientRead::Unread),
-        _ => RecipientRead::Unread,
+        TargetFilter::TrackedSetFiltered { filter, .. } => filter_recipient_read(filter),
+        // The selected source's filter lives in game state and preserves the
+        // recipient on recheck. Its unseen contents require a conservative grade.
+        TargetFilter::ChosenDamageSource { .. } => RecipientRead::Characteristics,
+        TargetFilter::None
+        | TargetFilter::Any
+        | TargetFilter::Player
+        | TargetFilter::Controller
+        | TargetFilter::SourceController
+        | TargetFilter::ControllerAndControlledPermanents { .. }
+        | TargetFilter::Opponent
+        | TargetFilter::SelfRef
+        | TargetFilter::GrantingObject { .. }
+        | TargetFilter::SourceOrPaired
+        | TargetFilter::StackAbility { .. }
+        | TargetFilter::StackSpell
+        | TargetFilter::SpecificObject { .. }
+        | TargetFilter::SpecificPlayer { .. }
+        | TargetFilter::PlayerWhoChoseLabel { .. }
+        | TargetFilter::Neighbor { .. }
+        | TargetFilter::ScopedPlayer
+        | TargetFilter::AttachedTo
+        | TargetFilter::LastCreated
+        | TargetFilter::LastRevealed
+        | TargetFilter::LastZoneChanged
+        | TargetFilter::CostPaidObject
+        | TargetFilter::AmassedArmy
+        | TargetFilter::ChosenCard
+        | TargetFilter::TrackedSet { .. }
+        | TargetFilter::ExiledBySource
+        | TargetFilter::ExiledCardByIndex { .. }
+        | TargetFilter::TriggeringSpellController
+        | TargetFilter::TriggeringSpellOwner
+        | TargetFilter::TriggeringPlayer
+        | TargetFilter::TriggeringSource
+        | TargetFilter::EventTarget
+        | TargetFilter::TriggeringSourceController
+        | TargetFilter::EventTargetController
+        | TargetFilter::ParentTarget
+        | TargetFilter::ParentTargetSlot { .. }
+        | TargetFilter::DeclaredPlayer { .. }
+        | TargetFilter::ParentTargetController
+        | TargetFilter::ParentTargetOwner
+        | TargetFilter::SourceChosenPlayer
+        | TargetFilter::OriginalController
+        | TargetFilter::OriginalSource
+        | TargetFilter::PostReplacementSourceController
+        | TargetFilter::PostReplacementDamageSource
+        | TargetFilter::PostReplacementDamageTarget
+        | TargetFilter::PostReplacementDamageTargetOwner
+        | TargetFilter::DefendingPlayer
+        | TargetFilter::HasChosenName
+        | TargetFilter::Named { .. }
+        | TargetFilter::Owner
+        | TargetFilter::AllPlayers
+        | TargetFilter::PlayerMatching { .. } => RecipientRead::Unread,
     }
 }
 
@@ -3291,7 +3462,117 @@ fn filter_prop_recipient_read(prop: &FilterProp) -> RecipientRead {
         } if matches!(reference.as_ref(), TargetFilter::ParentTarget) => {
             RecipientRead::Characteristics
         }
-        _ => RecipientRead::Unread,
+        FilterProp::SharesQuality { reference, .. } => reference
+            .as_deref()
+            .map_or(RecipientRead::Unread, filter_recipient_read),
+        // The Aura's own enchant filter lives in game state and receives the
+        // recipient. Its unseen contents require a conservative grade.
+        FilterProp::CanEnchant { .. } => RecipientRead::Characteristics,
+        // These nested filters and thresholds resolve with fresh contexts,
+        // without the outer recipient. Do not walk their payloads.
+        FilterProp::DifferentNameFrom { .. }
+        | FilterProp::DistinctFrom { .. }
+        | FilterProp::Targets { .. }
+        | FilterProp::TargetsOnly { .. }
+        | FilterProp::ControllerMatches { .. }
+        | FilterProp::DealtDamageThisTurn { .. }
+        | FilterProp::Token
+        | FilterProp::NonToken
+        | FilterProp::RepresentedByCard
+        | FilterProp::ControllerChoseLabel { .. }
+        | FilterProp::WasPlayed
+        | FilterProp::Attacking { .. }
+        | FilterProp::Blocking
+        | FilterProp::BlockingSource
+        | FilterProp::CombatRelation { .. }
+        | FilterProp::BlockStatus { .. }
+        | FilterProp::AttackingAlone
+        | FilterProp::BlockingAlone
+        | FilterProp::Tapped
+        | FilterProp::Untapped
+        | FilterProp::IsSaddled
+        | FilterProp::SaddledSource
+        | FilterProp::CrewedThisTurn { .. }
+        | FilterProp::ConvokedSource
+        | FilterProp::ProtectorMatches { .. }
+        | FilterProp::HasHasteOrControlledSinceTurnBegan
+        | FilterProp::WithKeyword { .. }
+        | FilterProp::HasKeywordKind { .. }
+        | FilterProp::WithoutKeyword { .. }
+        | FilterProp::WithoutKeywordKind { .. }
+        | FilterProp::Counters { .. }
+        | FilterProp::Cmc { .. }
+        | FilterProp::ManaValueParity { .. }
+        | FilterProp::ManaCostIn { .. }
+        | FilterProp::InZone { .. }
+        | FilterProp::Owned { .. }
+        | FilterProp::Foretold
+        | FilterProp::HasAdventure
+        | FilterProp::EnchantedBy
+        | FilterProp::EquippedBy
+        | FilterProp::AttachedTo {
+            to: AttachmentReferent::Source,
+        }
+        | FilterProp::AttachedTo {
+            to: AttachmentReferent::Player { .. },
+        }
+        | FilterProp::AttachedTo {
+            to: AttachmentReferent::DeclaredTarget { .. },
+        }
+        | FilterProp::HasAttachment { .. }
+        | FilterProp::HasAnyAttachmentOf { .. }
+        | FilterProp::Unpaired
+        | FilterProp::OtherThanTriggerObject
+        | FilterProp::HasColor { .. }
+        | FilterProp::PtComparison { .. }
+        | FilterProp::PowerGTSource
+        | FilterProp::ColorCount { .. }
+        | FilterProp::ManaSymbolCount { .. }
+        | FilterProp::HasSupertype { .. }
+        | FilterProp::IsChosenCreatureType
+        | FilterProp::MostPrevalentCreatureTypeIn { .. }
+        | FilterProp::IsChosenColor
+        | FilterProp::IsChosenCardType
+        | FilterProp::MatchesLastChosenCardPredicate
+        | FilterProp::HasSingleTarget
+        | FilterProp::Modal
+        | FilterProp::PrepareSpell
+        | FilterProp::NotColor { .. }
+        | FilterProp::NotSupertype { .. }
+        | FilterProp::Suspected
+        | FilterProp::Renowned
+        | FilterProp::Goaded
+        | FilterProp::ToughnessGTPower
+        | FilterProp::PowerExceedsBase
+        | FilterProp::InTrackedSet { .. }
+        | FilterProp::Modified
+        | FilterProp::Historic
+        | FilterProp::NotHistoric
+        | FilterProp::InAnyZone { .. }
+        | FilterProp::WasDealtDamageThisTurn
+        | FilterProp::EnteredThisTurn
+        | FilterProp::ControlledContinuouslySinceTurnBegan
+        | FilterProp::ZoneChangedThisTurn { .. }
+        | FilterProp::AttackedThisTurn { .. }
+        | FilterProp::BlockedThisTurn
+        | FilterProp::AttackedOrBlockedThisTurn
+        | FilterProp::CountersPutOnThisTurn { .. }
+        | FilterProp::FaceDown
+        | FilterProp::Transformed
+        | FilterProp::CouldBeTargetedByTriggeringSpell
+        | FilterProp::HasXInManaCost
+        | FilterProp::HasXInActivationCost
+        | FilterProp::WasKicked
+        | FilterProp::HasManaAbility
+        | FilterProp::HasNoAbilities
+        | FilterProp::Named { .. }
+        | FilterProp::SameName
+        | FilterProp::SameNameAsParentTarget
+        | FilterProp::SameNameAsExiledBySource
+        | FilterProp::NameMatchesAnyPermanent { .. }
+        | FilterProp::IsCommander
+        | FilterProp::SharesCreatureTypeWithCommander
+        | FilterProp::Other { .. } => RecipientRead::Unread,
     }
 }
 
@@ -12025,7 +12306,7 @@ mod tests {
     /// CR 205.2a + CR 611.3a: `SharedCardTypes` over an `Objects { filter }`
     /// population is recipient-dependent when its filter reads the recipient
     /// (e.g. `AttachedToRecipient`), mirroring its `DistinctCardTypes` sibling.
-    /// The wildcard `quantity_expr_uses_recipient` classifier must include it so
+    /// The exhaustive `quantity_expr_uses_recipient` classifier includes it so
     /// the layer evaluator re-resolves per recipient instead of reusing one
     /// value for every affected object.
     #[test]
@@ -12077,7 +12358,7 @@ mod tests {
         let power = |scope| QuantityExpr::Ref {
             qty: QuantityRef::Power { scope },
         };
-        let rows = vec![
+        let mut rows = vec![
             // Identity reads.
             (
                 count(vec![FilterProp::Another]),
@@ -12146,6 +12427,379 @@ mod tests {
             (power(ObjectScope::Source), RecipientRead::Unread),
             (power(ObjectScope::CostPaidObject), RecipientRead::Unread),
         ];
+        let other =
+            || TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::Another]));
+        let objects = || CardTypeSetSource::Objects { filter: other() };
+        let union = || {
+            CardTypeSetSource::any_of(vec![CardTypeSetSource::ExiledBySource, objects()]).unwrap()
+        };
+        let recipient = PlayerScope::RecipientController;
+        let characteristic_refs = [
+            QuantityRef::GraveyardSize {
+                player: recipient.clone(),
+            },
+            QuantityRef::StartingLifeTotal {
+                player: recipient.clone(),
+            },
+            QuantityRef::Speed {
+                player: recipient.clone(),
+            },
+            QuantityRef::LandsPlayedThisTurn {
+                player: recipient.clone(),
+                from_zones: None,
+            },
+            QuantityRef::PlayerChosenNumber {
+                player: recipient.clone(),
+            },
+            QuantityRef::LoyaltyAbilitiesActivatedThisTurn {
+                player: recipient.clone(),
+            },
+            QuantityRef::SacrificedThisTurn {
+                player: recipient.clone(),
+                filter: other(),
+            },
+            QuantityRef::BattlefieldEntriesThisTurn {
+                player: recipient.clone(),
+                filter: other(),
+            },
+            QuantityRef::Intensity {
+                scope: ObjectScope::Recipient,
+            },
+            QuantityRef::HandSize {
+                player: PlayerScope::AllPlayers {
+                    aggregate: AggregateFunction::Sum,
+                    exclude: Some(Box::new(recipient.clone())),
+                },
+            },
+            QuantityRef::PlayerCount {
+                filter: PlayerFilter::PlayerAttribute {
+                    relation: PlayerRelation::All,
+                    attr: Box::new(QuantityRef::LifeTotal {
+                        player: PlayerScope::ScopedPlayer,
+                    }),
+                    comparator: Comparator::GE,
+                    value: Box::new(power(ObjectScope::Recipient)),
+                },
+            },
+        ];
+        rows.extend(
+            characteristic_refs
+                .into_iter()
+                .map(|qty| (QuantityExpr::Ref { qty }, RecipientRead::Characteristics)),
+        );
+        let identity_refs = [
+            QuantityRef::CountersOnObjects {
+                counter_type: None,
+                filter: other(),
+            },
+            QuantityRef::EnteredThisTurn { filter: other() },
+            QuantityRef::ZoneCardCount {
+                zone: ZoneRef::Graveyard,
+                card_types: vec![],
+                filter: Some(other()),
+                scope: CountScope::Controller,
+            },
+            QuantityRef::FilteredTrackedSetSize {
+                filter: Box::new(other()),
+                caused_by: None,
+            },
+            QuantityRef::DistinctCounterKindsAmong { filter: other() },
+            QuantityRef::CounterAddedThisTurn {
+                actor: CountScope::Controller,
+                counters: crate::types::counter::CounterMatch::Any,
+                target: other(),
+            },
+            QuantityRef::DamageDealtThisTurn {
+                source: Box::new(other()),
+                target: Box::new(TargetFilter::Any),
+                aggregate: AggregateFunction::Sum,
+                group_by: None,
+                damage_kind: DamageKindFilter::Any,
+                channel: DamageChannel::Total,
+            },
+            QuantityRef::DamageDealtThisTurn {
+                source: Box::new(TargetFilter::Any),
+                target: Box::new(other()),
+                aggregate: AggregateFunction::Sum,
+                group_by: None,
+                damage_kind: DamageKindFilter::Any,
+                channel: DamageChannel::Total,
+            },
+            QuantityRef::PropertyAggregate(
+                crate::types::ability::PropertyAggregate::new(
+                    AggregateFunction::Sum,
+                    ObjectProperty::ManaValue,
+                    objects(),
+                )
+                .unwrap(),
+            ),
+            QuantityRef::DistinctColorsAmong { source: objects() },
+            QuantityRef::DistinctCardTypes { source: union() },
+            QuantityRef::SharedCardTypes { source: union() },
+            QuantityRef::DistinctSubtypes {
+                source: union(),
+                exclude: SubtypeExclusion::None,
+            },
+            QuantityRef::DistinctColorsAmong { source: union() },
+            QuantityRef::PropertyAggregate(
+                crate::types::ability::PropertyAggregate::new(
+                    AggregateFunction::Sum,
+                    ObjectProperty::Power,
+                    union(),
+                )
+                .unwrap(),
+            ),
+            QuantityRef::ObjectCount {
+                filter: TargetFilter::TrackedSetFiltered {
+                    id: crate::types::identifiers::TrackedSetId(0),
+                    filter: Box::new(other()),
+                    caused_by: None,
+                },
+            },
+        ];
+        rows.extend(
+            identity_refs
+                .into_iter()
+                .map(|qty| (QuantityExpr::Ref { qty }, RecipientRead::PopulationIdentity)),
+        );
+        rows.push((
+            count(vec![FilterProp::SharesQuality {
+                quality: SharedQuality::Name,
+                reference: Some(Box::new(other())),
+                relation: Default::default(),
+            }]),
+            RecipientRead::PopulationIdentity,
+        ));
+        rows.push((
+            count(vec![FilterProp::CanEnchant {
+                target: Box::new(TargetFilter::ParentTarget),
+            }]),
+            RecipientRead::Characteristics,
+        ));
+        rows.push((
+            QuantityExpr::Ref {
+                qty: QuantityRef::ObjectCount {
+                    filter: TargetFilter::ChosenDamageSource {
+                        filter: Some(Box::new(TargetFilter::Any)),
+                    },
+                },
+            },
+            RecipientRead::Characteristics,
+        ));
+
+        let nested_exclusion = PlayerScope::AllPlayers {
+            aggregate: AggregateFunction::Sum,
+            exclude: Some(Box::new(PlayerScope::AllPlayers {
+                aggregate: AggregateFunction::Sum,
+                exclude: Some(Box::new(recipient)),
+            })),
+        };
+        let unread_refs = [
+            QuantityRef::HandSize {
+                player: nested_exclusion,
+            },
+            QuantityRef::HandSize {
+                player: PlayerScope::AllPlayers {
+                    aggregate: AggregateFunction::Sum,
+                    exclude: Some(Box::new(PlayerScope::Opponent {
+                        aggregate: AggregateFunction::Sum,
+                    })),
+                },
+            },
+            QuantityRef::Power {
+                scope: ObjectScope::Anaphoric,
+            },
+            QuantityRef::Intensity {
+                scope: ObjectScope::Demonstrative,
+            },
+            QuantityRef::AttachmentsOnLeavingObject {
+                kind: crate::types::ability::AttachmentKind::Aura,
+                controller: Some(ControllerRef::You),
+            },
+            QuantityRef::PlayerCount {
+                filter: PlayerFilter::PlayerAttribute {
+                    relation: PlayerRelation::All,
+                    attr: Box::new(QuantityRef::Power {
+                        scope: ObjectScope::Recipient,
+                    }),
+                    comparator: Comparator::GE,
+                    value: Box::new(QuantityExpr::Fixed { value: 1 }),
+                },
+            },
+            QuantityRef::ControlledByEachPlayer {
+                filter: other(),
+                aggregate: AggregateFunction::Max,
+                relation: PlayerRelation::All,
+            },
+            QuantityRef::ZoneChangeCountThisTurn {
+                from: None,
+                to: None,
+                filter: other(),
+            },
+            QuantityRef::ZoneChangeAggregateThisTurn {
+                from: None,
+                to: None,
+                filter: other(),
+                function: AggregateFunction::Sum,
+                property: ObjectProperty::Power,
+            },
+            QuantityRef::SacrificedThisTurn {
+                player: PlayerScope::Controller,
+                filter: other(),
+            },
+            QuantityRef::TokensCreatedThisTurn {
+                player: PlayerScope::Controller,
+                filter: other(),
+            },
+            QuantityRef::BattlefieldEntriesThisTurn {
+                player: PlayerScope::Controller,
+                filter: other(),
+            },
+            QuantityRef::SpellsCastThisTurn {
+                scope: CountScope::Controller,
+                filter: Some(other()),
+            },
+            QuantityRef::SpellsCastBeforeTriggeringSpell {
+                scope: CountScope::Controller,
+                filter: Some(other()),
+            },
+            QuantityRef::SpellsCastThisGame {
+                scope: CountScope::Controller,
+                filter: Some(other()),
+            },
+            QuantityRef::ManaSpentToCast {
+                scope: CastManaObjectScope::SelfObject,
+                metric: CastManaSpentMetric::FromSource {
+                    source_filter: other(),
+                },
+            },
+            QuantityRef::ManaSpentToCast {
+                scope: CastManaObjectScope::SelfObject,
+                metric: CastManaSpentMetric::Total,
+            },
+            QuantityRef::ManaSpentToCast {
+                scope: CastManaObjectScope::SelfObject,
+                metric: CastManaSpentMetric::DistinctColors,
+            },
+            QuantityRef::ManaSpentToCast {
+                scope: CastManaObjectScope::SelfObject,
+                metric: CastManaSpentMetric::OfColor {
+                    color: ManaColor::Green,
+                },
+            },
+            QuantityRef::TargetObjectManaValue {
+                filter: Box::new(other()),
+            },
+            QuantityRef::PlayerCount {
+                filter: PlayerFilter::ControlsCount {
+                    relation: PlayerRelation::All,
+                    filter: other(),
+                    comparator: Comparator::GE,
+                    count: Box::new(count(vec![FilterProp::Another])),
+                },
+            },
+            QuantityRef::PlayerCount {
+                filter: PlayerFilter::AnyOf {
+                    filters: vec![PlayerFilter::PlayerAttribute {
+                        relation: PlayerRelation::All,
+                        attr: Box::new(QuantityRef::LifeTotal {
+                            player: PlayerScope::ScopedPlayer,
+                        }),
+                        comparator: Comparator::GE,
+                        value: Box::new(power(ObjectScope::Recipient)),
+                    }],
+                },
+            },
+            QuantityRef::EventContextPlayerCount {
+                filter: PlayerFilter::ControlsCount {
+                    relation: PlayerRelation::All,
+                    filter: other(),
+                    comparator: Comparator::GE,
+                    count: Box::new(QuantityExpr::Fixed { value: 1 }),
+                },
+            },
+        ];
+        for qty in unread_refs {
+            // Reach guard: the very same nested Another filter is live when
+            // evaluated through ObjectCount, not a dead branch in the walker.
+            assert_eq!(
+                quantity_ref_recipient_read(&QuantityRef::ObjectCount { filter: other() }),
+                RecipientRead::PopulationIdentity,
+                "live-filter control for {qty:?}"
+            );
+            rows.push((QuantityExpr::Ref { qty }, RecipientRead::Unread));
+        }
+        for prop in [
+            FilterProp::Counters {
+                counters: crate::types::counter::CounterMatch::Any,
+                comparator: Comparator::GE,
+                count: count(vec![FilterProp::Another]),
+            },
+            FilterProp::Cmc {
+                comparator: Comparator::GE,
+                value: count(vec![FilterProp::Another]),
+            },
+            FilterProp::PtComparison {
+                stat: crate::types::ability::PtStat::Power,
+                scope: Default::default(),
+                comparator: Comparator::GE,
+                value: count(vec![FilterProp::Another]),
+            },
+            FilterProp::DifferentNameFrom {
+                filter: Box::new(other()),
+            },
+            FilterProp::Targets {
+                filter: Box::new(other()),
+            },
+            FilterProp::TargetsOnly {
+                filter: Box::new(other()),
+            },
+            FilterProp::DistinctFrom {
+                reference: Box::new(other()),
+            },
+        ] {
+            assert_eq!(
+                quantity_expr_recipient_read(&count(vec![FilterProp::Another])),
+                RecipientRead::PopulationIdentity
+            );
+            rows.push((count(vec![prop]), RecipientRead::Unread));
+        }
+        for source in [
+            CardTypeSetSource::TurnJournal {
+                journal: TurnJournalKind::SpellsCast,
+                scope: CountScope::Controller,
+                filter: Some(other()),
+            },
+            CardTypeSetSource::TrackedSet {
+                set: TrackedAnaphorSource::ChainSet,
+                caused_by: None,
+            },
+            CardTypeSetSource::Zone {
+                zone: ZoneRef::Graveyard,
+                scope: CountScope::All,
+            },
+            CardTypeSetSource::ExiledBySource,
+        ] {
+            assert_eq!(
+                card_type_set_source_recipient_read(&objects()),
+                RecipientRead::PopulationIdentity
+            );
+            assert_eq!(
+                card_type_set_source_recipient_read(&source),
+                RecipientRead::Unread
+            );
+        }
+        let mut deep_source = objects();
+        for _ in 0..=crate::types::ability::UNION_DEPTH_BUDGET {
+            deep_source =
+                CardTypeSetSource::any_of(vec![deep_source, CardTypeSetSource::ExiledBySource])
+                    .unwrap();
+        }
+        assert_eq!(
+            card_type_set_source_recipient_read(&deep_source),
+            RecipientRead::Characteristics,
+            "a truncated union must not bind an uncreated token"
+        );
         for (expr, expected) in rows {
             assert_eq!(
                 quantity_expr_recipient_read(&expr),

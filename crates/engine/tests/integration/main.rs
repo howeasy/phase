@@ -1050,6 +1050,7 @@ mod issue_9657_enters_with_counter_type;
 mod issue_9660_where_x_substitutes_count;
 mod issue_9662_enters_with_second_placement;
 mod issue_9775_non_controller_activation_offered;
+mod issue_9884_recipient_classifier;
 mod issue_bound_by_moonsilver_sacrifice_attach;
 mod issue_circle_of_protection_source_choice;
 mod issue_desperate_gambit_choose_damage_source;

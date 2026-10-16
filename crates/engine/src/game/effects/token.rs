@@ -668,11 +668,10 @@ pub fn resolve(
 /// amount that reads the recipient's characteristics or controller ("its
 /// power", `SharesQuality`) would read an id with no object behind it, while
 /// CR 614.12 asks for the permanent as it would exist on the battlefield; such
-/// amounts (as far as the classifier enumerates them), and amounts that read no
-/// recipient, resolve exactly as before. A recipient read the classifier does
-/// not enumerate (its `_` tail, e.g. `Intensity { scope: Recipient }`) is graded
-/// `Unread` and can ride along inside a composite with an identity read; no
-/// parsed card produces that shape today.
+/// amounts, including composites with both identity and characteristic reads,
+/// stay unbound. The exhaustive classifier grades every quantity and filter
+/// variant, so a characteristic read such as `Intensity { scope: Recipient }`
+/// cannot ride along inside a composite graded only as an identity read.
 ///
 /// The single authority for both `resolve` and its read-only mirror
 /// `resolve_token_spec`, so the live resolution, the bulk-run gate and the
