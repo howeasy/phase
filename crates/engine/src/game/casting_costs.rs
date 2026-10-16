@@ -2193,6 +2193,65 @@ fn refresh_deferred_cast_cost_paid_object(
     }
 }
 
+/// CR 400.7d: PUBLISH the SPELL object's `cast_cost_paid_object` carrier — the
+/// object a cost moved to cast this spell — for the permanent it becomes.
+///
+/// A permanent spell with no on-resolve Spell ability (a vanilla or ETB-only
+/// creature) skips the ability-gated normalization in `stack::resolve`, so the
+/// pipeline's `CastLinkSnapshot` would otherwise capture `None`. Stamping the
+/// stack object here fulfills the "already-stamped" contract the resolution
+/// epilogue relies on, so the snapshot survives `reset_for_battlefield_entry`
+/// and reaches the permanent's ETB triggers (Adipose Offspring's "where X is
+/// the sacrificed creature's toughness") and its enters-with replacement
+/// (Dralnu's Pet's "where X is the discarded card's mana value").
+///
+/// The single publication seam for every cost-move handler (sacrifice,
+/// unattach, discard). Gated to SPELL CASTS ONLY: activated-ability costs
+/// share these handlers (`activation_ability_index` is set), but their
+/// `object_id` is the source permanent, whose own cast provenance must not be
+/// overwritten. [`refresh_deferred_cast_cost_paid_object`] mirrors this gate.
+fn stamp_spell_cast_cost_paid_object(
+    state: &mut GameState,
+    pending: &PendingCast,
+    snapshot: CostPaidObjectSnapshot,
+) {
+    if pending.activation_ability_index.is_some() {
+        return;
+    }
+    if let Some(spell_obj) = state.objects.get_mut(&pending.object_id) {
+        spell_obj.cast_cost_paid_object = Some(snapshot);
+    }
+}
+
+/// CR 400.7j + CR 701.9c: the settled cost-paid referent a completed discard
+/// component may publish to the spell's carrier — the singular referent, when
+/// it is one of the cards this component discarded (`chosen`) and the discard
+/// delivered it to a public zone. A replacement that put the card into a
+/// hidden zone without revealing it leaves its characteristics undefined
+/// (CR 701.9c) and CR 400.7j does not license finding it, so the carrier stays
+/// unstamped. A missing object row reads as not public, failing closed.
+///
+/// Call only after `settle_cost_paid_provenance_recursive` has settled this
+/// component's moves, so the snapshot names the post-move incarnation.
+fn settled_public_discard_referent(
+    state: &GameState,
+    pending: &PendingCast,
+    chosen: &[ObjectId],
+) -> Option<CostPaidObjectSnapshot> {
+    pending
+        .ability
+        .cost_paid_object
+        .as_ref()
+        .filter(|snapshot| chosen.contains(&snapshot.object_id))
+        .filter(|snapshot| {
+            state
+                .objects
+                .get(&snapshot.object_id)
+                .is_some_and(|obj| obj.zone.is_public())
+        })
+        .cloned()
+}
+
 /// Complete the discard-for-cost flow: discard selected cards, then continue casting.
 pub(crate) fn handle_discard_for_cost(
     state: &mut GameState,
@@ -2304,6 +2363,13 @@ pub(crate) fn handle_discard_for_cost(
     pending
         .ability
         .settle_cost_paid_provenance_recursive(state, chosen, CostMoveOutcome::Discard);
+    // CR 400.7d: publish the settled discarded card to the spell's carrier so
+    // the permanent it becomes can read it ("where X is the discarded card's
+    // mana value", Dralnu's Pet). The resumed suffix publishes in
+    // `resume_interrupted_cost_payment` after its own settlement.
+    if let Some(snapshot) = settled_public_discard_referent(state, &pending, chosen) {
+        stamp_spell_cast_cost_paid_object(state, &pending, snapshot);
+    }
 
     if pending.activation_ability_index.is_some() {
         pending.mark_activation_cost_committed();
@@ -3097,6 +3163,12 @@ pub(crate) fn resume_interrupted_cost_payment(
             &chosen,
             CostMoveOutcome::Discard,
         );
+        // CR 400.7d: the paused `handle_discard_for_cost` returned before its
+        // own publication, so the settled discarded card reaches the spell's
+        // carrier here, under the same public-delivery rule.
+        if let Some(snapshot) = settled_public_discard_referent(state, &pending, &chosen) {
+            stamp_spell_cast_cost_paid_object(state, &pending, snapshot);
+        }
         let cost_event_end = events.len();
         let waiting_for = finish_pending_cost_or_cast(state, player, pending, events)?;
         park_cost_payment_triggers_if_paused(
@@ -4127,25 +4199,11 @@ pub(crate) fn handle_sacrifice_for_cost(
         pending
             .ability
             .set_cost_paid_object_recursive(snapshot.clone());
-        // CR 400.7d: also stamp the spell object on the stack directly. A
-        // permanent spell whose only cost-paid-object reference lives in an
-        // ETB *trigger* (Adipose Offspring's "where X is the sacrificed
-        // creature's toughness") has no on-resolve Spell ability, so the
-        // ability-gated normalization in `stack::resolve` is skipped and the
-        // pipeline's `CastLinkSnapshot` would otherwise capture `None`.
-        // Stamping the stack object here fulfills the "already-stamped"
-        // contract that the resolution epilogue relies on for ability-less
-        // permanent spells, so the snapshot survives `reset_for_battlefield_entry`.
-        //
-        // Gated to spell casts only: activated-ability sacrifice costs share
-        // this resolver (`activation_ability_index` is set), but their
-        // `object_id` is the source permanent, whose own cast provenance must
-        // not be overwritten. A spell cast leaves this field `None`.
-        if pending.activation_ability_index.is_none() {
-            if let Some(spell_obj) = state.objects.get_mut(&pending.object_id) {
-                spell_obj.cast_cost_paid_object = Some(snapshot);
-            }
-        }
+        // CR 400.7d: also stamp the spell object on the stack directly
+        // (spell casts only), so a permanent spell whose only cost-paid-object
+        // reference lives in an ETB *trigger* (Adipose Offspring's "where X is
+        // the sacrificed creature's toughness") still carries it.
+        stamp_spell_cast_cost_paid_object(state, &pending, snapshot);
     }
     // CR 601.2h + CR 602.2b (issue #4948): Record EVERY sacrificed object,
     // not just `chosen.first()` above, so this SAME ability's own target
@@ -4495,15 +4553,9 @@ pub(crate) fn handle_unattach_for_cost(
             pending
                 .ability
                 .set_cost_paid_object_recursive(snapshot.clone());
-            // Gated to spell casts only (same guard as `handle_sacrifice_for_cost`):
-            // an activation's `object_id` is the source permanent, whose own cast
-            // provenance must not be overwritten. Captain America's Throw is an
-            // activation, so this stamp is skipped.
-            if pending.activation_ability_index.is_none() {
-                if let Some(spell_obj) = state.objects.get_mut(&pending.object_id) {
-                    spell_obj.cast_cost_paid_object = Some(snapshot);
-                }
-            }
+            // CR 400.7d: spell casts only — Captain America's Throw is an
+            // activation, so the shared seam skips this stamp.
+            stamp_spell_cast_cost_paid_object(state, &pending, snapshot);
         }
     }
 
@@ -18265,6 +18317,60 @@ mod tests {
     fn announced(state: &GameState, mut pending: PendingCast) -> PendingCast {
         crate::game::casting::stamp_announced_activation_record(state, PlayerId(0), &mut pending);
         pending
+    }
+
+    /// CR 400.7j + CR 701.9c: a discard component publishes its settled
+    /// referent to the spell's carrier only for a card it discarded AND
+    /// delivered to a public zone. A card a replacement put into a hidden zone
+    /// unrevealed has undefined characteristics, so nothing is published; a
+    /// referent this component did not move is not its to publish.
+    #[test]
+    fn settled_public_discard_referent_requires_a_public_delivery_of_this_component() {
+        let mut state = GameState::new_two_player(42);
+        let spell = create_object(
+            &mut state,
+            CardId(9_101),
+            PlayerId(0),
+            "Discard-Cost Spell".to_string(),
+            Zone::Stack,
+        );
+        let discarded = create_object(
+            &mut state,
+            CardId(9_102),
+            PlayerId(0),
+            "Discarded Card".to_string(),
+            Zone::Graveyard,
+        );
+        let mut pending = make_pending(spell);
+        pending.activation_ability_index = None;
+        let snapshot = {
+            let obj = &state.objects[&discarded];
+            CostPaidObjectSnapshot::capture(obj, obj.snapshot_for_mana_spent())
+        };
+        pending
+            .ability
+            .set_cost_paid_object_recursive(snapshot.clone());
+
+        assert_eq!(
+            settled_public_discard_referent(&state, &pending, &[discarded]),
+            Some(snapshot),
+            "a card this component delivered to the graveyard is published"
+        );
+        assert_eq!(
+            settled_public_discard_referent(&state, &pending, &[spell]),
+            None,
+            "a referent this component did not move is not published"
+        );
+        state
+            .objects
+            .get_mut(&discarded)
+            .expect("discarded card row")
+            .zone = Zone::Library;
+        assert_eq!(
+            settled_public_discard_referent(&state, &pending, &[discarded]),
+            None,
+            "CR 701.9c: a hidden, unrevealed delivery leaves the carrier unstamped"
+        );
     }
 
     /// `resolved` with the pre-payment journal record for a direct

@@ -8920,6 +8920,36 @@ impl CardTypeSetSource {
         }
     }
 
+    /// Does this population route a filter that references the cost-paid
+    /// object? Only the object filter and the journal's optional narrowing
+    /// filter can; `AnyOf` recurses so a union member's reference is not
+    /// dropped.
+    ///
+    /// Uncited: a structural query over which arms hold a `TargetFilter`, not a
+    /// rule implementation. (It cited CR 109.2, the battlefield-default rule for
+    /// a bare type description, which does not speak to filter routing.)
+    pub fn references_cost_paid_object(&self) -> bool {
+        let mut found = false;
+        let complete = self.try_for_each_member(UNION_DEPTH_BUDGET, &mut |leaf| {
+            if found {
+                return;
+            }
+            found = match leaf {
+                CardTypeSetSource::Objects { filter } => filter.references_cost_paid_object(),
+                CardTypeSetSource::TurnJournal { filter, .. } => filter
+                    .as_ref()
+                    .is_some_and(TargetFilter::references_cost_paid_object),
+                CardTypeSetSource::Zone { .. }
+                | CardTypeSetSource::ExiledBySource
+                | CardTypeSetSource::TrackedSet { .. }
+                | CardTypeSetSource::AnyOf { .. } => false,
+            };
+        });
+        // A truncated walk claims the reference: this gate exists to stop a
+        // cost-paid-object read from escaping, so exhaustion must not let one past.
+        found || !complete
+    }
+
     /// CR 400.1 + CR 613.4a: Every zone this population reads.
     ///
     /// THE single authority for the population-zone axis. Both consumers ask
@@ -10393,6 +10423,161 @@ impl LetterQuery {
 }
 
 impl QuantityRef {
+    /// CR 400.7d + CR 608.2k: True when this `QuantityRef` reads the cost-paid
+    /// object, by either of the two structural axes a ref can carry it on:
+    ///
+    /// 1. **Object-axis refs** carry a `scope: ObjectScope` and read the cost-paid
+    ///    object iff that scope is `CostPaidObject`.
+    /// 2. **Filter-bearing refs** embed a `TargetFilter`, which can itself reference
+    ///    `TargetFilter::CostPaidObject` (e.g. "the number of counters on the
+    ///    sacrificed creature" via `CountersOnObjects { filter: CostPaidObject }`),
+    ///    so the embedded filter is walked recursively.
+    ///
+    /// The match is intentionally exhaustive (no `_` wildcard) so a future
+    /// `QuantityRef` variant that adds either axis forces a compile error here
+    /// rather than silently falling through and dropping the snapshot propagation.
+    pub fn references_cost_paid_object(&self) -> bool {
+        match self {
+            // Object-axis refs: read the cost-paid object iff scoped to it.
+            QuantityRef::Power { scope }
+            | QuantityRef::BasePower { scope }
+            | QuantityRef::Toughness { scope }
+            | QuantityRef::Intensity { scope }
+            | QuantityRef::ObjectManaValue { scope }
+            | QuantityRef::ObjectColorCount { scope }
+            | QuantityRef::ObjectNameWordCount { scope }
+            | QuantityRef::NameStickerLetterCount {
+                stickers: NameStickerSet::OnObject { scope },
+                letters: _,
+            }
+            | QuantityRef::ObjectTypelineComponentCount { scope }
+            | QuantityRef::ManaSymbolsInManaCost { scope, .. }
+            | QuantityRef::CountersOn { scope, .. } => matches!(scope, ObjectScope::CostPaidObject),
+
+            // Filter-bearing refs (owned `TargetFilter`): recurse into the filter.
+            QuantityRef::ObjectCount { filter }
+            | QuantityRef::ObjectCountDistinct { filter, .. }
+            | QuantityRef::ObjectCountBySharedQuality { filter, .. }
+            | QuantityRef::CountersOnObjects { filter, .. }
+            | QuantityRef::ControlledByEachPlayer { filter, .. }
+            | QuantityRef::EnteredThisTurn { filter }
+            | QuantityRef::SacrificedThisTurn { filter, .. }
+            | QuantityRef::BattlefieldEntriesThisTurn { filter, .. }
+            | QuantityRef::ZoneChangeCountThisTurn { filter, .. }
+            | QuantityRef::ZoneChangeAggregateThisTurn { filter, .. }
+            | QuantityRef::CounterAddedThisTurn { target: filter, .. }
+            | QuantityRef::TokensCreatedThisTurn { filter, .. }
+            | QuantityRef::DistinctCounterKindsAmong { filter } => filter.references_cost_paid_object(),
+
+            // Filter-bearing refs (boxed `TargetFilter`): recurse (auto-deref).
+            QuantityRef::TargetObjectManaValue { filter }
+            | QuantityRef::FilteredTrackedSetSize { filter, .. } => {
+                filter.references_cost_paid_object()
+            }
+
+            // Filter-bearing refs (optional `TargetFilter`): recurse when present.
+            QuantityRef::ZoneCardCount { filter, .. }
+            | QuantityRef::AttackedThisTurn { filter, .. }
+            | QuantityRef::SpellsCastThisTurn { filter, .. }
+            | QuantityRef::SpellsCastBeforeTriggeringSpell { filter, .. }
+            | QuantityRef::SpellsCastThisGame { filter, .. } => filter
+                .as_ref()
+                .is_some_and(TargetFilter::references_cost_paid_object),
+
+            // Damage history carries a source filter and a recipient filter.
+            QuantityRef::DamageDealtThisTurn { source, target, .. } => {
+                source.references_cost_paid_object() || target.references_cost_paid_object()
+            }
+
+            // Card-type / subtype / colour counting all embed their `TargetFilter`s
+            // through the shared population enum.
+            QuantityRef::DistinctCardTypes { source }
+            | QuantityRef::SharedCardTypes { source }
+            | QuantityRef::DistinctSubtypes { source, .. }
+            | QuantityRef::DistinctColorsAmong { source } => source.references_cost_paid_object(),
+            QuantityRef::PropertyAggregate(aggregate) => {
+                aggregate.source().references_cost_paid_object()
+            }
+
+            // Mana-spent metering embeds a `TargetFilter` through its metric enum.
+            QuantityRef::ManaSpentToCast { metric, .. } => match metric {
+                CastManaSpentMetric::FromSource { source_filter } => {
+                    source_filter.references_cost_paid_object()
+                }
+                CastManaSpentMetric::Total
+                | CastManaSpentMetric::DistinctColors
+                | CastManaSpentMetric::OfColor { .. } => false,
+            },
+
+            // Non-object, non-filter refs never read the cost-paid object. Listed
+            // explicitly (no wildcard) so adding any future object-axis or
+            // filter-bearing variant is caught by the compiler here. `PlayerCount`
+            // carries a `PlayerFilter`, not a `TargetFilter`, so it cannot embed a
+            // `CostPaidObject` object reference.
+            QuantityRef::HandSize { .. }
+            | QuantityRef::LifeTotal { .. }
+            | QuantityRef::GraveyardSize { .. }
+            | QuantityRef::LifeAboveStarting
+            | QuantityRef::StartingLifeTotal { .. }
+            | QuantityRef::TriggeringDiscoverValue
+            | QuantityRef::TriggeringScryLookCount
+            | QuantityRef::TriggeringScryBottomCount
+            | QuantityRef::PlayerCount { .. }
+            | QuantityRef::EventContextPlayerCount { .. }
+            | QuantityRef::PlayerCounter { .. }
+            | QuantityRef::TargetControllerCounter { .. }
+            | QuantityRef::Variable { .. }
+            | QuantityRef::SelfManaValue
+            | QuantityRef::TargetZoneCardCount { .. }
+            | QuantityRef::Devotion { .. }
+            | QuantityRef::CardsExiledBySource
+            | QuantityRef::ExiledCardPower { .. }
+            | QuantityRef::BasicLandTypeCount { .. }
+            | QuantityRef::TrackedSetSize
+            | QuantityRef::ExiledFromHandThisResolution
+            // CR 608.2c: the resolution's placed-sticker record, not an object.
+            | QuantityRef::NameStickerLetterCount {
+                stickers: NameStickerSet::ThatSticker,
+                letters: _,
+            }
+            | QuantityRef::PreviousEffectAmount { .. }
+            | QuantityRef::PreviousEffectCount
+            | QuantityRef::LifeLostThisTurn { .. }
+            | QuantityRef::PartySize { .. }
+            | QuantityRef::UnspentMana { .. }
+            | QuantityRef::Speed { .. }
+            | QuantityRef::EventContextAmount
+            | QuantityRef::AttachmentsOnLeavingObject { .. }
+            | QuantityRef::EventContextSourceCostX
+            | QuantityRef::EventContextSourceModesChosen
+            | QuantityRef::CrimesCommittedThisTurn
+            | QuantityRef::BendTypesThisTurn
+            | QuantityRef::LifeGainedThisTurn { .. }
+            | QuantityRef::CardsDrawnThisTurn { .. }
+            | QuantityRef::LandsPlayedThisTurn { .. }
+            | QuantityRef::TurnsTaken
+            | QuantityRef::ChosenNumber
+            | QuantityRef::PlayerChosenNumber { .. }
+            | QuantityRef::NotedNumber
+            | QuantityRef::DescendedThisTurn
+            | QuantityRef::LoyaltyAbilitiesActivatedThisTurn { .. }
+            | QuantityRef::SpellsCastLastTurn
+            | QuantityRef::CardsDiscardedThisTurn { .. }
+            | QuantityRef::PlayerActionsThisTurn { .. }
+            | QuantityRef::DungeonsCompleted
+            | QuantityRef::CostXPaid
+            | QuantityRef::KickerCount
+            | QuantityRef::AdditionalCostPaymentCount
+            | QuantityRef::AdditionalCostPaymentCountFor { .. }
+            | QuantityRef::ConvokedCreatureCount
+            | QuantityRef::TimesCostPaidThisResolution
+            | QuantityRef::ColorsInCommandersColorIdentity
+            | QuantityRef::CommanderCastFromCommandZoneCount
+            | QuantityRef::CommanderManaValue { .. }
+            | QuantityRef::VoteCount { .. } => false,
+        }
+    }
+
     /// CR 109.4: mutable access to this reference's single player-relativity
     /// axis, when it has one.
     ///
@@ -11884,6 +12069,28 @@ impl<'de> serde::Deserialize<'de> for QuantityExpr {
 }
 
 impl QuantityExpr {
+    /// CR 400.7d + CR 608.2k: True when any leaf `QuantityRef` of this
+    /// expression reads the cost-paid object
+    /// ([`QuantityRef::references_cost_paid_object`]).
+    pub fn references_cost_paid_object(&self) -> bool {
+        match self {
+            QuantityExpr::Ref { qty } => qty.references_cost_paid_object(),
+            QuantityExpr::Fixed { .. } => false,
+            QuantityExpr::DivideRounded { inner, .. }
+            | QuantityExpr::Offset { inner, .. }
+            | QuantityExpr::ClampMin { inner, .. }
+            | QuantityExpr::Multiply { inner, .. } => inner.references_cost_paid_object(),
+            QuantityExpr::UpTo { max } => max.references_cost_paid_object(),
+            QuantityExpr::Power { exponent, .. } => exponent.references_cost_paid_object(),
+            QuantityExpr::Difference { left, right } => {
+                left.references_cost_paid_object() || right.references_cost_paid_object()
+            }
+            QuantityExpr::Sum { exprs } | QuantityExpr::Max { exprs } => {
+                exprs.iter().any(QuantityExpr::references_cost_paid_object)
+            }
+        }
+    }
+
     /// Scale a quantity expression by a non-negative runtime factor. Fixed
     /// values fold immediately; dynamic quantities compose through
     /// `QuantityExpr::Multiply` so the existing quantity resolver evaluates the
@@ -22688,6 +22895,40 @@ impl Effect {
         }
     }
 
+    /// CR 400.7d + CR 608.2k: does this single effect (ignoring its
+    /// sub-ability chain) read the cost-paid object through its primary
+    /// magnitude, its primary target filter, or a P/T modification? An effect
+    /// that does cannot be resolved without the `ResolvedAbility` that carries
+    /// the cost-paid snapshot.
+    pub fn references_cost_paid_object(&self) -> bool {
+        if self
+            .count_expr()
+            .is_some_and(QuantityExpr::references_cost_paid_object)
+        {
+            return true;
+        }
+        if self
+            .target_filter()
+            .is_some_and(TargetFilter::references_cost_paid_object)
+        {
+            return true;
+        }
+        // Set-P/T magnitudes (e.g. "+X/+X where X is the sacrificed creature's
+        // power") carry their quantity in a `PtValue`, which `count_expr` does not
+        // surface.
+        if let Effect::Pump {
+            power, toughness, ..
+        } = self
+        {
+            let reads = |value: &PtValue| match value {
+                PtValue::Quantity(expr) => expr.references_cost_paid_object(),
+                PtValue::Fixed(_) | PtValue::Variable(_) => false,
+            };
+            return reads(power) || reads(toughness);
+        }
+        false
+    }
+
     /// CR 115.1: Returns the target filter for effects that have a player-selectable
     /// `target` field. Returns `None` for effects with no target field, or whose
     /// targeting is handled through different mechanisms (filters, zones, etc.).
@@ -29525,6 +29766,23 @@ pub enum AbilityCondition {
 }
 
 impl AbilityCondition {
+    /// CR 608.2k: does this ability condition read the cost-paid object?
+    pub fn references_cost_paid_object(&self) -> bool {
+        match self {
+            AbilityCondition::CostPaidObjectMatchesFilter { .. } => true,
+            AbilityCondition::Not { condition }
+            | AbilityCondition::ConditionInstead { inner: condition } => {
+                condition.references_cost_paid_object()
+            }
+            AbilityCondition::And { conditions } | AbilityCondition::Or { conditions } => {
+                conditions
+                    .iter()
+                    .any(AbilityCondition::references_cost_paid_object)
+            }
+            _ => false,
+        }
+    }
+
     /// CR 608.2c / CR 608.2d: "if you do", "if that player does", and "if a
     /// player does" all read the same optional-effect-performed signal.
     pub fn effect_performed() -> Self {

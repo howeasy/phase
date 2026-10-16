@@ -8,7 +8,7 @@ use crate::types::ability::{
     CommanderOwnership, ControllerRef, CopyRetargetPermission, DamageAmountScope,
     DamageAmountThreshold, DelayedAbilityOrigin, DelayedTriggerCondition, DurationEvent, Effect,
     FilterProp, ModalChoice, NameStickerSet, ObjectScope, OriginConstraint, PlayerFilter,
-    PlayerScope, PtValue, QuantityExpr, QuantityRef, RenownSubject, ResolvedAbility, SacrificeCost,
+    PlayerScope, QuantityExpr, QuantityRef, RenownSubject, ResolvedAbility, SacrificeCost,
     StaticCondition, TargetFilter, TargetRef, TributeOutcome, TriggerCondition,
     TriggerConditionAnchor, TriggerConstraint, TriggerDefinition, TriggerDefinitionOccurrenceRef,
     TriggerDefinitionRef, TriggerEntry, TriggerGrantProducerKey, TypeFilter, TypedFilter,
@@ -16973,15 +16973,20 @@ fn record_trigger_fired(
 /// condition, or `sub_ability` / `else_ability` branches. Used to gate emerge
 /// cast-cost-object propagation (`build_triggered_ability`) so it stamps only
 /// the triggers that actually consume it (Adipose Offspring), never clobbering
-/// unrelated ETB triggers.
-fn resolved_ability_refs_cost_paid_object(resolved: &ResolvedAbility) -> bool {
-    if effect_refs_cost_paid_object(&resolved.effect) {
+/// unrelated ETB triggers, and the enters-with replacement continuation stamp
+/// in `engine_replacement::apply_post_replacement_effect` (Dralnu's Pet).
+///
+/// The per-node walk is the type-owned [`Effect::references_cost_paid_object`]
+/// / [`AbilityCondition::references_cost_paid_object`]; this wrapper adds only
+/// the `ResolvedAbility` chain traversal.
+pub(crate) fn resolved_ability_refs_cost_paid_object(resolved: &ResolvedAbility) -> bool {
+    if resolved.effect.references_cost_paid_object() {
         return true;
     }
     if resolved
         .condition
         .as_ref()
-        .is_some_and(ability_condition_refs_cost_paid_object)
+        .is_some_and(AbilityCondition::references_cost_paid_object)
     {
         return true;
     }
@@ -16993,264 +16998,6 @@ fn resolved_ability_refs_cost_paid_object(resolved: &ResolvedAbility) -> bool {
             .else_ability
             .as_deref()
             .is_some_and(resolved_ability_refs_cost_paid_object)
-}
-
-/// CR 400.7d: does this single effect's primary magnitude, primary target
-/// filter, or P-T modification read the cost-paid object?
-fn effect_refs_cost_paid_object(effect: &Effect) -> bool {
-    if effect
-        .count_expr()
-        .is_some_and(quantity_expr_refs_cost_paid_object)
-    {
-        return true;
-    }
-    if effect
-        .target_filter()
-        .is_some_and(TargetFilter::references_cost_paid_object)
-    {
-        return true;
-    }
-    // Set-P/T magnitudes (e.g. "+X/+X where X is the sacrificed creature's
-    // power") carry their quantity in a `PtValue`, which `count_expr` does not
-    // surface.
-    if let Effect::Pump {
-        power, toughness, ..
-    } = effect
-    {
-        return pt_value_refs_cost_paid_object(power) || pt_value_refs_cost_paid_object(toughness);
-    }
-    false
-}
-
-fn pt_value_refs_cost_paid_object(value: &PtValue) -> bool {
-    match value {
-        PtValue::Quantity(expr) => quantity_expr_refs_cost_paid_object(expr),
-        PtValue::Fixed(_) | PtValue::Variable(_) => false,
-    }
-}
-
-/// Recurse through a quantity expression, returning true if any leaf
-/// `QuantityRef` is scoped to `ObjectScope::CostPaidObject`.
-fn quantity_expr_refs_cost_paid_object(expr: &QuantityExpr) -> bool {
-    match expr {
-        QuantityExpr::Ref { qty } => quantity_ref_refs_cost_paid_object(qty),
-        QuantityExpr::Fixed { .. } => false,
-        QuantityExpr::DivideRounded { inner, .. }
-        | QuantityExpr::Offset { inner, .. }
-        | QuantityExpr::ClampMin { inner, .. }
-        | QuantityExpr::Multiply { inner, .. } => quantity_expr_refs_cost_paid_object(inner),
-        QuantityExpr::UpTo { max } => quantity_expr_refs_cost_paid_object(max),
-        QuantityExpr::Power { exponent, .. } => quantity_expr_refs_cost_paid_object(exponent),
-        QuantityExpr::Difference { left, right } => {
-            quantity_expr_refs_cost_paid_object(left) || quantity_expr_refs_cost_paid_object(right)
-        }
-        QuantityExpr::Sum { exprs } | QuantityExpr::Max { exprs } => {
-            exprs.iter().any(quantity_expr_refs_cost_paid_object)
-        }
-    }
-}
-
-/// Does a [`CardTypeSetSource`] population route a filter that references the
-/// cost-paid object? Only the object filter and the journal's optional
-/// narrowing filter can; `AnyOf` recurses so a union member's reference is not
-/// dropped.
-///
-/// Uncited: a structural query over which arms hold a `TargetFilter`, not a rule
-/// implementation. (It cited CR 109.2, the battlefield-default rule for a bare
-/// type description, which does not speak to filter routing.)
-fn characteristic_source_references_cost_paid_object(source: &CardTypeSetSource) -> bool {
-    let mut found = false;
-    let complete =
-        source.try_for_each_member(crate::types::ability::UNION_DEPTH_BUDGET, &mut |leaf| {
-            if found {
-                return;
-            }
-            found = match leaf {
-                CardTypeSetSource::Objects { filter } => filter.references_cost_paid_object(),
-                CardTypeSetSource::TurnJournal { filter, .. } => filter
-                    .as_ref()
-                    .is_some_and(TargetFilter::references_cost_paid_object),
-                CardTypeSetSource::Zone { .. }
-                | CardTypeSetSource::ExiledBySource
-                | CardTypeSetSource::TrackedSet { .. }
-                | CardTypeSetSource::AnyOf { .. } => false,
-            };
-        });
-    // A truncated walk claims the reference: this gate exists to stop a
-    // cost-paid-object read from escaping, so exhaustion must not let one past.
-    found || !complete
-}
-
-/// CR 400.7d + CR 608.2k: True when this `QuantityRef` reads the cost-paid
-/// object, by either of the two structural axes a ref can carry it on:
-///
-/// 1. **Object-axis refs** carry a `scope: ObjectScope` and read the cost-paid
-///    object iff that scope is `CostPaidObject`.
-/// 2. **Filter-bearing refs** embed a `TargetFilter`, which can itself reference
-///    `TargetFilter::CostPaidObject` (e.g. "the number of counters on the
-///    sacrificed creature" via `CountersOnObjects { filter: CostPaidObject }`),
-///    so the embedded filter is walked recursively.
-///
-/// The match is intentionally exhaustive (no `_` wildcard) so a future
-/// `QuantityRef` variant that adds either axis forces a compile error here
-/// rather than silently falling through and dropping the snapshot propagation.
-fn quantity_ref_refs_cost_paid_object(qty: &QuantityRef) -> bool {
-    match qty {
-        // Object-axis refs: read the cost-paid object iff scoped to it.
-        QuantityRef::Power { scope }
-        | QuantityRef::BasePower { scope }
-        | QuantityRef::Toughness { scope }
-        | QuantityRef::Intensity { scope }
-        | QuantityRef::ObjectManaValue { scope }
-        | QuantityRef::ObjectColorCount { scope }
-        | QuantityRef::ObjectNameWordCount { scope }
-        | QuantityRef::NameStickerLetterCount {
-            stickers: NameStickerSet::OnObject { scope },
-            letters: _,
-        }
-        | QuantityRef::ObjectTypelineComponentCount { scope }
-        | QuantityRef::ManaSymbolsInManaCost { scope, .. }
-        | QuantityRef::CountersOn { scope, .. } => matches!(scope, ObjectScope::CostPaidObject),
-
-        // Filter-bearing refs (owned `TargetFilter`): recurse into the filter.
-        QuantityRef::ObjectCount { filter }
-        | QuantityRef::ObjectCountDistinct { filter, .. }
-        | QuantityRef::ObjectCountBySharedQuality { filter, .. }
-        | QuantityRef::CountersOnObjects { filter, .. }
-        | QuantityRef::ControlledByEachPlayer { filter, .. }
-        | QuantityRef::EnteredThisTurn { filter }
-        | QuantityRef::SacrificedThisTurn { filter, .. }
-        | QuantityRef::BattlefieldEntriesThisTurn { filter, .. }
-        | QuantityRef::ZoneChangeCountThisTurn { filter, .. }
-        | QuantityRef::ZoneChangeAggregateThisTurn { filter, .. }
-        | QuantityRef::CounterAddedThisTurn { target: filter, .. }
-        | QuantityRef::TokensCreatedThisTurn { filter, .. }
-        | QuantityRef::DistinctCounterKindsAmong { filter } => filter.references_cost_paid_object(),
-
-        // Filter-bearing refs (boxed `TargetFilter`): recurse (auto-deref).
-        QuantityRef::TargetObjectManaValue { filter }
-        | QuantityRef::FilteredTrackedSetSize { filter, .. } => {
-            filter.references_cost_paid_object()
-        }
-
-        // Filter-bearing refs (optional `TargetFilter`): recurse when present.
-        QuantityRef::ZoneCardCount { filter, .. }
-        | QuantityRef::AttackedThisTurn { filter, .. }
-        | QuantityRef::SpellsCastThisTurn { filter, .. }
-        | QuantityRef::SpellsCastBeforeTriggeringSpell { filter, .. }
-        | QuantityRef::SpellsCastThisGame { filter, .. } => filter
-            .as_ref()
-            .is_some_and(TargetFilter::references_cost_paid_object),
-
-        // Damage history carries a source filter and a recipient filter.
-        QuantityRef::DamageDealtThisTurn { source, target, .. } => {
-            source.references_cost_paid_object() || target.references_cost_paid_object()
-        }
-
-        // Card-type / subtype / colour counting all embed their `TargetFilter`s
-        // through the shared population enum.
-        QuantityRef::DistinctCardTypes { source }
-        | QuantityRef::SharedCardTypes { source }
-        | QuantityRef::DistinctSubtypes { source, .. }
-        | QuantityRef::DistinctColorsAmong { source } => {
-            characteristic_source_references_cost_paid_object(source)
-        }
-        QuantityRef::PropertyAggregate(aggregate) => {
-            characteristic_source_references_cost_paid_object(aggregate.source())
-        }
-
-        // Mana-spent metering embeds a `TargetFilter` through its metric enum.
-        QuantityRef::ManaSpentToCast { metric, .. } => match metric {
-            CastManaSpentMetric::FromSource { source_filter } => {
-                source_filter.references_cost_paid_object()
-            }
-            CastManaSpentMetric::Total
-            | CastManaSpentMetric::DistinctColors
-            | CastManaSpentMetric::OfColor { .. } => false,
-        },
-
-        // Non-object, non-filter refs never read the cost-paid object. Listed
-        // explicitly (no wildcard) so adding any future object-axis or
-        // filter-bearing variant is caught by the compiler here. `PlayerCount`
-        // carries a `PlayerFilter`, not a `TargetFilter`, so it cannot embed a
-        // `CostPaidObject` object reference.
-        QuantityRef::HandSize { .. }
-        | QuantityRef::LifeTotal { .. }
-        | QuantityRef::GraveyardSize { .. }
-        | QuantityRef::LifeAboveStarting
-        | QuantityRef::StartingLifeTotal { .. }
-        | QuantityRef::TriggeringDiscoverValue
-        | QuantityRef::TriggeringScryLookCount
-        | QuantityRef::TriggeringScryBottomCount
-        | QuantityRef::PlayerCount { .. }
-        | QuantityRef::EventContextPlayerCount { .. }
-        | QuantityRef::PlayerCounter { .. }
-        | QuantityRef::TargetControllerCounter { .. }
-        | QuantityRef::Variable { .. }
-        | QuantityRef::SelfManaValue
-        | QuantityRef::TargetZoneCardCount { .. }
-        | QuantityRef::Devotion { .. }
-        | QuantityRef::CardsExiledBySource
-        | QuantityRef::ExiledCardPower { .. }
-        | QuantityRef::BasicLandTypeCount { .. }
-        | QuantityRef::TrackedSetSize
-        | QuantityRef::ExiledFromHandThisResolution
-        // CR 608.2c: the resolution's placed-sticker record, not an object.
-        | QuantityRef::NameStickerLetterCount {
-            stickers: NameStickerSet::ThatSticker,
-            letters: _,
-        }
-        | QuantityRef::PreviousEffectAmount { .. }
-        | QuantityRef::PreviousEffectCount
-        | QuantityRef::LifeLostThisTurn { .. }
-        | QuantityRef::PartySize { .. }
-        | QuantityRef::UnspentMana { .. }
-        | QuantityRef::Speed { .. }
-        | QuantityRef::EventContextAmount
-        | QuantityRef::AttachmentsOnLeavingObject { .. }
-        | QuantityRef::EventContextSourceCostX
-        | QuantityRef::EventContextSourceModesChosen
-        | QuantityRef::CrimesCommittedThisTurn
-        | QuantityRef::BendTypesThisTurn
-        | QuantityRef::LifeGainedThisTurn { .. }
-        | QuantityRef::CardsDrawnThisTurn { .. }
-        | QuantityRef::LandsPlayedThisTurn { .. }
-        | QuantityRef::TurnsTaken
-        | QuantityRef::ChosenNumber
-        | QuantityRef::PlayerChosenNumber { .. }
-        | QuantityRef::NotedNumber
-        | QuantityRef::DescendedThisTurn
-        | QuantityRef::LoyaltyAbilitiesActivatedThisTurn { .. }
-        | QuantityRef::SpellsCastLastTurn
-        | QuantityRef::CardsDiscardedThisTurn { .. }
-        | QuantityRef::PlayerActionsThisTurn { .. }
-        | QuantityRef::DungeonsCompleted
-        | QuantityRef::CostXPaid
-        | QuantityRef::KickerCount
-        | QuantityRef::AdditionalCostPaymentCount
-        | QuantityRef::AdditionalCostPaymentCountFor { .. }
-        | QuantityRef::ConvokedCreatureCount
-        | QuantityRef::TimesCostPaidThisResolution
-        | QuantityRef::ColorsInCommandersColorIdentity
-        | QuantityRef::CommanderCastFromCommandZoneCount
-        | QuantityRef::CommanderManaValue { .. }
-        | QuantityRef::VoteCount { .. } => false,
-    }
-}
-
-/// CR 608.2k: does this ability condition read the cost-paid object?
-fn ability_condition_refs_cost_paid_object(condition: &AbilityCondition) -> bool {
-    match condition {
-        AbilityCondition::CostPaidObjectMatchesFilter { .. } => true,
-        AbilityCondition::Not { condition }
-        | AbilityCondition::ConditionInstead { inner: condition } => {
-            ability_condition_refs_cost_paid_object(condition)
-        }
-        AbilityCondition::And { conditions } | AbilityCondition::Or { conditions } => conditions
-            .iter()
-            .any(ability_condition_refs_cost_paid_object),
-        _ => false,
-    }
 }
 
 /// CR 201.5a + CR 603.2 + CR 603.4: the source context a trigger definition is
@@ -24110,11 +23857,11 @@ pub mod tests {
             counter_type: None,
         };
         assert!(
-            quantity_ref_refs_cost_paid_object(&counters_on(ObjectScope::CostPaidObject)),
+            QuantityRef::references_cost_paid_object(&counters_on(ObjectScope::CostPaidObject)),
             "CountersOn with CostPaidObject scope must be detected as a cost-paid-object ref"
         );
         assert!(
-            !quantity_ref_refs_cost_paid_object(&counters_on(ObjectScope::Source)),
+            !QuantityRef::references_cost_paid_object(&counters_on(ObjectScope::Source)),
             "CountersOn with Source scope must not be treated as a cost-paid-object ref"
         );
     }
@@ -24130,17 +23877,19 @@ pub mod tests {
             filter,
         };
         assert!(
-            quantity_ref_refs_cost_paid_object(&counters_on_objects(TargetFilter::CostPaidObject)),
+            QuantityRef::references_cost_paid_object(&counters_on_objects(
+                TargetFilter::CostPaidObject
+            )),
             "CountersOnObjects over the cost-paid object must be detected"
         );
         assert!(
-            quantity_ref_refs_cost_paid_object(&counters_on_objects(TargetFilter::And {
+            QuantityRef::references_cost_paid_object(&counters_on_objects(TargetFilter::And {
                 filters: vec![TargetFilter::Controller, TargetFilter::CostPaidObject],
             })),
             "a nested CostPaidObject inside an And filter must be detected"
         );
         assert!(
-            quantity_ref_refs_cost_paid_object(&QuantityRef::ObjectCount {
+            QuantityRef::references_cost_paid_object(&QuantityRef::ObjectCount {
                 filter: TargetFilter::Not {
                     filter: Box::new(TargetFilter::CostPaidObject),
                 },
@@ -24148,7 +23897,9 @@ pub mod tests {
             "a CostPaidObject inside a Not filter must be detected"
         );
         assert!(
-            !quantity_ref_refs_cost_paid_object(&counters_on_objects(TargetFilter::Controller)),
+            !QuantityRef::references_cost_paid_object(&counters_on_objects(
+                TargetFilter::Controller
+            )),
             "a filter with no CostPaidObject reference must not be detected"
         );
     }
@@ -24182,7 +23933,7 @@ pub mod tests {
             },
         ] {
             assert!(
-                quantity_ref_refs_cost_paid_object(&qty),
+                QuantityRef::references_cost_paid_object(&qty),
                 "an Objects population over the cost-paid object must be detected: {qty:?}"
             );
         }
@@ -24190,13 +23941,13 @@ pub mod tests {
         // The journal's optional narrowing filter is the second filter-bearing
         // arm, and `None` there must not be mistaken for a reference.
         assert!(
-            quantity_ref_refs_cost_paid_object(&QuantityRef::DistinctCardTypes {
+            QuantityRef::references_cost_paid_object(&QuantityRef::DistinctCardTypes {
                 source: journal(Some(TargetFilter::CostPaidObject)),
             }),
             "a cost-paid-object reference in the journal's narrowing filter must be detected"
         );
         assert!(
-            !quantity_ref_refs_cost_paid_object(&QuantityRef::DistinctCardTypes {
+            !QuantityRef::references_cost_paid_object(&QuantityRef::DistinctCardTypes {
                 source: journal(None),
             }),
             "an unfiltered journal references nothing"
@@ -24218,7 +23969,7 @@ pub mod tests {
         ])
         .expect("two-member union");
         assert!(
-            quantity_ref_refs_cost_paid_object(&QuantityRef::DistinctSubtypes {
+            QuantityRef::references_cost_paid_object(&QuantityRef::DistinctSubtypes {
                 source: nested,
                 exclude: Default::default(),
             }),
@@ -24236,7 +23987,7 @@ pub mod tests {
             },
         ] {
             assert!(
-                !characteristic_source_references_cost_paid_object(&source),
+                !source.references_cost_paid_object(),
                 "a fixed-vocabulary population routes no filter: {source:?}"
             );
         }
