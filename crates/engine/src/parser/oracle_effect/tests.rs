@@ -85608,44 +85608,49 @@ fn entry_counter_riders_are_producer_bound() {
     let gain_life = |effect: &Effect| matches!(effect, Effect::GainLife { .. });
     // Each case names the preceding instructions that must parse (the positive
     // reach guard for the rider assertions below).
-    let cases: [(&str, &[&dyn Fn(&Effect) -> bool]); 6] = [
+    struct RiderGapCase<'a> {
+        text: &'static str,
+        predecessors: &'a [fn(&Effect) -> bool],
+    }
+    let cases = [
         // Exile parent.
-        (
-            "Exile target creature card from your graveyard. If a creature enters this way, it enters with an additional +1/+1 counter on it.",
-            &[&exile_mover],
-        ),
+        RiderGapCase {
+            text: "Exile target creature card from your graveyard. If a creature enters this way, it enters with an additional +1/+1 counter on it.",
+            predecessors: &[exile_mover],
+        },
         // Sacrifice parent.
-        (
-            "Sacrifice a creature. If a creature enters this way, it enters with an additional +1/+1 counter on it.",
-            &[&sacrifice],
-        ),
+        RiderGapCase {
+            text: "Sacrifice a creature. If a creature enters this way, it enters with an additional +1/+1 counter on it.",
+            predecessors: &[sacrifice],
+        },
         // Discard parent.
-        (
-            "Discard a card. If a creature enters this way, it enters with an additional +1/+1 counter on it.",
-            &[&discard],
-        ),
+        RiderGapCase {
+            text: "Discard a card. If a creature enters this way, it enters with an additional +1/+1 counter on it.",
+            predecessors: &[discard],
+        },
         // An intervening instruction between the mover and the rider.
-        (
-            "Return target creature card from your graveyard to the battlefield. You gain 2 life. If a creature enters this way, it enters with an additional +1/+1 counter on it.",
-            &[&battlefield_mover, &gain_life],
-        ),
-        // No predecessor at all.
-        (
-            "If a creature enters this way, it enters with an additional +1/+1 counter on it.",
-            &[],
-        ),
+        RiderGapCase {
+            text: "Return target creature card from your graveyard to the battlefield. You gain 2 life. If a creature enters this way, it enters with an additional +1/+1 counter on it.",
+            predecessors: &[battlefield_mover, gain_life],
+        },
+        // No predecessor at all: this row expects only the rider gap, so it
+        // has no preceding-instruction reach guard.
+        RiderGapCase {
+            text: "If a creature enters this way, it enters with an additional +1/+1 counter on it.",
+            predecessors: &[],
+        },
         // The reanimation witness: a battlefield mover, but no "this way" gate.
-        (
-            "Return target creature card from your graveyard to the battlefield. It enters with a +1/+1 counter on it.",
-            &[&battlefield_mover],
-        ),
+        RiderGapCase {
+            text: "Return target creature card from your graveyard to the battlefield. It enters with a +1/+1 counter on it.",
+            predecessors: &[battlefield_mover],
+        },
     ];
-    for (text, predecessors) in cases {
+    for RiderGapCase { text, predecessors } in cases {
         let abilities = spell_chain_definitions(text);
         let defs = chain_definitions(&abilities);
         for (index, predecessor) in predecessors.iter().enumerate() {
             assert!(
-                defs.iter().any(|def| predecessor(&*def.effect)),
+                defs.iter().any(|def| predecessor(&def.effect)),
                 "{text:?}: reach guard: preceding instruction {index} parses, got {abilities:?}"
             );
         }

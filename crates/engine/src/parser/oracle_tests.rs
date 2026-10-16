@@ -27787,23 +27787,33 @@ fn enters_with_n_additional_counters_parses_canonical_type() {
         )
     };
     let dig = |effect: &Effect| matches!(effect, Effect::Dig { .. });
-    let cases: [(&str, &str, &dyn Fn(&Effect) -> bool); 2] = [
-        (
-            "Necromantic Summons",
-            "Put target creature card from a graveyard onto the battlefield under your control.\n\
+    struct PrimaryMoverCase {
+        card: &'static str,
+        text: &'static str,
+        is_primary_mover: fn(&Effect) -> bool,
+    }
+    let cases = [
+        PrimaryMoverCase {
+            card: "Necromantic Summons",
+            text: "Put target creature card from a graveyard onto the battlefield under your control.\n\
              Spell mastery — If there are two or more instant and/or sorcery cards in your graveyard, \
              that creature enters with two additional +1/+1 counters on it.",
-            &battlefield_mover,
-        ),
-        (
-            "Turntimber Symbiosis",
-            "Look at the top seven cards of your library. You may put a creature card from among them \
+            is_primary_mover: battlefield_mover,
+        },
+        PrimaryMoverCase {
+            card: "Turntimber Symbiosis",
+            text: "Look at the top seven cards of your library. You may put a creature card from among them \
              onto the battlefield. If that card has mana value 3 or less, it enters with three \
              additional +1/+1 counters on it. Put the rest on the bottom of your library in a random order.",
-            &dig,
-        ),
+            is_primary_mover: dig,
+        },
     ];
-    for (name, oracle, primary_mover) in cases {
+    for PrimaryMoverCase {
+        card: name,
+        text: oracle,
+        is_primary_mover: primary_mover,
+    } in cases
+    {
         let parsed = parse_oracle_text(oracle, name, &[], &["Sorcery".to_string()], &[]);
         fn chain_nodes(ability: &AbilityDefinition) -> impl Iterator<Item = &AbilityDefinition> {
             let mut cursor = Some(ability);
@@ -27818,7 +27828,7 @@ fn enters_with_n_additional_counters_parses_canonical_type() {
                 .abilities
                 .iter()
                 .flat_map(chain_nodes)
-                .any(|node| primary_mover(&*node.effect)),
+                .any(|node| primary_mover(&node.effect)),
             "{name}: reach guard: the primary mover parses: {parsed:?}"
         );
         assert!(

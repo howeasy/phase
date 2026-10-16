@@ -772,3 +772,41 @@ fn keyword_qualified_distributive_subject_counts_at_entry() {
         .expect("reach guard: the non-flyer resolves");
     assert_eq!(outcome.counters(entered, CounterType::Plus1Plus1), 0);
 }
+
+/// Synthetic (no corpus member): a flavor-labeled leading gate on a
+/// keyword-qualified distributive subject. A flavor word has no rules meaning
+/// (CR 207.2d), so the gate still applies. Derived: while you control an
+/// artifact, each creature you control with flying enters with one +1/+1
+/// counter for each creature you control; with no artifact it gets none.
+#[test]
+fn labeled_leading_gate_conditions_the_distributive_entry() {
+    for (controls_artifact, expected) in [(true, 2), (false, 0)] {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        scenario.add_enchantment_from_oracle(
+            P0,
+            "Test Muster",
+            "Mystic Muster — If you control an artifact, each creature you control with flying enters with an additional +1/+1 counter on it for each creature you control.",
+        );
+        if controls_artifact {
+            scenario.add_artifact_from_oracle(P0, "Test Relic", "");
+        }
+        scenario.add_vanilla(P0, 1, 1);
+        scenario.add_vanilla(P0, 1, 1);
+        let flyer = scenario
+            .add_creature_to_hand_from_oracle(P0, "Test Flyer", 1, 1, "Flying")
+            .with_mana_cost(generic_cost(1))
+            .id();
+        scenario.with_mana_pool(P0, colorless(1));
+        let mut runner = scenario.build();
+        let outcome = runner.cast(flyer).resolve();
+        let entered = outcome
+            .find_object(|o| o.name == "Test Flyer" && o.zone == Zone::Battlefield)
+            .expect("reach guard: the flyer resolves");
+        assert_eq!(
+            outcome.counters(entered, CounterType::Plus1Plus1),
+            expected,
+            "controls an artifact: {controls_artifact}"
+        );
+    }
+}

@@ -31112,6 +31112,218 @@ mod tests {
         );
     }
 
+    /// CR 614.1c + CR 614.12 + CR 207.2d: a flavor label has no rules meaning,
+    /// so the gate after it still conditions a distributive enters-with
+    /// replacement. A skipped leading gate is carried only when a condition
+    /// reader reads it as the clause's single condition; a second gate (a raid
+    /// suffix, an escape verb) in the same clause leaves no slot for it, so the
+    /// line fails closed rather than dropping a gate.
+    #[test]
+    fn labeled_leading_gate_conditions_a_distributive_subject() {
+        // Derived from "If you control an artifact": the number of artifacts
+        // you control on the battlefield is at least one.
+        let you_control_an_artifact = ReplacementCondition::OnlyIfQuantity {
+            lhs: QuantityExpr::Ref {
+                qty: QuantityRef::ObjectCount {
+                    filter: TargetFilter::Typed(TypedFilter {
+                        type_filters: vec![TypeFilter::Artifact],
+                        controller: Some(ControllerRef::You),
+                        properties: vec![FilterProp::InZone {
+                            zone: Zone::Battlefield,
+                        }],
+                    }),
+                },
+            },
+            comparator: Comparator::GE,
+            rhs: QuantityExpr::Fixed { value: 1 },
+            active_player_req: None,
+        };
+        // Derived from "for each creature you control".
+        let creatures_you_control = QuantityExpr::Ref {
+            qty: QuantityRef::ObjectCount {
+                filter: TargetFilter::Typed(TypedFilter {
+                    type_filters: vec![TypeFilter::Creature],
+                    controller: Some(ControllerRef::You),
+                    properties: vec![],
+                }),
+            },
+        };
+        // Derived from "each creature you control with flying" / "each
+        // creature you control".
+        let flyers_you_control = TargetFilter::Typed(TypedFilter {
+            type_filters: vec![TypeFilter::Creature],
+            controller: Some(ControllerRef::You),
+            properties: vec![FilterProp::WithKeyword {
+                value: Keyword::Flying,
+            }],
+        });
+        let all_creatures_you_control = TargetFilter::Typed(TypedFilter {
+            type_filters: vec![TypeFilter::Creature],
+            controller: Some(ControllerRef::You),
+            properties: vec![],
+        });
+        let parse_card = |line: &str| {
+            parse_oracle_text(
+                line,
+                "Test Enchantment",
+                &[],
+                &["Enchantment".to_string()],
+                &[],
+            )
+        };
+
+        // The labeled witness, its unlabeled twin, and the labeled
+        // unqualified-subject row all carry the artifact gate.
+        for (line, expected_subject) in [
+            (
+                "Mystic Muster — If you control an artifact, each creature you control with flying enters with an additional +1/+1 counter on it for each creature you control.",
+                &flyers_you_control,
+            ),
+            (
+                "If you control an artifact, each creature you control with flying enters with an additional +1/+1 counter on it for each creature you control.",
+                &flyers_you_control,
+            ),
+            (
+                "Mystic Plain — If you control an artifact, each creature you control enters with an additional +1/+1 counter on it for each creature you control.",
+                &all_creatures_you_control,
+            ),
+        ] {
+            let parsed = parse_card(line);
+            assert_eq!(parsed.replacements.len(), 1, "{line:?}: {parsed:?}");
+            let rep = &parsed.replacements[0];
+            assert_eq!(rep.event, ReplacementEvent::ChangeZone, "{line:?}");
+            assert_eq!(rep.valid_card.as_ref(), Some(expected_subject), "{line:?}");
+            assert_eq!(
+                rep.execute.as_deref().map(|e| e.effect.as_ref()),
+                Some(&Effect::PutCounter {
+                    counter_type: CounterType::Plus1Plus1,
+                    count: creatures_you_control.clone(),
+                    target: TargetFilter::SelfRef,
+                }),
+                "{line:?}"
+            );
+            assert_eq!(
+                rep.condition.as_ref(),
+                Some(&you_control_an_artifact),
+                "{line:?}: the artifact gate must not be dropped"
+            );
+        }
+
+        // Control: Scarlet Spider, Ben Reilly (verbatim, MTGJSON). The
+        // labeled web-slinging gate is read and stays the self replacement's
+        // condition.
+        let scarlet = parse_oracle_text(
+            "Web-slinging {R}{G} (You may cast this spell for {R}{G} if you also return a tapped creature you control to its owner's hand.)\nTrample\nSensational Save — If Scarlet Spider was cast using web-slinging, he enters with X +1/+1 counters on him, where X is the mana value of the returned creature.",
+            "Scarlet Spider, Ben Reilly",
+            &[
+                "Sensational Save".to_string(),
+                "Trample".to_string(),
+                "Web-slinging".to_string(),
+            ],
+            &["Creature".to_string()],
+            &["Spider".to_string(), "Human".to_string(), "Hero".to_string()],
+        );
+        let sensational_save = scarlet
+            .replacements
+            .iter()
+            .find(|r| {
+                r.execute
+                    .as_ref()
+                    .is_some_and(|e| matches!(e.effect.as_ref(), Effect::PutCounter { .. }))
+            })
+            .unwrap_or_else(|| panic!("reach guard: Sensational Save parses: {scarlet:?}"));
+        assert_eq!(sensational_save.event, ReplacementEvent::Moved);
+        assert_eq!(sensational_save.valid_card, Some(TargetFilter::SelfRef));
+        assert_eq!(
+            sensational_save.condition,
+            Some(ReplacementCondition::CastVariantPaid {
+                variant: CastVariantPaid::WebSlinging,
+            })
+        );
+
+        // At the enters-with reader the labeled witness's gate is skipped by
+        // the head reader and matched by no condition suffix, so it fails
+        // closed there rather than publishing the replacement ungated.
+        assert_eq!(
+            enters_with_counters_outcome(
+                "mystic muster — if you control an artifact, each creature you control with flying enters with an additional +1/+1 counter on it for each creature you control.",
+                "Mystic Muster — If you control an artifact, each creature you control with flying enters with an additional +1/+1 counter on it for each creature you control.",
+            )
+            .err(),
+            Some(EntersWithDecline::FailsClosed(EntersWithGap::Gate))
+        );
+
+        // Reach guards for the co-occurring-gate rows: each gate alone is read.
+        for (line, expected) in [
+            (
+                "Mystic Both — If you control an artifact, each creature you control with flying enters with an additional +1/+1 counter on it.",
+                (ReplacementEvent::ChangeZone, you_control_an_artifact.clone()),
+            ),
+            (
+                "Each creature you control with flying enters with an additional +1/+1 counter on it if you attacked this turn.",
+                (
+                    ReplacementEvent::ChangeZone,
+                    ReplacementCondition::YouAttackedThisTurn,
+                ),
+            ),
+            (
+                "Test Enchantment escapes with a +1/+1 counter on it.",
+                (ReplacementEvent::Moved, ReplacementCondition::CastViaEscape),
+            ),
+        ] {
+            let parsed = parse_card(line);
+            assert_eq!(parsed.replacements.len(), 1, "reach guard: {line:?}: {parsed:?}");
+            let rep = &parsed.replacements[0];
+            assert_eq!(
+                (rep.event.clone(), rep.condition.clone()),
+                (expected.0, Some(expected.1)),
+                "{line:?}"
+            );
+        }
+
+        // Co-occurring gates: a leading gate and a raid suffix or an escape
+        // verb leave one condition slot for two gates, so the clause fails
+        // closed. The escape verb's condition never stands in for the leading
+        // gate, whether that gate is unreadable or readable.
+        for (line, card_text) in [
+            (
+                "mystic both — if you control an artifact, each creature you control with flying enters with an additional +1/+1 counter on it if you attacked this turn.",
+                "Mystic Both — If you control an artifact, each creature you control with flying enters with an additional +1/+1 counter on it if you attacked this turn.",
+            ),
+            (
+                "if you control an artifact, each creature you control with flying enters with an additional +1/+1 counter on it if you attacked this turn.",
+                "If you control an artifact, each creature you control with flying enters with an additional +1/+1 counter on it if you attacked this turn.",
+            ),
+            (
+                "mystic esc — if the mystery quality holds, ~ escapes with a +1/+1 counter on it.",
+                "Mystic Esc — If the mystery quality holds, Test Enchantment escapes with a +1/+1 counter on it.",
+            ),
+            (
+                "mystic esc — if you control an artifact, ~ escapes with a +1/+1 counter on it.",
+                "Mystic Esc — If you control an artifact, Test Enchantment escapes with a +1/+1 counter on it.",
+            ),
+        ] {
+            assert_eq!(
+                enters_with_counters_outcome(line, card_text).err(),
+                Some(EntersWithDecline::FailsClosed(EntersWithGap::Gate)),
+                "{line:?}"
+            );
+            let parsed = parse_card(card_text);
+            assert!(
+                parsed.replacements.is_empty(),
+                "{card_text:?}: no replacement is published: {parsed:?}"
+            );
+            // Positive: the line stays one explicit gap on the card.
+            assert!(
+                matches!(
+                    parsed.abilities.as_slice(),
+                    [gap] if gap.effect.unimplemented_description().is_some()
+                ),
+                "{card_text:?}: the line stays an explicit gap: {parsed:?}"
+            );
+        }
+    }
+
     fn enters_with_valid_card(norm_lower: &str) -> TargetFilter {
         enters_with_counters_outcome(norm_lower, norm_lower)
             .unwrap_or_else(|decline| panic!("{norm_lower:?} must be claimed, got {decline:?}"))
