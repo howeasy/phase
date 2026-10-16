@@ -16965,41 +16965,6 @@ fn record_trigger_fired(
     );
 }
 
-/// Build a ResolvedAbility from a TriggerDefinition using typed fields.
-/// CR 400.7d + CR 608.2k: True when this resolved ability tree reads the
-/// cost-paid object — i.e. references `ObjectScope::CostPaidObject` in a
-/// magnitude / P-T expression, `TargetFilter::CostPaidObject`, or
-/// `AbilityCondition::CostPaidObjectMatchesFilter` — anywhere in its effect,
-/// condition, or `sub_ability` / `else_ability` branches. Used to gate emerge
-/// cast-cost-object propagation (`build_triggered_ability`) so it stamps only
-/// the triggers that actually consume it (Adipose Offspring), never clobbering
-/// unrelated ETB triggers, and the enters-with replacement continuation stamp
-/// in `engine_replacement::apply_post_replacement_effect` (Dralnu's Pet).
-///
-/// The per-node walk is the type-owned [`Effect::references_cost_paid_object`]
-/// / [`AbilityCondition::references_cost_paid_object`]; this wrapper adds only
-/// the `ResolvedAbility` chain traversal.
-pub(crate) fn resolved_ability_refs_cost_paid_object(resolved: &ResolvedAbility) -> bool {
-    if resolved.effect.references_cost_paid_object() {
-        return true;
-    }
-    if resolved
-        .condition
-        .as_ref()
-        .is_some_and(AbilityCondition::references_cost_paid_object)
-    {
-        return true;
-    }
-    resolved
-        .sub_ability
-        .as_deref()
-        .is_some_and(resolved_ability_refs_cost_paid_object)
-        || resolved
-            .else_ability
-            .as_deref()
-            .is_some_and(resolved_ability_refs_cost_paid_object)
-}
-
 /// CR 201.5a + CR 603.2 + CR 603.4: the source context a trigger definition is
 /// matched, checked and instantiated with carries exactly that definition's granter stamp.
 pub(super) fn source_context_for_definition<'a>(
@@ -17085,7 +17050,7 @@ pub(super) fn build_triggered_ability_from_context(
         // still wins; for Adipose Offspring the ETB trigger has no cost, so this
         // build-time stamp is the sole, correct source.
         if let Some(snapshot) = &source_context.cast_cost_paid_object {
-            if resolved_ability_refs_cost_paid_object(&resolved) {
+            if resolved.references_cost_paid_object() {
                 resolved.set_cost_paid_object_recursive(snapshot.clone());
             }
         }

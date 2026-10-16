@@ -331,8 +331,10 @@ fn dralnus_pet_counter_count_follows_the_discarded_cards_mana_value() {
 /// card stayed in hand, so the absence of flying and counters is a gate
 /// decision, not a failed cast.
 ///
-/// REVERT DISCRIMINATOR: a grant or placement that ignored the kicker gate
-/// would give flying or counters here.
+/// REVERT DISCRIMINATOR: removing the kicker gate shared by the whole
+/// replacement grants flying here. The zero-counter assertion alone does not
+/// establish the gate: with no kicker discard there is no cost-paid referent,
+/// so an ungated placement would also resolve X to zero.
 #[test]
 fn dralnus_pet_unkicked_enters_without_flying_or_counters() {
     let mut board = pet_board("Dralnu's Pet", DRALNUS_PET, false);

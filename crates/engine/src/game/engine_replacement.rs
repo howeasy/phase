@@ -3115,15 +3115,16 @@ pub(super) fn apply_post_replacement_effect(
     // value", Dralnu's Pet). The spell's carrier reached the permanent through
     // the `CastLinkSnapshot` restore, so stamp it across this continuation —
     // only for a battlefield-entry `Moved` event, only when the chain reads the
-    // cost-paid object (the same gate the ETB-trigger stamp in `triggers.rs`
-    // uses), and never over a referent the chain already carries.
+    // cost-paid object (`ResolvedAbility::references_cost_paid_object`, the same
+    // gate the ETB-trigger stamp in `triggers.rs` uses), and never over a
+    // referent the chain already carries.
     if matches!(event, Some(ReplacementEvent::Moved)) && resolved.cost_paid_object.is_none() {
         let carrier = object_id
             .and_then(|id| state.entering_or_live_object(id))
             .filter(|obj| obj.zone == Zone::Battlefield)
             .and_then(|obj| obj.cast_cost_paid_object.clone());
         if let Some(snapshot) = carrier {
-            if super::triggers::resolved_ability_refs_cost_paid_object(&resolved) {
+            if resolved.references_cost_paid_object() {
                 resolved.set_cost_paid_object_recursive(snapshot);
             }
         }

@@ -36204,6 +36204,35 @@ impl PartialEq for ResolvedAbility {
 impl Eq for ResolvedAbility {}
 
 impl ResolvedAbility {
+    /// CR 400.7d + CR 608.2k: True when this resolved ability tree reads the
+    /// cost-paid object — i.e. references `ObjectScope::CostPaidObject` in a
+    /// magnitude / P-T expression, `TargetFilter::CostPaidObject`, or
+    /// `AbilityCondition::CostPaidObjectMatchesFilter` — anywhere in its effect,
+    /// condition, or `sub_ability` / `else_ability` branches. Gates the emerge
+    /// cast-cost-object propagation onto ETB triggers (`build_triggered_ability`,
+    /// Adipose Offspring) and the enters-with replacement continuation stamp in
+    /// `engine_replacement::apply_post_replacement_effect` (Dralnu's Pet), so
+    /// only chains that consume the referent are stamped.
+    ///
+    /// The per-node walk is the type-owned [`Effect::references_cost_paid_object`]
+    /// / [`AbilityCondition::references_cost_paid_object`]; this method adds only
+    /// the chain traversal.
+    pub(crate) fn references_cost_paid_object(&self) -> bool {
+        self.effect.references_cost_paid_object()
+            || self
+                .condition
+                .as_ref()
+                .is_some_and(AbilityCondition::references_cost_paid_object)
+            || self
+                .sub_ability
+                .as_deref()
+                .is_some_and(ResolvedAbility::references_cost_paid_object)
+            || self
+                .else_ability
+                .as_deref()
+                .is_some_and(ResolvedAbility::references_cost_paid_object)
+    }
+
     /// CR 610.3: The "until" event bounding this node's own zone change, for
     /// every bounded zone-move shape (single-object `ChangeZone` and mass
     /// `ChangeZoneAll`). The single classifier the CR 610.3a/b latch, the

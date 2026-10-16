@@ -4799,10 +4799,10 @@ fn enters_with_counters_outcome(
     // "equal to" ("ward—pay life equal to …"), which is not the counter count.
     // `after_with` is a suffix slice of `work_text` and `clause_text` a prefix
     // of it, so the payload's offset into `work_text` addresses `clause_text`.
-    // allow-noncombinator: debug-only suffix invariant, not parsing dispatch
-    debug_assert!(work_text.ends_with(after_with));
-    let counter_clause_text = clause_text
-        .get(work_text.len() - after_with.len()..)
+    let counter_clause_text = work_text
+        .len()
+        .checked_sub(after_with.len())
+        .and_then(|payload_offset| clause_text.get(payload_offset..))
         .unwrap_or("");
     let mut count_expr = match leading_count {
         Some(count) => count,
