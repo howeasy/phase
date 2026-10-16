@@ -1234,6 +1234,7 @@ mod notion_thief_opponent_draw_redirect;
 mod nth_spell_ordinal_cost_reduction;
 mod null_summoner_exiled_card_cast;
 mod oath_cycle_target_restriction;
+mod oath_of_teferi;
 mod ob_nixilis_captive_kingpin_life_loss;
 mod obeka_splitter_additional_phases;
 mod object_growth_cover_blink_boards;
