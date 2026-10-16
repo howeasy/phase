@@ -715,6 +715,9 @@ pub(crate) fn resolve_with_host_override(
 /// stay unbound. The exhaustive classifier grades every quantity and filter
 /// variant, so a characteristic read such as `Intensity { scope: Recipient }`
 /// cannot ride along inside a composite graded only as an identity read.
+/// Filters held in game state (`FilterProp::CanEnchant`,
+/// `TargetFilter::ChosenDamageSource`) are graded `Characteristics`
+/// conservatively, so they stay unbound as well.
 ///
 /// The single authority for both `resolve` and its read-only mirror
 /// `resolve_token_spec`, so the live resolution, the bulk-run gate and the

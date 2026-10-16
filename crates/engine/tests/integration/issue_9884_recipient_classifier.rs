@@ -157,7 +157,7 @@ fn issue_9884_put_counter_all_keeps_x_and_excludes_each_recipient() {
     }
 }
 
-// CR 122.1 + CR 608.2h: each recipient reads its own controller's graveyard.
+// CR 404.1 + CR 608.2h: each recipient reads its own controller's graveyard.
 #[test]
 fn issue_9884_player_scope_varies_between_recipient_controllers() {
     let mut scenario = GameScenario::new();
@@ -191,7 +191,9 @@ fn issue_9884_player_scope_varies_between_recipient_controllers() {
 }
 
 // Classifier contract: CanEnchant consults an Aura's runtime enchant filter.
-// ParentTarget stays fixed; the hidden Another predicate reads the recipient.
+// Here the recipient and ParentTarget are the same creature; the hidden Another
+// predicate fails only when the recipient is bound (base: evaluated against the
+// Aura, so both Auras pass).
 #[test]
 fn issue_9884_can_enchant_reads_hidden_recipient_filter() {
     let mut scenario = GameScenario::new();
