@@ -10919,12 +10919,12 @@ fn apply_continuous_effect_filtered(
     // WHICH CARDS: only those whose magnitude is recipient-INDEPENDENT, since a
     // recipient-DEPENDENT one is resolved inside the loop below and never
     // reaches this binding at all. That excludes Rat Colony ("each OTHER Rat"
-    // carries `FilterProp::Another`, which `quantity::filter_uses_recipient`
-    // reports as recipient-relative) and includes the 161 corpus cards shaped
-    // like Beanstalk Giant / Ashaya / Adeline ("equal to the number of lands you
-    // control"). The test pair below is built on the latter for exactly that
-    // reason — a Rat Colony fixture would assert zero against a counter that can
-    // never move.
+    // carries `FilterProp::Another`) and Ancient Ooze (an aggregate over
+    // "other" creatures): the exhaustive quantity classifier reports both as
+    // recipient-relative. Beanstalk Giant / Ashaya / Adeline ("equal to the
+    // number of lands you control") remain recipient-independent.
+    // The test pair below uses the latter class; a Rat Colony fixture would
+    // assert zero against a counter that can never move.
     //
     // Skipping it is a pure evaluation-order change, not a semantic one: the
     // affected set is already fixed above (and CR 613.6-retained through

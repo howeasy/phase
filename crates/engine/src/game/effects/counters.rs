@@ -2030,12 +2030,8 @@ pub fn resolve_add_all(
         .into_iter()
         .map(|obj_id| {
             let counter_num = if count_uses_recipient {
-                crate::game::quantity::resolve_quantity_with_recipient(
-                    state,
-                    &count,
-                    ability.controller,
-                    ability.source_id,
-                    obj_id,
+                crate::game::quantity::resolve_quantity_with_targets_and_recipient(
+                    state, &count, ability, obj_id,
                 )
                 .max(0) as u32
             } else {

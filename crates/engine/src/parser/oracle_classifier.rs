@@ -295,25 +295,15 @@ fn is_self_conditional_flash_grant(lower: &str) -> bool {
     nom_primitives::parse_self_spell_has_flash_prefix(lower).is_ok()
 }
 
+/// CR 502.3 + CR 611.2a: Lines on an instant or sorcery containing a "doesn't/don't untap
+/// during ... next untap step" restriction are resolution-time continuous effects of the spell,
+/// not permanent-hosted static abilities.
 fn is_spell_resolution_next_untap_restriction(lower: &str) -> bool {
-    let has_next_untap_restriction = (scan_contains(lower, "doesn't untap during")
-        || scan_contains(lower, "doesn’t untap during"))
-        && scan_contains(lower, "next untap step");
-    if !has_next_untap_restriction {
-        return false;
-    }
-
-    alt((
-        tag::<_, _, OracleError<'_>>("put "),
-        tag("tap "),
-        tag("untap "),
-        tag("target "),
-        tag("that "),
-        tag("it "),
-        tag("those "),
-    ))
-    .parse(lower)
-    .is_ok()
+    (scan_contains(lower, "doesn't untap during")
+        || scan_contains(lower, "doesn’t untap during")
+        || scan_contains(lower, "don't untap during")
+        || scan_contains(lower, "don’t untap during"))
+        && scan_contains(lower, "next untap step")
 }
 
 fn is_spell_resolution_cast_from_hand_free(lower: &str) -> bool {

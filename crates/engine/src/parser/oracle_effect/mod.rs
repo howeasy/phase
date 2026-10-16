@@ -26192,7 +26192,10 @@ fn chain_has_prior_typed_referent(clauses: &[ClauseIr], skip_first_conditional: 
         if let Some(cond) = prev.condition.as_ref() {
             if skip_first_conditional && !skipped_conditional {
                 skipped_conditional = true;
-            } else if !cond.has_when_you_do_marker() {
+            } else if !cond.has_when_you_do_marker()
+                && !cond.is_affirmative_reflexive_gate()
+                && !cond.is_casting_condition()
+            {
                 return false;
             }
         }
@@ -26216,6 +26219,41 @@ fn chain_has_prior_typed_referent(clauses: &[ClauseIr], skip_first_conditional: 
         return false;
     }
     false
+}
+
+fn effect_is_parent_target_carrier(effect: &Effect) -> bool {
+    matches!(effect.target_filter(), Some(TargetFilter::ParentTarget))
+        || matches!(
+            effect,
+            Effect::GenericEffect {
+                target: None,
+                static_abilities,
+                ..
+            } if static_abilities
+                .iter()
+                .any(|s| matches!(s.affected, Some(TargetFilter::ParentTarget)))
+        )
+}
+
+/// CR 608.2c + CR 207.2c: Walks back through clauses to determine whether an immediately
+/// preceding instruction (or unbroken run of ParentTarget carriers across casting/affirmative gates)
+/// established an available ParentTarget referent. Unlike `chain_has_prior_typed_referent`,
+/// this does NOT assert that a *new* typed target was introduced; it merely checks that
+/// a ParentTarget referent is active and carrying forward (e.g. Code of Constraint's
+/// "tap that creature and it doesn't untap...").
+fn chain_has_prior_parent_target_carrier(clauses: &[ClauseIr]) -> bool {
+    let Some(prev) = clauses.last() else {
+        return false;
+    };
+    if let Some(cond) = prev.condition.as_ref() {
+        if !cond.has_when_you_do_marker()
+            && !cond.is_affirmative_reflexive_gate()
+            && !cond.is_casting_condition()
+        {
+            return false;
+        }
+    }
+    effect_is_parent_target_carrier(&prev.parsed.effect)
 }
 
 /// CR 611.2a + CR 400.7: An `Otherwise, return it ... and it's a <animation>` else
@@ -26715,15 +26753,14 @@ fn refuse_target_pt_threshold_rider_with_own_target(clause: &mut ClauseIr) {
 /// preceding instruction (the comparative "that creature" gate).
 fn chain_declared_object_target_clause(clauses: &[ClauseIr]) -> Option<(usize, &TargetFilter)> {
     for (index, prev) in clauses.iter().enumerate().rev() {
-        // CR 608.2c + CR 118.12 / CR 603.12: an affirmative "if you do" / "when you do" gate decides whether its
+        // CR 608.2c + CR 118.12 / CR 603.12 / CR 207.2c: an affirmative "if you do" / "when you do" gate
+        // or whole-spell casting condition (Addendum / kicker) decides whether its
         // instruction happens, not what that instruction declared, so its declared
         // target stays the nearest antecedent of a later "that creature" (Magitek
         // Scythe; Neyith of the Dire Hunt). Every other condition still blocks.
-        if prev
-            .condition
-            .as_ref()
-            .is_some_and(|condition| !condition.is_affirmative_reflexive_gate())
-        {
+        if prev.condition.as_ref().is_some_and(|condition| {
+            !condition.is_affirmative_reflexive_gate() && !condition.is_casting_condition()
+        }) {
             return None;
         }
         match prev.parsed.effect.target_filter() {
@@ -42879,8 +42916,9 @@ fn parse_effect_chain_ir_body(
         // destroy working branches. So we only remember the verdict, and enforce it
         // at the LAST resort — immediately before the generic emission at the tail
         // of this loop, where every other owner has already had its chance.
-        let instead_parent_target_available =
-            ctx.parent_target_available || chain_has_prior_typed_referent(builder.clauses(), false);
+        let instead_parent_target_available = ctx.parent_target_available
+            || chain_has_prior_typed_referent(builder.clauses(), false)
+            || chain_has_prior_parent_target_carrier(builder.clauses());
         let instead_condition_unlowerable = match try_parse_generic_instead_clause(
             normalized_text,
             kind,
@@ -43935,8 +43973,10 @@ fn parse_effect_chain_ir_body(
         // this flag when the outer chain has such a referent (Brilliance Unleashed).
         // It is false on every top-level and non-else nested parse, so this OR is a
         // no-op for all pre-existing cards.
-        let parent_target_available =
-            ctx.parent_target_available || if_you_do_anchor.is_some() || prior_typed_referent;
+        let parent_target_available = ctx.parent_target_available
+            || if_you_do_anchor.is_some()
+            || prior_typed_referent
+            || chain_has_prior_parent_target_carrier(builder.clauses());
         // CR 608.2c + CR 601.2a: a strict subset of `parent_target_available`
         // restricted to chosen-target referents (Emry), excluding impulse
         // publishers (Territorial Bruntar's `ExileFromTopUntil`). An "if you

@@ -21771,6 +21771,73 @@ fn spell_counter_tap_plus_doesnt_untap() {
 }
 
 #[test]
+fn spell_code_of_constraint_addendum_tap_and_cant_untap() {
+    let r = parse(
+        "Target creature gets -4/-0 until end of turn.\nDraw a card.\nAddendum — If you cast this spell during your main phase, tap that creature and it doesn't untap during its controller's next untap step.",
+        "Code of Constraint",
+        &[],
+        &["Instant"],
+        &[],
+    );
+    assert!(
+        r.statics.is_empty(),
+        "Code of Constraint should not produce static abilities, got {:?}",
+        r.statics
+    );
+    assert_eq!(
+        r.abilities.len(),
+        2,
+        "should produce two top-level abilities: {r:?}"
+    );
+    assert!(matches!(*r.abilities[0].effect, Effect::Pump { .. }));
+    let sub = r.abilities[0]
+        .sub_ability
+        .as_ref()
+        .expect("sub_ability Draw");
+    assert!(matches!(*sub.effect, Effect::Draw { .. }));
+
+    let addendum = &r.abilities[1];
+    assert_eq!(
+        addendum.condition,
+        Some(AbilityCondition::CastDuringPhase {
+            phases: vec![Phase::PreCombatMain, Phase::PostCombatMain],
+        })
+    );
+    assert!(
+        matches!(
+            *addendum.effect,
+            Effect::SetTapState {
+                state: TapStateChange::Tap,
+                target: TargetFilter::ParentTarget,
+                ..
+            }
+        ),
+        "expected Tap ParentTarget, got {:?}",
+        addendum.effect
+    );
+    let cant_untap = addendum
+        .sub_ability
+        .as_ref()
+        .expect("sub_ability CantUntap");
+    let Effect::GenericEffect {
+        static_abilities, ..
+    } = cant_untap.effect.as_ref()
+    else {
+        panic!(
+            "expected GenericEffect CantUntap, got {:?}",
+            cant_untap.effect
+        );
+    };
+    assert_eq!(static_abilities.len(), 1);
+    assert_eq!(
+        static_abilities[0].affected,
+        Some(TargetFilter::ParentTarget),
+        "CantUntap static must affect ParentTarget, got {:?}",
+        static_abilities[0].affected
+    );
+}
+
+#[test]
 fn creature_cant_block_still_produces_static() {
     // Regression guard: non-spell "can't block" must still produce static.
     let r = parse(

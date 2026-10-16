@@ -29879,6 +29879,78 @@ impl AbilityCondition {
         }
     }
 
+    /// CR 207.2c + CR 601.2: Whether this condition is a spell-casting condition
+    /// (e.g. Addendum "if you cast this spell during your main phase", kicker,
+    /// alternative cost, mana spent).
+    ///
+    /// These conditions govern how or when the whole spell/ability was cast,
+    /// so they apply to the entire ability chain rather than creating an
+    /// intervening resolution-time alternative branch.
+    pub fn is_casting_condition(&self) -> bool {
+        match self {
+            AbilityCondition::CastDuringPhase { .. }
+            | AbilityCondition::WasCast { .. }
+            | AbilityCondition::CastTimingPermission { .. }
+            | AbilityCondition::AdditionalCostPaid { .. }
+            | AbilityCondition::AdditionalCostPaidInstead
+            | AbilityCondition::AlternativeManaCostPaid
+            | AbilityCondition::CastVariantPaid { .. }
+            | AbilityCondition::CastVariantPaidInstead { .. }
+            | AbilityCondition::ManaColorSpent { .. } => true,
+            AbilityCondition::And { conditions } => {
+                conditions.iter().all(|c| c.is_casting_condition())
+            }
+            AbilityCondition::WhenYouDo
+            | AbilityCondition::EffectOutcome { .. }
+            | AbilityCondition::TriggerEventTargetDamagedBySourceThisTurn
+            | AbilityCondition::TriggerEventTargetExploitedBySource
+            | AbilityCondition::EventOutcomeWon
+            | AbilityCondition::SourceEnteredThisTurn
+            | AbilityCondition::HasMaxSpeed
+            | AbilityCondition::IsMonarch
+            | AbilityCondition::IsInitiative
+            | AbilityCondition::HasCityBlessing
+            | AbilityCondition::HasEnduringStory
+            | AbilityCondition::ControlsCommander { .. }
+            | AbilityCondition::DiscardedCardMatchesFilter { .. }
+            | AbilityCondition::IsRingBearer
+            | AbilityCondition::HasObjectTarget
+            | AbilityCondition::IsYourTurn
+            | AbilityCondition::FirstCombatPhaseOfTurn
+            | AbilityCondition::FirstEndStepOfTurn
+            | AbilityCondition::SourceIsTapped
+            | AbilityCondition::SourceAttachedToCreature
+            | AbilityCondition::DayNightIsNeither
+            | AbilityCondition::CoinFlipOutcome { .. }
+            | AbilityCondition::CurrentPhaseIs { .. }
+            | AbilityCondition::RevealedHasCardType { .. }
+            | AbilityCondition::ObjectsShareQuality { .. }
+            | AbilityCondition::TargetSharesNameWithOtherExiledThisWay { .. }
+            | AbilityCondition::QuantityCheck { .. }
+            | AbilityCondition::PreviousEffectAmount { .. }
+            | AbilityCondition::CompletedDungeon { .. }
+            | AbilityCondition::TargetHasKeywordInstead { .. }
+            | AbilityCondition::TargetMatchesFilter { .. }
+            | AbilityCondition::TriggeringSpellTargetsFilter { .. }
+            | AbilityCondition::SourceMatchesFilter { .. }
+            | AbilityCondition::PostReplacementDamageSourceMatchesFilter { .. }
+            | AbilityCondition::ZoneChangeObjectMatchesFilter { .. }
+            | AbilityCondition::ControllerControlsMatching { .. }
+            | AbilityCondition::ControllerControlledMatchingAsCast { .. }
+            | AbilityCondition::WasStartingPlayer { .. }
+            | AbilityCondition::SpellCastWithVariantThisTurn { .. }
+            | AbilityCondition::ZoneChangedThisWay { .. }
+            | AbilityCondition::CostPaidObjectMatchesFilter { .. }
+            | AbilityCondition::ConditionInstead { .. }
+            | AbilityCondition::Or { .. }
+            | AbilityCondition::Not { .. }
+            | AbilityCondition::DayNightIs { .. }
+            | AbilityCondition::AbilityUseCountThisTurn { .. }
+            | AbilityCondition::SourceLacksKeyword { .. }
+            | AbilityCondition::ScopedPlayerMatches { .. } => false,
+        }
+    }
+
     pub fn is_optional_effect_performed(&self) -> bool {
         matches!(
             self,
@@ -30335,6 +30407,11 @@ pub struct SpellContext {
     /// `cast_from_zone` for caster-scoped intervening-if conditions.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cast_controller: Option<PlayerId>,
+    /// CR 102.1 + CR 109.5 + CR 601.2: The active player whose turn it was when the spell
+    /// was cast. Used by addendum-style conditions ("if you cast this spell during your
+    /// main phase") to verify that the spell was cast during the caster's own turn.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cast_active_player: Option<PlayerId>,
     /// CR 601.2: Phase at the time the spell was cast. Used by addendum-style
     /// conditions such as "if you cast this spell during your main phase".
     #[serde(default, skip_serializing_if = "Option::is_none")]

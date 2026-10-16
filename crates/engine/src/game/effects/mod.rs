@@ -20585,10 +20585,24 @@ pub(crate) fn evaluate_condition(
             );
             comparator.evaluate(l, r)
         }
-        AbilityCondition::CastDuringPhase { phases } => ability
-            .context
-            .cast_phase
-            .is_some_and(|cast_phase| phases.contains(&cast_phase)),
+        // CR 109.5 + CR 102.1 + CR 601.2: Addendum and timing riders ("if you cast this spell
+        // during your main phase") require the spell to have been cast during the specified
+        // phase of the caster's own turn (caster == active player when cast).
+        AbilityCondition::CastDuringPhase { phases } => {
+            let was_own_phase = match (
+                ability.context.cast_controller,
+                ability.context.cast_active_player,
+            ) {
+                (Some(caster), Some(active)) => caster == active,
+                (Some(caster), None) => caster == ability.controller,
+                (None, _) => true,
+            };
+            was_own_phase
+                && ability
+                    .context
+                    .cast_phase
+                    .is_some_and(|cast_phase| phases.contains(&cast_phase))
+        }
         AbilityCondition::CastTimingPermission { permission } => state
             .objects
             .get(&ability.source_id)
@@ -39685,6 +39699,8 @@ mod tests {
             ObjectId(1),
             PlayerId(0),
         );
+        ability.context.cast_controller = Some(PlayerId(0));
+        ability.context.cast_active_player = Some(PlayerId(0));
         ability.context.cast_phase = Some(Phase::PreCombatMain);
 
         assert!(evaluate_condition(
@@ -39704,9 +39720,22 @@ mod tests {
             &ability
         ));
 
+        // CR 109.5 + CR 601.2: Resolution-time active player changes to PlayerId(1), but casting-time
+        // cast_controller == cast_active_player was PlayerId(0): condition holds.
         ability.context.cast_phase = Some(Phase::PostCombatMain);
         state.active_player = PlayerId(1);
         assert!(evaluate_condition(
+            &AbilityCondition::CastDuringPhase {
+                phases: vec![Phase::PreCombatMain, Phase::PostCombatMain],
+            },
+            &state,
+            &ability
+        ));
+
+        // Casting-time active player was PlayerId(1) (opponent's turn) while caster was PlayerId(0):
+        // condition fails even if cast during a main phase.
+        ability.context.cast_active_player = Some(PlayerId(1));
+        assert!(!evaluate_condition(
             &AbilityCondition::CastDuringPhase {
                 phases: vec![Phase::PreCombatMain, Phase::PostCombatMain],
             },
