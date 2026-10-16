@@ -19,23 +19,13 @@
 //!     that permanent or a general subset of permanents.
 //!   - CR 608.2c: instructions are followed in the order written; a later
 //!     instruction refers to what an earlier one produced.
-//!   - CR 113.6m: an ability whose effect moves the object it is on out of a
-//!     zone functions only in that zone.
-//!   - CR 113.7a: a triggered ability exists independently of its source once
-//!     it has triggered.
-//!   - CR 306.5b: a planeswalker's printed loyalty is its own entry
-//!     replacement; an additional loyalty counter adds to it.
-//!   - CR 616.1: the affected object's controller orders simultaneous
-//!     replacement effects.
+//!   - CR 603.1: a "When/Whenever …" ability is a triggered ability; Dark
+//!     Intimations' second paragraph is one, left as an explicit gap.
 
-use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
-use engine::game::triggers::drain_order_triggers_with_identity;
-use engine::game::zone_pipeline::{move_object_for_test, ZoneMoveRequest};
+use engine::game::scenario::{GameScenario, P0, P1};
 use engine::parser::parse_oracle_text;
 use engine::types::ability::{AbilityDefinition, Effect, TargetFilter};
-use engine::types::actions::GameAction;
 use engine::types::counter::CounterType;
-use engine::types::game_state::{CastPaymentMode, WaitingFor};
 use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::replacements::ReplacementEvent;
@@ -326,44 +316,28 @@ fn hosting_season_is_not_a_self_counter_replacement() {
     assert_eq!(outcome.counters(entered, CounterType::Plus1Plus1), 0);
 }
 
-// ── Dark Intimations runtime (CR 113.6m + CR 113.7a + CR 608.2c + CR 306.5b) ──
+// ── Dark Intimations (CR 603.1 + CR 608.2c) ──
 
 const BOLAS_LOYALTY: u32 = 4;
 
-fn add_dark_intimations(
-    scenario: &mut GameScenario,
-    owner: engine::types::player::PlayerId,
-    zone: Zone,
-) -> ObjectId {
-    let mut builder = match zone {
-        Zone::Graveyard => scenario.add_spell_to_graveyard(owner, "Dark Intimations", false),
-        Zone::Exile => scenario.add_spell_to_exile(owner, "Dark Intimations", false),
-        Zone::Hand => scenario.add_spell_to_hand(owner, "Dark Intimations", false),
-        other => panic!("unsupported fixture zone {other:?}"),
-    };
-    builder.from_oracle_text(DARK_INTIMATIONS).id()
-}
-
 /// A synthetic test planeswalker (no abilities) of the given subtype in hand,
-/// printed loyalty `loyalty`, mana value 1. `flash` lets it be cast while
-/// another spell is on the stack.
+/// printed loyalty `loyalty`, mana value 1.
 fn add_test_planeswalker(
     scenario: &mut GameScenario,
     owner: engine::types::player::PlayerId,
     name: &str,
     subtype: &str,
     loyalty: u32,
-    flash: bool,
 ) -> ObjectId {
     scenario
-        .add_creature_to_hand_from_oracle(owner, name, 0, 0, if flash { "Flash" } else { "" })
+        .add_creature_to_hand_from_oracle(owner, name, 0, 0, "")
         .as_planeswalker_with_loyalty(subtype, loyalty)
         .with_mana_cost(generic_cost(1))
         .id()
 }
 
-fn loyalty_of(runner_state: &engine::types::game_state::GameState, name: &str) -> u32 {
-    let obj = runner_state
+fn loyalty_of(state: &engine::types::game_state::GameState, name: &str) -> u32 {
+    let obj = state
         .objects
         .values()
         .find(|o| o.name == name && o.zone == Zone::Battlefield)
@@ -374,371 +348,117 @@ fn loyalty_of(runner_state: &engine::types::game_state::GameState, name: &str) -
         .unwrap_or(0)
 }
 
-fn zone_of_named(state: &engine::types::game_state::GameState, id: ObjectId) -> Zone {
-    state
-        .objects
-        .get(&id)
-        .map(|o| o.zone)
-        .expect("object exists")
-}
-
-fn make_active(runner: &mut GameRunner, player: engine::types::player::PlayerId) {
-    let state = runner.state_mut();
-    state.active_player = player;
-    state.priority_player = player;
-    state.waiting_for = WaitingFor::Priority { player };
-}
-
-fn cast_spell(runner: &mut GameRunner, spell: ObjectId) {
-    let card_id = runner.state().objects[&spell].card_id;
-    runner
-        .act(GameAction::CastSpell {
-            object_id: spell,
-            card_id,
-            targets: vec![],
-            payment_mode: CastPaymentMode::Auto,
-        })
-        .expect("cast must be accepted");
-}
-
-/// Pass priority (draining trigger-ordering prompts) until the stack has `len` items.
-fn pass_priority_until_stack_len(runner: &mut GameRunner, len: usize) {
-    for _ in 0..64 {
-        if runner.state().stack.len() == len {
-            return;
-        }
-        match runner.state().waiting_for.clone() {
-            WaitingFor::Priority { .. } => {
-                runner
-                    .act(GameAction::PassPriority)
-                    .expect("pass priority must be accepted");
-            }
-            WaitingFor::OrderTriggers { .. } => {
-                drain_order_triggers_with_identity(runner.state_mut());
-            }
-            other => panic!("unexpected WaitingFor while pumping to stack length {len}: {other:?}"),
-        }
-    }
-    panic!("stack never reached length {len}");
-}
-
-/// Dark Intimations in its owner's graveyard: casting a Bolas planeswalker
-/// triggers it from the graveyard, the card is exiled, and the planeswalker
-/// enters with its printed loyalty plus one. The line is a graveyard cast
-/// trigger, never a self replacement on the sorcery.
+/// Dark Intimations' second paragraph ("When you cast a Bolas planeswalker
+/// spell, exile this card from your graveyard. That planeswalker enters with an
+/// additional loyalty counter on it.") is one honest gap: the card parses to its
+/// first paragraph plus exactly one `Unimplemented` ability for the second, with
+/// no trigger and no replacement. At runtime the first paragraph resolves as
+/// printed; afterwards a Bolas planeswalker cast with the card in the graveyard
+/// enters with only its printed loyalty, and the card stays in the graveyard —
+/// no self-exile trigger and no loyalty rider are ever published on their own.
 #[test]
-fn dark_intimations_exiles_itself_and_adds_a_loyalty_counter() {
+fn dark_intimations_second_paragraph_is_an_honest_gap() {
+    let parsed = parse_oracle_text(
+        DARK_INTIMATIONS,
+        "Dark Intimations",
+        &[],
+        &["Sorcery".to_string()],
+        &[],
+    );
+    assert!(parsed.triggers.is_empty(), "got {:?}", parsed.triggers);
+    assert!(
+        parsed.replacements.is_empty(),
+        "got {:?}",
+        parsed.replacements
+    );
+    let gaps: Vec<_> = parsed
+        .abilities
+        .iter()
+        .filter(|def| {
+            chain_effects(def)
+                .iter()
+                .any(|effect| matches!(effect, Effect::Unimplemented { .. }))
+        })
+        .collect();
+    assert_eq!(gaps.len(), 1, "one gap, got {:?}", parsed.abilities);
+    let paragraph_two = DARK_INTIMATIONS
+        .lines()
+        .nth(1)
+        .expect("Dark Intimations has two paragraphs");
+    assert!(
+        matches!(
+            gaps[0].effect.as_ref(),
+            Effect::Unimplemented { description: Some(text), .. } if text == paragraph_two
+        ) && gaps[0].sub_ability.is_none(),
+        "the gap is the whole second paragraph, got {:?}",
+        gaps[0]
+    );
+    assert!(
+        all_effects(&parsed).iter().all(|effect| !matches!(
+            effect,
+            Effect::AddTargetReplacement { .. } | Effect::PutCounter { .. }
+        )),
+        "no install or loyalty placement, got {parsed:?}"
+    );
+
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
-    let dark = add_dark_intimations(&mut scenario, P0, Zone::Graveyard);
+    let dark = scenario
+        .add_spell_to_hand_from_oracle(P0, "Dark Intimations", false, DARK_INTIMATIONS)
+        .with_mana_cost(generic_cost(1))
+        .id();
+    // What the first paragraph acts on: an opposing creature to sacrifice, an
+    // opposing card to discard, a creature card to return, and a card to draw.
+    let sacrificed = scenario.add_vanilla(P1, 2, 2);
+    let discarded = scenario.add_card_to_hand(P1, "Test Opposing Card");
+    let returned = scenario
+        .add_creature_to_graveyard(P0, "Test Returned Creature", 1, 1)
+        .id();
+    let drawn = scenario.add_card_to_library_top(P0, "Test Drawn Card");
     let walker = add_test_planeswalker(
         &mut scenario,
         P0,
         "Test Bolas Walker",
         "Bolas",
         BOLAS_LOYALTY,
-        false,
     );
-    scenario.with_mana_pool(P0, colorless(1));
+    scenario.with_mana_pool(P0, colorless(2));
     let mut runner = scenario.build();
-    assert_graveyard_cast_trigger_registered(&runner, dark);
-    let outcome = runner.cast(walker).resolve();
-    assert_eq!(
-        loyalty_of(outcome.state(), "Test Bolas Walker"),
-        BOLAS_LOYALTY + 1
-    );
-    assert_eq!(outcome.zone_of(dark), Zone::Exile, "the card exiles itself");
-}
 
-/// Reach guard: the card carries its SpellCast trigger, functioning from the
-/// graveyard (CR 113.6m), so a "no trigger" outcome is the trigger's own
-/// condition or zone declining, not a missing definition.
-fn assert_graveyard_cast_trigger_registered(runner: &GameRunner, dark: ObjectId) {
+    let outcome = runner.cast(dark).resolve();
+    // Reach guards: the first paragraph resolved as printed.
+    assert_eq!(outcome.zone_of(sacrificed), Zone::Graveyard, "sacrificed");
+    assert_eq!(outcome.zone_of(discarded), Zone::Graveyard, "discarded");
+    assert_eq!(outcome.zone_of(returned), Zone::Hand, "returned");
+    assert_eq!(outcome.zone_of(drawn), Zone::Hand, "drawn");
+    assert_eq!(
+        outcome.zone_of(dark),
+        Zone::Graveyard,
+        "the sorcery resolved"
+    );
     assert!(
         runner.state().objects[&dark]
             .trigger_definitions
             .as_slice()
             .iter()
-            .any(|entry| entry.definition.mode == TriggerMode::SpellCast
-                && entry.definition.trigger_zones == vec![Zone::Graveyard]),
-        "reach guard: the graveyard SpellCast trigger is registered"
+            .all(|entry| entry.definition.mode != TriggerMode::SpellCast),
+        "no cast trigger is registered on the card"
     );
-}
 
-/// Hostile: a non-Bolas planeswalker does not trigger it, and the card stays.
-/// Control: a Bolas planeswalker cast afterwards in the same game does trigger
-/// it, so the non-Bolas outcome is the subtype condition declining.
-#[test]
-fn dark_intimations_ignores_a_non_bolas_planeswalker() {
-    let mut scenario = GameScenario::new();
-    scenario.at_phase(Phase::PreCombatMain);
-    let dark = add_dark_intimations(&mut scenario, P0, Zone::Graveyard);
-    let walker = add_test_planeswalker(
-        &mut scenario,
-        P0,
-        "Test Jace Walker",
-        "Jace",
-        BOLAS_LOYALTY,
-        false,
-    );
-    let bolas = add_test_planeswalker(
-        &mut scenario,
-        P0,
-        "Test Bolas Walker",
-        "Bolas",
-        BOLAS_LOYALTY,
-        false,
-    );
-    scenario.with_mana_pool(P0, colorless(2));
-    let mut runner = scenario.build();
-    assert_graveyard_cast_trigger_registered(&runner, dark);
     let outcome = runner.cast(walker).resolve();
     assert_eq!(
-        loyalty_of(outcome.state(), "Test Jace Walker"),
-        BOLAS_LOYALTY
-    );
-    assert_eq!(outcome.zone_of(dark), Zone::Graveyard);
-
-    let outcome = runner.cast(bolas).resolve();
-    assert_eq!(
         loyalty_of(outcome.state(), "Test Bolas Walker"),
-        BOLAS_LOYALTY + 1,
-        "control: a Bolas planeswalker triggers the same card"
-    );
-    assert_eq!(outcome.zone_of(dark), Zone::Exile);
-}
-
-/// Hostile: CR 113.6m — the ability functions only from the graveyard. In hand
-/// or in exile the card does nothing.
-#[test]
-fn dark_intimations_outside_the_graveyard_does_not_trigger() {
-    for zone in [Zone::Hand, Zone::Exile] {
-        let mut scenario = GameScenario::new();
-        scenario.at_phase(Phase::PreCombatMain);
-        let dark = add_dark_intimations(&mut scenario, P0, zone);
-        let walker = add_test_planeswalker(
-            &mut scenario,
-            P0,
-            "Test Bolas Walker",
-            "Bolas",
-            BOLAS_LOYALTY,
-            false,
-        );
-        scenario.with_mana_pool(P0, colorless(1));
-        let mut runner = scenario.build();
-        assert_graveyard_cast_trigger_registered(&runner, dark);
-        let outcome = runner.cast(walker).resolve();
-        assert_eq!(
-            loyalty_of(outcome.state(), "Test Bolas Walker"),
-            BOLAS_LOYALTY,
-            "{zone:?}"
-        );
-        assert_eq!(outcome.zone_of(dark), zone);
-    }
-}
-
-/// Hostile: one card, one trigger. Once exiled it cannot add a counter to a
-/// second Bolas planeswalker.
-#[test]
-fn dark_intimations_applies_once() {
-    let mut scenario = GameScenario::new();
-    scenario.at_phase(Phase::PreCombatMain);
-    let dark = add_dark_intimations(&mut scenario, P0, Zone::Graveyard);
-    let first = add_test_planeswalker(
-        &mut scenario,
-        P0,
-        "Test Bolas One",
-        "Bolas",
         BOLAS_LOYALTY,
-        false,
+        "the planeswalker enters with its printed loyalty only"
     );
-    let second = add_test_planeswalker(
-        &mut scenario,
-        P0,
-        "Test Bolas Two",
-        "Bolas",
-        BOLAS_LOYALTY,
-        false,
-    );
-    scenario.with_mana_pool(P0, colorless(2));
-    let mut runner = scenario.build();
-    assert_graveyard_cast_trigger_registered(&runner, dark);
-    let outcome = runner.cast(first).resolve();
     assert_eq!(
         outcome.zone_of(dark),
-        Zone::Exile,
-        "reach guard: the first cast exiles the card"
-    );
-    let outcome = runner.cast(second).resolve();
-    assert_eq!(
-        loyalty_of(outcome.state(), "Test Bolas One"),
-        BOLAS_LOYALTY + 1
-    );
-    assert_eq!(loyalty_of(outcome.state(), "Test Bolas Two"), BOLAS_LOYALTY);
-}
-
-/// Owner vs controller: "When you cast" is the card's owner (its controller in
-/// the graveyard). An opponent casting a Bolas planeswalker does not trigger it;
-/// the same cast by the card's owner does — whether that owner is P0 or P1.
-#[test]
-fn dark_intimations_triggers_only_for_its_owner() {
-    // The opponent casts; the card stays and the planeswalker gets no extra counter.
-    let mut scenario = GameScenario::new();
-    scenario.at_phase(Phase::PreCombatMain);
-    let dark = add_dark_intimations(&mut scenario, P0, Zone::Graveyard);
-    let walker = add_test_planeswalker(
-        &mut scenario,
-        P1,
-        "Test Bolas Walker",
-        "Bolas",
-        BOLAS_LOYALTY,
-        false,
-    );
-    scenario.with_mana_pool(P1, colorless(1));
-    let mut runner = scenario.build();
-    make_active(&mut runner, P1);
-    let outcome = runner.cast(walker).resolve();
-    assert_eq!(
-        loyalty_of(outcome.state(), "Test Bolas Walker"),
-        BOLAS_LOYALTY
-    );
-    assert_eq!(outcome.zone_of(dark), Zone::Graveyard);
-
-    // P1 owns the card and casts the planeswalker: it triggers for P1.
-    let mut scenario = GameScenario::new();
-    scenario.at_phase(Phase::PreCombatMain);
-    let dark = add_dark_intimations(&mut scenario, P1, Zone::Graveyard);
-    let walker = add_test_planeswalker(
-        &mut scenario,
-        P1,
-        "Test Bolas Walker",
-        "Bolas",
-        BOLAS_LOYALTY,
-        false,
-    );
-    scenario.with_mana_pool(P1, colorless(1));
-    let mut runner = scenario.build();
-    make_active(&mut runner, P1);
-    let outcome = runner.cast(walker).resolve();
-    assert_eq!(
-        loyalty_of(outcome.state(), "Test Bolas Walker"),
-        BOLAS_LOYALTY + 1
-    );
-    assert_eq!(outcome.zone_of(dark), Zone::Exile);
-}
-
-/// Binding: the installed replacement belongs to the spell that triggered it.
-/// Another Bolas planeswalker that enters after the install but before that
-/// spell resolves gets nothing; the original spell still gets its counter.
-#[test]
-fn dark_intimations_binds_to_the_triggering_spell() {
-    let mut scenario = GameScenario::new();
-    scenario.at_phase(Phase::PreCombatMain);
-    add_dark_intimations(&mut scenario, P0, Zone::Graveyard);
-    let original = add_test_planeswalker(
-        &mut scenario,
-        P0,
-        "Test Bolas Original",
-        "Bolas",
-        BOLAS_LOYALTY,
-        false,
-    );
-    let interloper =
-        add_test_planeswalker(&mut scenario, P0, "Test Bolas Interloper", "Bolas", 3, true);
-    scenario.with_mana_pool(P0, colorless(2));
-    let mut runner = scenario.build();
-
-    cast_spell(&mut runner, original);
-    // Stack: [original, trigger]. The trigger resolves and installs the replacement.
-    pass_priority_until_stack_len(&mut runner, 1);
-    // A second Bolas planeswalker in response; the card is already exiled, so it
-    // does not trigger again.
-    cast_spell(&mut runner, interloper);
-    pass_priority_until_stack_len(&mut runner, 0);
-
-    assert_eq!(loyalty_of(runner.state(), "Test Bolas Interloper"), 3);
-    assert_eq!(
-        loyalty_of(runner.state(), "Test Bolas Original"),
-        BOLAS_LOYALTY + 1
+        Zone::Graveyard,
+        "the card is not exiled"
     );
 }
 
-/// CR 113.7a + CR 608.2c: once triggered, the ability does not depend on its
-/// source. The card leaving the graveyard before the trigger resolves turns the
-/// exile into a no-op, but the next instruction still installs the counter.
-#[test]
-fn dark_intimations_leaving_before_resolution_still_adds_the_counter() {
-    let mut scenario = GameScenario::new();
-    scenario.at_phase(Phase::PreCombatMain);
-    let dark = add_dark_intimations(&mut scenario, P0, Zone::Graveyard);
-    let walker = add_test_planeswalker(
-        &mut scenario,
-        P0,
-        "Test Bolas Walker",
-        "Bolas",
-        BOLAS_LOYALTY,
-        false,
-    );
-    scenario.with_mana_pool(P0, colorless(1));
-    let mut runner = scenario.build();
-    let mut commit = runner.cast(walker).commit();
-    assert_eq!(
-        commit.state().stack.len(),
-        2,
-        "reach guard: the trigger is on the stack"
-    );
-    // Through the zone pipeline, so ZoneChange replacements apply to the move.
-    assert!(
-        !move_object_for_test(
-            commit.state_mut(),
-            ZoneMoveRequest::effect(dark, Zone::Hand, dark),
-            &mut Vec::new(),
-        ),
-        "the move to hand needs no replacement choice"
-    );
-    let outcome = commit.resolve();
-    assert_eq!(
-        loyalty_of(outcome.state(), "Test Bolas Walker"),
-        BOLAS_LOYALTY + 1
-    );
-    assert_eq!(
-        zone_of_named(outcome.state(), dark),
-        Zone::Hand,
-        "the card that left the graveyard is a new object the exile cannot find"
-    );
-}
-
-/// Multi-authority: two copies in the graveyard both trigger for one Bolas
-/// planeswalker; both are exiled and each adds its own counter (two separate
-/// "additional" replacement effects both apply). The two entry replacements are
-/// simultaneous (CR 616.1); the harness answers the order prompt with the first
-/// candidate each time, and the result does not depend on the order.
-#[test]
-fn two_dark_intimations_both_apply() {
-    let mut scenario = GameScenario::new();
-    scenario.at_phase(Phase::PreCombatMain);
-    let first = add_dark_intimations(&mut scenario, P0, Zone::Graveyard);
-    let second = add_dark_intimations(&mut scenario, P0, Zone::Graveyard);
-    let walker = add_test_planeswalker(
-        &mut scenario,
-        P0,
-        "Test Bolas Walker",
-        "Bolas",
-        BOLAS_LOYALTY,
-        false,
-    );
-    scenario.with_mana_pool(P0, colorless(1));
-    let mut runner = scenario.build();
-    let outcome = runner.cast(walker).replacement_choice(0).resolve();
-    assert_eq!(
-        loyalty_of(outcome.state(), "Test Bolas Walker"),
-        BOLAS_LOYALTY + 2
-    );
-    assert_eq!(outcome.zone_of(first), Zone::Exile);
-    assert_eq!(outcome.zone_of(second), Zone::Exile);
-}
-
-/// Synthetic (no corpus member): a keyword-qualified distributive subject.
+// Synthetic (no corpus member): a keyword-qualified distributive subject.
 /// Derived: each creature you control with flying enters with one +1/+1
 /// counter for each creature you control; a creature without flying gets none.
 /// The line is a distributive replacement, not a `static_structure` gap.
