@@ -543,7 +543,7 @@ fn dark_intimations_outside_the_graveyard_does_not_trigger() {
 fn dark_intimations_applies_once() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
-    add_dark_intimations(&mut scenario, P0, Zone::Graveyard);
+    let dark = add_dark_intimations(&mut scenario, P0, Zone::Graveyard);
     let first = add_test_planeswalker(
         &mut scenario,
         P0,
@@ -562,7 +562,13 @@ fn dark_intimations_applies_once() {
     );
     scenario.with_mana_pool(P0, colorless(2));
     let mut runner = scenario.build();
-    runner.cast(first).resolve();
+    assert_graveyard_cast_trigger_registered(&runner, dark);
+    let outcome = runner.cast(first).resolve();
+    assert_eq!(
+        outcome.zone_of(dark),
+        Zone::Exile,
+        "reach guard: the first cast exiles the card"
+    );
     let outcome = runner.cast(second).resolve();
     assert_eq!(
         loyalty_of(outcome.state(), "Test Bolas One"),

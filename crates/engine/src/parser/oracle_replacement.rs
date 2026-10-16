@@ -6160,8 +6160,7 @@ fn parse_cast_spell_filter(spell_filter_text: &str) -> Option<TypedFilter> {
     let (spell_filter, filter_rest) = parse_type_phrase_folding(spell_filter_text);
     // Require that the spell filter cleanly consumed its text (modulo trailing
     // "spell" token which parse_type_phrase_folding leaves in the remainder on some paths).
-    let filter_rest = filter_rest.trim();
-    if !filter_rest.is_empty() && filter_rest != "spell" && filter_rest != "spells" {
+    if !is_bare_spell_noun_remainder(filter_rest) {
         return None;
     }
     let TargetFilter::Typed(mut spell_typed) = spell_filter else {
@@ -6170,6 +6169,17 @@ fn parse_cast_spell_filter(spell_filter_text: &str) -> Option<TypedFilter> {
     // The Oracle text says "you cast" — constrain to the controller.
     spell_typed.controller = Some(ControllerRef::You);
     Some(spell_typed)
+}
+
+/// A spell-filter remainder that is empty or only the bare "spell"/"spells"
+/// noun. "spells" is tried before "spell" so the plural is consumed whole.
+fn is_bare_spell_noun_remainder(rest: &str) -> bool {
+    all_consuming(opt(alt((
+        tag::<_, _, OracleError<'_>>("spells"),
+        tag("spell"),
+    ))))
+    .parse(rest.trim())
+    .is_ok()
 }
 
 /// CR 113.6m + CR 608.2c: the self-exile prelude of a graveyard cast trigger
@@ -28603,6 +28613,40 @@ mod tests {
                 matches!(&*exec.effect, Effect::AddTargetReplacement { .. })
                     && exec.sub_ability.is_none(),
                 "{name}: the install alone, got {exec:?}"
+            );
+        }
+    }
+
+    /// The cast-trigger spell filter accepts only an empty or bare
+    /// "spell"/"spells" remainder.
+    #[test]
+    fn cast_spell_filter_remainder() {
+        for (rest, accepted) in [
+            ("", true),
+            (" ", true),
+            ("spell", true),
+            ("spells", true),
+            (" spells ", true),
+            ("spelling", false),
+            ("spell x", false),
+            ("spellsx", false),
+            ("x", false),
+        ] {
+            assert_eq!(is_bare_spell_noun_remainder(rest), accepted, "{rest:?}");
+        }
+        // Through the filter parser: the type phrase leaves each remainder shown.
+        for (text, rest, accepted) in [
+            ("creature spell", "", true),
+            ("bolas planeswalker spell", "", true),
+            ("creature spelling", " spelling", false),
+            ("creature spellsx", " spellsx", false),
+            ("creature spell x", "x", false),
+        ] {
+            assert_eq!(parse_type_phrase_folding(text).1, rest, "{text:?}");
+            assert_eq!(
+                parse_cast_spell_filter(text).is_some(),
+                accepted,
+                "{text:?}"
             );
         }
     }

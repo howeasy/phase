@@ -87924,14 +87924,58 @@ fn cast_permission_rider_requires_the_lingering_shape() {
         "reach guard: the when-next rider is untouched, got {when_next:?}"
     );
 
-    for text in [
+    let graveyard_cast = |effect: &Effect| {
+        matches!(
+            effect,
+            Effect::CastFromZone {
+                target: TargetFilter::Typed(filter),
+                ..
+            } if filter.properties.contains(&crate::types::ability::FilterProp::InZone {
+                zone: Zone::Graveyard,
+            })
+        )
+    };
+    let graveyard_exile = |effect: &Effect| {
+        matches!(
+            effect,
+            Effect::ChangeZone {
+                origin: Some(Zone::Graveyard),
+                destination: Zone::Exile,
+                ..
+            }
+        )
+    };
+    // The cast grant parses, then the final-tree gate replaces it with this
+    // named gap because its "If you do" rider cannot reach the spell.
+    let refused_cast_grant = |effect: &Effect| {
+        matches!(
+            effect,
+            Effect::Unimplemented { name, .. }
+                if name == super::lower::CAST_RIDER_ON_LINGERING_GRANT_GAP
+        )
+    };
+    type Producer = fn(&Effect) -> bool;
+    let cases: [(&str, &[Producer]); 2] = [
         // Windowless (duration None) cast.
-        "Cast target creature card from your graveyard without paying its mana cost. It enters with a finality counter on it.",
+        (
+            "Cast target creature card from your graveyard without paying its mana cost. It enters with a finality counter on it.",
+            &[graveyard_cast],
+        ),
         // The nearest producer is not a lingering cast grant the rider can ride.
-        "Exile target creature card from a graveyard. You may cast it this turn. If you do, it enters with a finality counter on it.",
-    ] {
+        (
+            "Exile target creature card from a graveyard. You may cast it this turn. If you do, it enters with a finality counter on it.",
+            &[graveyard_exile, refused_cast_grant],
+        ),
+    ];
+    for (text, producers) in cases {
         let abilities = spell_chain_definitions(text);
         let defs = chain_definitions(&abilities);
+        for (index, producer) in producers.iter().enumerate() {
+            assert!(
+                defs.iter().any(|def| producer(&def.effect)),
+                "{text:?}: reach guard: producer {index} parses, got {abilities:?}"
+            );
+        }
         assert!(
             !pending_counters(&defs),
             "{text:?}: no rider without a lingering producer, got {abilities:?}"
