@@ -1709,8 +1709,7 @@ pub fn resolve_quantity_with_spell(
 /// or filter reads at the strongest grade among its parts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum RecipientRead {
-    /// No recipient read the classifier can see. Filters held in game state
-    /// are graded conservatively.
+    /// No recipient read the classifier can see.
     Unread,
     /// Reads the recipient only as the identity that delimits a counted
     /// population: "other" (`FilterProp::Another`) or "attached to it"
@@ -1721,6 +1720,9 @@ pub(crate) enum RecipientRead {
     /// Reads the recipient object or its controller: an `ObjectScope::Recipient`
     /// characteristic, a `PlayerScope::RecipientController` player quantity, or a
     /// quality shared with it (`SharesQuality { reference: ParentTarget }`).
+    /// Filters held in game state (`FilterProp::CanEnchant`,
+    /// `TargetFilter::ChosenDamageSource`) carry the recipient but their contents
+    /// are invisible here, so they are graded `Characteristics`.
     Characteristics,
 }
 
@@ -1843,9 +1845,9 @@ fn quantity_ref_recipient_read(qty: &QuantityRef) -> RecipientRead {
             | PlayerFilter::TrackedSetPossessor { .. }
             | PlayerFilter::AnyOf { .. } => RecipientRead::Unread,
         },
-        // These filters use records, fresh contexts, or target-slot metadata,
-        // not the live recipient binding. Sacrifice/token/entry filters above
-        // are likewise record-based; only their player scopes can read it.
+        // Filter-bearing members use records, fresh contexts, or target-slot
+        // metadata, not the live recipient binding. Sacrifice/token/entry filters
+        // above are likewise record-based; only their player scopes can read it.
         QuantityRef::ControlledByEachPlayer { .. }
         | QuantityRef::ZoneChangeCountThisTurn { .. }
         | QuantityRef::ZoneChangeAggregateThisTurn { .. }
@@ -1855,6 +1857,7 @@ fn quantity_ref_recipient_read(qty: &QuantityRef) -> RecipientRead {
         | QuantityRef::ManaSpentToCast { .. }
         | QuantityRef::TargetObjectManaValue { .. }
         | QuantityRef::EventContextPlayerCount { .. }
+        // Remaining leaves have no recipient-bearing payload.
         | QuantityRef::AttachmentsOnLeavingObject { .. }
         | QuantityRef::LifeAboveStarting
         | QuantityRef::TriggeringDiscoverValue
@@ -1881,6 +1884,7 @@ fn quantity_ref_recipient_read(qty: &QuantityRef) -> RecipientRead {
         | QuantityRef::BendTypesThisTurn
         | QuantityRef::TurnsTaken
         | QuantityRef::ChosenNumber
+        | QuantityRef::NotedNumber
         | QuantityRef::DescendedThisTurn
         | QuantityRef::SpellsCastLastTurn
         | QuantityRef::DungeonsCompleted
@@ -3473,14 +3477,18 @@ fn filter_prop_recipient_read(prop: &FilterProp) -> RecipientRead {
         // The Aura's own enchant filter lives in game state and receives the
         // recipient. Its unseen contents require a conservative grade.
         FilterProp::CanEnchant { .. } => RecipientRead::Characteristics,
-        // These nested filters and thresholds resolve with fresh contexts,
-        // without the outer recipient. Do not walk their payloads.
+        // These nested filters and quantity thresholds do not receive the outer
+        // recipient. Do not walk their payloads.
         FilterProp::DifferentNameFrom { .. }
         | FilterProp::DistinctFrom { .. }
         | FilterProp::Targets { .. }
         | FilterProp::TargetsOnly { .. }
         | FilterProp::ControllerMatches { .. }
         | FilterProp::DealtDamageThisTurn { .. }
+        | FilterProp::Counters { .. }
+        | FilterProp::Cmc { .. }
+        | FilterProp::PtComparison { .. }
+        // Remaining leaves have no recipient-bearing payload.
         | FilterProp::Token
         | FilterProp::NonToken
         | FilterProp::RepresentedByCard
@@ -3505,8 +3513,6 @@ fn filter_prop_recipient_read(prop: &FilterProp) -> RecipientRead {
         | FilterProp::HasKeywordKind { .. }
         | FilterProp::WithoutKeyword { .. }
         | FilterProp::WithoutKeywordKind { .. }
-        | FilterProp::Counters { .. }
-        | FilterProp::Cmc { .. }
         | FilterProp::ManaValueParity { .. }
         | FilterProp::ManaCostIn { .. }
         | FilterProp::InZone { .. }
@@ -3529,7 +3535,6 @@ fn filter_prop_recipient_read(prop: &FilterProp) -> RecipientRead {
         | FilterProp::Unpaired
         | FilterProp::OtherThanTriggerObject
         | FilterProp::HasColor { .. }
-        | FilterProp::PtComparison { .. }
         | FilterProp::PowerGTSource
         | FilterProp::ColorCount { .. }
         | FilterProp::ManaSymbolCount { .. }
@@ -12445,6 +12450,12 @@ mod tests {
             (count(vec![]), RecipientRead::Unread),
             (power(ObjectScope::Source), RecipientRead::Unread),
             (power(ObjectScope::CostPaidObject), RecipientRead::Unread),
+            (
+                QuantityExpr::Ref {
+                    qty: QuantityRef::NotedNumber,
+                },
+                RecipientRead::Unread,
+            ),
         ];
         let other =
             || TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::Another]));
@@ -12739,13 +12750,40 @@ mod tests {
             },
         ];
         for qty in unread_refs {
-            // Reach guard: the very same nested Another filter is live when
-            // evaluated through ObjectCount, not a dead branch in the walker.
-            assert_eq!(
-                quantity_ref_recipient_read(&QuantityRef::ObjectCount { filter: other() }),
-                RecipientRead::PopulationIdentity,
-                "live-filter control for {qty:?}"
-            );
+            // Build the live-context control from this row's actual filter.
+            // Scope-only and payload-free rows have no such filter.
+            let filter = match &qty {
+                QuantityRef::ControlledByEachPlayer { filter, .. }
+                | QuantityRef::ZoneChangeCountThisTurn { filter, .. }
+                | QuantityRef::ZoneChangeAggregateThisTurn { filter, .. }
+                | QuantityRef::SacrificedThisTurn { filter, .. }
+                | QuantityRef::TokensCreatedThisTurn { filter, .. }
+                | QuantityRef::BattlefieldEntriesThisTurn { filter, .. } => Some(filter),
+                QuantityRef::SpellsCastThisTurn { filter, .. }
+                | QuantityRef::SpellsCastBeforeTriggeringSpell { filter, .. }
+                | QuantityRef::SpellsCastThisGame { filter, .. } => filter.as_ref(),
+                QuantityRef::ManaSpentToCast {
+                    metric: CastManaSpentMetric::FromSource { source_filter },
+                    ..
+                } => Some(source_filter),
+                QuantityRef::TargetObjectManaValue { filter } => Some(filter.as_ref()),
+                QuantityRef::PlayerCount {
+                    filter: PlayerFilter::ControlsCount { filter, .. },
+                }
+                | QuantityRef::EventContextPlayerCount {
+                    filter: PlayerFilter::ControlsCount { filter, .. },
+                } => Some(filter),
+                _ => None,
+            };
+            if let Some(filter) = filter {
+                assert_eq!(
+                    quantity_ref_recipient_read(&QuantityRef::ObjectCount {
+                        filter: filter.clone()
+                    }),
+                    RecipientRead::PopulationIdentity,
+                    "live-filter control for {qty:?}",
+                );
+            }
             rows.push((QuantityExpr::Ref { qty }, RecipientRead::Unread));
         }
         for prop in [
@@ -12776,10 +12814,60 @@ mod tests {
             FilterProp::DistinctFrom {
                 reference: Box::new(other()),
             },
+            FilterProp::ControllerMatches {
+                player: Box::new(PlayerFilter::ControlsCount {
+                    relation: PlayerRelation::All,
+                    filter: other(),
+                    comparator: Comparator::GE,
+                    count: Box::new(QuantityExpr::Fixed { value: 1 }),
+                }),
+            },
+            FilterProp::DealtDamageThisTurn {
+                kind: DamageKindFilter::Any,
+                recipient: Some(PlayerFilter::ControlsCount {
+                    relation: PlayerRelation::All,
+                    filter: other(),
+                    comparator: Comparator::GE,
+                    count: Box::new(QuantityExpr::Fixed { value: 1 }),
+                }),
+            },
         ] {
+            let control = match &prop {
+                FilterProp::Counters { count, .. }
+                | FilterProp::Cmc { value: count, .. }
+                | FilterProp::PtComparison { value: count, .. } => count.clone(),
+                FilterProp::DifferentNameFrom { filter }
+                | FilterProp::Targets { filter }
+                | FilterProp::TargetsOnly { filter }
+                | FilterProp::DistinctFrom { reference: filter } => QuantityExpr::Ref {
+                    qty: QuantityRef::ObjectCount {
+                        filter: filter.as_ref().clone(),
+                    },
+                },
+                FilterProp::ControllerMatches { player } => {
+                    let PlayerFilter::ControlsCount { filter, .. } = player.as_ref() else {
+                        panic!("row must carry a live-filter control: {prop:?}");
+                    };
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::ObjectCount {
+                            filter: filter.clone(),
+                        },
+                    }
+                }
+                FilterProp::DealtDamageThisTurn {
+                    recipient: Some(PlayerFilter::ControlsCount { filter, .. }),
+                    ..
+                } => QuantityExpr::Ref {
+                    qty: QuantityRef::ObjectCount {
+                        filter: filter.clone(),
+                    },
+                },
+                _ => panic!("row must carry a live-filter control: {prop:?}"),
+            };
             assert_eq!(
-                quantity_expr_recipient_read(&count(vec![FilterProp::Another])),
-                RecipientRead::PopulationIdentity
+                quantity_expr_recipient_read(&control),
+                RecipientRead::PopulationIdentity,
+                "live-filter control for {prop:?}"
             );
             rows.push((count(vec![prop]), RecipientRead::Unread));
         }
@@ -12799,10 +12887,19 @@ mod tests {
             },
             CardTypeSetSource::ExiledBySource,
         ] {
-            assert_eq!(
-                card_type_set_source_recipient_read(&objects()),
-                RecipientRead::PopulationIdentity
-            );
+            if let CardTypeSetSource::TurnJournal {
+                filter: Some(filter),
+                ..
+            } = &source
+            {
+                assert_eq!(
+                    card_type_set_source_recipient_read(&CardTypeSetSource::Objects {
+                        filter: filter.clone(),
+                    }),
+                    RecipientRead::PopulationIdentity,
+                    "live-filter control for {source:?}",
+                );
+            }
             assert_eq!(
                 card_type_set_source_recipient_read(&source),
                 RecipientRead::Unread
@@ -12830,6 +12927,201 @@ mod tests {
                 expected != RecipientRead::Unread,
                 "legacy verdict of {expr:?}"
             );
+        }
+    }
+
+    /// CR 608.2h + CR 608.2i: record-backed populations and fresh nested
+    /// contexts do not acquire the surrounding effect's recipient binding.
+    #[test]
+    fn recipient_read_unread_runtime_invariance() {
+        let mut state = GameState::new_two_player(42);
+        let add = |state: &mut GameState, name: &str, core_type| {
+            let card_id = CardId(state.next_object_id);
+            let id = create_object(
+                state,
+                card_id,
+                PlayerId(0),
+                name.to_string(),
+                Zone::Battlefield,
+            );
+            let object = state.objects.get_mut(&id).unwrap();
+            object.card_types.core_types = vec![core_type];
+            object.base_card_types = object.card_types.clone();
+            object.power = Some(3);
+            object.toughness = Some(3);
+            id
+        };
+        let source = add(&mut state, "Source creature", CoreType::Creature);
+        let counted = add(&mut state, "Counted creature token", CoreType::Creature);
+        let outside_population = add(&mut state, "Artifact recipient", CoreType::Artifact);
+        state.objects.get_mut(&counted).unwrap().is_token = true;
+        let filter =
+            TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::Another]));
+
+        // Use the same snapshot authorities as the existing sacrifice and
+        // spent-mana tests; all journals contain an actual matching member.
+        let departed = state.objects[&counted].snapshot_for_zone_change(
+            counted,
+            Some(Zone::Battlefield),
+            Zone::Graveyard,
+        );
+        state
+            .sacrificed_permanents_this_turn
+            .push_back(departed.clone());
+        state.zone_changes_this_turn.push_back(departed);
+        state
+            .created_tokens_this_turn
+            .push_back(state.objects[&counted].snapshot_for_zone_change(
+                counted,
+                None,
+                Zone::Battlefield,
+            ));
+        crate::game::restrictions::record_battlefield_entry(&mut state, counted);
+        add_spent_mana_source_snapshot(&mut state, source, counted);
+
+        // Exercise the own-cast peel, not merely an empty/unfiltered journal.
+        state.objects.get_mut(&source).unwrap().cast_from_zone = Some(Zone::Hand);
+        state.spells_cast_this_turn_by_player.insert(
+            PlayerId(0),
+            crate::im::Vector::from(vec![
+                SpellCastRecord {
+                    core_types: vec![CoreType::Creature],
+                    spell_object_id: Some(ObjectId(900)),
+                    ..Default::default()
+                },
+                SpellCastRecord {
+                    core_types: vec![CoreType::Creature],
+                    spell_object_id: Some(source),
+                    ..Default::default()
+                },
+            ]),
+        );
+        let rows = [
+            (
+                QuantityRef::ControlledByEachPlayer {
+                    filter: filter.clone(),
+                    aggregate: AggregateFunction::Max,
+                    relation: PlayerRelation::Controller,
+                },
+                1,
+            ),
+            (
+                QuantityRef::PlayerCount {
+                    filter: PlayerFilter::ControlsCount {
+                        relation: PlayerRelation::Controller,
+                        filter: filter.clone(),
+                        comparator: Comparator::EQ,
+                        count: Box::new(QuantityExpr::Fixed { value: 1 }),
+                    },
+                },
+                1,
+            ),
+            (
+                QuantityRef::BattlefieldEntriesThisTurn {
+                    player: PlayerScope::Controller,
+                    filter: filter.clone(),
+                },
+                1,
+            ),
+            (
+                QuantityRef::SacrificedThisTurn {
+                    player: PlayerScope::Controller,
+                    filter: filter.clone(),
+                },
+                1,
+            ),
+            (
+                QuantityRef::TokensCreatedThisTurn {
+                    player: PlayerScope::Controller,
+                    filter: filter.clone(),
+                },
+                1,
+            ),
+            (
+                QuantityRef::ZoneChangeCountThisTurn {
+                    from: Some(Zone::Battlefield),
+                    to: Some(Zone::Graveyard),
+                    filter: filter.clone(),
+                },
+                1,
+            ),
+            (
+                QuantityRef::ZoneChangeAggregateThisTurn {
+                    from: Some(Zone::Battlefield),
+                    to: Some(Zone::Graveyard),
+                    filter: filter.clone(),
+                    function: AggregateFunction::Sum,
+                    property: ObjectProperty::Power,
+                },
+                3,
+            ),
+            (
+                QuantityRef::SpellsCastThisTurn {
+                    scope: CountScope::Controller,
+                    filter: Some(filter.clone()),
+                },
+                1,
+            ),
+            (
+                QuantityRef::ManaSpentToCast {
+                    scope: CastManaObjectScope::SelfObject,
+                    metric: CastManaSpentMetric::FromSource {
+                        source_filter: filter,
+                    },
+                },
+                1,
+            ),
+        ];
+        for (qty, expected) in rows {
+            let row_filter = match &qty {
+                QuantityRef::ControlledByEachPlayer { filter, .. }
+                | QuantityRef::BattlefieldEntriesThisTurn { filter, .. }
+                | QuantityRef::SacrificedThisTurn { filter, .. }
+                | QuantityRef::TokensCreatedThisTurn { filter, .. }
+                | QuantityRef::ZoneChangeCountThisTurn { filter, .. }
+                | QuantityRef::ZoneChangeAggregateThisTurn { filter, .. }
+                | QuantityRef::SpellsCastThisTurn {
+                    filter: Some(filter),
+                    ..
+                }
+                | QuantityRef::PlayerCount {
+                    filter: PlayerFilter::ControlsCount { filter, .. },
+                }
+                | QuantityRef::ManaSpentToCast {
+                    metric:
+                        CastManaSpentMetric::FromSource {
+                            source_filter: filter,
+                        },
+                    ..
+                } => filter,
+                _ => panic!("invariance row must carry a filter: {qty:?}"),
+            };
+            let control = QuantityExpr::Ref {
+                qty: QuantityRef::ObjectCount {
+                    filter: row_filter.clone(),
+                },
+            };
+            assert_eq!(
+                quantity_expr_recipient_read(&control),
+                RecipientRead::PopulationIdentity
+            );
+            let values = [counted, outside_population].map(|recipient| {
+                resolve_quantity_with_recipient(&state, &control, PlayerId(0), source, recipient)
+            });
+            assert_eq!(
+                values,
+                [1, 2],
+                "live control changes with the recipient: {qty:?}"
+            );
+            let expr = QuantityExpr::Ref { qty };
+            assert_eq!(quantity_expr_recipient_read(&expr), RecipientRead::Unread);
+            for recipient in [counted, outside_population] {
+                assert_eq!(
+                    resolve_quantity_with_recipient(&state, &expr, PlayerId(0), source, recipient),
+                    expected,
+                    "nonzero recipient-invariant result for {expr:?}, recipient {recipient:?}",
+                );
+            }
         }
     }
 
