@@ -4716,6 +4716,9 @@ fn enters_with_counters_outcome(
         // one condition slot — so their co-occurrence fails closed.
         let other_suffix =
             enters_with_condition_suffix(is_escape, &kicker_condition, work_text, after_with);
+        if !skipped_leading_gate_is_read(head.leading_gate, &other_suffix) {
+            return Err(EntersWithDecline::FailsClosed(EntersWithGap::Gate));
+        }
         match resolve_enters_with_condition(&unless_outcome, &leading_if_outcome, &other_suffix) {
             None => return Err(EntersWithDecline::FailsClosed(EntersWithGap::Gate)),
             Some(Some(cond)) => def = def.condition(cond),
@@ -4898,7 +4901,11 @@ fn enters_with_counters_outcome(
             typed.properties.insert(0, FilterProp::Another);
             TargetFilter::Typed(typed)
         }
-        Some((other, SubjectScope::Other)) => other,
+        // CR 614.12: an "other" subset excludes the source; a filter that cannot
+        // carry `FilterProp::Another` would include it, so the clause fails closed.
+        Some((_, SubjectScope::Other)) => {
+            return Err(EntersWithDecline::FailsClosed(EntersWithGap::Clause))
+        }
     };
 
     // CR 614.12: External ETB counter placements (non-SelfRef) use ChangeZone
@@ -4929,6 +4936,9 @@ fn enters_with_counters_outcome(
     // rather than silently dropping one gate.
     let other_suffix =
         enters_with_condition_suffix(is_escape, &kicker_condition, work_text, after_with);
+    if !skipped_leading_gate_is_read(head.leading_gate, &other_suffix) {
+        return Err(EntersWithDecline::FailsClosed(EntersWithGap::Gate));
+    }
     match resolve_enters_with_condition(&unless_outcome, &leading_if_outcome, &other_suffix) {
         None => return Err(EntersWithDecline::FailsClosed(EntersWithGap::Gate)),
         Some(Some(cond)) => def = def.condition(cond),
@@ -4936,6 +4946,26 @@ fn enters_with_counters_outcome(
     }
 
     Ok(def)
+}
+
+/// CR 614.1c: a leading "if …, " gate the head reader skipped
+/// (`EntersWithHead::leading_gate`, behind a label the ability-word peel does
+/// not know) was read by no gate extractor. It counts as read only when a
+/// condition-suffix reader recognizes the gate's own text as the clause's
+/// single condition (Scarlet Spider, Ben Reilly's web-slinging gate).
+/// Otherwise the gate is present but unread, and the clause fails closed
+/// rather than applying unconditionally.
+fn skipped_leading_gate_is_read(leading_gate: Option<&str>, other_suffix: &EntersWithGate) -> bool {
+    let Some(gate) = leading_gate else {
+        return true;
+    };
+    match (
+        enters_with_condition_suffix(false, &None, gate, ""),
+        other_suffix,
+    ) {
+        (EntersWithGate::Parsed(read), EntersWithGate::Parsed(slot)) => read == *slot,
+        _ => false,
+    }
 }
 
 /// CR 614.1c: The trailing conditional-suffix gate shared by both the
@@ -31023,6 +31053,63 @@ mod tests {
             "This creature enters with a +1/+1 counter on it if you control a permanent with mana value 4 or greater.",
         )
         .is_ok());
+    }
+
+    /// CR 614.1c: a leading gate behind a label the ability-word peel does not
+    /// know is skipped by the head reader, not read. It counts as read only when
+    /// a condition reader recognizes the gate's own text as the clause's single
+    /// condition (Scarlet Spider, Ben Reilly's web-slinging gate); any other
+    /// skipped gate fails closed instead of yielding an unconditional replacement.
+    #[test]
+    fn enters_with_skipped_leading_gate_fails_closed_unless_read() {
+        // Reach guard: the skipped web-slinging gate is read and carried.
+        let scarlet = enters_with_counters_outcome(
+            "sensational save — if ~ was cast using web-slinging, he enters with x +1/+1 counters on him, where x is the mana value of the returned creature.",
+            "Sensational Save — If Scarlet Spider was cast using web-slinging, he enters with X +1/+1 counters on him, where X is the mana value of the returned creature.",
+        )
+        .expect("reach guard: the web-slinging gate is read");
+        assert_eq!(
+            scarlet.condition,
+            Some(ReplacementCondition::CastVariantPaid {
+                variant: CastVariantPaid::WebSlinging,
+            })
+        );
+        // Reach guard: without the label the same gate is read by the
+        // leading-if extractor, so only the label differs below.
+        let unlabeled = enters_with_counters_outcome(
+            "if you control an artifact, ~ enters with a +1/+1 counter on it.",
+            "If you control an artifact, this creature enters with a +1/+1 counter on it.",
+        )
+        .expect("reach guard: the unlabeled gate is read");
+        assert!(unlabeled.condition.is_some(), "{unlabeled:?}");
+        for line in [
+            "test label — if the mystery quality holds, ~ enters with a +1/+1 counter on it.",
+            "test label — if you control an artifact, ~ enters with a +1/+1 counter on it.",
+            "test label — if ~ was kicked, it enters with two +1/+1 counters on it.",
+            "if the mystery quality holds, ~ enters with a +1/+1 counter on it.",
+        ] {
+            assert_eq!(
+                enters_with_counters_outcome(line, line).err(),
+                Some(EntersWithDecline::FailsClosed(EntersWithGap::Gate)),
+                "{line:?}"
+            );
+        }
+        // Through the card parser: the gated line publishes no counter
+        // replacement on the card.
+        let parsed = parse_oracle_text(
+            "Test Label — If the mystery quality holds, Test Beast enters with a +1/+1 counter on it.",
+            "Test Beast",
+            &[],
+            &["Creature".to_string()],
+            &[],
+        );
+        assert!(
+            parsed.replacements.iter().all(|r| r
+                .execute
+                .as_ref()
+                .is_none_or(|e| !matches!(e.effect.as_ref(), Effect::PutCounter { .. }))),
+            "{parsed:?}"
+        );
     }
 
     fn enters_with_valid_card(norm_lower: &str) -> TargetFilter {

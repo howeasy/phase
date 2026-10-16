@@ -27777,38 +27777,59 @@ fn enters_with_n_additional_counters_parses_canonical_type() {
     // mastery and Turntimber Symbiosis on the card's mana value — neither is an
     // "enters this way" gate the mover's entry counters can carry — so each rider
     // is an explicit gap, never a `PutCounter` replacement on the sorcery itself.
-    for (name, oracle) in [
+    let battlefield_mover = |effect: &Effect| {
+        matches!(
+            effect,
+            Effect::ChangeZone {
+                destination: Zone::Battlefield,
+                ..
+            }
+        )
+    };
+    let dig = |effect: &Effect| matches!(effect, Effect::Dig { .. });
+    let cases: [(&str, &str, &dyn Fn(&Effect) -> bool); 2] = [
         (
             "Necromantic Summons",
             "Put target creature card from a graveyard onto the battlefield under your control.\n\
              Spell mastery — If there are two or more instant and/or sorcery cards in your graveyard, \
              that creature enters with two additional +1/+1 counters on it.",
+            &battlefield_mover,
         ),
         (
             "Turntimber Symbiosis",
             "Look at the top seven cards of your library. You may put a creature card from among them \
              onto the battlefield. If that card has mana value 3 or less, it enters with three \
              additional +1/+1 counters on it. Put the rest on the bottom of your library in a random order.",
+            &dig,
         ),
-    ] {
+    ];
+    for (name, oracle, primary_mover) in cases {
         let parsed = parse_oracle_text(oracle, name, &[], &["Sorcery".to_string()], &[]);
+        fn chain_nodes(ability: &AbilityDefinition) -> impl Iterator<Item = &AbilityDefinition> {
+            let mut cursor = Some(ability);
+            std::iter::from_fn(move || {
+                let node = cursor?;
+                cursor = node.sub_ability.as_deref();
+                Some(node)
+            })
+        }
+        assert!(
+            parsed
+                .abilities
+                .iter()
+                .flat_map(chain_nodes)
+                .any(|node| primary_mover(&*node.effect)),
+            "{name}: reach guard: the primary mover parses: {parsed:?}"
+        );
         assert!(
             parsed.replacements.is_empty(),
             "{name}: the rider is not a replacement on the sorcery: {parsed:?}"
         );
         assert!(
-            parsed.abilities.iter().any(|ability| {
-                let mut cursor = Some(ability);
-                std::iter::from_fn(|| {
-                    let node = cursor?;
-                    cursor = node.sub_ability.as_deref();
-                    Some(node)
-                })
-                .any(|node| {
-                    node.effect
-                        .unimplemented_description()
-                        .is_some_and(|text| text.contains("enters with"))
-                })
+            parsed.abilities.iter().flat_map(chain_nodes).any(|node| {
+                node.effect
+                    .unimplemented_description()
+                    .is_some_and(|text| text.contains("enters with"))
             }),
             "{name}: the rider stays an explicit gap: {parsed:?}"
         );

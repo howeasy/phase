@@ -30,6 +30,7 @@
 
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::triggers::drain_order_triggers_with_identity;
+use engine::game::zone_pipeline::{move_object_for_test, ZoneMoveRequest};
 use engine::parser::parse_oracle_text;
 use engine::types::ability::{AbilityDefinition, Effect, TargetFilter};
 use engine::types::actions::GameAction;
@@ -680,7 +681,15 @@ fn dark_intimations_leaving_before_resolution_still_adds_the_counter() {
         2,
         "reach guard: the trigger is on the stack"
     );
-    engine::game::zones::move_to_zone(commit.state_mut(), dark, Zone::Hand, &mut Vec::new());
+    // Through the zone pipeline, so ZoneChange replacements apply to the move.
+    assert!(
+        !move_object_for_test(
+            commit.state_mut(),
+            ZoneMoveRequest::effect(dark, Zone::Hand, dark),
+            &mut Vec::new(),
+        ),
+        "the move to hand needs no replacement choice"
+    );
     let outcome = commit.resolve();
     assert_eq!(
         loyalty_of(outcome.state(), "Test Bolas Walker"),

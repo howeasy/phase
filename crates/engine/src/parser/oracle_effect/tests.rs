@@ -85585,22 +85585,70 @@ fn entry_counter_riders_are_producer_bound() {
         .iter()
         .all(|def| def.effect.unimplemented_description().is_none()));
 
-    for text in [
+    let exile_mover = |effect: &Effect| {
+        matches!(
+            effect,
+            Effect::ChangeZone {
+                destination: Zone::Exile,
+                ..
+            }
+        )
+    };
+    let battlefield_mover = |effect: &Effect| {
+        matches!(
+            effect,
+            Effect::ChangeZone {
+                destination: Zone::Battlefield,
+                ..
+            }
+        )
+    };
+    let sacrifice = |effect: &Effect| matches!(effect, Effect::Sacrifice { .. });
+    let discard = |effect: &Effect| matches!(effect, Effect::Discard { .. });
+    let gain_life = |effect: &Effect| matches!(effect, Effect::GainLife { .. });
+    // Each case names the preceding instructions that must parse (the positive
+    // reach guard for the rider assertions below).
+    let cases: [(&str, &[&dyn Fn(&Effect) -> bool]); 6] = [
         // Exile parent.
-        "Exile target creature card from your graveyard. If a creature enters this way, it enters with an additional +1/+1 counter on it.",
+        (
+            "Exile target creature card from your graveyard. If a creature enters this way, it enters with an additional +1/+1 counter on it.",
+            &[&exile_mover],
+        ),
         // Sacrifice parent.
-        "Sacrifice a creature. If a creature enters this way, it enters with an additional +1/+1 counter on it.",
+        (
+            "Sacrifice a creature. If a creature enters this way, it enters with an additional +1/+1 counter on it.",
+            &[&sacrifice],
+        ),
         // Discard parent.
-        "Discard a card. If a creature enters this way, it enters with an additional +1/+1 counter on it.",
+        (
+            "Discard a card. If a creature enters this way, it enters with an additional +1/+1 counter on it.",
+            &[&discard],
+        ),
         // An intervening instruction between the mover and the rider.
-        "Return target creature card from your graveyard to the battlefield. You gain 2 life. If a creature enters this way, it enters with an additional +1/+1 counter on it.",
+        (
+            "Return target creature card from your graveyard to the battlefield. You gain 2 life. If a creature enters this way, it enters with an additional +1/+1 counter on it.",
+            &[&battlefield_mover, &gain_life],
+        ),
         // No predecessor at all.
-        "If a creature enters this way, it enters with an additional +1/+1 counter on it.",
+        (
+            "If a creature enters this way, it enters with an additional +1/+1 counter on it.",
+            &[],
+        ),
         // The reanimation witness: a battlefield mover, but no "this way" gate.
-        "Return target creature card from your graveyard to the battlefield. It enters with a +1/+1 counter on it.",
-    ] {
+        (
+            "Return target creature card from your graveyard to the battlefield. It enters with a +1/+1 counter on it.",
+            &[&battlefield_mover],
+        ),
+    ];
+    for (text, predecessors) in cases {
         let abilities = spell_chain_definitions(text);
         let defs = chain_definitions(&abilities);
+        for (index, predecessor) in predecessors.iter().enumerate() {
+            assert!(
+                defs.iter().any(|def| predecessor(&*def.effect)),
+                "{text:?}: reach guard: preceding instruction {index} parses, got {abilities:?}"
+            );
+        }
         assert!(
             !has_parent_target_put(&defs),
             "{text:?}: no dangling PutCounter {{ ParentTarget }}, got {abilities:?}"
