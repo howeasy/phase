@@ -25,7 +25,7 @@ import { initializeConnectivity } from "./stores/connectivityStore";
 
 export async function bootstrap(): Promise<void> {
   // Before anything renders: a tab opened in the background must not start
-  // CSS or framer-motion animations it can never finish.
+  // CSS animations it can never finish (see animation/hiddenDocumentMotion).
   installHiddenDocumentMotion();
 
   await initializeHostPlatform();
