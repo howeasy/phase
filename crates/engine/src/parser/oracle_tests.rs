@@ -7,9 +7,9 @@ use crate::parser::oracle_ir::doc::{
 use crate::parser::oracle_ir::static_ir::StaticIr;
 use crate::parser::oracle_util::GRANTING_SELF_PLACEHOLDER;
 use crate::types::ability::{
-    AdditionalCostOrigin, AdditionalCostPaymentSource, CountScope, CounterAdjustment,
-    DamageKindFilter, DoorLockOp, PlayerRelation, SpellStackToGraveyardReplacement, SubAbilityLink,
-    TargetReadOrigin,
+    AdditionalCostOrigin, AdditionalCostPaymentSource, ChooseOneOfKind, CountScope,
+    CounterAdjustment, DamageKindFilter, DoorLockOp, PlayerRelation,
+    SpellStackToGraveyardReplacement, SubAbilityLink, TargetReadOrigin,
 };
 use crate::types::counter::{CounterMatch, CounterType};
 use crate::types::phase::{PhaseGroup, TurnSegment};
@@ -8733,7 +8733,10 @@ fn owen_grady_shared_noun_counter_choice_activated() {
         .sub_ability
         .as_deref()
         .expect("counter choice must be chained as a sub-ability");
-    let Effect::ChooseOneOf { chooser, branches } = &*choice.effect else {
+    let Effect::ChooseOneOf {
+        chooser, branches, ..
+    } = &*choice.effect
+    else {
         panic!("expected ChooseOneOf sub-ability, got {:?}", choice.effect);
     };
     assert_eq!(*chooser, PlayerFilter::Controller);
@@ -11228,6 +11231,111 @@ fn parses_activate_only_if_condition_and_only_once_each_turn() {
             }
         )),
         "expected RequiresCondition with OpponentLostLife"
+    );
+}
+
+/// CR 602.5: Grim Repriser's graveyard return — "Activate only if an opponent
+/// has been dealt noncombat damage this turn" must parse to a RequiresCondition
+/// gate over `DamageDealtThisTurn { NoncombatOnly } >= 1`, with no
+/// Unimplemented clause. The bare "was dealt damage" form (Skarrgan Pit-Skulk's
+/// Bloodthirst gate) is re-asserted as `Any` in the same test so the qualifier
+/// threading cannot collapse the unqualified cell.
+#[test]
+fn parses_grim_repriser_noncombat_damage_activation_gate() {
+    const GRIM_ACTIVATED: &str = "{B}{R}: Return this card from your graveyard to the battlefield with a finality counter on it. Activate only if an opponent has been dealt noncombat damage this turn. (If a creature with a finality counter on it would die, exile it instead.)";
+    const BARE_ACTIVATED: &str = "{B}{R}: Return this card from your graveyard to the battlefield with a finality counter on it. Activate only if an opponent was dealt damage this turn. (If a creature with a finality counter on it would die, exile it instead.)";
+    let r = parse(
+        GRIM_ACTIVATED,
+        "Grim Repriser",
+        &[],
+        &["Creature"],
+        &["Zombie", "Bard"],
+    );
+    assert_eq!(r.abilities.len(), 1);
+    // CR 113.6m: the effect moves the source out of the graveyard, so the
+    // ability functions only from the graveyard.
+    assert_eq!(
+        r.abilities[0].activation_zone,
+        Some(Zone::Graveyard),
+        "CR 113.6m: a graveyard self-return functions only from the graveyard"
+    );
+    let restrictions = &r.abilities[0].activation_restrictions;
+    match restrictions.iter().find_map(|r| match r {
+        ActivationRestriction::RequiresCondition { condition } => condition.clone(),
+        _ => None,
+    }) {
+        Some(ParsedCondition::QuantityComparison {
+            lhs:
+                QuantityExpr::Ref {
+                    qty:
+                        QuantityRef::DamageDealtThisTurn {
+                            source,
+                            target,
+                            aggregate: AggregateFunction::Sum,
+                            group_by: None,
+                            damage_kind: DamageKindFilter::NoncombatOnly,
+                            ..
+                        },
+                },
+            comparator: Comparator::GE,
+            rhs: QuantityExpr::Fixed { value: 1 },
+        }) => {
+            assert_eq!(
+                *source,
+                TargetFilter::Any,
+                "the gate counts damage from any source"
+            );
+            match target.as_ref() {
+                TargetFilter::And { filters }
+                    if filters.len() == 2
+                        && filters[0] == TargetFilter::Player
+                        && matches!(
+                            &filters[1],
+                            TargetFilter::Typed(tf)
+                                if tf.controller == Some(ControllerRef::Opponent)
+                        ) => {}
+                other => panic!("expected the opponent player-only recipient, got {other:?}"),
+            }
+        }
+        other => panic!(
+            "expected RequiresCondition with NoncombatOnly DamageDealtThisTurn, got {other:?}"
+        ),
+    }
+    assert!(r.parse_warnings.is_empty());
+    assert!(
+        !parsed_has_unimplemented(&r),
+        "no clause of Grim Repriser may fall through to Unimplemented"
+    );
+
+    // Regression tripwire: the bare Skarrgan form keeps the `Any` damage class.
+    let bare = parse(
+        BARE_ACTIVATED,
+        "Grim Repriser",
+        &[],
+        &["Creature"],
+        &["Zombie", "Bard"],
+    );
+    assert!(bare.parse_warnings.is_empty());
+    assert!(
+        bare.abilities[0]
+            .activation_restrictions
+            .iter()
+            .any(|r| matches!(
+                r,
+                ActivationRestriction::RequiresCondition {
+                    condition: Some(ParsedCondition::QuantityComparison {
+                        lhs: QuantityExpr::Ref {
+                            qty: QuantityRef::DamageDealtThisTurn {
+                                damage_kind: DamageKindFilter::Any,
+                                ..
+                            }
+                        },
+                        comparator: Comparator::GE,
+                        rhs: QuantityExpr::Fixed { value: 1 },
+                    })
+                }
+            )),
+        "the bare 'was dealt damage' gate must stay DamageKindFilter::Any"
     );
 }
 
@@ -29890,6 +29998,7 @@ fn demote_net_reaches_every_ability_carrier() {
     parsed.abilities.push(holder(Effect::ChooseOneOf {
         chooser: crate::types::ability::PlayerFilter::Controller,
         branches: vec![refused()],
+        kind: ChooseOneOfKind::Ordinary,
     }));
 
     // 8 — a trigger's payload.
@@ -31305,7 +31414,7 @@ fn census_variant_names(body: &str) -> Vec<String> {
 /// it.
 #[test]
 fn render_net_effect_carrier_census() {
-    const EFFECT_VARIANT_PIN: usize = 234;
+    const EFFECT_VARIANT_PIN: usize = 236;
     /// `(enum header, pinned variant count, the ONE variant the net destructures)`.
     const PAYLOAD_ENUM_PINS: &[(&str, usize, &str)] = &[
         ("pub enum CastingPermission {", 8, "ExileWithAltCost"),
@@ -31321,6 +31430,7 @@ fn render_net_effect_carrier_census() {
         "CopySpell",
         "CopyTokenOf",
         "Counter",
+        "CreateBoon",
         "CreateDelayedTrigger",
         "CreateDrawReplacement",
         "CreateEmblem",
@@ -31616,6 +31726,7 @@ fn render_net_reaches_every_nested_description_carrier() {
     parsed.abilities.push(carrier(Effect::ChooseOneOf {
         chooser: PlayerFilter::Controller,
         branches: vec![ability("choose_one_of")],
+        kind: ChooseOneOfKind::Ordinary,
     }));
     tags.push("choose_one_of");
 

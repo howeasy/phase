@@ -50,11 +50,11 @@ use super::oracle_util::{
     parse_ordinal, rewrite_quantity_expr_rounding, strip_after, strip_reminder_text, TextPair,
 };
 use crate::types::ability::{
-    AbilityCost, AbilityDefinition, AbilityKind, CastVariantPaid, ChoiceType, CombatDamageScope,
-    Comparator, ContinuousModification, ControllerRef, CopyManaValueLimit, CountScope,
-    CounterReplacementSubject, DamageModification, DamageRedirectTarget, DamageTargetFilter,
-    DamageTargetPlayerScope, DieRollIgnoreRule, DrawReplacementScope, Duration, Effect,
-    EffectScope, FilterProp, LibraryInstructionActor, LibraryPosition, ManaModification,
+    AbilityCost, AbilityDefinition, AbilityKind, CastVariantPaid, ChoiceType, ChooseOneOfKind,
+    CombatDamageScope, Comparator, ContinuousModification, ControllerRef, CopyManaValueLimit,
+    CountScope, CounterReplacementSubject, DamageModification, DamageRedirectTarget,
+    DamageTargetFilter, DamageTargetPlayerScope, DieRollIgnoreRule, DrawReplacementScope, Duration,
+    Effect, EffectScope, FilterProp, LibraryInstructionActor, LibraryPosition, ManaModification,
     ManaReplacementScope, ManaSpendPermission, PermissionGrantee, PlayerFilter, PreventionAmount,
     PreventionFormula, QuantityExpr, QuantityModification, QuantityRef, RedirectionLifetime,
     ReplacementChoiceAuthority, ReplacementCondition, ReplacementDefinition, ReplacementMode,
@@ -1044,6 +1044,7 @@ fn parse_search_found_replacement(original: &str, lower: &str) -> Option<Replace
                 single_use: false,
                 cast_cost_modifier: None,
                 alt_ability_cost: None,
+                without_paying_mana_cost: false,
                 land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                 invalidation: None,
             },
@@ -4679,6 +4680,7 @@ fn enters_with_counters_outcome(
             Effect::ChooseOneOf {
                 chooser: PlayerFilter::Controller,
                 branches,
+                kind: ChooseOneOfKind::Ordinary,
             },
         );
         let mut choice = choice;
@@ -6051,8 +6053,18 @@ fn build_enters_counter_ability(entries: Vec<(CounterType, QuantityExpr)>) -> Ab
 /// so a prelude-form line whose later text also contains ", that " has its
 /// spell filter read up to that later occurrence; when that filter fails to
 /// parse, the line declines here and the prelude path is not retried.
+///
+/// The entry frame after the subject is "enters with " / "enters the
+/// battlefield with " (CR 614.12: the same replacement frame — boon inners
+/// print both) or "enters tapped and with " (Loch Larent's boon), whose tap
+/// rider is reported on the shape so the payload builder can compose
+/// `SetTapState` ahead of the counters.
 fn parse_cast_enters_with_prefix(norm_lower: &str) -> Option<CastEntersWithShape<'_>> {
-    // Prefix. CR 603.1: "when" and "whenever" open the same triggered ability.
+    // Prefix. CR 603.1: "when" and "whenever" are both trigger words; the
+    // repeatable form ("whenever") appears on permanents while one-time
+    // boon inners print the singular ("when you cast a creature spell, that
+    // creature enters with …"). Longer word first so the shared prefix can
+    // never partially match.
     let (rest, _) = alt((
         tag::<_, _, OracleError<'_>>("whenever you cast "),
         tag("when you cast "),
@@ -6089,8 +6101,11 @@ fn parse_cast_enters_with_prefix(norm_lower: &str) -> Option<CastEntersWithShape
             }
         };
 
-    // Subject — "creature", "permanent", "spell" or "planeswalker" — and
-    // " enters with ".
+    // Subject — "creature", "permanent", "spell" or "planeswalker" — and the
+    // enters frame. CR 614.12: "enters with" and "enters the battlefield with"
+    // are the same replacement frame (boon inners print both: March Toward
+    // Perfection vs Tenacious Pup); "enters tapped and with" (Loch Larent's
+    // boon) adds a tap rider. Longest frame first.
     let (rest, _subject) = alt((
         tag::<_, _, OracleError<'_>>("creature "),
         tag("permanent "),
@@ -6099,11 +6114,20 @@ fn parse_cast_enters_with_prefix(norm_lower: &str) -> Option<CastEntersWithShape
     ))
     .parse(after_that_text)
     .ok()?;
-    let (payload, ()) = parse_plain_enters_with(rest).ok()?;
+    let (payload, tapped) = alt((
+        value(
+            true,
+            tag::<_, _, OracleError<'_>>("enters tapped and with "),
+        ),
+        value(false, parse_plain_enters_with),
+    ))
+    .parse(rest)
+    .ok()?;
 
     Some(CastEntersWithShape {
         spell_filter,
         prelude,
+        tapped,
         payload,
     })
 }
@@ -6115,6 +6139,9 @@ struct CastEntersWithShape<'a> {
     /// CR 113.6m + CR 608.2c: the printed self-exile instruction run before the
     /// rider is installed, when the trigger has one.
     prelude: Option<AbilityDefinition>,
+    /// CR 614.1c: the frame was "enters tapped and with " — the entering
+    /// permanent is tapped as it enters, ahead of the counters.
+    tapped: bool,
     /// The text after "enters with ".
     payload: &'a str,
 }
@@ -6199,8 +6226,59 @@ fn parse_whenever_you_cast_enters_with(
     let CastEntersWithShape {
         spell_filter: spell_typed,
         prelude,
+        tapped,
         payload: rest,
     } = parse_cast_enters_with_prefix(norm_lower)?;
+
+    // CR 614.12a + CR 608.2d: "… enters with your choice of <counter-list> on
+    // it" (Champions of Tyr's boon) — the same controller-picks-the-counter
+    // construction the self-ETB path builds, routed through the same two
+    // authorities (`strip_enters_with_choice_target` +
+    // `classify_and_parse_counter_choice_list`) so the grammars cannot drift
+    // apart. Branches are `SelfRef` `PutCounter`s: the entering permanent is
+    // the recipient once this floating replacement applies to it.
+    if let Some((choices, _on)) = strip_enters_with_choice_target(rest) {
+        let entries =
+            crate::parser::oracle_effect::classify_and_parse_counter_choice_list(choices)?;
+        let branches: Vec<AbilityDefinition> = entries
+            .into_iter()
+            .map(|(counter_type, count)| {
+                let mut def = AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::PutCounter {
+                        counter_type: counter_type.clone(),
+                        count,
+                        target: TargetFilter::SelfRef,
+                    },
+                );
+                def.description = Some(format!("a {} counter", counter_type.display_phrase()));
+                def
+            })
+            .collect();
+        // No separate remainder gate is needed here (unlike the conjoined
+        // list below): `strip_enters_with_choice_target` only succeeds when
+        // EVERYTHING past the final " on " is the bare entering-permanent
+        // pronoun, so a trailing rider ("… on it and with haste") fails the
+        // pronoun check and the whole recognizer falls through to `None`.
+        let mut choice = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::ChooseOneOf {
+                chooser: PlayerFilter::Controller,
+                branches,
+                kind: ChooseOneOfKind::Ordinary,
+            },
+        );
+        choice.description = Some("your choice of counter".to_string());
+        let execute = compose_cast_enters_with_tap(choice, tapped);
+        return Some(CastEntersWithPayload {
+            replacement: ReplacementDefinition::new(ReplacementEvent::ChangeZone)
+                .execute(execute)
+                .valid_card(TargetFilter::Typed(spell_typed))
+                .destination_zone(Zone::Battlefield)
+                .description(original_text.to_string()),
+            prelude,
+        });
+    }
 
     // A CONJOINED counter list ("an additional +1/+1 counter and deathtouch
     // counter on it") routes through `parse_enters_counter_entries_with_rest` — the same
@@ -6243,7 +6321,10 @@ fn parse_whenever_you_cast_enters_with(
         }
         return Some(CastEntersWithPayload {
             replacement: ReplacementDefinition::new(ReplacementEvent::ChangeZone)
-                .execute(build_enters_counter_ability(entries))
+                .execute(compose_cast_enters_with_tap(
+                    build_enters_counter_ability(entries),
+                    tapped,
+                ))
                 .valid_card(TargetFilter::Typed(spell_typed))
                 .destination_zone(Zone::Battlefield)
                 .description(original_text.to_string()),
@@ -6254,39 +6335,46 @@ fn parse_whenever_you_cast_enters_with(
     // Count prefix: "an additional" | "N additional" | plain "N" | "x additional" | "x".
     // Mirrors `try_parse_enters_with_additional_counters` — the Wildgrowth
     // family always uses "additional" but the underlying shape matches.
-    let (rest, fixed_count) =
-        if let Ok((r, _)) = tag::<_, _, OracleError<'_>>("an additional ").parse(rest) {
-            (r, Some(1u32))
-        } else if let Ok((r, _)) = alt((
-            tag::<_, _, OracleError<'_>>("x additional "),
-            tag("X additional "),
-        ))
-        .parse(rest)
-        {
-            // X is dynamic — actual value comes from the trailing "where X is …" clause.
-            (r, None)
-        } else if let Ok((r, n)) = nom_primitives::parse_number(rest) {
-            let (r, _) = tag::<_, _, OracleError<'_>>(" additional ")
-                .parse(r)
-                .or_else(|_| tag::<_, _, OracleError<'_>>(" ").parse(r))
-                .ok()?;
-            (r, Some(n))
-        } else {
-            return None;
-        };
+    // Digital-only Alchemy (no CR entry): the bare article ("a stun counter",
+    // Loch Larent's boon; "a lifelink counter", Klement) is count one. Tried
+    // AFTER "an additional " so the longer prefix wins.
+    let (rest, fixed_count) = if let Ok((r, _)) =
+        tag::<_, _, OracleError<'_>>("an additional ").parse(rest)
+    {
+        (r, Some(1u32))
+    } else if let Ok((r, _)) = alt((
+        tag::<_, _, OracleError<'_>>("x additional "),
+        tag("X additional "),
+    ))
+    .parse(rest)
+    {
+        // X is dynamic — actual value comes from the trailing "where X is …" clause.
+        (r, None)
+    } else if let Ok((r, n)) = nom_primitives::parse_number(rest) {
+        let (r, _) = tag::<_, _, OracleError<'_>>(" additional ")
+            .parse(r)
+            .or_else(|_| tag::<_, _, OracleError<'_>>(" ").parse(r))
+            .ok()?;
+        (r, Some(n))
+    } else if let Ok((r, _)) = alt((tag::<_, _, OracleError<'_>>("an "), tag("a "))).parse(rest) {
+        (r, Some(1u32))
+    } else {
+        return None;
+    };
 
     // CR 122.1: the counter type is one whole counter name ending at the counter
-    // noun ("+1/+1 counter", "loyalty counter"), then " counter(s) on it".
+    // noun ("+1/+1 counter", "loyalty counter", "stun counter"), then
+    // " counter(s) on it". The shared vocabulary (P/T, keyword, named, generic)
+    // lowers "a stun counter" (Loch Larent's boon) and "a lifelink counter"
+    // (Klement) here instead of the generic trigger parser's pending-counters
+    // rider. Only the floating replacement this route builds can carry the
+    // "enters tapped" rider (CR 110.5: a resolving trigger cannot tap a
+    // permanent that has not entered yet), so routing tapped shapes here is
+    // load-bearing.
     let (rest, counter_type) = parse_enters_counter_type_noun(rest).ok()?;
     let (rest, _) = preceded(opt(tag::<_, _, OracleError<'_>>("s")), tag(" on it"))
         .parse(rest)
         .ok()?;
-    // CR 614.1c: a fixed count has no "where X is" definition to read after the
-    // recipient, so anything left is an unread instruction of this sentence
-    // ("… on it and with haste") and the payload fails closed.
-    if fixed_count.is_some() && !counter_list_remainder_is_exhausted(rest) {
-        return None;
-    }
 
     // Optional trailing "where X is [quantity]" clause. Delegate to
     // `parse_enters_with_where_x_suffix` so composite/offset quantities ("its
@@ -6297,7 +6385,18 @@ fn parse_whenever_you_cast_enters_with(
     // expression, misrouting the whole ability to the generic self-ETB
     // fallback (Runadi, Behemoth Caller — issue #6492).
     let count_expr = match fixed_count {
-        Some(n) => QuantityExpr::Fixed { value: n as i32 },
+        Some(n) => {
+            // CR 614.12: the fixed-count arm must not publish a
+            // complete-looking replacement while silently dropping a trailing
+            // rider ("… on it and it gains haste"). Require the same complete
+            // suffix consumption the conjoined-list route above enforces — a
+            // rider this route cannot compose stays an honest gap. (The
+            // dynamic-X arm already fails closed via `?`.)
+            if !counter_list_remainder_is_exhausted(rest) {
+                return None;
+            }
+            QuantityExpr::Fixed { value: n as i32 }
+        }
         None => parse_enters_with_where_x_suffix(rest)?,
     };
 
@@ -6314,12 +6413,32 @@ fn parse_whenever_you_cast_enters_with(
     // entering the battlefield also receive counters (Metallic Mimic + creature tokens).
     Some(CastEntersWithPayload {
         replacement: ReplacementDefinition::new(ReplacementEvent::ChangeZone)
-            .execute(put_counter)
+            .execute(compose_cast_enters_with_tap(put_counter, tapped))
             .valid_card(TargetFilter::Typed(spell_typed))
             .destination_zone(Zone::Battlefield)
             .description(original_text.to_string()),
         prelude,
     })
+}
+
+/// CR 614.1c: compose the "enters tapped" rider ahead of the entering-with
+/// counters (Loch Larent's boon: "that creature enters tapped and with a
+/// stun counter on it"). Tap-first chaining mirrors the self-ETB path's
+/// `SetTapState.sub_ability(core)` composition; `SelfRef` is the entering
+/// permanent once this floating replacement applies to it.
+fn compose_cast_enters_with_tap(core: AbilityDefinition, tapped: bool) -> AbilityDefinition {
+    if !tapped {
+        return core;
+    }
+    AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::SetTapState {
+            target: TargetFilter::SelfRef,
+            scope: EffectScope::Single,
+            state: TapStateChange::Tap,
+        },
+    )
+    .sub_ability(core)
 }
 
 /// CR 603.1 + CR 603.3 + CR 614.1c/614.12: The actual recognizer for
@@ -6336,6 +6455,11 @@ fn parse_whenever_you_cast_enters_with(
 /// independently of the object that created it. CR 306.5b: a planeswalker's
 /// printed loyalty is its own entry replacement, so an "additional loyalty
 /// counter" adds to it.
+///
+/// CR 614.1c: the "that creature enters tapped and with …" frame (Loch
+/// Larent's boon) composes its `SetTapState` rider ahead of the counters via
+/// `compose_cast_enters_with_tap`; "your choice of" counter lists (Champions
+/// of Tyr's boon) install a controller-chosen `ChooseOneOf`.
 ///
 /// "Whenever" is a triggered ability — it goes on the stack ABOVE the spell
 /// that triggered it (CR 603.3b) and resolves first. Modeling this whole
@@ -6790,6 +6914,10 @@ fn replacement_condition_from_static(
         | StaticCondition::EnchantedIsFaceDown
         | StaticCondition::AdditionalCostPaid
         | StaticCondition::CastingAsVariant { .. }
+        // Digital-only Alchemy (no CR entry): "if you have a boon" has no
+        // `ReplacementCondition` carrier — fail closed like the other
+        // uncarriable gates.
+        | StaticCondition::HasBoon { .. }
         | StaticCondition::None => None,
     }
 }
@@ -11766,6 +11894,7 @@ fn parse_optional_token_substitution_choice(
                 Effect::ChooseOneOf {
                     chooser: PlayerFilter::Controller,
                     branches,
+                    kind: ChooseOneOfKind::Ordinary,
                 },
             ))
             .description(original_text.to_string()),
@@ -20916,7 +21045,9 @@ mod tests {
                 Some(TargetFilter::SelfRef),
                 "valid_card should be SelfRef: {text}"
             );
-            let Effect::ChooseOneOf { chooser, branches } = &*def.execute.as_ref().unwrap().effect
+            let Effect::ChooseOneOf {
+                chooser, branches, ..
+            } = &*def.execute.as_ref().unwrap().effect
             else {
                 panic!("expected ChooseOneOf execute, got {:?}", def.execute);
             };
@@ -21055,7 +21186,10 @@ mod tests {
         )
         .unwrap();
         let execute = def.execute.as_ref().unwrap();
-        let Effect::ChooseOneOf { chooser, branches } = &*execute.effect else {
+        let Effect::ChooseOneOf {
+            chooser, branches, ..
+        } = &*execute.effect
+        else {
             panic!("expected ChooseOneOf, got {:?}", execute.effect);
         };
         assert_eq!(*chooser, PlayerFilter::Controller);
@@ -28836,6 +28970,69 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    /// M6: a fixed article counter followed by a trailing rider must fail
+    /// closed — the route cannot compose the rider, so publishing the bare
+    /// counter replacement would silently drop rules text.
+    #[test]
+    fn fixed_article_counter_with_trailing_rider_fails_closed() {
+        let text = "Whenever you cast a creature spell, that creature enters with a stun counter on it and it gains haste.";
+        assert!(
+            parse_whenever_you_cast_enters_with(&text.to_lowercase(), text).is_none(),
+            "article counter + rider must fail the route closed, not drop the rider"
+        );
+        assert!(
+            parse_whenever_you_cast_enters_with_trigger(text, "Filler").is_none(),
+            "the trigger recognizer must also fail closed when its payload builder does"
+        );
+    }
+
+    /// M6: the same trailing-rider gate covers the numeric fixed-count arm,
+    /// which shared the accept-and-discard weakness.
+    #[test]
+    fn fixed_numeric_counter_with_trailing_rider_fails_closed() {
+        let text = "Whenever you cast a creature spell, that creature enters with two +1/+1 counters on it and it gains haste.";
+        assert!(
+            parse_whenever_you_cast_enters_with(&text.to_lowercase(), text).is_none(),
+            "numeric counter + rider must fail the route closed, not drop the rider"
+        );
+        assert!(
+            parse_whenever_you_cast_enters_with_trigger(text, "Filler").is_none(),
+            "the trigger recognizer must also fail closed when its payload builder does"
+        );
+    }
+
+    /// M6 no-regression: Loch Larent's boon body ("that creature enters
+    /// tapped and with a stun counter on it") has no trailing rider — the
+    /// tap composes ahead of the counters, so the route still accepts it.
+    #[test]
+    fn fixed_article_counter_simple_body_still_parses() {
+        let text =
+            "When you cast a creature spell, that creature enters tapped and with a stun counter on it.";
+        let trigger =
+            parse_whenever_you_cast_enters_with_trigger(text, "Loch Larent").expect("should parse");
+        let exec = trigger.execute.as_ref().expect("execute set");
+        let Effect::AddTargetReplacement { replacement, .. } = &*exec.effect else {
+            panic!("expected AddTargetReplacement, got {:?}", exec.effect);
+        };
+        let tap = replacement.execute.as_ref().expect("execute set");
+        assert!(
+            matches!(&*tap.effect, Effect::SetTapState { .. }),
+            "tapped rider must compose ahead of the counters, got {:?}",
+            tap.effect
+        );
+        let put_counter = tap.sub_ability.as_ref().expect("counter payload chained");
+        let Effect::PutCounter {
+            counter_type,
+            count,
+            ..
+        } = &*put_counter.effect
+        else {
+            panic!("expected PutCounter payload, got {:?}", put_counter.effect);
+        };
+        assert_eq!(*counter_type, CounterType::Stun);
+        assert_eq!(count, &QuantityExpr::Fixed { value: 1 });
     }
 
     /// #5656 + CR 614.1a: Archmage Ascension's "As long as ~ has six
