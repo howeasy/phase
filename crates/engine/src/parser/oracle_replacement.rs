@@ -22710,10 +22710,6 @@ mod tests {
     fn enters_with_numberless_count_requires_equal_to_quantity() {
         for (card, line) in [
             (
-                "Thought Sponge",
-                "This creature enters with a number of +1/+1 counters on it equal to the greatest number of cards an opponent has drawn this turn.",
-            ),
-            (
                 "Master Biomancer",
                 "Each other creature you control enters with a number of additional +1/+1 counters on it equal to this creature's power and as a Mutant in addition to its other types.",
             ),
@@ -22738,6 +22734,24 @@ mod tests {
                 [(CounterType::Plus1Plus1, count)] if !matches!(count, QuantityExpr::Fixed { .. })
             ),
             "got {gyrus_counters:?}"
+        );
+        let sponge = parse_replacement_line(
+            "This creature enters with a number of +1/+1 counters on it equal to the greatest number of cards an opponent has drawn this turn.",
+            "Thought Sponge",
+        )
+        .expect("readable draw extremum parses");
+        assert_eq!(
+            put_counters_in_chain(&sponge),
+            vec![(
+                CounterType::Plus1Plus1,
+                QuantityExpr::Ref {
+                    qty: QuantityRef::CardsDrawnThisTurn {
+                        player: crate::types::ability::PlayerScope::Opponent {
+                            aggregate: crate::types::ability::AggregateFunction::Max,
+                        },
+                    },
+                },
+            )]
         );
         assert!(parse_replacement_line(
             "Each other creature you control enters with a number of additional +1/+1 counters on it equal to Arwen's toughness.",
