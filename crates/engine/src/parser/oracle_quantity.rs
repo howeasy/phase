@@ -498,7 +498,8 @@ pub(crate) fn parse_quantity_ref_with_context(
         if let Ok((after_head_tag, head_text)) =
             take_until::<_, _, OracleError<'_>>(" you controlled ").parse(rest)
         {
-            let (head_filter, head_rem) = parse_type_phrase_folding(head_text);
+            let (head_filter, head_rem) =
+                parse_type_phrase_folding_with_ctx(head_text, &mut ctx.clone_player_antecedents());
             if head_rem.trim().is_empty()
                 && !matches!(head_filter, TargetFilter::Any)
                 && !is_empty_typed_filter(&head_filter)
@@ -819,6 +820,28 @@ pub(crate) fn parse_cda_quantity_with_context(
 ) -> Option<QuantityExpr> {
     let text = text.trim().trim_end_matches('.');
 
+    // CR 608.2k: owner-bound possessive pronouns ("its power", "2 plus its
+    // power", "half its toughness"). When the context carries a
+    // `characteristic_pronoun_owner` (set only by
+    // `parse_where_x_quantity_expression_with_owner` for boon-granted
+    // "it"/"that" tails, where the pronoun names the triggering object), the
+    // bare pronoun-characteristic surface binds the owner STRUCTURALLY during
+    // this shared parse — every recursive arm below (fractions, multipliers,
+    // offsets, sums) re-enters through this same context, so composed and
+    // nested forms bind the owner at every level with no post-hoc repair.
+    // Explicit self-references ("~'s power") never match the pronoun grammar
+    // and fall through to the `Source` arms below unchanged. `None` (every
+    // other caller) skips this arm entirely: zero behavior change.
+    if let Some(owner) = ctx.characteristic_pronoun_owner {
+        if let Ok((rest, qty)) =
+            nom_quantity::parse_pronoun_characteristic_ref_with_scope(text, owner)
+        {
+            if rest.is_empty() {
+                return Some(QuantityExpr::Ref { qty });
+            }
+        }
+    }
+
     // CR 101.4 + CR 608.2d: "the highest number" / "the lowest number" — the
     // cross-player extremum of the numbers players secretly chose earlier in THIS
     // ability (Wheel of Misfortune, Menacing Ogre, Life at Stake).
@@ -855,8 +878,23 @@ pub(crate) fn parse_cda_quantity_with_context(
     // falls through to `Variable { name: "<whole phrase>" }`, which resolves to 0
     // at runtime (a silent no-op). Tried first so the leading "half " is consumed
     // before the single-ref / binary-arithmetic arms below.
-    if let Ok((rest, expr)) = nom_quantity::parse_fraction_rounded(text) {
-        if rest.is_empty() {
+    //
+    // CR 608.2k exception: in owner mode the general nom grammar hardcodes
+    // `Source` for possessive pronouns, so the CDA-recursive fraction arm
+    // below (which re-enters with this context, binding the owner) runs
+    // FIRST; the nom-direct attempt becomes the fallback after it. Default
+    // mode keeps today's nom-first order exactly.
+    let owner_mode = ctx.characteristic_pronoun_owner.is_some();
+    let try_nom_fraction = || {
+        if let Ok((rest, expr)) = nom_quantity::parse_fraction_rounded(text) {
+            if rest.is_empty() {
+                return Some(expr);
+            }
+        }
+        None
+    };
+    if !owner_mode {
+        if let Some(expr) = try_nom_fraction() {
             return Some(expr);
         }
     }
@@ -894,6 +932,14 @@ pub(crate) fn parse_cda_quantity_with_context(
                 divisor,
                 rounding,
             });
+        }
+    }
+    // CR 608.2k owner-mode fallback: the CDA-recursive fraction declined, so
+    // retry the general nom grammar — today's result for tails only it
+    // accepts (no owner benefit, but no owner-mode gap either).
+    if owner_mode {
+        if let Some(expr) = try_nom_fraction() {
+            return Some(expr);
         }
     }
 
@@ -1908,6 +1954,19 @@ fn parse_anaphoric_power_toughness_sum(
 /// Parse event-context quantity references from Oracle text fragments.
 /// Returns None for unrecognized patterns (caller falls back to Variable).
 pub(crate) fn parse_event_context_quantity(text: &str) -> Option<QuantityExpr> {
+    parse_event_context_quantity_with_context(text, &ParseContext::default())
+}
+
+/// `parse_event_context_quantity` under the caller's player antecedents. The
+/// composite branch and the named-quantity fallbacks each parse under an
+/// antecedent-only clone of `ctx` (`clone_player_antecedents`), so a "that
+/// player" / "they" inside the amount binds the player the caller's scope names
+/// (CR 608.2c) and nothing else of the caller's context reaches the sub-parse;
+/// the clone's diagnostics are dropped with it.
+pub(crate) fn parse_event_context_quantity_with_context(
+    text: &str,
+    ctx: &ParseContext,
+) -> Option<QuantityExpr> {
     let lower = text.to_lowercase();
     let lower = lower.trim();
     if let Ok((_, expr)) =
@@ -2116,7 +2175,7 @@ pub(crate) fn parse_event_context_quantity(text: &str) -> Option<QuantityExpr> {
     // delegate to parse_cda_quantity — the single authority for offset/multiply grammar.
     // Limited to composite variants so atomic refs still flow through the
     // TargetPower/TargetLifeTotal exclusion in the fallback below.
-    match parse_cda_quantity(lower) {
+    match parse_cda_quantity_with_context(lower, &mut ctx.clone_player_antecedents()) {
         Some(qty @ (QuantityExpr::Offset { .. } | QuantityExpr::Multiply { .. })) => {
             return Some(qty);
         }
@@ -2148,7 +2207,9 @@ pub(crate) fn parse_event_context_quantity(text: &str) -> Option<QuantityExpr> {
     let stripped = tag::<_, _, OracleError<'_>>("the ")
         .parse(lower)
         .map_or(lower, |(r, _)| r);
-    if let Some(qty) = parse_quantity_ref(stripped) {
+    if let Some(qty) =
+        parse_quantity_ref_with_context(stripped, &mut ctx.clone_player_antecedents())
+    {
         if !matches!(
             qty,
             QuantityRef::Power {
@@ -2160,7 +2221,9 @@ pub(crate) fn parse_event_context_quantity(text: &str) -> Option<QuantityExpr> {
             return Some(QuantityExpr::Ref { qty });
         }
     }
-    if let Some(qty @ QuantityRef::CommanderManaValue { .. }) = parse_quantity_ref(lower) {
+    if let Some(qty @ QuantityRef::CommanderManaValue { .. }) =
+        parse_quantity_ref_with_context(lower, &mut ctx.clone_player_antecedents())
+    {
         return Some(QuantityExpr::Ref { qty });
     }
 
@@ -2715,6 +2778,10 @@ fn parse_for_each_clause_expr_with_parser(
         return rest.is_empty().then_some(expr);
     }
 
+    if let Some(expr) = parse_for_each_short_of_clause_expr_with_parser(clause, parse_clause) {
+        return Some(expr);
+    }
+
     fn segment(i: &str) -> nom::IResult<&str, &str, OracleError<'_>> {
         alt((take_until(" and each "), rest)).parse(i)
     }
@@ -2761,6 +2828,46 @@ fn parse_for_each_beyond_first_clause_expr_with_parser(
             minimum: 0,
         },
     ))
+}
+
+/// CR 107.1b + CR 608.2c: "for each <noun> less than N <qualifier>" (or
+/// "fewer than N") counts how far the qualified count of `<noun>` falls short of
+/// N: N minus the count of "<noun> <qualifier>", clamped at zero because a
+/// calculation that yields a negative number uses zero. Truce: "for each card
+/// less than two a player draws this way". The noun is a single type word, so a
+/// property comparison ("creature with power less than 0") never matches here.
+fn parse_for_each_short_of_clause_expr_with_parser(
+    input: &str,
+    parse_clause: impl Fn(&str) -> Option<QuantityRef>,
+) -> Option<QuantityExpr> {
+    let (qualifier, (noun, _, ceiling, _)) = (
+        recognize(nom_target::parse_type_filter_word),
+        alt((
+            tag::<_, _, OracleError<'_>>(" less than "),
+            tag(" fewer than "),
+        )),
+        nom_primitives::parse_number,
+        tag(" "),
+    )
+        .parse(input)
+        .ok()?;
+    let qty = parse_clause(&format!("{noun} {qualifier}"))?;
+    Some(QuantityExpr::ClampMin {
+        inner: Box::new(QuantityExpr::Offset {
+            inner: Box::new(QuantityExpr::Multiply {
+                factor: -1,
+                inner: Box::new(QuantityExpr::Ref { qty }),
+            }),
+            offset: i32::try_from(ceiling).ok()?,
+        }),
+        minimum: 0,
+    })
+}
+
+/// CR 107.1b + CR 608.2c: the leading-prefix entry for
+/// [`parse_for_each_short_of_clause_expr_with_parser`].
+pub(crate) fn parse_for_each_short_of_clause_expr(clause: &str) -> Option<QuantityExpr> {
+    parse_for_each_short_of_clause_expr_with_parser(clause, parse_for_each_clause)
 }
 
 /// CR 109.4 + CR 400.1 + CR 608.2c: Parse an anaphoric hand-card union like
@@ -3378,7 +3485,10 @@ fn parse_for_each_clause_with_they_controller(
         .parse(clause)
         {
             if after.trim().is_empty() {
-                let (type_filter, type_rest) = parse_type_phrase_folding(prefix);
+                let (type_filter, type_rest) = parse_type_phrase_folding_with_ctx(
+                    prefix,
+                    &mut for_each_anaphor_context(ctx, &antecedents).clone_player_antecedents(),
+                );
                 if type_rest.trim().is_empty() && !matches!(type_filter, TargetFilter::Any) {
                     return Some(QuantityRef::ObjectCount {
                         filter: TargetFilter::And {
@@ -3575,7 +3685,10 @@ fn parse_for_each_clause_with_they_controller(
     // "[counter type] counter(s) on that creature/permanent" — anaphoric, must check
     // before the wildcard "counter on" guard below which would misroute to CountersOnSelf.
     if clause.contains("counter on that") {
-        if let Some(qty) = parse_quantity_ref(clause) {
+        if let Some(qty) = parse_quantity_ref_with_context(
+            clause,
+            &mut for_each_anaphor_context(ctx, &antecedents).clone_player_antecedents(),
+        ) {
             return Some(qty);
         }
     }
@@ -3596,7 +3709,10 @@ fn parse_for_each_clause_with_they_controller(
             // The counter suffix must consume the rest of the clause (possibly with
             // trailing whitespace / punctuation already stripped by trim_end_matches).
             if suffix_part[consumed..].trim().is_empty() {
-                let (filter, type_rest) = parse_type_phrase_folding(type_part);
+                let (filter, type_rest) = parse_type_phrase_folding_with_ctx(
+                    type_part,
+                    &mut for_each_anaphor_context(ctx, &antecedents).clone_player_antecedents(),
+                );
                 if type_rest.trim().is_empty() {
                     // Compose: attach the counter property onto the typed filter.
                     // parse_type_phrase_folding always emits TargetFilter::Typed for non-Any
@@ -3635,13 +3751,19 @@ fn parse_for_each_clause_with_they_controller(
     // "card in your hand" (→ HandSize), "life you gained this turn", etc.
     // "for each" strips the quantifier, so the clause may be singular or have
     // slightly different phrasing. Try both as-is and with "s" appended.
-    if let Some(qty) = parse_quantity_ref(clause) {
+    if let Some(qty) = parse_quantity_ref_with_context(
+        clause,
+        &mut for_each_anaphor_context(ctx, &antecedents).clone_player_antecedents(),
+    ) {
         return Some(qty);
     }
     // Handle singular → plural: "card in your hand" → "cards in your hand"
     if let Some((first_word, rest)) = clause.split_once(' ') {
         let pluralized = format!("{first_word}s {rest}");
-        if let Some(qty) = parse_quantity_ref(&pluralized) {
+        if let Some(qty) = parse_quantity_ref_with_context(
+            &pluralized,
+            &mut for_each_anaphor_context(ctx, &antecedents).clone_player_antecedents(),
+        ) {
             return Some(qty);
         }
     }
@@ -7643,6 +7765,42 @@ mod tests {
                 assert_eq!(filter.properties, vec![FilterProp::BlockingSource]);
             }
             other => panic!("expected blocking-source ObjectCount, got {other:?}"),
+        }
+    }
+
+    /// CR 107.1b + CR 608.2c: "for each <noun> fewer than N <qualifier>" is N
+    /// minus the count of "<noun> <qualifier>", clamped at zero (Stabwhisker the
+    /// Odious). A property comparison on the noun is not a shortfall count.
+    #[test]
+    fn for_each_fewer_than_clamps_shortfall_below_ceiling() {
+        let qty = parse_for_each_clause("card in their hand").expect("base clause parses");
+        assert_eq!(
+            parse_for_each_clause_expr("card fewer than three in their hand"),
+            Some(QuantityExpr::ClampMin {
+                inner: Box::new(QuantityExpr::Offset {
+                    inner: Box::new(QuantityExpr::Multiply {
+                        factor: -1,
+                        inner: Box::new(QuantityExpr::Ref { qty }),
+                    }),
+                    offset: 3,
+                }),
+                minimum: 0,
+            })
+        );
+        for clause in [
+            "creature with power less than 0 on the battlefield",
+            "opponent whose life total is less than half their starting life total",
+        ] {
+            let result = parse_for_each_clause_expr(clause);
+            assert!(
+                !matches!(
+                    &result,
+                    Some(QuantityExpr::ClampMin { inner, .. })
+                        if matches!(inner.as_ref(), QuantityExpr::Offset { inner, .. }
+                            if matches!(inner.as_ref(), QuantityExpr::Multiply { .. }))
+                ),
+                "a property comparison must not parse as a shortfall: {clause} → {result:?}"
+            );
         }
     }
 

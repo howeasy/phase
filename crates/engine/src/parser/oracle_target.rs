@@ -2,7 +2,7 @@ use std::str::FromStr;
 
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_till, take_till1};
-use nom::character::complete::{multispace0, satisfy, space1};
+use nom::character::complete::{multispace0, one_of, satisfy, space1};
 use nom::combinator::{eof, map, map_opt, not, opt, peek, success, value, verify};
 use nom::multi::many0;
 use nom::sequence::{preceded, terminated};
@@ -10,11 +10,11 @@ use nom::Parser;
 
 use crate::types::ability::{
     AggregateFunction, AttachmentKind, AttachmentReferent, CardTypeSetSource, ChoiceType,
-    CombatRelation, CombatRelationSubject, Comparator, ControllerRef, CountScope, DamageKindFilter,
-    FilterProp, NameStickerSet, ObjectProperty, ObjectScope, ParitySource, PlayerFilter,
-    PlayerRelation, PropertyAggregate, PtStat, PtValueScope, QuantityExpr, QuantityRef,
-    SeatDirection, SharedQuality, SharedQualityRelation, TargetFilter, TargetSelectionMode,
-    ThisWayCause, TypeFilter, TypedFilter,
+    CombatRelation, CombatRelationSubject, Comparator, ControllerRef, CountScope, CrewRelation,
+    DamageKindFilter, FilterProp, NameStickerSet, ObjectProperty, ObjectScope, ParitySource,
+    PlayerFilter, PlayerRelation, PropertyAggregate, PtStat, PtValueScope, QuantityExpr,
+    QuantityRef, SeatDirection, SharedQuality, SharedQualityRelation, TargetFilter,
+    TargetSelectionMode, ThisWayCause, TypeFilter, TypedFilter,
 };
 use crate::types::card_type::{noncreature_subtype_set, SubtypeSet, Supertype};
 use crate::types::counter::{CounterMatch, CounterType};
@@ -33,7 +33,9 @@ use super::oracle_nom::filter as nom_filter;
 use super::oracle_nom::primitives as nom_primitives;
 use super::oracle_nom::quantity as nom_quantity;
 use super::oracle_nom::target as nom_target;
-use super::oracle_nom::target::{ControllerSubject, ControllerTense, PlayerAnaphor};
+use super::oracle_nom::target::{
+    controller_phrase_among, ControllerPhrase, ControllerSubject, ControllerTense, PlayerAnaphor,
+};
 use super::oracle_quantity::capitalize_first;
 use super::oracle_util::{
     merge_or_filters, parse_subtype, strip_possessive, strip_where_x_is_clause, TextPair,
@@ -3291,6 +3293,11 @@ pub fn parse_type_phrase_folding_with_ctx<'a>(
         pos += consumed;
     }
 
+    if let Some((prop, consumed)) = parse_crewed_by_source_suffix(&lower[pos..]) {
+        properties.push(prop);
+        pos += consumed;
+    }
+
     // CR 205.3a: Comma-separated type lists ("artifacts, creatures, and lands") are
     // syntactic sugar for set-union, same as "and" between two types.
     let rest_lower = lower[pos..].trim_start();
@@ -5327,6 +5334,7 @@ fn prop_reads_creature_pt(prop: &FilterProp) -> bool {
         | FilterProp::Untapped
         | FilterProp::IsSaddled
         | FilterProp::SaddledSource
+        | FilterProp::CrewedThisTurn { .. }
         | FilterProp::ConvokedSource
         | FilterProp::ProtectorMatches { .. }
         | FilterProp::HasHasteOrControlledSinceTurnBegan
@@ -6261,6 +6269,30 @@ fn parse_token_suffix(text: &str) -> Option<usize> {
     None
 }
 
+/// CR 702.122c: postnominal participle "crewed by ~ this turn" ("a Vehicle
+/// crewed by Balthier and Fran this turn") — the candidate is a Vehicle the
+/// filter source crewed this turn. Only the printed self-reference `~` with the
+/// explicit " this turn" is accepted: the relation is a per-turn ledger, so a
+/// bare "crewed by ~" (no producer) stays unparsed rather than silently gaining
+/// a turn scope. A word boundary must follow.
+fn parse_crewed_by_source_suffix(text: &str) -> Option<(FilterProp, usize)> {
+    let (rest, _) = (
+        tag::<_, _, OracleError<'_>>(" crewed by ~ this turn"),
+        peek(alt((
+            value((), eof::<_, OracleError<'_>>),
+            value((), one_of(" ,.")),
+        ))),
+    )
+        .parse(text)
+        .ok()?;
+    Some((
+        FilterProp::CrewedThisTurn {
+            relation: CrewRelation::CrewedBySource,
+        },
+        text.len() - rest.len(),
+    ))
+}
+
 fn parse_combat_relation_suffix(text: &str) -> Option<(FilterProp, usize)> {
     let (rest, _) = (
         tag::<_, _, OracleError<'_>>(" blocking or blocked by target "),
@@ -6441,30 +6473,46 @@ fn parse_attacking_defender_suffix(text: &str) -> Option<(FilterProp, usize)> {
         return Some((prop, text.len() - rest.len()));
     }
 
-    for (pattern, defender) in [
+    // Each row is a printed defender head, then the controller phrase that must
+    // follow it, if any (a marker: the row fixes the defender either way).
+    let rows: [(&str, Option<&'static [ControllerPhrase]>, ControllerRef); 6] = [
         (
             "attacking you or a planeswalker you control",
+            None,
             ControllerRef::You,
         ),
         (
             "attacking you and/or planeswalkers you control",
+            None,
             ControllerRef::You,
         ),
-        ("attacking you", ControllerRef::You),
+        ("attacking you", None, ControllerRef::You),
         (
-            "attacking your opponents and/or planeswalkers they control",
+            "attacking your opponents and/or planeswalkers",
+            Some(&[ControllerPhrase::THEY_CONTROL]),
             ControllerRef::Opponent,
         ),
-        ("attacking your opponents", ControllerRef::Opponent),
+        ("attacking your opponents", None, ControllerRef::Opponent),
         // CR 508.1b: "attacking one of your opponents" — in a multiplayer
         // attack-multiple-players game each attacker is assigned one defending
         // player; "one of your opponents" scopes the defender to any of the
         // controller's opponents (Oviya, Automech Artisan). Same defender scope
         // as the plural "your opponents" form; the singular phrasing only
         // changes the surface text, not the `ControllerRef::Opponent` mapping.
-        ("attacking one of your opponents", ControllerRef::Opponent),
-    ] {
-        if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>(pattern).parse(trimmed) {
+        (
+            "attacking one of your opponents",
+            None,
+            ControllerRef::Opponent,
+        ),
+    ];
+    for (head, controller, defender) in rows {
+        let matched = tag::<_, _, OracleError<'_>>(head)
+            .parse(trimmed)
+            .and_then(|(rest, _)| match controller {
+                Some(admitted) => preceded(tag(" "), controller_phrase_among(admitted)).parse(rest),
+                None => Ok((rest, ())),
+            });
+        if let Ok((rest, ())) = matched {
             let rest_trim = rest.trim_start();
             // "...attacking you if it's controlled by..." is a target resolution
             // gate, not a defender suffix (Stalking Leonin). Accepting the bare
@@ -7102,7 +7150,10 @@ pub(crate) fn parse_mana_value_suffix(
             // into your hand" on Beseech the Queen).
             let phrase_end = a.find([',', '.']).unwrap_or(a.len());
             let phrase = &a[..phrase_end];
-            let qty = crate::parser::oracle_quantity::parse_quantity_ref(phrase)?;
+            let qty = crate::parser::oracle_quantity::parse_quantity_ref_with_context(
+                phrase,
+                &mut ctx.clone_player_antecedents(),
+            )?;
             (qty, &a[phrase_end..])
         };
         let make_value = |off: i32| {
@@ -7154,7 +7205,11 @@ pub(crate) fn parse_mana_value_suffix(
                 .ok()?;
         let parse_value = |phrase: &str| -> Option<QuantityExpr> {
             let phrase = phrase.trim();
-            crate::parser::oracle_quantity::parse_cda_quantity(phrase).or_else(|| {
+            crate::parser::oracle_quantity::parse_cda_quantity_with_context(
+                phrase,
+                &mut ctx.clone_player_antecedents(),
+            )
+            .or_else(|| {
                 parse_mana_value_reference_expr(phrase)
                     .and_then(|(value, after)| after.trim().is_empty().then_some(value))
             })
@@ -9280,6 +9335,18 @@ pub(crate) fn parse_that_clause_suffix<'a>(
         // ability source. Calamity, Galloping Inferno. Longest match first.
         ("saddled it this turn", FilterProp::SaddledSource),
         ("saddled it", FilterProp::SaddledSource),
+        // CR 702.122b + CR 702.122c: "that crewed it this turn" — the creature
+        // was tapped to pay the source Vehicle's crew cost this turn (per-turn
+        // crew ledger). "it" is the source. Getaway Car, Golden Argosy. Only the
+        // complete turn-scoped phrase is accepted (the trailing-duration
+        // stripper defers to this row via `target_relative_clause_owns_suffix`);
+        // a bare "crewed it" has no turn scope and stays unparsed.
+        (
+            "crewed it this turn",
+            FilterProp::CrewedThisTurn {
+                relation: CrewRelation::CrewedSource,
+            },
+        ),
         // CR 702.51c: "that convoked this spell" / "that convoked it" — the
         // creature was tapped to pay the source spell's convoke cost (recorded in
         // the source's `convoked_creatures`). "it"/"this spell" refer to the
@@ -10885,6 +10952,34 @@ mod tests {
     use crate::types::ability::AttackerBlockStatus;
     use crate::types::ability::{PtStat, PtValueScope};
     use crate::types::counter::CounterType;
+
+    #[test]
+    fn attacking_defender_suffix_marker() {
+        let text = "attacking your opponents and/or planeswalkers they control";
+        assert_eq!(
+            parse_attacking_defender_suffix(text),
+            Some((
+                FilterProp::Attacking {
+                    defender: Some(ControllerRef::Opponent),
+                },
+                text.len()
+            ))
+        );
+        for declined in [
+            "you control",
+            "that player controls",
+            "controlled by that player",
+            "the chosen player controls",
+        ] {
+            assert_eq!(
+                parse_attacking_defender_suffix(&format!(
+                    "attacking your opponents and/or planeswalkers {declined}"
+                )),
+                None,
+                "{declined:?}"
+            );
+        }
+    }
 
     fn typed_leg(filter: &TargetFilter) -> Option<&TypedFilter> {
         match filter {
@@ -20036,6 +20131,52 @@ mod tests {
         assert_eq!(props, vec![FilterProp::AttackedThisTurn { defender: None }]);
     }
 
+    /// CR 702.122c: "that crewed it this turn" is the crewer side of the crew
+    /// ledger; the bare "that crewed it" has no turn scope and must not parse.
+    #[test]
+    fn that_crewed_it_this_turn_requires_the_turn_scope() {
+        let (props, consumed) = parse_that_clause_suffix(" that crewed it this turn", None)
+            .expect("the complete turn-scoped clause parses");
+        assert_eq!(
+            props,
+            vec![FilterProp::CrewedThisTurn {
+                relation: CrewRelation::CrewedSource
+            }]
+        );
+        assert_eq!(consumed, " that crewed it this turn".len());
+        assert!(
+            parse_that_clause_suffix(" that crewed it", None).is_none(),
+            "an unscoped 'crewed it' must stay unparsed"
+        );
+    }
+
+    /// CR 702.122c: "crewed by ~ this turn" is the Vehicle side; the explicit
+    /// turn scope and a word boundary are both required.
+    #[test]
+    fn crewed_by_source_suffix_requires_turn_scope_and_boundary() {
+        let (prop, consumed) = parse_crewed_by_source_suffix(" crewed by ~ this turn attacks")
+            .expect("the turn-scoped participle parses");
+        assert_eq!(
+            prop,
+            FilterProp::CrewedThisTurn {
+                relation: CrewRelation::CrewedBySource
+            }
+        );
+        assert_eq!(consumed, " crewed by ~ this turn".len());
+        assert!(parse_crewed_by_source_suffix(" crewed by ~ attacks").is_none());
+        assert!(parse_crewed_by_source_suffix(" crewed by ~ this turnip").is_none());
+        assert!(parse_crewed_by_source_suffix(" crewed by a creature this turn").is_none());
+
+        let (filter, rest) = parse_type_phrase_folding("vehicle crewed by ~ this turn attacks");
+        assert_eq!(rest.trim(), "attacks");
+        let TargetFilter::Typed(typed) = filter else {
+            panic!("expected a typed Vehicle filter, got {filter:?}");
+        };
+        assert!(typed.properties.contains(&FilterProp::CrewedThisTurn {
+            relation: CrewRelation::CrewedBySource
+        }));
+    }
+
     /// Upstream-truncated form: some producers (the "tap all" target extractor)
     /// strip the trailing " this turn" duration before the target text reaches
     /// the type-phrase parser, leaving "that didn't attack" at end-of-string.
@@ -22037,6 +22178,44 @@ mod tests {
             ),
             "expected Cmc LE Fixed(3), got {prop:?}"
         );
+    }
+
+    /// CR 202.3 + CR 608.2c: a dynamic mana-value bound binds "that player"
+    /// in its count to the caller's player antecedent; a literal "you" stays
+    /// the controller (CR 109.5).
+    #[test]
+    fn mana_value_count_bound_binds_that_player_to_relative_scope() {
+        for (text, expected) in [
+            (
+                "with mana value less than or equal to the number of lands that player controls",
+                ControllerRef::TargetPlayer,
+            ),
+            (
+                "with mana value less than or equal to the number of lands you control",
+                ControllerRef::You,
+            ),
+        ] {
+            let mut ctx = ParseContext {
+                relative_player_scope: Some(ControllerRef::TargetPlayer),
+                ..ParseContext::default()
+            };
+            let (prop, _) = parse_mana_value_suffix(text, &mut ctx).expect(text);
+            let FilterProp::Cmc {
+                comparator: Comparator::LE,
+                value:
+                    QuantityExpr::Ref {
+                        qty:
+                            QuantityRef::ObjectCount {
+                                filter: TargetFilter::Typed(typed),
+                            },
+                    },
+            } = &prop
+            else {
+                panic!("{text}: expected Cmc LE ObjectCount, got {prop:?}");
+            };
+            assert!(typed.type_filters.contains(&TypeFilter::Land), "{text}");
+            assert_eq!(typed.controller, Some(expected), "{text}");
+        }
     }
 
     /// CR 202.3: the branch is the MANA-VALUE suffix parser, so it must admit

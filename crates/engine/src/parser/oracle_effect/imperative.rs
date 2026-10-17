@@ -1,12 +1,12 @@
 use crate::parser::oracle_nom::error::{oracle_err, OracleError, OracleResult};
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_till, take_until, take_while1};
-use nom::character::complete::{one_of, satisfy, space0, space1, u8 as parse_u8};
+use nom::character::complete::{anychar, one_of, satisfy, space0, space1, u8 as parse_u8};
 use nom::combinator::{
     all_consuming, eof, map, map_res, not, opt, peek, recognize, rest, value, verify,
 };
 use nom::error::ParseError;
-use nom::multi::separated_list0;
+use nom::multi::{many_till, separated_list0};
 use nom::sequence::{pair, preceded, terminated};
 use nom::Parser;
 
@@ -18,7 +18,8 @@ use super::counter::{
 };
 use super::lower::{
     parse_multi_target_count_expr, parse_where_x_quantity_expression,
-    rebind_cost_paid_object_pt_to_target, strip_leading_quantifier, strip_trailing_where_x,
+    parse_where_x_quantity_expression_with_owner, rebind_cost_paid_object_pt_to_target,
+    strip_leading_quantifier, strip_trailing_where_x,
 };
 use super::mana::{try_parse_activate_only_condition, try_parse_add_mana_effect_with_context};
 use super::token::try_parse_token;
@@ -40,6 +41,7 @@ use crate::parser::oracle_nom::prevention::{
 use crate::parser::oracle_nom::primitives as nom_primitives;
 use crate::parser::oracle_nom::quantity as nom_quantity;
 use crate::parser::oracle_nom::target as nom_target;
+use crate::parser::oracle_nom::target::{controller_phrase_among, ControllerPhrase};
 use crate::parser::oracle_static::{parse_activated_ability_cost_head, ActivatedAbilityCostHead};
 use crate::parser::oracle_static::{
     parse_continuous_modifications, parse_may_look_at_face_down_filter,
@@ -1456,7 +1458,8 @@ pub(super) fn parse_one_or_more_sacrifice(
     let target_text = strip_sacrifice_count_suffix(&strip_sacrifice_choice_marker(
         strip_article(filter_text.trim_start()).trim_end_matches('.'),
     ));
-    let (mut target, remainder) = parse_type_phrase_folding(target_text.trim());
+    let (mut target, remainder) =
+        parse_type_phrase_folding_with_ctx(target_text.trim(), &mut ctx.clone_player_antecedents());
     if !remainder.trim().is_empty() || matches!(target, TargetFilter::Any) {
         return None;
     }
@@ -3224,7 +3227,8 @@ fn try_parse_heterogeneous_chosen_exile(input: &str, ctx: &ParseContext) -> Opti
     )
     .parse(input)
     .ok()?;
-    let (mut hand_filter, hand_rem) = parse_type_phrase_folding(hand_head.trim());
+    let (mut hand_filter, hand_rem) =
+        parse_type_phrase_folding_with_ctx(hand_head.trim(), &mut ctx.clone_player_antecedents());
     if !hand_rem.trim().is_empty() || !matches!(hand_filter, TargetFilter::Typed(_)) {
         return None;
     }
@@ -3942,7 +3946,8 @@ pub(super) fn parse_hand_reveal_ast(
 
         let (_, after_look_at) =
             nom_on_lower(text, lower, |input| value((), tag("look at ")).parse(input))?;
-        let (target, _) = parse_target(after_look_at);
+        let (target, _) =
+            ctx.with_player_antecedents(|scoped| parse_target_with_ctx(after_look_at, scoped));
         return Some(HandRevealImperativeAst::LookAt {
             target,
             count: None,
@@ -4002,7 +4007,7 @@ pub(super) fn parse_hand_reveal_ast(
             .parse(after_reveal_lower)
             .is_ok()
     {
-        let (target, _) = parse_target(after_reveal);
+        let (target, _) = parse_target_with_ctx(after_reveal, &mut ctx.clone_player_antecedents());
         if !matches!(target, TargetFilter::None) {
             return Some(HandRevealImperativeAst::RevealObject { target });
         }
@@ -4145,7 +4150,8 @@ fn parse_hand_reveal_target_and_card_filter(
             return (target, TargetFilter::Any);
         }
         let singular = format!("{} card", descriptor.trim());
-        let (filter, rem) = parse_type_phrase_folding(&singular);
+        let (filter, rem) =
+            parse_type_phrase_folding_with_ctx(&singular, &mut ctx.clone_player_antecedents());
         if rem.trim().is_empty() && matches!(filter, TargetFilter::Typed(_)) {
             return (target, filter);
         }
@@ -4175,7 +4181,8 @@ fn parse_hand_reveal_target_and_card_filter(
         .map(|(_, target)| target)
         .unwrap_or(TargetFilter::Any);
     let singular = format!("{} card", descriptor.trim());
-    let (filter, rem) = parse_type_phrase_folding(&singular);
+    let (filter, rem) =
+        parse_type_phrase_folding_with_ctx(&singular, &mut ctx.clone_player_antecedents());
     if rem.trim().is_empty() && matches!(filter, TargetFilter::Typed(_)) {
         (target, filter)
     } else {
@@ -4368,10 +4375,17 @@ fn parse_choose_discard_rest_of_hand(text: &str, lower: &str) -> Option<Targeted
 /// `alt()`, covering the edict class (exile / sacrifice / destroy) without
 /// proliferating recognizers.
 fn try_parse_choose_and_verb_it_edict(rest_lower: &str) -> Option<ChooseImperativeAst> {
+    let they_control_and = || {
+        (
+            tag::<_, _, OracleError<'_>>(" "),
+            controller_phrase_among(&[ControllerPhrase::THEY_CONTROL]),
+            tag(" and "),
+        )
+    };
     let (_, (_, type_text, _, verb, _, _, _)) = (
         alt((tag::<_, _, OracleError<'_>>("a "), tag("an "))),
-        take_until::<_, _, OracleError<'_>>(" they control and "),
-        tag::<_, _, OracleError<'_>>(" they control and "),
+        recognize(many_till(anychar, peek(they_control_and()))),
+        they_control_and(),
         alt((
             value("exile", tag::<_, _, OracleError<'_>>("exiles")),
             value("sacrifice", tag("sacrifices")),
@@ -5592,7 +5606,7 @@ fn parse_controlled_battlefield_body(
     }
 
     let (control_clause_start, _) = nom_primitives::scan_split_at_phrase(after_other, |i| {
-        value((), tag::<_, _, E>("that player controls")).parse(i)
+        controller_phrase_among(&[ControllerPhrase::THAT_PLAYER_CONTROLS]).parse(i)
     })?;
     let type_phrase = control_clause_start.trim_end();
     if type_phrase.is_empty() {
@@ -5729,10 +5743,9 @@ pub(super) fn parse_for_each_opponent_choose_controlled(
     let (up_to, filter) = parse_controlled_battlefield_body(after_verb, ctx)?;
     // Nothing may follow "that player controls": a trailing instruction on the
     // same clause would otherwise be dropped silently.
-    let (_, tail) = nom_primitives::scan_split_at_phrase(after_verb, |i| {
-        value((), tag::<_, _, E>("that player controls")).parse(i)
+    let (_, (), after_clause) = nom_primitives::scan_preceded(after_verb, |i| {
+        controller_phrase_among(&[ControllerPhrase::THAT_PLAYER_CONTROLS]).parse(i)
     })?;
-    let (after_clause, _) = tag::<_, _, E>("that player controls").parse(tail).ok()?;
     if !terminal_punctuation_only(after_clause) {
         return None;
     }
@@ -6038,6 +6051,15 @@ pub(super) fn parse_category_and_sacrifice_rest_pub(
         })
 }
 
+/// The controller phrases a per-player chooser's domain admits: "they control",
+/// "you control" and "that player controls". Each is a marker; the resolver
+/// scopes the domain to each choosing seat.
+pub(super) const CHOOSER_DOMAIN_CONTROLLERS: &[ControllerPhrase] = &[
+    ControllerPhrase::THEY_CONTROL,
+    ControllerPhrase::YOU_CONTROL,
+    ControllerPhrase::THAT_PLAYER_CONTROLS,
+];
+
 /// CR 608.2d + CR 701.21a: Parse the single-category form specific to the
 /// "for each player, [you ]choose" entry point: "a <type> [they/you/that
 /// player] control[s]". Keeping this arm outside the generic `choose` parser
@@ -6047,11 +6069,10 @@ fn parse_single_category_and_sacrifice_rest(rest_lower: &str) -> Option<ChooseIm
     type E<'a> = OracleError<'a>;
 
     let (rest, core_type) = parse_category_item(rest_lower).ok()?;
-    alt((
-        tag::<_, _, E>(" they control"),
-        tag(" you control"),
-        tag(" that player controls"),
-    ))
+    preceded(
+        tag::<_, _, E>(" "),
+        controller_phrase_among(CHOOSER_DOMAIN_CONTROLLERS),
+    )
     .parse(rest)
     .ok()?;
 
@@ -6097,12 +6118,7 @@ fn parse_category_and_sacrifice_rest(rest_lower: &str) -> Option<ChooseImperativ
     // rest" are sacrificed. Matching only through "of each permanent type" and
     // discarding the remainder mirrors patterns 1 and 2 (no "sacrifice" token matched).
     if let Ok((rest, _)) = tag::<_, _, E>("a permanent ").parse(rest_lower) {
-        let controller = alt((
-            tag::<_, _, E>("they control"),
-            tag("you control"),
-            tag("that player controls"),
-        ))
-        .parse(rest);
+        let controller = controller_phrase_among(CHOOSER_DOMAIN_CONTROLLERS).parse(rest);
         if let Ok((rest, _)) = controller {
             if tag::<_, _, E>(" of each permanent type")
                 .parse(rest)
@@ -6159,13 +6175,7 @@ fn parse_category_and_sacrifice_rest(rest_lower: &str) -> Option<ChooseImperativ
     if let Ok((rest, _)) =
         preceded(opt(tag::<_, _, E>("any number of ")), tag("creatures ")).parse(rest_lower)
     {
-        if let Ok((rest, _)) = alt((
-            tag::<_, _, E>("they control"),
-            tag("you control"),
-            tag("that player controls"),
-        ))
-        .parse(rest)
-        {
+        if let Ok((rest, _)) = controller_phrase_among(CHOOSER_DOMAIN_CONTROLLERS).parse(rest) {
             if let Ok((rest, cap)) = preceded(
                 tag::<_, _, E>(" with total power "),
                 nom_primitives::parse_number,
@@ -6207,12 +6217,7 @@ fn parse_choose_domain(input: &str) -> OracleResult<'_, TargetFilter> {
     let (rest, _) = tag::<_, _, E>("the ").parse(input)?;
     let (rest, nonland) = opt(tag::<_, _, E>("nonland ")).parse(rest)?;
     let (rest, _) = tag::<_, _, E>("permanents ").parse(rest)?;
-    let (rest, _) = alt((
-        tag::<_, _, E>("they control"),
-        tag("you control"),
-        tag("that player controls"),
-    ))
-    .parse(rest)?;
+    let (rest, _) = controller_phrase_among(CHOOSER_DOMAIN_CONTROLLERS).parse(rest)?;
     let (rest, _) = opt(alt((tag::<_, _, E>(", "), tag(" ")))).parse(rest)?;
     Ok((
         rest,
@@ -6695,7 +6700,10 @@ pub(super) fn parse_utility_imperative_ast(
         let (input, attachment) = terminated(take_until(" from "), tag(" from ")).parse(input)?;
         Ok((input, attachment.to_string()))
     }) {
-        let (attachment, attachment_rem) = parse_type_phrase_folding(attachment_text.trim());
+        let (attachment, attachment_rem) = parse_type_phrase_folding_with_ctx(
+            attachment_text.trim(),
+            &mut ctx.clone_player_antecedents(),
+        );
         let (target, target_rem) = parse_target_with_ctx(target_text, ctx);
         if attachment_rem.trim().is_empty() && target_rem.trim().is_empty() {
             return Some(UtilityImperativeAst::UnattachAll { attachment, target });
@@ -6904,7 +6912,7 @@ pub(super) fn parse_utility_imperative_ast(
     if let Some((_, rest)) =
         nom_on_lower(text, lower, |input| value((), tag("switch ")).parse(input))
     {
-        let (target, rem) = parse_target(rest);
+        let (target, rem) = parse_target_with_ctx(rest, &mut ctx.clone_player_antecedents());
         // Consume "'s power and toughness" or " power and toughness" suffix
         let rem_lower = rem.to_lowercase();
         if tag::<_, _, OracleError<'_>>("'s power and toughness")
@@ -7389,7 +7397,7 @@ fn parse_attachment_anaphor<'a>(text: &'a str, ctx: &ParseContext) -> (TargetFil
             return (TargetFilter::SelfRef, &text[text.len()..]);
         }
     }
-    parse_target(text)
+    parse_target_with_ctx(text, &mut ctx.clone_player_antecedents())
 }
 
 /// CR 608.2c (rules of English — number agreement): Recognize an attachment
@@ -8924,7 +8932,8 @@ fn try_parse_that_many_counters(lower: &str, ctx: &mut ParseContext) -> Option<E
             // CR 608.2k: Bare pronoun — context-dependent
             resolve_it_pronoun(ctx)
         } else {
-            let (t, _) = parse_target(on_rest);
+            let (t, _) =
+                ctx.with_player_antecedents(|scoped| parse_target_with_ctx(on_rest, scoped));
             t
         }
     } else {
@@ -9045,7 +9054,7 @@ fn parse_remove_from_combat_ast(lower: &str, ctx: &mut ParseContext) -> Option<T
         "" => TargetFilter::SelfRef,
         _ => {
             // Try parsing as a target phrase (e.g., "target attacking creature you control")
-            let (tf, _rest) = parse_target(subject);
+            let (tf, _rest) = parse_target_with_ctx(subject, &mut ctx.clone_player_antecedents());
             if matches!(tf, TargetFilter::Any) && !subject.starts_with("target") {
                 // parse_target returns Any when it doesn't recognize the phrase —
                 // bail out to avoid false matches.
@@ -10979,7 +10988,8 @@ pub(super) fn parse_exile_ast(
         || starts_with_possessive(rest_lower, "", "hand")
         || starts_with_target_possessive_zone(rest_lower);
     if mass_zone {
-        let (target, _rem) = parse_target(rest_text);
+        let (target, _rem) =
+            ctx.with_player_antecedents(|scoped| parse_target_with_ctx(rest_text, scoped));
         #[cfg(debug_assertions)]
         assert_no_compound_remainder(_rem, text);
         let origin = super::infer_origin_zone(rest_lower);
@@ -11012,7 +11022,10 @@ pub(super) fn parse_exile_ast(
     )
         .parse(rest_lower)
     {
-        let (mut target, rem) = parse_type_phrase_folding(filter_text.trim());
+        let (mut target, rem) = parse_type_phrase_folding_with_ctx(
+            filter_text.trim(),
+            &mut ctx.clone_player_antecedents(),
+        );
         // `after_hand` is the parser remainder AFTER "from your hand": empty/"."
         // (no-tail case) or " with a number of … counters on it equal to …".
         let enter_with_counters = super::parse_with_counters_suffix(after_hand);
@@ -11051,7 +11064,10 @@ pub(super) fn parse_exile_ast(
     )
         .parse(rest_lower)
     {
-        let (target, rem) = parse_type_phrase_folding(filter_text.trim());
+        let (target, rem) = parse_type_phrase_folding_with_ctx(
+            filter_text.trim(),
+            &mut ctx.clone_player_antecedents(),
+        );
         let tail_clean = after_among.trim().trim_start_matches('.').trim(); // allow-noncombinator: punctuation cleanup after typed terminator
         if rem.trim().is_empty() && !matches!(target, TargetFilter::Any) && tail_clean.is_empty() {
             return Some(ZoneCounterImperativeAst::Exile {
@@ -12224,6 +12240,103 @@ fn parse_activation_cost_referent(input: &str) -> OracleResult<'_, ()> {
     .parse(input)
 }
 
+/// Digital-only Alchemy (no CR entry): "note <quantity>" where `<quantity>`
+/// is any shared-grammar quantity ("its power") or the licensed excess
+/// demonstrative ("that excess damage").
+///
+/// CR 120.10: the bare demonstrative "that excess damage" is bound ONLY
+/// outside trigger and replacement bodies (`!ctx.in_trigger &&
+/// !ctx.in_replacement`). Inside a trigger body the antecedent could be the
+/// triggering event — a different resolution whose excess tally was cleared
+/// at depth-0 (Fall of Cair Andros) — while in a spell/activated ability the
+/// damage leg and the note share one resolution (Contest of Claws), so
+/// `PreviousEffectAmount { Excess }` reads correctly. This trigger-context
+/// gate is the same-resolution guarantee the where-X licence
+/// (`rebind_context_dependent_where_x`) enforces via the sibling condition;
+/// the note needs no condition of its own (an ungated note honestly reads 0
+/// when no excess was dealt).
+fn parse_note_number_clause(lower: &str, ctx: &ParseContext) -> Option<ImperativeFamilyAst> {
+    let (rest, _) = tag::<_, _, OracleError<'_>>("note ").parse(lower).ok()?;
+    let rest = rest.trim().trim_end_matches('.').trim();
+    if rest.is_empty() {
+        return None;
+    }
+    // Nom-composed like the bare possessive alternatives below: full-string
+    // equality is not a grammar production.
+    if let Ok((_, qty)) = all_consuming(value(
+        QuantityRef::PreviousEffectAmount {
+            channel: crate::types::ability::DamageChannel::Excess,
+            aggregate: crate::types::ability::AggregateFunction::Sum,
+        },
+        tag::<_, _, OracleError<'_>>("that excess damage"),
+    ))
+    .parse(rest)
+    {
+        if ctx.in_trigger || ctx.in_replacement {
+            return None;
+        }
+        return Some(ImperativeFamilyAst::NoteNumber {
+            value: QuantityExpr::Ref { qty },
+        });
+    }
+    // CR 608.2k: in a trigger body the bare possessive ("its power")
+    // anaphors the triggering object (Dragonborn Immolator's dies trigger
+    // notes the DIED creature) — the shared leaf's context-free `Source`
+    // would misbind whenever source and trigger subject differ.
+    if ctx.in_trigger {
+        if let Some(value) = anaphoric_trigger_body_note_value(rest) {
+            return Some(ImperativeFamilyAst::NoteNumber { value });
+        }
+        // Composed forms of bare possessives ("half its power, rounded up")
+        // bind through the trigger subject via the shared owner-threaded
+        // composition: the context-free fallback below would misbind the
+        // pronoun leaf to Source on a non-self trigger. Explicit
+        // self-references ("~'s power") keep Source structurally — the
+        // pronoun grammar never matches them — and remainders the
+        // composition declines still fall through to the fallback.
+        if let Some(value) = parse_where_x_quantity_expression_with_owner(
+            rest,
+            crate::types::ability::ObjectScope::Anaphoric,
+        ) {
+            return Some(ImperativeFamilyAst::NoteNumber { value });
+        }
+    }
+    let (_, value) = all_consuming(nom_quantity::parse_quantity)
+        .parse(rest)
+        .ok()?;
+    Some(ImperativeFamilyAst::NoteNumber { value })
+}
+
+/// CR 608.2k: direct `Anaphoric` binding for the three printed "its …"
+/// note surfaces in trigger bodies (see `parse_note_number_clause`).
+/// Surface-gated: a fixed "~'s power" keeps `Source`, and spells keep
+/// `Source` ("its" there can only be the source).
+fn anaphoric_trigger_body_note_value(rest: &str) -> Option<QuantityExpr> {
+    let (_, qty) = all_consuming(alt((
+        value(
+            QuantityRef::Power {
+                scope: crate::types::ability::ObjectScope::Anaphoric,
+            },
+            tag::<_, _, OracleError<'_>>("its power"),
+        ),
+        value(
+            QuantityRef::Toughness {
+                scope: crate::types::ability::ObjectScope::Anaphoric,
+            },
+            tag::<_, _, OracleError<'_>>("its toughness"),
+        ),
+        value(
+            QuantityRef::ObjectManaValue {
+                scope: crate::types::ability::ObjectScope::Anaphoric,
+            },
+            tag::<_, _, OracleError<'_>>("its mana value"),
+        ),
+    )))
+    .parse(rest)
+    .ok()?;
+    Some(QuantityExpr::Ref { qty })
+}
+
 /// CR 205.1a + CR 205.1b + CR 110.2a + CR 122.1 + CR 115.2: recognize the
 /// `assimilate <target phrase>` keyword action and return the phrase's target
 /// filter.
@@ -12630,6 +12743,15 @@ pub(super) fn parse_imperative_family_ast(
         return Some(ImperativeFamilyAst::NoteManaSpent);
     }
 
+    // Digital-only Alchemy (no CR entry): "note <quantity>" — record a
+    // number for the resolving player (Dragonborn Immolator's "note its
+    // power"; Mephit's Enthusiasm / Molten Impact's "note that excess
+    // damage"). Runs after the mana-spent pre-check: disjoint surfaces
+    // ("note the type of mana …" never parses as a quantity).
+    if let Some(ast) = parse_note_number_clause(lower.trim(), ctx) {
+        return Some(ast);
+    }
+
     // NOTE: when adding verbs here, also add them to CLAUSE_HEAD_VERBS in
     // oracle_effect/gap_diagnosis.rs, which mirrors this dispatch table. `diagnose_clause_gap`
     // reads it, so a verb missing there diagnoses its argument gaps as unrecognized heads.
@@ -12785,7 +12907,7 @@ pub(super) fn parse_imperative_family_ast(
             })();
             match parsed {
                 Ok(mid_orig) if !mid_orig.trim().is_empty() => {
-                    let (target, _) = parse_target(mid_orig);
+                    let (target, _) = parse_target_with_ctx(mid_orig, &mut ctx.clone_player_antecedents());
                     if matches!(target, TargetFilter::None) {
                         None
                     } else {
@@ -12847,11 +12969,10 @@ pub(super) fn parse_imperative_family_ast(
                     // subject (Illithid Harvester) surfaces a `MultiTargetSpec`
                     // instead of collapsing to one slot; single subjects (Cyber
                     // Conversion, self-references) yield `None`.
-                    let (target, remainder) = parse_target(mid_orig);
+                    let (target, remainder) = parse_target_with_ctx(mid_orig, &mut ctx.clone_player_antecedents());
                     // The count quantifier is derived purely from the subject's
                     // count phrase, not from enclosing context, so a throwaway
-                    // context (mirroring the `parse_target` wrapper above) keeps
-                    // the caller's `ctx` diagnostics untouched.
+                    // context keeps the caller's `ctx` diagnostics untouched.
                     let multi_target = super::subject::parse_subject_application(
                         mid_orig,
                         &mut ParseContext::default(),
@@ -12943,7 +13064,7 @@ pub(super) fn parse_imperative_family_ast(
         "explore" if lower == "explore" || lower == "explore again" => {
             Some(ImperativeFamilyAst::Explore)
         }
-        // CR 702.162a + CR 701.50d: "connive" / "connives" — extract optional
+        // CR 701.50a + CR 701.50d: "connive" / "connives" — extract optional
         // count ("connive 2", "connives X, where X is …") and target from remainder.
         "connive" | "connives" => {
             let after_verb_lower = &lower[first_word.len()..];
@@ -12952,7 +13073,7 @@ pub(super) fn parse_imperative_family_ast(
             let rest_orig = text.get(prefix_len..).unwrap_or("");
             let (count, rest_orig) = parse_connive_count_expr(rest_orig, rest_lower);
             if !rest_orig.trim().is_empty() {
-                let (target, _) = parse_target(rest_orig.trim());
+                let (target, _) = parse_target_with_ctx(rest_orig.trim(), &mut ctx.clone_player_antecedents());
                 Some(ImperativeFamilyAst::GainKeyword(Effect::Connive { target, count }))
             } else if count != (QuantityExpr::Fixed { value: 1 }) {
                 Some(ImperativeFamilyAst::GainKeyword(Effect::Connive {
@@ -13157,7 +13278,7 @@ pub(super) fn parse_imperative_family_ast(
         "suspect" | "suspects" => {
             let rest = lower[first_word.len()..].trim();
             let target = if !rest.is_empty() {
-                let (t, _) = parse_target(rest);
+                let (t, _) = ctx.with_player_antecedents(|scoped| parse_target_with_ctx(rest, scoped));
                 t
             } else {
                 crate::types::ability::TargetFilter::ParentTarget
@@ -13171,7 +13292,7 @@ pub(super) fn parse_imperative_family_ast(
         "detain" | "detains" => {
             let rest = lower[first_word.len()..].trim();
             let target = if !rest.is_empty() {
-                let (t, _) = parse_target(rest);
+                let (t, _) = ctx.with_player_antecedents(|scoped| parse_target_with_ctx(rest, scoped));
                 t
             } else {
                 crate::types::ability::TargetFilter::ParentTarget
@@ -13477,7 +13598,7 @@ pub(super) fn parse_imperative_family_ast(
                 let target = if tail.is_empty() {
                     TargetFilter::Any
                 } else {
-                    let (t, _) = parse_target(tail);
+                    let (t, _) = ctx.with_player_antecedents(|scoped| parse_target_with_ctx(tail, scoped));
                     t
                 };
                 match dir {
@@ -15819,6 +15940,7 @@ fn lower_imperative_family_effect(ast: ImperativeFamilyAst) -> Effect {
         ImperativeFamilyAst::Investigate => Effect::Investigate,
         ImperativeFamilyAst::Learn => Effect::Learn,
         ImperativeFamilyAst::NoteManaSpent => Effect::NoteManaSpent,
+        ImperativeFamilyAst::NoteNumber { value } => Effect::NoteNumber { value },
         // CR 701.40a: Default subject is the controller ("you manifest..."). Subject
         // lowering for "its controller manifests..." routes through the dedicated
         // subject-predicate arm in `lower_subject_predicate_ast` below, which
@@ -17101,6 +17223,208 @@ mod tests {
     use crate::types::keywords::KeywordKind;
     use crate::types::phase::PhaseGroup;
 
+    /// The chooser-domain sites admit "they control", "you control" and "that
+    /// player controls"; these controller phrases are declined at each of them.
+    const NOT_CHOOSER_DOMAIN: [&str; 2] =
+        ["controlled by that player", "the chosen player controls"];
+
+    /// The "they control" sites decline every other controller phrase.
+    const NOT_THEY_CONTROL: [&str; 4] = [
+        "you control",
+        "that player controls",
+        "controlled by that player",
+        "the chosen player controls",
+    ];
+
+    /// The "that player controls" sites decline every other controller phrase.
+    const NOT_THAT_PLAYER_CONTROLS: [&str; 4] = [
+        "they control",
+        "you control",
+        "controlled by that player",
+        "the chosen player controls",
+    ];
+
+    const CHOOSER_DOMAIN: [&str; 3] = ["they control", "you control", "that player controls"];
+
+    #[test]
+    fn choose_and_verb_it_edict_marker() {
+        assert_eq!(
+            try_parse_choose_and_verb_it_edict("a creature they control and exiles it."),
+            Some(ChooseImperativeAst::Reparse {
+                text: "exile a creature you control".to_string(),
+            })
+        );
+        for declined in NOT_THEY_CONTROL {
+            assert_eq!(
+                try_parse_choose_and_verb_it_edict(&format!(
+                    "a creature {declined} and exiles it."
+                )),
+                None,
+                "{declined:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn controlled_battlefield_body_marker() {
+        let parse = |controller: &str| {
+            parse_controlled_battlefield_body(
+                &format!("up to one creature {controller}"),
+                &mut ParseContext::default(),
+            )
+        };
+        let (up_to, filter) = parse("that player controls").expect("battlefield body");
+        assert!(up_to);
+        assert!(
+            matches!(&filter, TargetFilter::Typed(tf) if tf.type_filters == vec![TypeFilter::Creature]),
+            "{filter:?}"
+        );
+        for declined in NOT_THAT_PLAYER_CONTROLS {
+            assert_eq!(parse(declined), None, "{declined:?}");
+        }
+    }
+
+    #[test]
+    fn for_each_opponent_choose_marker() {
+        let parse = |controller: &str| {
+            parse_for_each_opponent_choose_controlled(
+                &format!("for each opponent, choose up to one creature {controller}."),
+                &mut ParseContext::default(),
+            )
+        };
+        let clause = parse("that player controls").expect("for-each-opponent choose");
+        assert!(matches!(
+            clause.effect,
+            Effect::ChooseFromZone {
+                zone: Zone::Battlefield,
+                zone_owner: ZoneOwner::Each(PerPlayerScope::Opponents),
+                up_to: true,
+                ..
+            }
+        ));
+        for declined in NOT_THAT_PLAYER_CONTROLS {
+            assert!(parse(declined).is_none(), "{declined:?}");
+        }
+    }
+
+    #[test]
+    fn single_category_sacrifice_rest_marker() {
+        for admitted in CHOOSER_DOMAIN {
+            let Some(ChooseImperativeAst::CategoryAndSacrificeRest {
+                categories,
+                chooser_scope,
+                ..
+            }) = parse_single_category_and_sacrifice_rest(&format!("a creature {admitted}"))
+            else {
+                panic!("{admitted:?} must be admitted");
+            };
+            assert_eq!(categories, vec![CoreType::Creature], "{admitted:?}");
+            assert_eq!(
+                chooser_scope,
+                CategoryChooserScope::EachPlayerSelf,
+                "{admitted:?}"
+            );
+        }
+        for declined in NOT_CHOOSER_DOMAIN {
+            assert_eq!(
+                parse_single_category_and_sacrifice_rest(&format!("a creature {declined}")),
+                None,
+                "{declined:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn category_sacrifice_rest_marker() {
+        // Pattern 3: "a permanent <controller> of each permanent type".
+        for admitted in CHOOSER_DOMAIN {
+            let Some(ChooseImperativeAst::CategoryAndSacrificeRest { categories, .. }) =
+                parse_category_and_sacrifice_rest(&format!(
+                    "a permanent {admitted} of each permanent type"
+                ))
+            else {
+                panic!("pattern 3 {admitted:?} must be admitted");
+            };
+            assert_eq!(
+                categories,
+                PERMANENT_TYPE_CATEGORIES.to_vec(),
+                "{admitted:?}"
+            );
+        }
+        for declined in NOT_CHOOSER_DOMAIN {
+            assert_eq!(
+                parse_category_and_sacrifice_rest(&format!(
+                    "a permanent {declined} of each permanent type"
+                )),
+                None,
+                "pattern 3 {declined:?}"
+            );
+        }
+        // Pattern 4: "any number of creatures <controller> with total power N or less".
+        for admitted in CHOOSER_DOMAIN {
+            let Some(ChooseImperativeAst::CategoryAndSacrificeRest {
+                total_power_cap, ..
+            }) = parse_category_and_sacrifice_rest(&format!(
+                "any number of creatures {admitted} with total power 4 or less"
+            ))
+            else {
+                panic!("pattern 4 {admitted:?} must be admitted");
+            };
+            assert_eq!(
+                total_power_cap,
+                Some(QuantityExpr::Fixed { value: 4 }),
+                "{admitted:?}"
+            );
+        }
+        for declined in NOT_CHOOSER_DOMAIN {
+            assert_eq!(
+                parse_category_and_sacrifice_rest(&format!(
+                    "any number of creatures {declined} with total power 4 or less"
+                )),
+                None,
+                "pattern 4 {declined:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn choose_domain_marker() {
+        let categories = "an artifact, a creature, an enchantment, and a land";
+        for admitted in CHOOSER_DOMAIN {
+            assert_eq!(
+                parse_choose_domain(&format!("the nonland permanents {admitted} {categories}"))
+                    .ok(),
+                Some((categories, nonland_permanent_filter())),
+                "{admitted:?}"
+            );
+            // Pattern 1 ("from among <domain> <categories>") and pattern 2
+            // ("<categories> from among <domain>") both reach the domain.
+            for text in [
+                format!("from among the permanents {admitted} {categories}"),
+                format!("{categories} from among the permanents {admitted}"),
+            ] {
+                let Some(ChooseImperativeAst::CategoryAndSacrificeRest { choose_filter, .. }) =
+                    parse_category_and_sacrifice_rest(&text)
+                else {
+                    panic!("{text:?} must be admitted");
+                };
+                assert_eq!(choose_filter, permanent_filter(), "{text:?}");
+            }
+        }
+        for declined in NOT_CHOOSER_DOMAIN {
+            assert!(
+                parse_choose_domain(&format!("the permanents {declined} {categories}")).is_err(),
+                "{declined:?}"
+            );
+            for text in [
+                format!("from among the permanents {declined} {categories}"),
+                format!("{categories} from among the permanents {declined}"),
+            ] {
+                assert_eq!(parse_category_and_sacrifice_rest(&text), None, "{text:?}");
+            }
+        }
+    }
+
     #[test]
     fn put_counter_list_preserves_self_ref_for_every_entry_shape() {
         // SHAPE: CR 122.1 + CR 608.2c preserve every count and the shared source.
@@ -17775,6 +18099,133 @@ mod tests {
                 );
             }
             other => panic!("expected DivideRounded, got {other:?}"),
+        }
+    }
+
+    /// CR 121.1 + CR 107.3c + CR 107.3i + CR 107.1a: the draw count position
+    /// binds a "where X is" definition at the X inside the count, keeping the
+    /// arithmetic and rounding around it; a count that prints no X is not bound.
+    /// Locks #9830's count-position binding (#9660); not revert-failing for this
+    /// change. SYNTHETIC: no printed card has these shapes.
+    #[test]
+    fn draw_count_slot_where_x_substitutes_into_count() {
+        use crate::parser::oracle_util::parse_count_slot;
+        use crate::types::ability::RoundingMode;
+
+        let bare_slot = parse_count_slot(
+            "X cards, where X is the number of creatures you control",
+            &mut ParseContext::default(),
+        )
+        .expect("bare where-X draw count parses");
+        let bare = bare_slot.count.clone();
+        assert!(
+            matches!(
+                bare,
+                QuantityExpr::Ref {
+                    qty: QuantityRef::ObjectCount { .. }
+                }
+            ),
+            "bare where-X count should be the where-X quantity, got {bare:?}"
+        );
+        assert_eq!(bare_slot.noun, "cards");
+        assert_eq!(bare_slot.where_x, Some(bare.clone()));
+
+        let twice = parse_count_slot(
+            "twice X cards, where X is the number of creatures you control",
+            &mut ParseContext::default(),
+        )
+        .expect("twice-X where-X draw count parses");
+        assert_eq!(
+            twice.count,
+            QuantityExpr::Multiply {
+                factor: 2,
+                inner: Box::new(bare.clone()),
+            }
+        );
+        assert_eq!(twice.noun, "cards");
+        assert_eq!(twice.where_x, Some(bare.clone()));
+
+        let three = parse_count_slot(
+            "three times X cards, where X is the number of creatures you control",
+            &mut ParseContext::default(),
+        )
+        .expect("three-times-X where-X draw count parses");
+        assert_eq!(
+            three.count,
+            QuantityExpr::Multiply {
+                factor: 3,
+                inner: Box::new(bare.clone()),
+            }
+        );
+
+        for (text, rounding) in [
+            (
+                "half X cards, rounded up, where X is the number of creatures you control",
+                RoundingMode::Up,
+            ),
+            (
+                "half X cards, rounded down, where X is the number of creatures you control",
+                RoundingMode::Down,
+            ),
+        ] {
+            let half = parse_count_slot(text, &mut ParseContext::default())
+                .unwrap_or_else(|| panic!("half-X where-X draw count parses: {text}"));
+            assert_eq!(
+                half.count,
+                QuantityExpr::DivideRounded {
+                    inner: Box::new(bare.clone()),
+                    divisor: 2,
+                    rounding,
+                },
+                "{text}"
+            );
+            assert_eq!(half.noun, "cards", "{text}");
+        }
+
+        let no_x = parse_count_slot(
+            "two cards, where X is the number of creatures you control",
+            &mut ParseContext::default(),
+        )
+        .expect("no-X draw count slot parses");
+        assert_eq!(no_x.count, QuantityExpr::Fixed { value: 2 });
+        assert_eq!(no_x.where_x, None);
+    }
+
+    /// CR 121.1 + CR 107.3c + CR 107.3i: the draw verb publishes the
+    /// multiplier around the where-X-bound X. Locks #9830's count-position
+    /// binding (#9660); not revert-failing for this change. SYNTHETIC.
+    #[test]
+    fn draw_where_x_tail_keeps_multiplier() {
+        let bare = "draw x cards, where x is the number of creatures you control";
+        let Some(NumericImperativeAst::Draw {
+            count: bare_count, ..
+        }) = parse_numeric_imperative_ast(bare, bare)
+        else {
+            panic!("reach guard: bare where-X draw parses");
+        };
+        assert!(
+            matches!(
+                bare_count,
+                QuantityExpr::Ref {
+                    qty: QuantityRef::ObjectCount { .. }
+                }
+            ),
+            "bare where-X draw count should be the where-X quantity, got {bare_count:?}"
+        );
+
+        let text = "draw twice x cards, where x is the number of creatures you control";
+        match parse_numeric_imperative_ast(text, text) {
+            Some(NumericImperativeAst::Draw { count, up_to }) => {
+                assert_eq!(
+                    count,
+                    QuantityExpr::Multiply {
+                        factor: 2,
+                        inner: Box::new(bare_count),
+                    }
+                );
+                assert!(!up_to);
+            }
+            other => panic!("expected Draw imperative, got {other:?}"),
         }
     }
 

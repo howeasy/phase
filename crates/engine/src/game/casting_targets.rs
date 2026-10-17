@@ -151,6 +151,8 @@ pub(crate) fn handle_select_modes(
     // Build a chain of ResolvedAbility from chosen modes (in order)
     let mut resolved = build_chained_resolved(&abilities, &indices, pending.object_id, controller)?;
     resolved.set_context_recursive(pending.ability.context.clone());
+    // CR 601.2b + CR 601.2c: the chosen modes declare only the targets chosen for them.
+    resolved.start_target_record_recursive();
     resolved.selected_mode_labels = selected_mode_labels(&modal.mode_descriptions, &indices);
     // CR 700.2a + CR 700.2d + CR 601.2b: latch the chosen modal-mode indices onto
     // the spell's context so finalize can stamp them on the stack object (read by
@@ -683,11 +685,15 @@ pub(super) fn extract_distribution_total(
 /// carries its last known information, taken when it left. A source announced
 /// from another zone (embalm, cycling) never takes battlefield LKI, so a stale
 /// entry from an earlier departure can't answer for it.
+///
+/// `stack_entry` is the stack object a stack-using activation created (CR
+/// 602.2a); a mana-ability activation passes `None` (CR 605.3b).
 pub(crate) fn emit_ability_activated(
     state: &GameState,
     player: PlayerId,
     source_id: ObjectId,
     kind: crate::types::events::ActivatedAbilityKind,
+    stack_entry: Option<ObjectId>,
     announced_zone: crate::types::zones::Zone,
     events: &mut Vec<GameEvent>,
 ) -> usize {
@@ -705,6 +711,7 @@ pub(crate) fn emit_ability_activated(
         kind,
         departed_source_lki,
         trigger_state: crate::types::events::ActivationTriggerState::Pending,
+        stack_entry,
     });
     events.len() - 1
 }

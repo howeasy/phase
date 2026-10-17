@@ -349,8 +349,9 @@ pub fn apnap_order_from(
 /// CR 603.10a + CR 607.2a: Return the cards linked as "exiled with" `source_id`.
 /// Leaves-the-battlefield triggers prefer the trigger event's zone-change snapshot
 /// because `TrackedBySource` links are pruned immediately on battlefield exit per
-/// CR 400.7. Outside that look-back path, fall back to the live exile-link store.
-/// The final linked-exile LKI fallback is incarnation-bounded (CR 400.7).
+/// CR 400.7. Outside that look-back path, fall back to the exile-link store's
+/// links of the incarnation this read is made for. The final linked-exile LKI
+/// fallback is incarnation-bounded the same way (CR 400.7).
 pub fn linked_exile_cards_for_source(
     state: &GameState,
     source_id: ObjectId,
@@ -367,21 +368,23 @@ pub fn linked_exile_cards_for_source(
         }
     }
 
-    let live: Vec<LinkedExileSnapshot> =
-        crate::game::exile_links::live_links_for_source(state, source_id)
+    // CR 113.7a + CR 400.7: an ability of an older incarnation reads only that
+    // incarnation's cards, never the pile of the object that replaced it.
+    let reader = crate::game::exile_links::linked_exile_incarnation(state, source_id);
+    let linked: Vec<LinkedExileSnapshot> =
+        crate::game::exile_links::links_for_reader(state, source_id, reader)
             .filter_map(|link| {
                 crate::game::exile_links::exiled_card_snapshot(state, link.exiled_id)
             })
             .collect();
-    if !live.is_empty() {
-        return live;
+    if !linked.is_empty() {
+        return linked;
     }
 
-    // CR 607.2a + CR 607.2b + CR 113.7a: The live links are gone (the source left
-    // the battlefield, e.g. sacrificed as its own ability's cost, or an ability
-    // of a departed incarnation exiled them). Fall back to the linked-exile LKI,
-    // but only to the piles of the incarnation this read is made for (CR 400.7).
-    let reader = crate::game::exile_links::linked_exile_incarnation(state, source_id);
+    // CR 607.2a + CR 607.2b + CR 113.7a: The reader has no links (the source left
+    // the battlefield, e.g. sacrificed as its own ability's cost, or the reader is
+    // a departed incarnation whose tracked links were pruned or never made). Fall
+    // back to the linked-exile LKI, again only to the reader's piles.
     crate::game::exile_links::lki_snapshots_for_reader(state, source_id, reader)
         .cloned()
         .collect()
@@ -501,7 +504,7 @@ mod tests {
         );
     }
     use super::*;
-    use crate::game::zones::create_object;
+    use crate::game::zones::{create_object, move_to_zone};
     use crate::types::ability::{Effect, QuantityExpr, ResolvedAbility, TargetFilter};
     use crate::types::format::FormatConfig;
     use crate::types::game_state::{LinkedExileLki, StackEntry, StackEntryKind};
@@ -1071,6 +1074,8 @@ mod tests {
                 exiled_id: card,
                 owner: PlayerId(1),
                 mana_value: 0,
+                // `departed_pile` makes the card directly in exile.
+                incarnation: 0,
             }],
         }
     }
@@ -1221,5 +1226,29 @@ mod tests {
         assert_eq!(linked_ids(&state, source), vec![first]);
         resolving_ability_of(&mut state, source, DEPARTED + 2);
         assert_eq!(linked_ids(&state, source), vec![second]);
+    }
+
+    /// CR 607.2a + CR 400.7: a pile member that leaves exile is not read, and it
+    /// is still not read once it is exiled again, because the card in exile is
+    /// a new object. Checked for a source that no longer exists and for the
+    /// object the source became.
+    #[test]
+    fn linked_exile_lki_drops_a_member_that_left_exile_and_was_exiled_again() {
+        for live in [None, Some(DEPARTED + 1)] {
+            let (mut state, source, card) = departed_pile(live);
+            assert_eq!(
+                linked_ids(&state, source),
+                vec![card],
+                "positive control: the member is read while it stays in exile"
+            );
+            let mut events = Vec::new();
+            move_to_zone(&mut state, card, Zone::Graveyard, &mut events);
+            assert!(linked_ids(&state, source).is_empty(), "it left exile");
+            move_to_zone(&mut state, card, Zone::Exile, &mut events);
+            assert!(
+                linked_ids(&state, source).is_empty(),
+                "CR 400.7: the card exiled again is a new object, not the member"
+            );
+        }
     }
 }

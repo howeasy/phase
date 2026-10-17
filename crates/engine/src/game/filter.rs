@@ -6,6 +6,7 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::game::combat;
+use crate::game::crew_payment::CrewHistoryPair;
 use crate::game::game_object::GameObject;
 use crate::game::quantity::{
     counter_count_from_map, quantity_expr_characteristic_reads_at, resolve_quantity,
@@ -15,9 +16,9 @@ use crate::game::targeting::{DeclaredSlotBinding, SlotReferent};
 use crate::types::ability::{
     AbilityCondition, AttachmentReferent, AttackerBlockStatus, CardTypeSetSource,
     CastManaSpentMetric, ChoiceValue, ChosenAttribute, CombatRelation, CombatRelationSubject,
-    ContinuousModification, ControllerRef, CountScope, FilterProp, Parity, ParitySource,
-    PlayerFilter, PtStat, PtValueScope, QuantityExpr, QuantityRef, ResolvedAbility, SharedQuality,
-    SharedQualityRelation, TargetFilter, TargetRef, TypeFilter, TypedFilter,
+    ContinuousModification, ControllerRef, CountScope, CrewRelation, FilterProp, Parity,
+    ParitySource, PlayerFilter, PtStat, PtValueScope, QuantityExpr, QuantityRef, ResolvedAbility,
+    SharedQuality, SharedQualityRelation, TargetFilter, TargetRef, TypeFilter, TypedFilter,
 };
 use crate::types::card::CardFace;
 use crate::types::card_type::{CoreType, Supertype};
@@ -297,6 +298,7 @@ fn filter_prop_uses_object_population(prop: &FilterProp) -> bool {
         | FilterProp::Tapped
         | FilterProp::IsSaddled
         | FilterProp::SaddledSource
+        | FilterProp::CrewedThisTurn { .. }
         | FilterProp::ConvokedSource
         | FilterProp::ProtectorMatches { .. }
         | FilterProp::Untapped
@@ -877,6 +879,7 @@ fn filter_prop_characteristic_reads_at(prop: &FilterProp, depth: u32) -> Charact
         | FilterProp::Untapped
         | FilterProp::IsSaddled
         | FilterProp::SaddledSource
+        | FilterProp::CrewedThisTurn { .. }
         | FilterProp::ConvokedSource
         | FilterProp::Foretold
         | FilterProp::HasAdventure
@@ -1094,6 +1097,7 @@ fn entered_object_perturbs_filter_prop(
         | FilterProp::Tapped
         | FilterProp::IsSaddled
         | FilterProp::SaddledSource
+        | FilterProp::CrewedThisTurn { .. }
         | FilterProp::ConvokedSource
         | FilterProp::ProtectorMatches { .. }
         | FilterProp::Untapped
@@ -2254,6 +2258,7 @@ pub(crate) fn filter_prop_contains(
         | FilterProp::Untapped
         | FilterProp::IsSaddled
         | FilterProp::SaddledSource
+        | FilterProp::CrewedThisTurn { .. }
         | FilterProp::ConvokedSource
         | FilterProp::ProtectorMatches { .. }
         | FilterProp::HasHasteOrControlledSinceTurnBegan
@@ -2518,6 +2523,7 @@ fn filter_prop_contains_filter_prop(
             | FilterProp::Untapped
             | FilterProp::IsSaddled
             | FilterProp::SaddledSource
+            | FilterProp::CrewedThisTurn { .. }
             | FilterProp::ConvokedSource
             | FilterProp::ProtectorMatches { .. }
             | FilterProp::HasHasteOrControlledSinceTurnBegan
@@ -2788,6 +2794,7 @@ fn quantity_ref_contains_filter_prop(
         | QuantityRef::TurnsTaken
         | QuantityRef::ChosenNumber
         | QuantityRef::PlayerChosenNumber { .. }
+        | QuantityRef::NotedNumber
         | QuantityRef::DescendedThisTurn
         | QuantityRef::LoyaltyAbilitiesActivatedThisTurn { .. }
         | QuantityRef::SpellsCastLastTurn
@@ -2922,6 +2929,60 @@ pub(crate) fn bind_declaring_owner_authority(
     complete
 }
 
+/// Re-anchor holder-relative ("you") references in one boon-granted trigger
+/// MATCHER filter to the concrete holder.
+///
+/// Delayed-trigger matchers resolve "you" through the trigger source's
+/// controller — the boon's CREATOR. When the holder differs (Loch Larent,
+/// Valiant Batrider), an un-rewritten reference watches the wrong player's
+/// events. Binding unconditionally (even when holder == creator) additionally
+/// immunizes self-held boons against the creating object changing controller
+/// mid-flight; in the common case the bound filter matches exactly what the
+/// relative one would.
+///
+/// Reuses the shared [`rewrite_filter_props`] traversal (the same seam as
+/// [`bind_declaring_owner_authority`]), so nested descendants an ad-hoc
+/// recursion would miss — `TrackedSetFiltered` filters, `DistinctFrom` /
+/// `SharesQuality` / comparator references, `Typed` properties — re-anchor
+/// too. Rewritten leaves: bare `Controller` nodes, `Typed.controller == You`,
+/// and `Owned { You }` props. `Opponent` and the other relative
+/// `ControllerRef`s have no concrete singular form and are left untouched, as
+/// are event-determined (`Triggering*`) and source-identity
+/// (`SourceController`) leaves. Transactional like its sibling: an incomplete
+/// bounded walk leaves the input unchanged and reports `false`.
+pub(crate) fn reanchor_filter_to_holder(filter: &mut TargetFilter, holder: PlayerId) -> bool {
+    let mut rewritten = filter.clone();
+    let mut complete = true;
+    rewrite_filter_props(
+        &mut rewritten,
+        &mut |node| {
+            if matches!(node, TargetFilter::Controller) {
+                *node = TargetFilter::SpecificPlayer { id: holder };
+            }
+            if let TargetFilter::Typed(typed) = node {
+                if typed.controller == Some(ControllerRef::You) {
+                    typed.controller = Some(ControllerRef::SpecificPlayer { id: holder });
+                }
+            }
+        },
+        &mut |prop| {
+            if let FilterProp::Owned {
+                controller: ControllerRef::You,
+            } = prop
+            {
+                *prop = FilterProp::Owned {
+                    controller: ControllerRef::SpecificPlayer { id: holder },
+                };
+            }
+        },
+        &mut complete,
+    );
+    if complete {
+        *filter = rewritten;
+    }
+    complete
+}
+
 /// Rewrites declared-player references to the concrete player a resolver names. The one
 /// traversal of the reference sites, shared by detection and binding.
 struct DeclaredGroupBinder<'a> {
@@ -3005,6 +3066,7 @@ fn declared_group_controller(prop: &mut FilterProp) -> Option<&mut ControllerRef
         | FilterProp::Untapped
         | FilterProp::IsSaddled
         | FilterProp::SaddledSource
+        | FilterProp::CrewedThisTurn { .. }
         | FilterProp::ConvokedSource
         | FilterProp::HasHasteOrControlledSinceTurnBegan
         | FilterProp::WithKeyword { .. }
@@ -3444,6 +3506,7 @@ fn rewrite_filter_prop(
         | FilterProp::Untapped
         | FilterProp::IsSaddled
         | FilterProp::SaddledSource
+        | FilterProp::CrewedThisTurn { .. }
         | FilterProp::ConvokedSource
         | FilterProp::ProtectorMatches { .. }
         | FilterProp::HasHasteOrControlledSinceTurnBegan
@@ -3732,6 +3795,7 @@ fn rewrite_quantity_ref_filter_props(
         | QuantityRef::TurnsTaken
         | QuantityRef::ChosenNumber
         | QuantityRef::PlayerChosenNumber { .. }
+        | QuantityRef::NotedNumber
         | QuantityRef::DescendedThisTurn
         | QuantityRef::LoyaltyAbilitiesActivatedThisTurn { .. }
         | QuantityRef::SpellsCastLastTurn
@@ -6236,6 +6300,8 @@ fn filter_inner_for_object(
         // CR 603.10a + CR 607.2a: "cards exiled with [this object]" on a
         // leaves-the-battlefield trigger resolves from the trigger event's
         // zone-change snapshot; other contexts fall back to live exile links.
+        // CR 400.7: an entry names the object it captured, so a card that left
+        // exile (and any later exile of it) does not match.
         TargetFilter::ExiledBySource => {
             let source_ctx = source_context_from_filter(
                 state,
@@ -6252,7 +6318,9 @@ fn filter_inner_for_object(
             } else {
                 crate::game::players::linked_exile_cards_for_source(state, source_id).to_vec()
             };
-            linked.iter().any(|entry| entry.exiled_id == object_id)
+            linked
+                .iter()
+                .any(|entry| entry.exiled_id == object_id && entry.is_still_exiled(state))
         }
         // CR 607.2a: References a specific card exiled by the source, indexed by order.
         // Used by The Mimeoplasm to distinguish "the first card exiled this way" from
@@ -7730,6 +7798,7 @@ fn spell_record_matches_property(record: &SpellCastRecord, prop: &FilterProp) ->
         | FilterProp::Tapped
         | FilterProp::IsSaddled
         | FilterProp::SaddledSource
+        | FilterProp::CrewedThisTurn { .. }
         | FilterProp::ConvokedSource
         | FilterProp::ProtectorMatches { .. }
         | FilterProp::Untapped
@@ -8243,6 +8312,36 @@ fn matches_combat_relation(
     }
 }
 
+/// CR 702.122b + CR 702.122c + CR 400.7: does the per-turn crew ledger pair the
+/// `candidate` incarnation with the filter source's incarnation in the
+/// direction `relation` names? The source resolves through the same authority
+/// as a combat-relation `Source` subject (trigger capture, then the ability's
+/// stamped source incarnation, then the live object), so a source that left and
+/// returned is a new object and finds nothing its predecessor crewed.
+fn matches_crew_relation(
+    state: &GameState,
+    candidate: ObjectIncarnationRef,
+    relation: CrewRelation,
+    source: &SourceContext<'_>,
+) -> bool {
+    let Some(source_ref) =
+        combat_relation_subject_ref(state, CombatRelationSubject::Source, source)
+    else {
+        return false;
+    };
+    let pair = match relation {
+        CrewRelation::CrewedSource => CrewHistoryPair {
+            vehicle: source_ref,
+            crewer: candidate,
+        },
+        CrewRelation::CrewedBySource => CrewHistoryPair {
+            vehicle: candidate,
+            crewer: source_ref,
+        },
+    };
+    state.crew_history_this_turn.contains(&pair)
+}
+
 fn referenced_targets_for_filter(
     state: &GameState,
     target: &TargetFilter,
@@ -8625,6 +8724,14 @@ fn matches_filter_prop(
         // (recorded in the source's `convoked_creatures`). Source-relative,
         // mirroring `SaddledSource`.
         FilterProp::ConvokedSource => source.convoked_creatures.contains(&object_id),
+        // CR 702.122b + CR 702.122c + CR 400.7: crew-payment relation, answered
+        // from the per-turn crew ledger by exact incarnations.
+        FilterProp::CrewedThisTurn { relation } => matches_crew_relation(
+            state,
+            ObjectIncarnationRef::from_object(obj),
+            *relation,
+            source,
+        ),
         // CR 310.9 + CR 310.9e: "each battle they protect" — protector is an opponent of
         // the source controller (Joyful Stormsculptor class).
         FilterProp::ProtectorMatches { controller } => {
@@ -9383,8 +9490,6 @@ fn matches_filter_prop(
                 .fold(0, |sum: u32, record| sum.saturating_add(record.count));
             comparator.evaluate(i32::try_from(total).unwrap_or(i32::MAX), *count as i32)
         }
-        // CR 115.7: Stack entry has exactly one target — permissive at filter level,
-        // validated by retarget effects at resolution time.
         FilterProp::HasSingleTarget => true,
         // CR 700.2: The object is modal iff its printed modality is present. Read
         // from the static printed characteristic populated at object creation,
@@ -9488,7 +9593,8 @@ fn stack_entry_targets_satisfy(
     let Some(ability) = entry.ability() else {
         return true; // KeywordAction entries carry no ability targets — permissive.
     };
-    if ability.targets.is_empty() {
+    let targets = crate::game::ability_utils::declared_targets_in_chain(ability);
+    if targets.is_empty() {
         return false; // "targets X" with no targets cannot be satisfied.
     }
     let ctx = match source_controller {
@@ -9506,9 +9612,9 @@ fn stack_entry_targets_satisfy(
         ),
     };
     if require_all {
-        ability.targets.iter().all(check)
+        targets.iter().all(check)
     } else {
-        ability.targets.iter().any(check)
+        targets.iter().any(check)
     }
 }
 
@@ -9751,6 +9857,13 @@ fn zone_change_record_matches_property(
                 })
             }
         },
+        // CR 702.122c + CR 608.2h: the crew ledger survives the candidate's
+        // departure; answer from the record's own departing incarnation. A record
+        // without one fails closed.
+        FilterProp::CrewedThisTurn { relation } => record
+            .trigger_source_context()
+            .map(|context| context.identity.reference)
+            .is_some_and(|candidate| matches_crew_relation(state, candidate, *relation, source)),
         // CR 509.1h: blocked/unblocked as of the zone change.
         FilterProp::BlockStatus { status } => match status {
             AttackerBlockStatus::Blocked => {
@@ -10810,6 +10923,105 @@ pub(crate) fn extract_targets(filter: &TargetFilter) -> Option<TargetFilter> {
             filters.iter().find_map(extract_targets)
         }
         _ => None,
+    }
+}
+
+/// How a `HasSingleTarget` requirement counts a stack entry's targets.
+pub(crate) enum SingleTargetCount {
+    /// CR 115.9a: "with a single target" counts each time an object or player
+    /// was chosen as a target.
+    Instances,
+    /// CR 115.9c: "that targets only a single …" counts the different objects
+    /// and players chosen as targets.
+    DifferentObjectsOrPlayers,
+}
+
+impl SingleTargetCount {
+    /// Whether `targets` count as a single target.
+    pub(crate) fn admits(self, targets: &[TargetRef]) -> bool {
+        match self {
+            Self::Instances => targets.len() == 1,
+            Self::DifferentObjectsOrPlayers => targets
+                .first()
+                .is_some_and(|first| targets.iter().all(|t| t == first)),
+        }
+    }
+}
+
+/// The `HasSingleTarget` requirement anywhere in `filter`'s tree, if any. It
+/// counts as CR 115.9c's when its property list also carries `TargetsOnly`
+/// (`oracle_target.rs::parse_targets_only_constraint` writes both for "that
+/// targets only a single …"), and as CR 115.9a's otherwise.
+pub(crate) fn single_target_count(filter: &TargetFilter) -> Option<SingleTargetCount> {
+    match filter {
+        TargetFilter::Typed(tf) => {
+            let has = |wanted: fn(&FilterProp) -> bool| tf.properties.iter().any(wanted);
+            has(|p| matches!(p, FilterProp::HasSingleTarget)).then(|| {
+                if has(|p| matches!(p, FilterProp::TargetsOnly { .. })) {
+                    SingleTargetCount::DifferentObjectsOrPlayers
+                } else {
+                    SingleTargetCount::Instances
+                }
+            })
+        }
+        TargetFilter::Or { filters } | TargetFilter::And { filters } => {
+            filters.iter().find_map(single_target_count)
+        }
+        TargetFilter::None
+        | TargetFilter::Any
+        | TargetFilter::Player
+        | TargetFilter::Controller
+        | TargetFilter::SourceController
+        | TargetFilter::ControllerAndControlledPermanents { .. }
+        | TargetFilter::Opponent
+        | TargetFilter::SelfRef
+        | TargetFilter::GrantingObject { .. }
+        | TargetFilter::SourceOrPaired
+        | TargetFilter::Not { .. }
+        | TargetFilter::StackAbility { .. }
+        | TargetFilter::StackSpell
+        | TargetFilter::SpecificObject { .. }
+        | TargetFilter::SpecificPlayer { .. }
+        | TargetFilter::PlayerWhoChoseLabel { .. }
+        | TargetFilter::PlayerMatching { .. }
+        | TargetFilter::Neighbor { .. }
+        | TargetFilter::ScopedPlayer
+        | TargetFilter::AttachedTo
+        | TargetFilter::LastCreated
+        | TargetFilter::LastRevealed
+        | TargetFilter::LastZoneChanged
+        | TargetFilter::CostPaidObject
+        | TargetFilter::AmassedArmy
+        | TargetFilter::ChosenCard
+        | TargetFilter::TrackedSet { .. }
+        | TargetFilter::TrackedSetFiltered { .. }
+        | TargetFilter::ExiledBySource
+        | TargetFilter::ExiledCardByIndex { .. }
+        | TargetFilter::TriggeringSpellController
+        | TargetFilter::TriggeringSpellOwner
+        | TargetFilter::TriggeringPlayer
+        | TargetFilter::TriggeringSource
+        | TargetFilter::EventTarget
+        | TargetFilter::TriggeringSourceController
+        | TargetFilter::EventTargetController
+        | TargetFilter::ParentTarget
+        | TargetFilter::ParentTargetSlot { .. }
+        | TargetFilter::ParentTargetController
+        | TargetFilter::ParentTargetOwner
+        | TargetFilter::DeclaredPlayer { .. }
+        | TargetFilter::SourceChosenPlayer
+        | TargetFilter::OriginalController
+        | TargetFilter::OriginalSource
+        | TargetFilter::PostReplacementSourceController
+        | TargetFilter::PostReplacementDamageSource
+        | TargetFilter::PostReplacementDamageTarget
+        | TargetFilter::PostReplacementDamageTargetOwner
+        | TargetFilter::DefendingPlayer
+        | TargetFilter::HasChosenName
+        | TargetFilter::ChosenDamageSource { .. }
+        | TargetFilter::Named { .. }
+        | TargetFilter::Owner
+        | TargetFilter::AllPlayers => None,
     }
 }
 
@@ -14320,6 +14532,100 @@ mod tests {
         ));
     }
 
+    fn crewed_filter(relation: CrewRelation) -> TargetFilter {
+        TargetFilter::Typed(
+            TypedFilter::default().properties(vec![FilterProp::CrewedThisTurn { relation }]),
+        )
+    }
+
+    /// CR 702.122b + CR 702.122c + CR 400.7: the crew ledger answers both
+    /// directions by exact incarnation, and a bumped incarnation on EITHER end
+    /// (the Vehicle or the crewer left and returned) finds nothing.
+    #[test]
+    fn crewed_this_turn_matches_both_directions_by_exact_incarnation() {
+        let mut state = setup();
+        let vehicle = add_creature(&mut state, PlayerId(0), "Vehicle");
+        let crewer = add_creature(&mut state, PlayerId(0), "Crewer");
+        let bystander = add_creature(&mut state, PlayerId(0), "Bystander");
+        crate::game::engine::record_crew_payment(&mut state, vehicle, &[crewer]);
+
+        let from_vehicle = FilterContext::from_source_with_controller(vehicle, PlayerId(0));
+        let from_crewer = FilterContext::from_source_with_controller(crewer, PlayerId(0));
+        let crewed_source = crewed_filter(CrewRelation::CrewedSource);
+        let crewed_by_source = crewed_filter(CrewRelation::CrewedBySource);
+
+        assert!(super::matches_target_filter(
+            &state,
+            crewer,
+            &crewed_source,
+            &from_vehicle
+        ));
+        assert!(!super::matches_target_filter(
+            &state,
+            bystander,
+            &crewed_source,
+            &from_vehicle
+        ));
+        assert!(
+            !super::matches_target_filter(&state, vehicle, &crewed_source, &from_crewer),
+            "direction matters: the Vehicle did not crew the crewer"
+        );
+        assert!(super::matches_target_filter(
+            &state,
+            vehicle,
+            &crewed_by_source,
+            &from_crewer
+        ));
+        assert!(!super::matches_target_filter(
+            &state,
+            bystander,
+            &crewed_by_source,
+            &from_crewer
+        ));
+
+        state.objects.get_mut(&crewer).unwrap().bump_incarnation();
+        assert!(
+            !super::matches_target_filter(&state, crewer, &crewed_source, &from_vehicle),
+            "a crewer that left and returned is a new object (CR 400.7)"
+        );
+        assert!(
+            !super::matches_target_filter(&state, vehicle, &crewed_by_source, &from_crewer),
+            "the new crewer object crewed nothing"
+        );
+
+        crate::game::engine::record_crew_payment(&mut state, vehicle, &[crewer]);
+        state.objects.get_mut(&vehicle).unwrap().bump_incarnation();
+        assert!(
+            !super::matches_target_filter(&state, crewer, &crewed_source, &from_vehicle),
+            "a Vehicle that left and returned was crewed by nothing"
+        );
+    }
+
+    /// CR 702.122c + CR 608.2h: the look-back path answers from the snapshot's
+    /// own captured incarnation, not the live object's.
+    #[test]
+    fn crewed_this_turn_event_snapshot_answers_from_its_captured_identity() {
+        let mut state = setup();
+        let vehicle = add_creature(&mut state, PlayerId(0), "Vehicle");
+        let crewer = add_creature(&mut state, PlayerId(0), "Crewer");
+        crate::game::engine::record_crew_payment(&mut state, vehicle, &[crewer]);
+        let snapshot = state
+            .capture_connive_subject(crewer)
+            .expect("a live object must capture a snapshot")
+            .snapshot;
+        state.objects.get_mut(&crewer).unwrap().bump_incarnation();
+        let ctx = FilterContext::from_source_with_controller(vehicle, PlayerId(0));
+        let filter = crewed_filter(CrewRelation::CrewedSource);
+        assert!(
+            !super::matches_target_filter(&state, crewer, &filter, &ctx),
+            "reach guard: the live object has moved past the recorded incarnation"
+        );
+        assert!(
+            matches_target_filter_on_event_snapshot(&state, &snapshot, &filter, &ctx),
+            "the snapshot's captured incarnation crewed the Vehicle"
+        );
+    }
+
     #[test]
     fn exiled_by_source_matches_linked_objects() {
         use crate::types::game_state::{ExileLink, ExileLinkKind};
@@ -14433,6 +14739,85 @@ mod tests {
             &filter,
             source
         ));
+    }
+
+    /// CR 607.2a + CR 400.7: a snapshot entry names the object it captured. The
+    /// card matches while it stays in exile; once it leaves exile it no longer
+    /// matches, and it still does not match after it is exiled again, because
+    /// the card in exile is a new object. Checked for the trigger-snapshot arm
+    /// and for the live-link arm.
+    #[test]
+    fn exiled_by_source_does_not_match_a_card_exiled_again() {
+        let fixture = || {
+            let mut state = GameState::new_two_player(42);
+            let source = create_object(
+                &mut state,
+                CardId(1),
+                PlayerId(0),
+                "Source".into(),
+                Zone::Battlefield,
+            );
+            let card = create_object(
+                &mut state,
+                CardId(2),
+                PlayerId(1),
+                "Exiled Card".into(),
+                Zone::Exile,
+            );
+            (state, source, card)
+        };
+        let move_card = |state: &mut GameState, card: ObjectId, zone: Zone| {
+            let mut events = Vec::new();
+            crate::game::zones::move_to_zone(state, card, zone, &mut events);
+        };
+
+        // Trigger-snapshot arm: the trigger latched the card while it was in exile.
+        let (mut state, source, card) = fixture();
+        let mut trigger_source = state.objects[&source]
+            .snapshot_for_zone_change(source, Some(Zone::Battlefield), Zone::Battlefield)
+            .trigger_source_context
+            .expect("a battlefield object has a trigger source context");
+        trigger_source.linked_exile_snapshot =
+            vec![crate::game::exile_links::exiled_card_snapshot(&state, card)
+                .expect("the card is in exile")];
+        let matches_snapshot = |state: &GameState| {
+            super::matches_target_filter(
+                state,
+                card,
+                &TargetFilter::ExiledBySource,
+                &FilterContext::from_trigger_source(&trigger_source),
+            )
+        };
+        assert!(
+            matches_snapshot(&state),
+            "positive: the latched card in exile matches"
+        );
+        move_card(&mut state, card, Zone::Graveyard);
+        assert!(!matches_snapshot(&state), "the card left exile");
+        move_card(&mut state, card, Zone::Exile);
+        assert!(
+            !matches_snapshot(&state),
+            "CR 400.7: the card exiled again is a new object"
+        );
+
+        // Live-link arm (no trigger source): the link is pruned when the card
+        // leaves exile.
+        let (mut state, source, card) = fixture();
+        state.exile_links.push(crate::types::game_state::ExileLink {
+            exiled_id: card,
+            source_id: source,
+            kind: crate::types::game_state::ExileLinkKind::TrackedBySource,
+        });
+        assert!(
+            matches_target_filter(&state, card, &TargetFilter::ExiledBySource, source),
+            "positive: the linked card in exile matches"
+        );
+        move_card(&mut state, card, Zone::Graveyard);
+        move_card(&mut state, card, Zone::Exile);
+        assert!(
+            !matches_target_filter(&state, card, &TargetFilter::ExiledBySource, source),
+            "CR 400.7: the card exiled again is a new object"
+        );
     }
 
     #[test]
@@ -16313,6 +16698,72 @@ mod tests {
         let before = other.clone();
         assert!(bind_declaring_owner_authority(&mut other, PlayerId(0)));
         assert_eq!(other, before, "a complete unrelated owner stays untouched");
+    }
+
+    /// M10: boon holder re-anchoring reuses the shared traversal seam, so
+    /// nested descendants the old ad-hoc recursion missed —
+    /// `TrackedSetFiltered` filters, `DistinctFrom` references, `Typed`
+    /// properties, `Owned` props — bind the holder too, while
+    /// opponent-relative leaves (no singular form) stay untouched.
+    #[test]
+    fn boon_holder_reanchor_is_total_over_nested_filter_topology() {
+        use crate::types::identifiers::TrackedSetId;
+
+        let holder = PlayerId(1);
+        let bound = ControllerRef::SpecificPlayer { id: holder };
+
+        let mut bare = TargetFilter::Controller;
+        assert!(reanchor_filter_to_holder(&mut bare, holder));
+        assert_eq!(bare, TargetFilter::SpecificPlayer { id: holder });
+
+        // TrackedSetFiltered descendant the old recursion never entered.
+        let mut tracked = TargetFilter::TrackedSetFiltered {
+            id: TrackedSetId(0),
+            filter: Box::new(TargetFilter::Typed(
+                TypedFilter::creature().controller(ControllerRef::You),
+            )),
+            caused_by: None,
+        };
+        assert!(reanchor_filter_to_holder(&mut tracked, holder));
+        let TargetFilter::TrackedSetFiltered { filter, .. } = &tracked else {
+            unreachable!()
+        };
+        assert_eq!(
+            filter.as_ref(),
+            &TargetFilter::Typed(TypedFilter::creature().controller(bound.clone())),
+            "tracked-set descendants must re-anchor"
+        );
+
+        // DistinctFrom reference + Owned prop inside Typed.properties.
+        let mut propped = TargetFilter::Typed(TypedFilter::creature().properties(vec![
+            FilterProp::DistinctFrom {
+                reference: Box::new(TargetFilter::Controller),
+            },
+            FilterProp::Owned {
+                controller: ControllerRef::You,
+            },
+        ]));
+        assert!(reanchor_filter_to_holder(&mut propped, holder));
+        let TargetFilter::Typed(typed) = &propped else {
+            unreachable!()
+        };
+        assert_eq!(
+            typed.properties,
+            vec![
+                FilterProp::DistinctFrom {
+                    reference: Box::new(TargetFilter::SpecificPlayer { id: holder }),
+                },
+                FilterProp::Owned { controller: bound },
+            ],
+            "prop-nested You references must re-anchor"
+        );
+
+        // Opponent-relative leaves have no singular form: untouched.
+        let mut opponent =
+            TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::Opponent));
+        let before = opponent.clone();
+        assert!(reanchor_filter_to_holder(&mut opponent, holder));
+        assert_eq!(opponent, before);
     }
 
     /// The chosen-type relation rewrites a property wherever the typed filter
@@ -20984,6 +21435,7 @@ mod characteristic_read_classification_tests {
             | FilterProp::Untapped
             | FilterProp::IsSaddled
             | FilterProp::SaddledSource
+            | FilterProp::CrewedThisTurn { .. }
             | FilterProp::ConvokedSource
             | FilterProp::HasHasteOrControlledSinceTurnBegan
             | FilterProp::WithKeyword { .. }

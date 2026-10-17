@@ -380,9 +380,19 @@ pub(crate) enum ContinuationAst {
     ManaGrant {
         grants: Vec<crate::types::mana::ManaSpellGrant>,
     },
+    /// CR 608.2c + CR 109.2: "If an ability of a <type list> is countered this
+    /// way, that permanent loses all abilities for as long as ..." — patches
+    /// `source_rider = Some(CounterSourceRider::LosesAbilities { .. })` on the
+    /// preceding `Effect::Counter` (Tishana's Tidebinder). `source_filter` is
+    /// the parsed type list (`None` for the untyped "a permanent's ability").
     CounterSourceStatic {
         source_static: Box<StaticDefinition>,
+        source_filter: Option<Box<TargetFilter>>,
     },
+    /// CR 608.2c: the Tidebinder-shaped rider clause whose type list cannot be
+    /// read. Lowers the preceding `Effect::Counter` to a strict-failure marker
+    /// (never an unrestricted rider). `fragment` is the printed clause.
+    CounterSourceRiderUnreadable { fragment: String },
     /// CR 701.8: "If a permanent's ability is countered this way, destroy that
     /// permanent." — patches `source_rider = Some(CounterSourceRider::Destroy)`
     /// on the preceding `Effect::Counter` (Teferi's Response, Green Slime).
@@ -872,6 +882,16 @@ pub(crate) enum ImperativeFamilyAst {
     /// Ice Cauldron's "note the type AND AMOUNT..." sibling is intentionally
     /// left unmatched (see `parse_imperative_family_ast`).
     NoteManaSpent,
+    /// Digital-only Alchemy (no CR entry): "note <quantity>" — record a
+    /// number for the resolving player ("note its power", Dragonborn
+    /// Immolator; "note that excess damage", Mephit's Enthusiasm / Molten
+    /// Impact), overwriting any previous note. Read back by
+    /// `QuantityRef::NotedNumber`. The "that excess damage" demonstrative is
+    /// licensed at parse time by trigger-context (see
+    /// `parse_note_number_clause`), not by a sibling condition.
+    NoteNumber {
+        value: QuantityExpr,
+    },
     /// CR 701.40a: Manifest the top card(s) of library.
     Manifest {
         target: TargetFilter,
@@ -3080,6 +3100,7 @@ pub(crate) fn duration_governs(effect: &Effect) -> bool {
         | Effect::BecomeSaddled { .. }
         | Effect::SetClassLevel { .. }
         | Effect::CreateDelayedTrigger { .. }
+        | Effect::CreateBoon { .. }
         | Effect::AddTargetReplacement { .. }
         | Effect::ReduceNextSpellCost { .. }
         | Effect::GrantNextSpellAbility { .. }
@@ -3121,6 +3142,7 @@ pub(crate) fn duration_governs(effect: &Effect) -> bool {
         | Effect::ChooseFromZone { .. }
         | Effect::RememberCard { .. }
         | Effect::NoteManaSpent
+        | Effect::NoteNumber { .. }
         | Effect::ForEachCategory { .. }
         | Effect::ChooseObjectsIntoTrackedSet { .. }
         | Effect::ChooseAndSacrificeRest { .. }
@@ -3132,6 +3154,7 @@ pub(crate) fn duration_governs(effect: &Effect) -> bool {
         | Effect::ExileFromTopUntil { .. }
         | Effect::RevealUntil { .. }
         | Effect::Discover { .. }
+        | Effect::PhysicalContest { .. }
         | Effect::Heist { .. }
         | Effect::HeistExile
         | Effect::Cascade
@@ -3306,7 +3329,7 @@ fn masked_outer_bound_fragment(duration: &Option<Duration>) -> Option<String> {
     }
 }
 
-fn normalize_play_from_exile_duration(duration: Duration) -> Duration {
+pub(crate) fn normalize_play_from_exile_duration(duration: Duration) -> Duration {
     match duration {
         duration if is_play_from_exile_lifetime_duration(&duration) => {
             // CR 400.7i + CR 611.2a: exile-play permissions persist until the
@@ -3482,6 +3505,7 @@ mod duration_distribution_tests_7923 {
             // play-from-exile construction in `oracle_effect/mod.rs`.
             mode: CardPlayMode::Cast,
             alt_ability_cost: None,
+            without_paying_mana_cost: false,
             granted_to: crate::types::player::PlayerId(0),
             frequency: crate::types::statics::CastFrequency::Unlimited,
             source_id: None,
