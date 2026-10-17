@@ -12011,6 +12011,200 @@ fn static_boast_abilities_activate_as_instant() {
     );
 }
 
+/// CR 606.3: Oath of Teferi line 2 (verbatim) lowers to the shared
+/// `ModifyActivationLimit` mode with the `"loyalty"` keyword convention (the
+/// Eidolon cost-gate spelling), scoped to planeswalkers its controller
+/// controls. Reverting the `dispatch.rs` call site yields `None` here.
+#[test]
+fn static_oath_of_teferi_loyalty_activation_limit() {
+    let def = parse_static_line(
+        "You may activate the loyalty abilities of planeswalkers you control twice each turn rather than only once.",
+    )
+    .unwrap();
+    assert_eq!(
+        def.mode,
+        StaticMode::ModifyActivationLimit {
+            keyword: "loyalty".to_string(),
+            new_limit: 2,
+        }
+    );
+    assert_eq!(
+        def.affected,
+        Some(TargetFilter::Typed(
+            TypedFilter::new(TypeFilter::Planeswalker).controller(ControllerRef::You),
+        ))
+    );
+}
+
+/// CR 606.3 + CR 201.5 + CR 201.5c: Urza, Planeswalker's self-scoped sibling — the
+/// production pipeline normalizes "Urza" to `~` before the static line parses,
+/// so the unit shape uses `~` directly and expects `SelfRef`. Runtime scope is
+/// pinned by the `oath_of_teferi` integration seam test, not here.
+#[test]
+fn static_urza_planeswalker_loyalty_activation_limit_is_self_scoped() {
+    let def = parse_static_line(
+        "You may activate the loyalty abilities of ~ twice each turn rather than only once.",
+    )
+    .unwrap();
+    assert_eq!(
+        def.mode,
+        StaticMode::ModifyActivationLimit {
+            keyword: "loyalty".to_string(),
+            new_limit: 2,
+        }
+    );
+    assert_eq!(def.affected, Some(TargetFilter::SelfRef));
+}
+
+/// CR 606.3: the count axis composes (`twice`/`thrice`/N) — no printed card
+/// carries the thrice/N-time loyalty shape yet, so these are labeled
+/// combinator tests, not card tests.
+#[test]
+fn static_loyalty_activation_limit_count_axis_composes() {
+    let thrice = parse_static_line(
+        "You may activate the loyalty abilities of planeswalkers you control thrice each turn rather than only once.",
+    )
+    .unwrap();
+    assert_eq!(
+        thrice.mode,
+        StaticMode::ModifyActivationLimit {
+            keyword: "loyalty".to_string(),
+            new_limit: 3,
+        }
+    );
+    let n = parse_static_line(
+        "You may activate the loyalty abilities of planeswalkers you control 4 times each turn rather than only once.",
+    )
+    .unwrap();
+    assert_eq!(
+        n.mode,
+        StaticMode::ModifyActivationLimit {
+            keyword: "loyalty".to_string(),
+            new_limit: 4,
+        }
+    );
+}
+
+/// Synthetic numeric grammar controls: representable nonzero limits retain
+/// their exact value; zero and overflowing limits keep honest unsupported output.
+#[test]
+fn static_loyalty_activation_limit_numeric_bounds_are_honest() {
+    for limit in [1u8, 4, 255] {
+        let text = format!(
+            "You may activate the loyalty abilities of planeswalkers you control {limit} times each turn rather than only once."
+        );
+        let parsed = crate::parser::oracle::parse_oracle_text(
+            &text,
+            "Numeric Limit",
+            &[],
+            &["Enchantment".to_string()],
+            &[],
+        );
+        assert!(
+            parsed.statics.iter().any(|definition| matches!(
+                &definition.mode,
+                StaticMode::ModifyActivationLimit { keyword, new_limit }
+                    if keyword == "loyalty" && *new_limit == limit
+            )),
+            "limit {limit} must retain its exact value: {parsed:?}"
+        );
+        assert!(
+            !parsed
+                .abilities
+                .iter()
+                .any(|ability| matches!(ability.effect.as_ref(), Effect::Unimplemented { .. })),
+            "representable limit {limit} must parse completely: {parsed:?}"
+        );
+    }
+
+    for limit in [0, 256, 257] {
+        let text = format!(
+            "You may activate the loyalty abilities of planeswalkers you control {limit} times each turn rather than only once."
+        );
+        let parsed = crate::parser::oracle::parse_oracle_text(
+            &text,
+            "Numeric Limit",
+            &[],
+            &["Enchantment".to_string()],
+            &[],
+        );
+        assert!(
+            parsed
+                .abilities
+                .iter()
+                .any(|ability| matches!(ability.effect.as_ref(), Effect::Unimplemented { .. })),
+            "unfaithful limit {limit} must remain unsupported: {parsed:?}"
+        );
+        assert!(
+            !parsed.statics.iter().any(|definition| matches!(
+                &definition.mode,
+                StaticMode::ModifyActivationLimit { keyword, .. } if keyword == "loyalty"
+            )),
+            "unfaithful limit {limit} must not produce a loyalty cap: {parsed:?}"
+        );
+    }
+}
+
+/// CR 606.3: routing claims exactly its class. Kaito, Dancing Shadow's line is
+/// trigger-led ("Whenever ..."), so the full pipeline must keep it a trigger
+/// and produce NO `ModifyActivationLimit` static — the trigger slot precedes
+/// the static slot and the new routing entry must not steal the line.
+#[test]
+fn static_routing_does_not_steal_trigger_led_loyalty_line() {
+    let parsed = crate::parser::oracle::parse_oracle_text(
+        "Whenever one or more creatures you control deal combat damage to a player, you may return one of them to its owner's hand. If you do, you may activate loyalty abilities of Kaito twice this turn rather than only once.",
+        "Kaito, Dancing Shadow",
+        &[],
+        &["Planeswalker".to_string()],
+        &[],
+    );
+    assert!(
+        !parsed.triggers.is_empty(),
+        "the trigger-led line must stay a trigger, got {:?}",
+        parsed.triggers
+    );
+    assert!(
+        !parsed.statics.iter().any(|d| matches!(
+            &d.mode,
+            StaticMode::ModifyActivationLimit { keyword, .. } if keyword == "loyalty"
+        )),
+        "no loyalty activation-limit static may be claimed from a trigger-led line, got {:?}",
+        parsed.statics
+    );
+}
+
+/// CR 606.3: scope wording selects mechanism. A permanent-led "twice THIS turn"
+/// loyalty sentence is a one-shot SET grant, not a continuous static — the
+/// grammar must fail closed so it keeps today's honest `Unimplemented`, and the
+/// `Unimplemented` assertion below is the reach-guard against a vacuous pass.
+#[test]
+fn static_loyalty_activation_limit_rejects_this_turn_scope() {
+    let parsed = crate::parser::oracle::parse_oracle_text(
+        "You may activate the loyalty abilities of planeswalkers you control twice this turn rather than only once.",
+        "Test Card",
+        &[],
+        &["Enchantment".to_string()],
+        &[],
+    );
+    assert!(
+        parsed
+            .abilities
+            .iter()
+            .any(|a| matches!(a.effect.as_ref(), Effect::Unimplemented { .. })),
+        "the one-shot scope must stay an honest Unimplemented, got abilities={:?} statics={:?}",
+        parsed.abilities,
+        parsed.statics
+    );
+    assert!(
+        !parsed.statics.iter().any(|d| matches!(
+            &d.mode,
+            StaticMode::ModifyActivationLimit { keyword, .. } if keyword == "loyalty"
+        )),
+        "no permanent static may be claimed from a this-turn scope, got {:?}",
+        parsed.statics
+    );
+}
+
 // CR 400.7: Crew Captain — "This creature has indestructible as long as it
 // entered this turn." For a SelfRef static the bound pronoun "it" co-refers with
 // the source, so `rewrite_self_pronoun_subject` on the SelfRef path normalizes
