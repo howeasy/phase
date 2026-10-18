@@ -22708,18 +22708,14 @@ mod tests {
     /// instead of placing one counter (BASE: `Fixed 1`).
     #[test]
     fn enters_with_numberless_count_requires_equal_to_quantity() {
-        for (card, line) in [
-            (
-                "Master Biomancer",
-                "Each other creature you control enters with a number of additional +1/+1 counters on it equal to this creature's power and as a Mutant in addition to its other types.",
-            ),
-        ] {
-            assert!(
-                parse_replacement_line(line, card).is_none(),
-                "{card}: an unreadable equal-to count must fail closed, got {:?}",
-                parse_replacement_line(line, card)
-            );
-        }
+        let master_biomancer = parse_replacement_line(
+            "Each other creature you control enters with a number of additional +1/+1 counters on it equal to this creature's power and as a Mutant in addition to its other types.",
+            "Master Biomancer",
+        );
+        assert!(
+            master_biomancer.is_none(),
+            "Master Biomancer: an unreadable equal-to count must fail closed, got {master_biomancer:?}"
+        );
 
         // Reach guards: readable equal-to quantities still parse.
         let gyrus = parse_replacement_line(
