@@ -66521,6 +66521,7 @@ fn effect_filter_has_chosen_color(effect: &Effect) -> bool {
         | Effect::EndCombatPhase
         | Effect::Vote { .. }
         | Effect::SeparateIntoPiles { .. }
+        | Effect::ExileTopCardContest { .. }
         | Effect::SwitchPT { .. }
         | Effect::CopySpell { .. }
         | Effect::EpicCopy { .. }
@@ -66644,6 +66645,7 @@ fn effect_filter_has_chosen_color(effect: &Effect) -> bool {
         | Effect::ExileFromTopUntil { .. }
         | Effect::RevealUntil { .. }
         | Effect::Discover { .. }
+        | Effect::PhysicalContest { .. }
         | Effect::Heist { .. }
         | Effect::HeistExile
         | Effect::Cascade
@@ -85955,6 +85957,125 @@ mod bare_pronoun_after_object_creation_tests {
             grants[0]
         );
     }
+
+    fn trigger_json(text: &str) -> serde_json::Value {
+        let parsed = parse_oracle_text(text, "Row", &[], &["Creature".to_string()], &[]);
+        serde_json::to_value(&parsed.triggers).unwrap()
+    }
+
+    /// CR 111.3: a "They have" sentence after a trigger's token clause is the tokens' own text,
+    /// whoever the trigger's event player is (Rapacious One).
+    #[test]
+    fn they_have_after_a_triggered_token_clause_is_the_tokens_own_ability() {
+        let parsed = parse_oracle_text(
+            "Trample\nWhenever this creature deals combat damage to a player, create that many 0/1 colorless Eldrazi Spawn creature tokens. They have \"Sacrifice this token: Add {C}.\"",
+            "Rapacious One",
+            &["trample".to_string()],
+            &["Creature".to_string()],
+            &["Eldrazi".to_string(), "Drone".to_string()],
+        );
+        let json = serde_json::to_value(&parsed.triggers).unwrap();
+        let (mut tokens, mut grants) = (Vec::new(), Vec::new());
+        effect_nodes(&json, "Token", &mut tokens);
+        effect_nodes(&json, "GenericEffect", &mut grants);
+        assert_eq!(tokens.len(), 1, "reach guard: the Token node: {json}");
+        let statics = &tokens[0]["static_abilities"];
+        assert_eq!(statics.as_array().map_or(0, Vec::len), 1, "{}", tokens[0]);
+        assert_eq!(statics[0]["affected"]["type"], "SelfRef", "{}", tokens[0]);
+        assert_eq!(
+            statics[0]["modifications"][0]["type"], "GrantAbility",
+            "{}",
+            tokens[0]
+        );
+        assert!(grants.is_empty(), "{json}");
+        assert!(!json.to_string().contains("TriggeringPlayer"), "{json}");
+    }
+
+    /// CR 608.2c: "They" as the object of a grant reads the tokens the chain just created, under
+    /// an event player and under a targeted player alike.
+    #[test]
+    fn they_gain_after_a_token_clause_reads_the_tokens_under_a_player_scoped_chain() {
+        for json in [
+            trigger_json(
+                "Whenever this creature deals combat damage to a player, create two 1/1 red Goblin creature tokens. They gain haste until end of turn.",
+            ),
+            chain_json(
+                "Target player creates two 1/1 white Soldier creature tokens. They gain haste until end of turn.",
+            ),
+        ] {
+            let (mut tokens, mut grants) = (Vec::new(), Vec::new());
+            effect_nodes(&json, "Token", &mut tokens);
+            effect_nodes(&json, "GenericEffect", &mut grants);
+            assert_eq!(tokens.len(), 1, "reach guard: the Token node: {json}");
+            assert_eq!(grants.len(), 1, "reach guard: the grant node: {json}");
+            assert_eq!(
+                grants[0]["static_abilities"][0]["affected"]["type"], "LastCreated",
+                "{}",
+                grants[0]
+            );
+            assert_eq!(grants[0]["duration"], "UntilEndOfTurn", "{}", grants[0]);
+        }
+    }
+
+    /// CR 701.9a: only a player discards, so "They" as the actor stays the damaged player after a
+    /// token clause.
+    #[test]
+    fn they_as_an_actor_after_a_token_clause_stays_the_event_player() {
+        let json = trigger_json(
+            "Whenever this creature deals combat damage to a player, create a Treasure token. They discard a card.",
+        );
+        let (mut tokens, mut discards) = (Vec::new(), Vec::new());
+        effect_nodes(&json, "Token", &mut tokens);
+        effect_nodes(&json, "Discard", &mut discards);
+        assert_eq!(tokens.len(), 1, "reach guard: the Token node: {json}");
+        assert_eq!(discards.len(), 1, "reach guard: the Discard node: {json}");
+        assert_eq!(
+            discards[0]["target"],
+            serde_json::json!({ "type": "TriggeringPlayer" }),
+            "{json}"
+        );
+    }
+
+    /// CR 119.3: with nothing created, "They" as the object of a restriction is the damaged
+    /// player.
+    #[test]
+    fn they_as_a_grant_object_with_nothing_created_stays_the_event_player() {
+        let json = trigger_json(
+            "Whenever this creature deals combat damage to a player, you draw a card. They can't gain life this turn.",
+        );
+        let (mut tokens, mut grants) = (Vec::new(), Vec::new());
+        effect_nodes(&json, "Token", &mut tokens);
+        effect_nodes(&json, "GenericEffect", &mut grants);
+        assert!(tokens.is_empty(), "{json}");
+        assert_eq!(grants.len(), 1, "reach guard: the grant node: {json}");
+        assert_eq!(
+            grants[0]["static_abilities"][0]["affected"]["type"], "TriggeringPlayer",
+            "{}",
+            grants[0]
+        );
+    }
+
+    /// CR 608.2c: an "each …" population named after the token clause is the nearer antecedent
+    /// of "They".
+    #[test]
+    fn they_after_a_token_clause_and_a_mass_clause_reads_the_mass_population() {
+        let json = trigger_json(
+            "Whenever you cast a white spell, create a 1/1 white Soldier creature token. Put a +1/+1 counter on each legendary creature you control. They gain vigilance until end of turn.",
+        );
+        let (mut tokens, mut counters, mut grants) = (Vec::new(), Vec::new(), Vec::new());
+        effect_nodes(&json, "Token", &mut tokens);
+        effect_nodes(&json, "PutCounterAll", &mut counters);
+        effect_nodes(&json, "GenericEffect", &mut grants);
+        assert_eq!(tokens.len(), 1, "reach guard: the Token node: {json}");
+        assert_eq!(counters.len(), 1, "reach guard: the mass node: {json}");
+        assert_eq!(grants.len(), 1, "reach guard: the grant node: {json}");
+        assert_eq!(counters[0]["target"]["type"], "Typed", "{}", counters[0]);
+        assert_eq!(
+            grants[0]["static_abilities"][0]["affected"], counters[0]["target"],
+            "{}",
+            grants[0]
+        );
+    }
 }
 
 const FINALE_OF_PROMISE: &str = "You may cast up to one target instant card and/or up to one target sorcery card from your graveyard each with mana value X or less without paying their mana costs. If a spell cast this way would be put into your graveyard, exile it instead. If X is 10 or more, copy each of those spells twice. You may choose new targets for the copies.";
@@ -86196,6 +86317,69 @@ fn a_mana_rider_conjunct_must_end_its_sentence() {
     assert!(!super::sequence::starts_bare_and_clause(&format!(
         "{bare}. draw a card"
     )));
+}
+
+/// Every effect in a parsed chain, following `sub_ability` links.
+fn contest_chain_effects(def: &AbilityDefinition) -> Vec<&Effect> {
+    let mut effects = vec![&*def.effect];
+    let mut next = def.sub_ability.as_deref();
+    while let Some(sub) = next {
+        effects.push(&*sub.effect);
+        next = sub.sub_ability.as_deref();
+    }
+    effects
+}
+
+fn contest_clause_effects(text: &str) -> Vec<Effect> {
+    contest_chain_effects(&parse_effect_chain(text, AbilityKind::Spell))
+        .into_iter()
+        .cloned()
+        .collect()
+}
+
+fn has_contest(effects: &[Effect]) -> bool {
+    effects
+        .iter()
+        .any(|effect| matches!(effect, Effect::PhysicalContest { .. }))
+}
+
+fn has_unimplemented(effects: &[Effect]) -> bool {
+    effects
+        .iter()
+        .any(|effect| matches!(effect, Effect::Unimplemented { .. }))
+}
+
+/// A contestant the ability has bound — a relation to a declared object target, or an
+/// anaphor to a player slot an earlier clause declared — becomes a contest.
+#[test]
+fn a_physical_contest_with_a_bound_contestant_parses() {
+    let by_relation =
+        contest_clause_effects("You and target creature's controller have a staring contest.");
+    assert!(has_contest(&by_relation), "{by_relation:?}");
+    assert!(!has_unimplemented(&by_relation), "{by_relation:?}");
+
+    let by_anaphor = contest_clause_effects(
+        "Choose target opponent and target creature they control. You and that player have a breath-holding contest.",
+    );
+    assert!(has_contest(&by_anaphor), "{by_anaphor:?}");
+    assert!(!has_unimplemented(&by_anaphor), "{by_anaphor:?}");
+}
+
+/// CR 115.1 + CR 608.2c: an unbound player population names no particular player, and
+/// the resolver would fall back to the controller (the contest would then skip itself).
+/// It is declined — surfacing as an `Unimplemented` diagnostic — rather than guessed.
+#[test]
+fn a_physical_contest_with_an_unbound_contestant_is_declined() {
+    for text in [
+        "You and an opponent have a staring contest.",
+        "You and each opponent have a staring contest.",
+        "You and your opponents have a breath-holding contest.",
+    ] {
+        let effects = contest_clause_effects(text);
+        assert!(!has_contest(&effects), "{text}: {effects:?}");
+        // Reach-guard: the clause was seen and reported, not silently dropped.
+        assert!(has_unimplemented(&effects), "{text}: {effects:?}");
+    }
 }
 
 // ── One count position, fail closed (`oracle_util::parse_count_slot`) ──────
