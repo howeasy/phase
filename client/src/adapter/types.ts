@@ -2165,10 +2165,11 @@ export interface TriggerContextDisplay {
   player?: PlayerId;
 }
 
-/** Typed form of `StackEntryDisplay.kind_label` for ability entries, so the
- * display layer localizes the label without parsing the English text. */
+/** Mirrors `engine::game::derived_views::StackAbilityKindView`: the typed
+ * template behind `kind_label`, so the display layer localizes the ability
+ * label without parsing English text. */
 export type StackAbilityKindView =
-  | { type: "Activated"; data: { number?: number | null } }
+  | { type: "Activated"; data: { number?: number | null } } // older engines send null; current omits the key
   | { type: "Triggered" };
 
 export interface StackEntryDisplay {
@@ -2848,7 +2849,7 @@ export type WaitingFor =
   | { type: "ChooseFromZoneOpponentChooser"; data: { player: PlayerId; candidates: PlayerId[]; ability: unknown; purpose?: "Ordinary" | "BindReciprocalConsume" | "PerPlayerChoiceOrder" | "SubstituteChooser" } }
   | { type: "ChooseAnnouncingOpponent"; data: { player: PlayerId; candidates: PlayerId[]; choice_index: number; choice_count: number; target_type?: CoreType; pending_cast: unknown } }
   | { type: "ChooseGiftRecipient"; data: { player: PlayerId; candidates: PlayerId[]; gift_kind?: { type: string }; pending_cast: unknown } }
-  | { type: "ClashCardPlacement"; data: { player: PlayerId; card: ObjectId; remaining: [PlayerId, ObjectId][] } }
+  | { type: "ClashCardPlacement"; data: { player: PlayerId; card: ObjectId; remaining: [PlayerId, ObjectId][]; bottom_cards?: ObjectId[] } }
   // Eye to Eye / Mouth to Mouth: a real-time sustained-clicking contest. Nobody submits a
   // GameAction here — the host (server, or the local driver) stamps clicks and ticks the
   // engine's state machine. See `ContestState`.
