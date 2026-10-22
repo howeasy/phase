@@ -1381,6 +1381,7 @@ pub fn trigger_definition_is_cast_stable_for_pre_cast(definition: &TriggerDefini
         description: _,
         constraint: None,
         condition,
+        attack_cost_condition: None,
         counter_filter: _,
         saga_chapter: _,
         unless_pay: None,
@@ -2674,6 +2675,7 @@ pub(crate) fn static_condition_uses_unspent_mana(condition: &StaticCondition) ->
         | StaticCondition::DuringOpponentsTurn
         | StaticCondition::SourceEnteredThisTurn
         | StaticCondition::SourceHasDealtDamage
+        | StaticCondition::SourceExertedThisTurn
         | StaticCondition::WasCast { .. }
         | StaticCondition::IsRingBearer
         | StaticCondition::RingLevelAtLeast { .. }
@@ -3640,6 +3642,7 @@ fn filter_prop_recipient_read(prop: &FilterProp) -> RecipientRead {
         | FilterProp::NotColor { .. }
         | FilterProp::NotSupertype { .. }
         | FilterProp::Suspected
+        | FilterProp::Prepared
         | FilterProp::Renowned
         | FilterProp::Goaded
         | FilterProp::ToughnessGTPower
@@ -11218,6 +11221,7 @@ mod tests {
             counters: HashMap::new(),
             tapped: false,
             is_suspected: false,
+            was_prepared: false,
             attachments: Vec::new(),
         };
 
@@ -21963,6 +21967,7 @@ mod tests {
                 counters: HashMap::new(),
                 tapped: false,
                 is_suspected: false,
+                was_prepared: false,
                 attachments: Vec::new(),
             },
         );
@@ -22029,6 +22034,7 @@ mod tests {
                 counters: HashMap::new(),
                 tapped: false,
                 is_suspected: false,
+                was_prepared: false,
                 attachments: Vec::new(),
             },
             incarnation: 0,
@@ -22180,6 +22186,7 @@ mod tests {
                 counters: HashMap::new(),
                 tapped: false,
                 is_suspected: false,
+                was_prepared: false,
                 attachments: Vec::new(),
             },
             incarnation: 0,
@@ -22262,6 +22269,7 @@ mod tests {
                 counters: HashMap::new(),
                 tapped: false,
                 is_suspected: false,
+                was_prepared: false,
                 attachments: Vec::new(),
             },
             incarnation: 0,
@@ -22342,6 +22350,7 @@ mod tests {
                 counters: HashMap::new(),
                 tapped: false,
                 is_suspected: false,
+                was_prepared: false,
                 attachments: Vec::new(),
             },
             incarnation: 0,
@@ -22408,6 +22417,7 @@ mod tests {
                 counters: HashMap::new(),
                 tapped: false,
                 is_suspected: false,
+                was_prepared: false,
                 attachments: Vec::new(),
             },
             incarnation: 0,
@@ -22471,6 +22481,7 @@ mod tests {
                 counters: HashMap::new(),
                 tapped: false,
                 is_suspected: false,
+                was_prepared: false,
                 attachments: Vec::new(),
             },
             incarnation: 0,
@@ -22527,6 +22538,7 @@ mod tests {
                 counters: HashMap::new(),
                 tapped: false,
                 is_suspected: false,
+                was_prepared: false,
                 attachments: Vec::new(),
             },
             incarnation: 0,
@@ -22606,6 +22618,7 @@ mod tests {
                 counters: HashMap::new(),
                 tapped: false,
                 is_suspected: false,
+                was_prepared: false,
                 attachments: Vec::new(),
             },
             incarnation: 0,
@@ -23315,6 +23328,7 @@ mod tests {
                 counters: HashMap::new(),
                 tapped: false,
                 is_suspected: false,
+                was_prepared: false,
                 attachments: Vec::new(),
             },
         );
@@ -23689,6 +23703,7 @@ mod tests {
             .act(GameAction::ActivateAbility {
                 source_id: greater_good,
                 ability_index,
+                payment_mode: crate::types::game_state::CastPaymentMode::Auto,
             })
             .expect("activation must succeed");
 
@@ -24137,6 +24152,7 @@ mod tests {
                     chosen_attributes: vec![],
                     tapped: false,
                     is_suspected: false,
+                    was_prepared: false,
                     attachments: Vec::new(),
                 },
             );

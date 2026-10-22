@@ -4555,6 +4555,7 @@ fn redact_lki_snapshot(snapshot: &mut crate::types::game_state::LKISnapshot) {
         counters,
         tapped: _,
         is_suspected: _,
+        was_prepared: _,
         attachments,
     } = snapshot;
     *name = HIDDEN_CARD_NAME.to_string();
@@ -6643,6 +6644,7 @@ mod tests {
                     source_id: paid,
                     counter_type: None,
                     available: Vec::new(),
+                    max_total: None,
                     pending_effect: effect(),
                 }),
             ),
@@ -7440,6 +7442,7 @@ mod tests {
             activation_cost_committed: false,
             alt_cost_grant_source: None,
             activation_trigger_collection: None,
+            activation_phyrexian_intent: None,
         })
     }
 
@@ -7487,6 +7490,7 @@ mod tests {
             ability_index: None,
             rules_execution_node: None,
             ability_snapshot: None,
+            announced_source_incarnation: None,
             color_override: None,
             resume: ManaAbilityResume::Priority,
             cost_move_resume: None,
