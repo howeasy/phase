@@ -6244,7 +6244,7 @@ fn parse_cast_enters_with_prefix(norm_lower: &str) -> Option<CastEntersWithShape
             (
                 rider,
                 parse_self_exile_from_graveyard(instruction)
-                    .map(CastEntersWithPrelude::SelfExile)
+                    .map(|instruction| CastEntersWithPrelude::SelfExile(Box::new(instruction)))
                     .unwrap_or(CastEntersWithPrelude::Unsupported),
             )
         };
@@ -6300,7 +6300,7 @@ struct CastEntersWithShape<'a> {
 /// An invalid prelude must not fall through and publish a partial instruction.
 enum CastEntersWithPrelude {
     None,
-    SelfExile(AbilityDefinition),
+    SelfExile(Box<AbilityDefinition>),
     Unsupported,
 }
 
@@ -6390,7 +6390,7 @@ fn parse_whenever_you_cast_enters_with(
     let (tapped, rest) = rider?;
     let prelude = match prelude {
         CastEntersWithPrelude::None => None,
-        CastEntersWithPrelude::SelfExile(instruction) => Some(instruction),
+        CastEntersWithPrelude::SelfExile(instruction) => Some(*instruction),
         CastEntersWithPrelude::Unsupported => return None,
     };
 
