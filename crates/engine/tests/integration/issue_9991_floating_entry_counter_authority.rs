@@ -266,7 +266,7 @@ fn r5_preservation_archaic_uses_colors_spent_on_the_entrant() {
 const DARK: &str = "Each opponent sacrifices a creature or planeswalker of their choice, then discards a card. You return a creature or planeswalker card from your graveyard to your hand, then draw a card.\nWhen you cast a Bolas planeswalker spell, exile this card from your graveyard. That planeswalker enters with an additional loyalty counter on it.";
 const BOLAS: &str = "Nicol Bolas has all loyalty abilities of all other planeswalkers on the battlefield.\n[+1]: You draw a card. Each opponent exiles a card from their hand or a permanent they control.\n[−3]: Destroy target creature or planeswalker.\n[−8]: Each opponent who doesn't control a legendary creature or planeswalker loses the game.";
 const CHANDRA: &str = "[+1]: Exile the top card of your library. You may cast that card. If you don't, Chandra deals 2 damage to each opponent.\n[+1]: Add {R}{R}.\n[−3]: Chandra deals 4 damage to target creature.\n[−7]: You get an emblem with \"Whenever you cast a spell, this emblem deals 5 damage to any target.\"";
-const CREMATE: &str = "Exile target card from a graveyard.\nDraw a card.";
+const RECOLLECT: &str = "Return target card from your graveyard to your hand.";
 const STIFLE: &str =
     "Counter target activated or triggered ability. (Mana abilities can't be targeted.)";
 const LEYLINE: &str = "If this card is in your opening hand, you may begin the game with it on the battlefield.\nYou may cast spells as though they had flash.";
@@ -583,39 +583,61 @@ fn dark_intimations_uses_the_graveyard_owners_cast_trigger() {
 
 #[test]
 fn dark_intimations_source_departure_does_not_gate_the_rider() {
-    for exile_source_in_response in [false, true] {
+    for return_source_in_response in [false, true] {
         let mut scenario = GameScenario::new();
         scenario.at_phase(Phase::PreCombatMain);
+        scenario.add_enchantment_from_oracle(P0, "Leyline of Anticipation", LEYLINE);
         let dark = add_dark(&mut scenario, P0, Zone::Graveyard);
         let walker = add_walker(&mut scenario, P0, true);
-        let cremate = scenario
-            .add_spell_to_hand_from_oracle(P0, "Cremate", true, CREMATE)
+        let recollect = scenario
+            .add_spell_to_hand_from_oracle(P0, "Recollect", false, RECOLLECT)
             .with_mana_cost(ManaCost::Cost {
-                shards: vec![ManaCostShard::Black],
-                generic: 0,
+                shards: vec![ManaCostShard::Green],
+                generic: 2,
             })
             .id();
-        scenario.add_card_to_library_top(P0, "Cremate draw");
-        fund(&mut scenario, P0, 2);
+        scenario.with_mana_pool(
+            P0,
+            [
+                ManaType::Blue,
+                ManaType::Black,
+                ManaType::Black,
+                ManaType::Black,
+                ManaType::Red,
+                ManaType::Green,
+                ManaType::Colorless,
+                ManaType::Colorless,
+            ]
+            .into_iter()
+            .map(|kind| ManaUnit::new(kind, ObjectId(0), false, vec![]))
+            .collect(),
+        );
         let mut runner = scenario.build();
         runner.cast(walker).commit();
         let trigger = queued_dark_trigger(&runner, dark, P0);
-        if exile_source_in_response {
-            runner.cast(cremate).target_object(dark).commit();
+        if return_source_in_response {
+            runner.cast(recollect).target_object(dark).commit();
             runner.resolve_top();
-            assert_eq!(runner.state().objects[&dark].zone, Zone::Exile);
+            assert_eq!(runner.state().objects[&dark].zone, Zone::Hand);
             assert!(runner.state().stack.iter().any(|entry| entry.id == trigger));
         } else {
             assert_eq!(runner.state().objects[&dark].zone, Zone::Graveyard);
         }
         runner.resolve_top();
-        // CR 113.7a + CR 609.3: failure to exile the departed source does not
-        // prevent the independent install; the no-response control exiles it.
-        assert_eq!(runner.state().objects[&dark].zone, Zone::Exile);
+        // CR 400.7 + CR 609.3: the returned card is not the graveyard object
+        // the trigger could exile. It stays in hand while the rider installs;
+        // the no-response control still exiles the original graveyard source.
+        let expected_source_zone = if return_source_in_response {
+            Zone::Hand
+        } else {
+            Zone::Exile
+        };
+        assert_eq!(runner.state().objects[&dark].zone, expected_source_zone);
         assert_eq!(runner.state().objects[&walker].zone, Zone::Stack);
         assert_eq!(runner.state().pending_damage_replacements.len(), 1);
         runner.advance_until_stack_empty();
         assert_loyalty(runner.state(), walker, 5);
+        assert_eq!(runner.state().objects[&dark].zone, expected_source_zone);
         assert_finished(runner.state());
     }
 }
@@ -669,21 +691,22 @@ fn dark_intimations_additional_loyalty_is_doubled_as_part_of_entry() {
         let walker = add_walker(&mut scenario, P0, true);
         fund(&mut scenario, P0, 1);
         let mut runner = scenario.build();
-        runner.cast(walker).resolve();
-        for _ in 0..8 {
-            match runner.state().waiting_for {
-                WaitingFor::ReplacementChoice { player, .. } => {
-                    assert_eq!(player, P0);
-                    runner
-                        .act(GameAction::ChooseReplacement { index: 0 })
-                        .unwrap();
-                }
-                WaitingFor::Priority { .. } if !runner.state().stack.is_empty() => {
-                    runner.resolve_top();
-                }
-                _ => break,
-            }
-        }
+        let outcome = runner.cast(walker).resolve();
+        // CR 306.5b + CR 122.6: both the four printed loyalty counters and
+        // Dark Intimations' additional counter are entry counters, so Doubling
+        // Season doubles both: (4 + 1) * 2 = 10, not 4 * 2 + 1 = 9.
+        // The engine applies Doubling Season to AddCounter events, separately
+        // from the rider's ChangeZone replacement. No CR 616.1 ordering prompt
+        // or ordering candidates are surfaced for this single-doubler fixture.
+        assert!(
+            matches!(outcome.final_waiting_for(), WaitingFor::Priority { .. }),
+            "with_dark={with_dark}: expected no ordering prompt in the per-placement model, got {:?}",
+            outcome.final_waiting_for()
+        );
+        assert!(
+            runner.state().pending_replacement.is_none(),
+            "with_dark={with_dark}: expected zero queued ordering candidates"
+        );
         assert_loyalty(runner.state(), walker, if with_dark { 10 } else { 8 });
         assert_finished(runner.state());
     }
