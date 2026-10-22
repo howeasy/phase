@@ -6289,7 +6289,9 @@ fn parse_cast_enters_with_prefix(norm_lower: &str) -> Option<CastEntersWithShape
     })
 }
 
-/// The frame owns its whole line even when its filter, prelude or rider is unsupported.
+/// Once the head matches, the frame owns its line when the rider's subject and frame
+/// are recognized, or when a recognized self-exile prelude precedes any entry-with
+/// sentence; its filter or prelude may still be unsupported (the line then fails closed).
 struct CastEntersWithShape<'a> {
     spell_filter: Option<TypedFilter>,
     /// A recognized entry with an unsupported subject/frame has no payload.
@@ -6638,8 +6640,9 @@ fn compose_cast_enters_with_tap(core: AbilityDefinition, tapped: bool) -> Abilit
 /// parse-time placeholder id that `Effect::AddTargetReplacement`'s resolve
 /// function (`add_target_replacement.rs`) concretizes to the SPECIFIC spell
 /// object named by `state.current_trigger_event` (this trigger's own
-/// originating `SpellCast` event — CR 603.2) at install time, so only that
-/// exact spell's entry can ever satisfy it.
+/// originating `SpellCast` event — CR 603.2) at install time, so an interloping
+/// spell cannot consume it. The binding is by `ObjectId` (see the known-limitation
+/// note in `parse_whenever_you_cast_enters_with_trigger`).
 /// CR 603.1 + CR 603.3: What the dispatcher learned about a
 /// `"Whenever you cast …, that … enters with …"` line.
 ///
