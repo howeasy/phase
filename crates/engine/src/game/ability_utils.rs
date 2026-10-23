@@ -155,6 +155,7 @@ pub fn build_resolved_from_def_with_targets(
 ) -> ResolvedAbility {
     let mut resolved =
         ResolvedAbility::new(*def.effect.clone(), targets, source_id, controller).kind(def.kind);
+    materialize_coin_branches(&mut resolved);
     resolved.declares_chosen_group = def.declares_chosen_group;
     resolved.reads_chosen_group = def.reads_chosen_group;
     resolved.target_reads = def.target_reads;
@@ -248,6 +249,28 @@ pub fn build_resolved_from_def_with_targets(
     resolved
 }
 
+/// Bind coin templates before announcement; outcome children never inherit
+/// the parent's declaration vector (CR 601.2c).
+pub(crate) fn materialize_coin_branches(resolved: &mut ResolvedAbility) {
+    resolved.coin_branches = match &resolved.effect {
+        Effect::FlipCoins {
+            win_effect,
+            lose_effect,
+            ..
+        } if win_effect.is_some() || lose_effect.is_some() => {
+            Some(Box::new(crate::types::ability::ResolvedCoinBranches {
+                won: win_effect.as_deref().map(|def| {
+                    build_resolved_from_def(def, resolved.source_id, resolved.controller)
+                }),
+                lost: lose_effect.as_deref().map(|def| {
+                    build_resolved_from_def(def, resolved.source_id, resolved.controller)
+                }),
+            }))
+        }
+        _ => None,
+    };
+}
+
 /// CR 608.2c: Apply an "instead" swap from a sub-ability override
 /// onto a parent `ResolvedAbility`. Produces a new `ResolvedAbility` whose
 /// **identity / runtime context** comes from the parent (controller, source,
@@ -288,6 +311,7 @@ pub(crate) fn apply_instead_swap(
 ) -> ResolvedAbility {
     let mut overridden = parent.clone();
     overridden.effect = sub.effect.clone();
+    overridden.coin_branches = sub.coin_branches.clone();
     overridden.declares_chosen_group = sub.declares_chosen_group;
     overridden.reads_chosen_group = sub.reads_chosen_group;
     overridden.declares_return_result = sub.declares_return_result;
@@ -439,15 +463,40 @@ pub(crate) fn append_to_sub_chain(ability: &mut ResolvedAbility, next: ResolvedA
 }
 
 pub fn find_first_target_filter_in_chain(ability: &ResolvedAbility) -> Option<&TargetFilter> {
+    if let Some(delegate) = paid_instead_delegate(ability) {
+        return find_first_target_filter_in_chain(delegate);
+    }
     if ability.target_choice_timing == TargetChoiceTiming::Stack {
         if let Some(filter) = triggers::extract_target_filter_from_effect(&ability.effect) {
             return Some(filter);
         }
     }
-    ability
-        .sub_ability
-        .as_deref()
-        .and_then(find_first_target_filter_in_chain)
+    announced_child_links(ability).find_map(|(_, child, disposition)| match disposition {
+        AnnouncementDisposition::Declare => find_first_target_filter_in_chain(child),
+        AnnouncementDisposition::Inherited => find_first_announced_filter_below(child),
+        AnnouncementDisposition::AfterDeferred => find_first_filter_after_deferred(child),
+    })
+}
+
+fn find_first_announced_filter_below(ability: &ResolvedAbility) -> Option<&TargetFilter> {
+    announced_child_links(ability).find_map(|(_, child, disposition)| match disposition {
+        AnnouncementDisposition::Declare => find_first_target_filter_in_chain(child),
+        AnnouncementDisposition::Inherited => find_first_announced_filter_below(child),
+        AnnouncementDisposition::AfterDeferred => find_first_filter_after_deferred(child),
+    })
+}
+
+fn find_first_filter_after_deferred(ability: &ResolvedAbility) -> Option<&TargetFilter> {
+    match after_deferred_disposition(ability)? {
+        AnnouncementDisposition::Declare => find_first_target_filter_in_chain(ability),
+        AnnouncementDisposition::AfterDeferred => ability
+            .sub_ability
+            .as_deref()
+            .and_then(find_first_filter_after_deferred),
+        AnnouncementDisposition::Inherited => {
+            unreachable!("deferred nodes do not inherit declarations")
+        }
+    }
 }
 
 /// CR 700.2 / CR 601.2b: Accumulates target slots alongside their per-slot mode
@@ -1450,6 +1499,8 @@ struct TargetSlotSpec {
     instance: TargetInstanceId,
     /// The declared-player group the clause announcing this slot is tagged with.
     group: Option<crate::types::ability::ChosenGroupId>,
+    /// Typed origin of the declaring instruction, relative to the targeting root.
+    path: Vec<ChainStep>,
 }
 
 struct AbilityTargetingView<'a> {
@@ -2196,11 +2247,8 @@ pub(crate) fn record_root_target_slots(ability: &mut ResolvedAbility) {
 
 fn clear_chosen_target_slots(ability: &mut ResolvedAbility) {
     ability.chosen_target_slots = ChosenTargetSlots::Recorded(Vec::new());
-    if let Some(sub_ability) = ability.sub_ability.as_deref_mut() {
-        clear_chosen_target_slots(sub_ability);
-    }
-    if let Some(else_ability) = ability.else_ability.as_deref_mut() {
-        clear_chosen_target_slots(else_ability);
+    for (_, child) in ability.child_links_mut() {
+        clear_chosen_target_slots(child);
     }
 }
 
@@ -2242,6 +2290,14 @@ fn stamp_other_batch_source_targets(ability: &mut ResolvedAbility) {
         }
 
         let branch_slots = recent_slots.clone();
+        if let Some(branches) = ability.coin_branches.as_deref_mut() {
+            for child in [branches.won.as_mut(), branches.lost.as_mut()]
+                .into_iter()
+                .flatten()
+            {
+                visit(child, &mut branch_slots.clone());
+            }
+        }
         if let Some(sub) = ability.sub_ability.as_deref_mut() {
             visit(sub, recent_slots);
         }
@@ -2278,11 +2334,8 @@ fn chain_node_targets(ability: &ResolvedAbility) -> Vec<TargetRef> {
 
 pub fn flatten_targets_in_chain(ability: &ResolvedAbility) -> Vec<TargetRef> {
     let mut targets = chain_node_targets(ability);
-    if let Some(sub_ability) = ability.sub_ability.as_deref() {
-        targets.extend(flatten_targets_in_chain(sub_ability));
-    }
-    if let Some(else_ability) = ability.else_ability.as_deref() {
-        targets.extend(flatten_targets_in_chain(else_ability));
+    for (_, child) in ability.child_links() {
+        targets.extend(flatten_targets_in_chain(child));
     }
     targets
 }
@@ -2396,6 +2449,16 @@ fn walk_declared_slots<'a>(
             );
             path.pop();
             return;
+        }
+        for (edge, child) in node.child_links() {
+            match edge {
+                ChainStep::CoinFlipBranch { .. } => {
+                    path.push(edge);
+                    go(child, numbering, false, next_slot, path, visit);
+                    path.pop();
+                }
+                ChainStep::SubAbility | ChainStep::ElseAbility => {}
+            }
         }
         if let Some(sub_ability) = node.sub_ability.as_deref() {
             path.push(ChainStep::SubAbility);
@@ -2630,11 +2693,8 @@ pub(crate) fn illegal_declared_target_slots(
 /// normal initial legality check.
 pub(crate) fn clear_illegal_local_target_slots(ability: &mut ResolvedAbility) {
     ability.illegal_local_target_slots.clear();
-    if let Some(sub_ability) = ability.sub_ability.as_deref_mut() {
-        clear_illegal_local_target_slots(sub_ability);
-    }
-    if let Some(else_ability) = ability.else_ability.as_deref_mut() {
-        clear_illegal_local_target_slots(else_ability);
+    for (_, child) in ability.child_links_mut() {
+        clear_illegal_local_target_slots(child);
     }
 }
 
@@ -2788,6 +2848,12 @@ pub(crate) fn flatten_specified_targets_in_chain(ability: &ResolvedAbility) -> V
         // (Today neither assign path recurses after the push, so this traversal
         // is inert and preserves BASE exactly — it is the correct shape if that
         // ever changes.)
+        for (edge, child) in ability.child_links() {
+            match edge {
+                ChainStep::CoinFlipBranch { .. } => visit(child, false, out),
+                ChainStep::SubAbility | ChainStep::ElseAbility => {}
+            }
+        }
         if let Some(sub) = ability.sub_ability.as_deref() {
             // Mirror BOTH producer gates — `assign_targets_recursive`
             // :7898 / :7916 and `assign_selected_slots_recursive`
@@ -3894,6 +3960,24 @@ fn validate_targets_in_chain_inner(
     } else {
         parent_block
     };
+    if numbering.delegate(ability).is_none() {
+        for (edge, child) in validated.child_links_mut() {
+            match edge {
+                ChainStep::CoinFlipBranch { .. } => {
+                    *child = validate_targets_in_chain_inner(
+                        state,
+                        child,
+                        TargetReadOrigin::OwnAnnouncement,
+                        view_out,
+                        false,
+                        numbering,
+                        child_block,
+                    );
+                }
+                ChainStep::SubAbility | ChainStep::ElseAbility => {}
+            }
+        }
+    }
     if let Some(sub_ability) = validated.sub_ability.as_mut() {
         // Mirrors `declared_targets_in_chain`: a paid-"instead" delegate carries
         // its delegator's inheritance; any other sub inherits per
@@ -4678,7 +4762,7 @@ fn collect_target_slots_inner(
                 effect_detail: acc.current_effect_detail,
             });
         }
-        return Ok(());
+        return collect_sub_chain_slots(state, ability, acc);
     }
 
     if let Effect::MoveCounters {
@@ -5020,27 +5104,13 @@ fn collect_sub_chain_slots(
     ability: &ResolvedAbility,
     acc: &mut SlotAccumulator,
 ) -> Result<(), TargetSlotBuildError> {
-    if defers_sub_ability_target_selection(&ability.effect) {
-        collect_target_slots_after_deferred_effect(state, ability.sub_ability.as_deref(), acc)?;
-        return Ok(());
-    }
-    if let Some(sub_ability) = ability.sub_ability.as_deref() {
-        // CR 700.2c: Conditional sub-mode targets are chosen only if the
-        // condition holds at resolution time (CR 601.2c), not when the parent
-        // goes on the stack — so they are pre-collected later by
-        // `resolve_ability_chain`, not here. They are intentionally left
-        // UNLABELLED for the modal targeting banner: no slot is surfaced at
-        // mode-selection time, so there is no slot to attach a mode label to.
-        if defers_conditional_target_selection(sub_ability) {
-            // Pre-collected at resolution (see above).
-        } else if rider_entries_are_inherited(ability, sub_ability) {
-            // CR 601.2c + CR 700.2: an inheriting rider (#3864 life-gain anaphor,
-            // Conformer Shuriken's "that creature" gate) announces no slot of its
-            // own, but the chain below it — e.g. a later chosen mode — still
-            // does. Skip only the rider's own slot.
-            collect_sub_chain_slots(state, sub_ability, acc)?;
-        } else {
-            collect_target_slots(state, sub_ability, acc)?;
+    for (_, child, disposition) in announced_child_links(ability) {
+        match disposition {
+            AnnouncementDisposition::Declare => collect_target_slots(state, child, acc)?,
+            AnnouncementDisposition::Inherited => collect_sub_chain_slots(state, child, acc)?,
+            AnnouncementDisposition::AfterDeferred => {
+                collect_target_slots_after_deferred_effect(state, Some(child), acc)?
+            }
         }
     }
     Ok(())
@@ -5259,13 +5329,8 @@ pub fn ability_target_legality_needs_chosen_x(
 fn ability_target_legality_needs_chosen_x_inner(ability: &ResolvedAbility) -> bool {
     target_slot_construction_needs_chosen_x(ability)
         || ability
-            .sub_ability
-            .as_deref()
-            .is_some_and(ability_target_legality_needs_chosen_x_inner)
-        || ability
-            .else_ability
-            .as_deref()
-            .is_some_and(ability_target_legality_needs_chosen_x_inner)
+            .child_links()
+            .any(|(_, child)| ability_target_legality_needs_chosen_x_inner(child))
 }
 
 /// CR 601.2b/c: The current chain link cannot determine either its target
@@ -6452,6 +6517,7 @@ fn collect_attach_attachment_target_slot_specs(
                     optional: slot_index >= bounds.min,
                     instance: id,
                     group: ability.declares_chosen_group,
+                    path: Vec::new(),
                 });
             }
         }
@@ -6463,6 +6529,7 @@ fn collect_attach_attachment_target_slot_specs(
             optional: attach_attachment_targeting_is_optional(ability),
             instance: id,
             group: ability.declares_chosen_group,
+            path: Vec::new(),
         });
     }
 }
@@ -6924,7 +6991,7 @@ fn sub_ability_inherits_parent_creature_target_only(
     parent: &ResolvedAbility,
     sub: &ResolvedAbility,
 ) -> bool {
-    if !chain_has_target_sink(parent) {
+    if !chain_has_potential_target_sink(parent) {
         return false;
     }
     if triggers::extract_target_filter_from_effect(&sub.effect).is_some() {
@@ -7543,7 +7610,11 @@ fn collect_target_slot_specs(
     next_instance: &mut usize,
 ) {
     if let Some(sub_ability) = paid_instead_delegate(ability) {
+        let start = specs.len();
         collect_target_slot_specs(state, sub_ability, specs, next_instance);
+        for spec in &mut specs[start..] {
+            spec.path.insert(0, ChainStep::SubAbility);
+        }
         return;
     }
 
@@ -7560,6 +7631,7 @@ fn collect_target_slot_specs(
                     optional: ability.optional_targeting,
                     instance: id,
                     group: ability.declares_chosen_group,
+                    path: Vec::new(),
                 });
             }
         } else if let Some(src_leaf) = damage_replacement_source_slot_filter(&ability.effect) {
@@ -7570,6 +7642,7 @@ fn collect_target_slot_specs(
                 optional: ability.optional_targeting,
                 instance: id,
                 group: ability.declares_chosen_group,
+                path: Vec::new(),
             });
         }
     }
@@ -7590,6 +7663,7 @@ fn collect_target_slot_specs(
                 optional: ability.targeting_is_optional(),
                 instance: id,
                 group: ability.declares_chosen_group,
+                path: Vec::new(),
             });
         }
         collect_sub_chain_slot_specs(state, ability, specs, next_instance);
@@ -7608,8 +7682,10 @@ fn collect_target_slot_specs(
                 optional: ability.optional_targeting,
                 instance: id,
                 group: ability.declares_chosen_group,
+                path: Vec::new(),
             });
         }
+        collect_sub_chain_slot_specs(state, ability, specs, next_instance);
         return;
     }
 
@@ -7629,6 +7705,7 @@ fn collect_target_slot_specs(
                     optional: ability.optional_targeting,
                     instance: id,
                     group: ability.declares_chosen_group,
+                    path: Vec::new(),
                 });
             }
         }
@@ -7647,6 +7724,7 @@ fn collect_target_slot_specs(
                 optional: ability.optional_targeting,
                 instance: id,
                 group: ability.declares_chosen_group,
+                path: Vec::new(),
             });
         }
     } else if let Effect::Attach {
@@ -7672,6 +7750,7 @@ fn collect_target_slot_specs(
                     optional: ability.optional_targeting,
                     instance: id,
                     group: ability.declares_chosen_group,
+                    path: Vec::new(),
                 });
             }
         }
@@ -7702,6 +7781,7 @@ fn collect_target_slot_specs(
                             optional: slot_index >= bounds.min,
                             instance: id,
                             group: ability.declares_chosen_group,
+                            path: Vec::new(),
                         });
                     }
                 }
@@ -7713,6 +7793,7 @@ fn collect_target_slot_specs(
                     optional: false,
                     instance: id,
                     group: ability.declares_chosen_group,
+                    path: Vec::new(),
                 });
             }
             // CR 115.4 + CR 601.2c: group-B spec — its OWN instance, between the
@@ -7727,6 +7808,7 @@ fn collect_target_slot_specs(
                     optional: true,
                     instance: id,
                     group: ability.declares_chosen_group,
+                    path: Vec::new(),
                 });
             }
             let id = TargetInstanceId(*next_instance);
@@ -7736,6 +7818,7 @@ fn collect_target_slot_specs(
                 optional: false,
                 instance: id,
                 group: ability.declares_chosen_group,
+                path: Vec::new(),
             });
         }
     } else {
@@ -7761,6 +7844,7 @@ fn collect_target_slot_specs(
                 optional: ability.optional_targeting,
                 instance: id,
                 group: ability.declares_chosen_group,
+                path: Vec::new(),
             });
         }
         if ability.target_choice_timing == TargetChoiceTiming::Stack
@@ -7776,6 +7860,7 @@ fn collect_target_slot_specs(
                 optional: ability.optional_targeting,
                 instance: id,
                 group: ability.declares_chosen_group,
+                path: Vec::new(),
             });
         }
         if ability.target_choice_timing == TargetChoiceTiming::Stack
@@ -7788,6 +7873,7 @@ fn collect_target_slot_specs(
                 optional: ability.optional_targeting,
                 instance: id,
                 group: ability.declares_chosen_group,
+                path: Vec::new(),
             });
         }
         // CR 115.1 + CR 601.2c: EXACT MIRROR of the `BecomeCopy` recipient slot
@@ -7813,6 +7899,7 @@ fn collect_target_slot_specs(
                     optional: ability.optional_targeting,
                     instance: id,
                     group: ability.declares_chosen_group,
+                    path: Vec::new(),
                 });
             }
         }
@@ -7837,6 +7924,7 @@ fn collect_target_slot_specs(
                                 optional: slot_index >= bounds.min,
                                 instance: id,
                                 group: ability.declares_chosen_group,
+                                path: Vec::new(),
                             });
                         }
                     }
@@ -7848,6 +7936,7 @@ fn collect_target_slot_specs(
                         optional: ability.optional_targeting,
                         instance: id,
                         group: ability.declares_chosen_group,
+                        path: Vec::new(),
                     });
                 }
             }
@@ -7866,24 +7955,26 @@ fn collect_sub_chain_slot_specs(
     specs: &mut Vec<TargetSlotSpec>,
     next_instance: &mut usize,
 ) {
-    if defers_sub_ability_target_selection(&ability.effect) {
-        collect_target_slot_specs_after_deferred_effect(
-            state,
-            ability.sub_ability.as_deref(),
-            specs,
-            next_instance,
-        );
-        return;
-    }
-    if let Some(sub_ability) = ability.sub_ability.as_deref() {
-        if defers_conditional_target_selection(sub_ability) {
-            // Chosen at resolution; no spec now.
-        } else if rider_entries_are_inherited(ability, sub_ability) {
-            // Mirror of `collect_sub_chain_slots`: skip only the inheriting
-            // rider's own spec, keep its sub-chain's.
-            collect_sub_chain_slot_specs(state, sub_ability, specs, next_instance);
-        } else {
-            collect_target_slot_specs(state, sub_ability, specs, next_instance);
+    for (edge, child, disposition) in announced_child_links(ability) {
+        let start = specs.len();
+        match disposition {
+            AnnouncementDisposition::Declare => {
+                collect_target_slot_specs(state, child, specs, next_instance)
+            }
+            AnnouncementDisposition::Inherited => {
+                collect_sub_chain_slot_specs(state, child, specs, next_instance)
+            }
+            AnnouncementDisposition::AfterDeferred => {
+                collect_target_slot_specs_after_deferred_effect(
+                    state,
+                    Some(child),
+                    specs,
+                    next_instance,
+                )
+            }
+        }
+        for spec in &mut specs[start..] {
+            spec.path.insert(0, edge);
         }
     }
 }
@@ -8277,23 +8368,17 @@ fn attach_host_enchant_filter(
     spec: &TargetSlotSpec,
     selected_slots: &[Option<TargetRef>],
 ) -> Option<(TargetFilter, ObjectId, PlayerId)> {
-    // Walk the effect + sub_ability chain (mirrors collect_target_slot_specs) to
-    // find the Attach whose host `target` filter is the one we're enumerating.
-    let mut current = Some(ability);
-    let mut attachment_filter: Option<&TargetFilter> = None;
-    while let Some(node) = current {
-        if let Effect::Attach {
-            attachment, target, ..
-        } = &node.effect
-        {
-            if target == &spec.filter {
-                attachment_filter = Some(attachment);
-                break;
-            }
-        }
-        current = node.sub_ability.as_deref();
+    let node = node_at(ability, &spec.path)?;
+    let Effect::Attach {
+        attachment, target, ..
+    } = &node.effect
+    else {
+        return None;
+    };
+    if target != &spec.filter {
+        return None;
     }
-    let attachment_filter = attachment_filter?;
+    let attachment_filter = attachment;
 
     // Resolve the attachment (the moved Aura) to a concrete object id.
     let attachment_id = match attachment_filter {
@@ -8462,12 +8547,14 @@ fn collect_per_opponent_target_fanout_specs(
             optional: false,
             instance: player_id,
             group: None,
+            path: Vec::new(),
         });
         specs.push(TargetSlotSpec {
             filter: object_filter.clone(),
             optional: ability.targeting_is_optional(),
             instance: object_id,
             group: None,
+            path: Vec::new(),
         });
     }
 }
@@ -9008,6 +9095,170 @@ fn skips_stack_targets_after_deferred_effect(effect: &Effect) -> bool {
     )
 }
 
+/// CR 601.2c: Routing shared by every announcement construction walker.
+/// Declared views deliberately do not apply this resolution-choice policy.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum AnnouncementDisposition {
+    Declare,
+    Inherited,
+    AfterDeferred,
+}
+
+fn after_deferred_disposition(node: &ResolvedAbility) -> Option<AnnouncementDisposition> {
+    if defers_conditional_target_selection(node) {
+        None
+    } else if skips_stack_targets_after_deferred_effect(&node.effect) {
+        Some(AnnouncementDisposition::AfterDeferred)
+    } else {
+        Some(AnnouncementDisposition::Declare)
+    }
+}
+
+fn announcement_child_disposition(
+    parent: &ResolvedAbility,
+    edge: ChainStep,
+    child: &ResolvedAbility,
+) -> Option<AnnouncementDisposition> {
+    match edge {
+        ChainStep::CoinFlipBranch { .. } => {
+            if paid_instead_delegate(parent).is_some() || defers_conditional_target_selection(child)
+            {
+                None
+            } else {
+                Some(AnnouncementDisposition::Declare)
+            }
+        }
+        ChainStep::SubAbility => {
+            if defers_sub_ability_target_selection(&parent.effect) {
+                after_deferred_disposition(child)
+            } else if defers_conditional_target_selection(child) {
+                None
+            } else if rider_entries_are_inherited(parent, child) {
+                Some(AnnouncementDisposition::Inherited)
+            } else {
+                Some(AnnouncementDisposition::Declare)
+            }
+        }
+        ChainStep::ElseAbility => None,
+    }
+}
+
+fn announced_child_links(
+    ability: &ResolvedAbility,
+) -> impl Iterator<Item = (ChainStep, &ResolvedAbility, AnnouncementDisposition)> {
+    ability.child_links().filter_map(move |(edge, child)| {
+        announcement_child_disposition(ability, edge, child)
+            .map(|disposition| (edge, child, disposition))
+    })
+}
+
+fn announced_child_links_mut(
+    ability: &mut ResolvedAbility,
+) -> impl Iterator<Item = (ChainStep, &mut ResolvedAbility, AnnouncementDisposition)> {
+    let disposition = |edge| {
+        ability
+            .child_links()
+            .find(|(candidate, _)| *candidate == edge)
+            .and_then(|(_, child)| announcement_child_disposition(ability, edge, child))
+    };
+    let won = disposition(ChainStep::CoinFlipBranch {
+        result: crate::types::ability::CoinFlipResult::Won,
+    });
+    let lost = disposition(ChainStep::CoinFlipBranch {
+        result: crate::types::ability::CoinFlipResult::Lost,
+    });
+    let sub = disposition(ChainStep::SubAbility);
+    ability.child_links_mut().filter_map(move |(edge, child)| {
+        let disposition = match edge {
+            ChainStep::CoinFlipBranch {
+                result: crate::types::ability::CoinFlipResult::Won,
+            } => won,
+            ChainStep::CoinFlipBranch {
+                result: crate::types::ability::CoinFlipResult::Lost,
+            } => lost,
+            ChainStep::SubAbility => sub,
+            ChainStep::ElseAbility => None,
+        };
+        disposition.map(|disposition| (edge, child, disposition))
+    })
+}
+
+/// Announcement-node view, sharing routing with collection and assignment.
+pub(crate) fn walk_announced_nodes<'a>(
+    ability: &'a ResolvedAbility,
+    visit: &mut impl FnMut(&'a ResolvedAbility, &[ChainStep]),
+) {
+    fn go<'a>(
+        node: &'a ResolvedAbility,
+        path: &mut Vec<ChainStep>,
+        disposition: AnnouncementDisposition,
+        visit: &mut impl FnMut(&'a ResolvedAbility, &[ChainStep]),
+    ) {
+        if disposition == AnnouncementDisposition::AfterDeferred {
+            if let Some(sub) = node.sub_ability.as_deref() {
+                if let Some(next) = after_deferred_disposition(sub) {
+                    path.push(ChainStep::SubAbility);
+                    go(sub, path, next, visit);
+                    path.pop();
+                }
+            }
+            return;
+        }
+        if let Some(delegate) = paid_instead_delegate(node) {
+            path.push(ChainStep::SubAbility);
+            go(delegate, path, disposition, visit);
+            path.pop();
+            return;
+        }
+        if disposition == AnnouncementDisposition::Declare {
+            visit(node, path);
+        }
+        for (edge, child, disposition) in announced_child_links(node) {
+            path.push(edge);
+            go(child, path, disposition, visit);
+            path.pop();
+        }
+    }
+    go(
+        ability,
+        &mut Vec::new(),
+        AnnouncementDisposition::Declare,
+        visit,
+    );
+}
+
+pub(crate) fn walk_announced_nodes_mut(
+    ability: &mut ResolvedAbility,
+    visit: &mut impl FnMut(&mut ResolvedAbility),
+) {
+    fn go(
+        node: &mut ResolvedAbility,
+        disposition: AnnouncementDisposition,
+        visit: &mut impl FnMut(&mut ResolvedAbility),
+    ) {
+        if disposition == AnnouncementDisposition::AfterDeferred {
+            if let Some(sub) = node.sub_ability.as_deref_mut() {
+                if let Some(next) = after_deferred_disposition(sub) {
+                    go(sub, next, visit);
+                }
+            }
+            return;
+        }
+        if paid_instead_delegate(node).is_some() {
+            if let Some(delegate) = node.sub_ability.as_deref_mut() {
+                go(delegate, disposition, visit);
+            }
+            return;
+        }
+        if disposition == AnnouncementDisposition::Declare {
+            visit(node);
+        }
+        for (_, child, disposition) in announced_child_links_mut(node) {
+            go(child, disposition, visit);
+        }
+    }
+    go(ability, AnnouncementDisposition::Declare, visit);
+}
 fn collect_target_slots_after_deferred_effect(
     state: &GameState,
     sub_ability: Option<&ResolvedAbility>,
@@ -9016,10 +9267,10 @@ fn collect_target_slots_after_deferred_effect(
     let Some(sub_ability) = sub_ability else {
         return Ok(());
     };
-    if defers_conditional_target_selection(sub_ability) {
+    if after_deferred_disposition(sub_ability).is_none() {
         return Ok(());
     }
-    if skips_stack_targets_after_deferred_effect(&sub_ability.effect) {
+    if after_deferred_disposition(sub_ability) == Some(AnnouncementDisposition::AfterDeferred) {
         return collect_target_slots_after_deferred_effect(
             state,
             sub_ability.sub_ability.as_deref(),
@@ -9038,16 +9289,20 @@ fn collect_target_slot_specs_after_deferred_effect(
     let Some(sub_ability) = sub_ability else {
         return;
     };
-    if defers_conditional_target_selection(sub_ability) {
+    if after_deferred_disposition(sub_ability).is_none() {
         return;
     }
-    if skips_stack_targets_after_deferred_effect(&sub_ability.effect) {
+    if after_deferred_disposition(sub_ability) == Some(AnnouncementDisposition::AfterDeferred) {
+        let start = specs.len();
         collect_target_slot_specs_after_deferred_effect(
             state,
             sub_ability.sub_ability.as_deref(),
             specs,
             next_instance,
         );
+        for spec in &mut specs[start..] {
+            spec.path.insert(0, ChainStep::SubAbility);
+        }
         return;
     }
     collect_target_slot_specs(state, sub_ability, specs, next_instance);
@@ -10209,21 +10464,8 @@ fn assign_targets_recursive(
                 ));
             }
         }
-        if defers_sub_ability_target_selection(&ability.effect) {
-            assign_targets_after_deferred_effect(
-                state,
-                ability.sub_ability.as_deref_mut(),
-                targets,
-                next_target,
-            )?;
-            return Ok(());
-        }
-        if let Some(sub_ability) = ability.sub_ability.as_mut() {
-            if defers_conditional_target_selection(sub_ability) {
-                return Ok(());
-            }
-            assign_targets_recursive(state, sub_ability, targets, next_target)?;
-        }
+
+        assign_sub_chain_targets(state, ability, targets, next_target)?;
         return Ok(());
     }
 
@@ -10259,21 +10501,8 @@ fn assign_targets_recursive(
                     ));
                 }
             }
-            if defers_sub_ability_target_selection(&ability.effect) {
-                assign_targets_after_deferred_effect(
-                    state,
-                    ability.sub_ability.as_deref_mut(),
-                    targets,
-                    next_target,
-                )?;
-                return Ok(());
-            }
-            if let Some(sub_ability) = ability.sub_ability.as_mut() {
-                if defers_conditional_target_selection(sub_ability) {
-                    return Ok(());
-                }
-                assign_targets_recursive(state, sub_ability, targets, next_target)?;
-            }
+
+            assign_sub_chain_targets(state, ability, targets, next_target)?;
             return Ok(());
         }
     }
@@ -10334,12 +10563,7 @@ fn assign_targets_recursive(
                 ));
             }
         }
-        if let Some(sub_ability) = ability.sub_ability.as_mut() {
-            if defers_conditional_target_selection(sub_ability) {
-                return Ok(());
-            }
-            assign_targets_recursive(state, sub_ability, targets, next_target)?;
-        }
+        assign_sub_chain_targets(state, ability, targets, next_target)?;
         return Ok(());
     }
 
@@ -10368,12 +10592,7 @@ fn assign_targets_recursive(
                 ));
             }
         }
-        if let Some(sub_ability) = ability.sub_ability.as_mut() {
-            if defers_conditional_target_selection(sub_ability) {
-                return Ok(());
-            }
-            assign_targets_recursive(state, sub_ability, targets, next_target)?;
-        }
+        assign_sub_chain_targets(state, ability, targets, next_target)?;
         return Ok(());
     }
 
@@ -10403,21 +10622,8 @@ fn assign_targets_recursive(
                 ));
             }
         }
-        if defers_sub_ability_target_selection(&ability.effect) {
-            assign_targets_after_deferred_effect(
-                state,
-                ability.sub_ability.as_deref_mut(),
-                targets,
-                next_target,
-            )?;
-            return Ok(());
-        }
-        if let Some(sub_ability) = ability.sub_ability.as_mut() {
-            if defers_conditional_target_selection(sub_ability) {
-                return Ok(());
-            }
-            assign_targets_recursive(state, sub_ability, targets, next_target)?;
-        }
+
+        assign_sub_chain_targets(state, ability, targets, next_target)?;
         return Ok(());
     }
 
@@ -10438,21 +10644,8 @@ fn assign_targets_recursive(
                     ));
                 }
             }
-            if defers_sub_ability_target_selection(&ability.effect) {
-                assign_targets_after_deferred_effect(
-                    state,
-                    ability.sub_ability.as_deref_mut(),
-                    targets,
-                    next_target,
-                )?;
-                return Ok(());
-            }
-            if let Some(sub_ability) = ability.sub_ability.as_mut() {
-                if defers_conditional_target_selection(sub_ability) {
-                    return Ok(());
-                }
-                assign_targets_recursive(state, sub_ability, targets, next_target)?;
-            }
+
+            assign_sub_chain_targets(state, ability, targets, next_target)?;
             return Ok(());
         }
     }
@@ -10590,34 +10783,24 @@ fn assign_sub_chain_targets(
     targets: &[TargetRef],
     next_target: &mut usize,
 ) -> Result<(), EngineError> {
-    if defers_sub_ability_target_selection(&ability.effect) {
-        assign_targets_after_deferred_effect(
-            state,
-            ability.sub_ability.as_deref_mut(),
-            targets,
-            next_target,
-        )?;
-        return Ok(());
-    }
-    let inherits_parent_creature_target = ability
-        .sub_ability
-        .as_ref()
-        .is_some_and(|sub| rider_entries_are_inherited(ability, sub));
-    let parent_creature_target = ability.targets.iter().find_map(|t| match t {
+    let parent_creature_target = ability.targets.iter().find_map(|target| match target {
         TargetRef::Object(id) => Some(TargetRef::Object(*id)),
-        _ => None,
+        TargetRef::Player(_) => None,
     });
-    if let Some(sub_ability) = ability.sub_ability.as_mut() {
-        if defers_conditional_target_selection(sub_ability) {
-            return Ok(());
-        }
-        if inherits_parent_creature_target {
-            if let Some(creature) = parent_creature_target {
-                sub_ability.push_target(creature);
+    for (_, child, disposition) in announced_child_links_mut(ability) {
+        match disposition {
+            AnnouncementDisposition::Declare => {
+                assign_targets_recursive(state, child, targets, next_target)?
             }
-            assign_sub_chain_targets(state, sub_ability, targets, next_target)?;
-        } else {
-            assign_targets_recursive(state, sub_ability, targets, next_target)?;
+            AnnouncementDisposition::Inherited => {
+                if let Some(target) = parent_creature_target.clone() {
+                    child.push_target(target);
+                }
+                assign_sub_chain_targets(state, child, targets, next_target)?;
+            }
+            AnnouncementDisposition::AfterDeferred => {
+                assign_targets_after_deferred_effect(state, Some(child), targets, next_target)?
+            }
         }
     }
     Ok(())
@@ -10674,21 +10857,8 @@ fn assign_selected_slots_recursive(
             }
             *next_slot += 1;
         }
-        if defers_sub_ability_target_selection(&ability.effect) {
-            assign_selected_slots_after_deferred_effect(
-                state,
-                ability.sub_ability.as_deref_mut(),
-                selected_slots,
-                next_slot,
-            )?;
-            return Ok(());
-        }
-        if let Some(sub_ability) = ability.sub_ability.as_mut() {
-            if defers_conditional_target_selection(sub_ability) {
-                return Ok(());
-            }
-            assign_selected_slots_recursive(state, sub_ability, selected_slots, next_slot)?;
-        }
+
+        assign_sub_chain_selected_slots(state, ability, selected_slots, next_slot)?;
         return Ok(());
     }
 
@@ -10716,21 +10886,8 @@ fn assign_selected_slots_recursive(
             }
             *next_slot += 1;
         }
-        if defers_sub_ability_target_selection(&ability.effect) {
-            assign_selected_slots_after_deferred_effect(
-                state,
-                ability.sub_ability.as_deref_mut(),
-                selected_slots,
-                next_slot,
-            )?;
-            return Ok(());
-        }
-        if let Some(sub_ability) = ability.sub_ability.as_mut() {
-            if defers_conditional_target_selection(sub_ability) {
-                return Ok(());
-            }
-            assign_selected_slots_recursive(state, sub_ability, selected_slots, next_slot)?;
-        }
+
+        assign_sub_chain_selected_slots(state, ability, selected_slots, next_slot)?;
         return Ok(());
     }
 
@@ -10774,21 +10931,8 @@ fn assign_selected_slots_recursive(
                 }
                 *next_slot += 1;
             }
-            if defers_sub_ability_target_selection(&ability.effect) {
-                assign_selected_slots_after_deferred_effect(
-                    state,
-                    ability.sub_ability.as_deref_mut(),
-                    selected_slots,
-                    next_slot,
-                )?;
-                return Ok(());
-            }
-            if let Some(sub_ability) = ability.sub_ability.as_mut() {
-                if defers_conditional_target_selection(sub_ability) {
-                    return Ok(());
-                }
-                assign_selected_slots_recursive(state, sub_ability, selected_slots, next_slot)?;
-            }
+
+            assign_sub_chain_selected_slots(state, ability, selected_slots, next_slot)?;
             return Ok(());
         }
     }
@@ -10832,12 +10976,7 @@ fn assign_selected_slots_recursive(
             }
             *next_slot += 1;
         }
-        if let Some(sub_ability) = ability.sub_ability.as_mut() {
-            if defers_conditional_target_selection(sub_ability) {
-                return Ok(());
-            }
-            assign_selected_slots_recursive(state, sub_ability, selected_slots, next_slot)?;
-        }
+        assign_sub_chain_selected_slots(state, ability, selected_slots, next_slot)?;
         return Ok(());
     }
 
@@ -10871,12 +11010,7 @@ fn assign_selected_slots_recursive(
             }
             *next_slot += 1;
         }
-        if let Some(sub_ability) = ability.sub_ability.as_mut() {
-            if defers_conditional_target_selection(sub_ability) {
-                return Ok(());
-            }
-            assign_selected_slots_recursive(state, sub_ability, selected_slots, next_slot)?;
-        }
+        assign_sub_chain_selected_slots(state, ability, selected_slots, next_slot)?;
         return Ok(());
     }
 
@@ -10901,12 +11035,7 @@ fn assign_selected_slots_recursive(
                 }
                 *next_slot += 1;
             }
-            if let Some(sub_ability) = ability.sub_ability.as_mut() {
-                if defers_conditional_target_selection(sub_ability) {
-                    return Ok(());
-                }
-                assign_selected_slots_recursive(state, sub_ability, selected_slots, next_slot)?;
-            }
+            assign_sub_chain_selected_slots(state, ability, selected_slots, next_slot)?;
             return Ok(());
         }
     }
@@ -11091,34 +11220,27 @@ fn assign_sub_chain_selected_slots(
     selected_slots: &[Option<TargetRef>],
     next_slot: &mut usize,
 ) -> Result<(), EngineError> {
-    if defers_sub_ability_target_selection(&ability.effect) {
-        assign_selected_slots_after_deferred_effect(
-            state,
-            ability.sub_ability.as_deref_mut(),
-            selected_slots,
-            next_slot,
-        )?;
-        return Ok(());
-    }
-    let inherits_parent_creature_target = ability
-        .sub_ability
-        .as_ref()
-        .is_some_and(|sub| rider_entries_are_inherited(ability, sub));
-    let parent_creature_target = ability.targets.iter().find_map(|t| match t {
+    let parent_creature_target = ability.targets.iter().find_map(|target| match target {
         TargetRef::Object(id) => Some(TargetRef::Object(*id)),
-        _ => None,
+        TargetRef::Player(_) => None,
     });
-    if let Some(sub_ability) = ability.sub_ability.as_mut() {
-        if defers_conditional_target_selection(sub_ability) {
-            return Ok(());
-        }
-        if inherits_parent_creature_target {
-            if let Some(creature) = parent_creature_target {
-                sub_ability.push_target(creature);
+    for (_, child, disposition) in announced_child_links_mut(ability) {
+        match disposition {
+            AnnouncementDisposition::Declare => {
+                assign_selected_slots_recursive(state, child, selected_slots, next_slot)?
             }
-            assign_sub_chain_selected_slots(state, sub_ability, selected_slots, next_slot)?;
-        } else {
-            assign_selected_slots_recursive(state, sub_ability, selected_slots, next_slot)?;
+            AnnouncementDisposition::Inherited => {
+                if let Some(target) = parent_creature_target.clone() {
+                    child.push_target(target);
+                }
+                assign_sub_chain_selected_slots(state, child, selected_slots, next_slot)?;
+            }
+            AnnouncementDisposition::AfterDeferred => assign_selected_slots_after_deferred_effect(
+                state,
+                Some(child),
+                selected_slots,
+                next_slot,
+            )?,
         }
     }
     Ok(())
@@ -11133,10 +11255,10 @@ fn assign_targets_after_deferred_effect(
     let Some(sub_ability) = sub_ability else {
         return Ok(());
     };
-    if defers_conditional_target_selection(sub_ability) {
+    if after_deferred_disposition(sub_ability).is_none() {
         return Ok(());
     }
-    if skips_stack_targets_after_deferred_effect(&sub_ability.effect) {
+    if after_deferred_disposition(sub_ability) == Some(AnnouncementDisposition::AfterDeferred) {
         return assign_targets_after_deferred_effect(
             state,
             sub_ability.sub_ability.as_deref_mut(),
@@ -11156,10 +11278,10 @@ fn assign_selected_slots_after_deferred_effect(
     let Some(sub_ability) = sub_ability else {
         return Ok(());
     };
-    if defers_conditional_target_selection(sub_ability) {
+    if after_deferred_disposition(sub_ability).is_none() {
         return Ok(());
     }
-    if skips_stack_targets_after_deferred_effect(&sub_ability.effect) {
+    if after_deferred_disposition(sub_ability) == Some(AnnouncementDisposition::AfterDeferred) {
         return assign_selected_slots_after_deferred_effect(
             state,
             sub_ability.sub_ability.as_deref_mut(),
@@ -11355,7 +11477,7 @@ fn paired_subject_slot_filters(effect: &Effect) -> impl Iterator<Item = &TargetF
         .filter(|filter| !filter.is_context_ref())
 }
 
-fn chain_has_target_sink(ability: &ResolvedAbility) -> bool {
+fn node_has_target_sink(ability: &ResolvedAbility) -> bool {
     // CR 601.2c: a paired-subject node IS a target sink whenever it claims at
     // least one declared slot. This cannot be left to the generic
     // `extract_target_filter_from_effect` test below: that reads
@@ -11512,23 +11634,50 @@ fn chain_has_target_sink(ability: &ResolvedAbility) -> bool {
     {
         return true;
     }
+    false
+}
+
+fn chain_has_target_sink(ability: &ResolvedAbility) -> bool {
+    node_has_target_sink(ability) || chain_has_target_sink_below(ability)
+}
+
+/// The inheritance prerequisite must not invoke its own routing classifier.
+/// Preserve the pre-inheritance sink query: a rider's magnitude slot is a
+/// potential sink even when declaration routing will inherit it.
+fn chain_has_potential_target_sink(ability: &ResolvedAbility) -> bool {
+    if node_has_target_sink(ability) {
+        return true;
+    }
     if defers_sub_ability_target_selection(&ability.effect) {
         return chain_has_target_sink_after_deferred_effect(ability.sub_ability.as_deref());
     }
-    ability
-        .sub_ability
-        .as_deref()
-        .is_some_and(chain_has_target_sink)
+    ability.child_links().any(|(edge, child)| match edge {
+        ChainStep::CoinFlipBranch { .. } => {
+            !defers_conditional_target_selection(child) && chain_has_potential_target_sink(child)
+        }
+        ChainStep::SubAbility => chain_has_potential_target_sink(child),
+        ChainStep::ElseAbility => false,
+    })
+}
+
+fn chain_has_target_sink_below(ability: &ResolvedAbility) -> bool {
+    announced_child_links(ability).any(|(_, child, disposition)| match disposition {
+        AnnouncementDisposition::Declare => chain_has_target_sink(child),
+        AnnouncementDisposition::Inherited => chain_has_target_sink_below(child),
+        AnnouncementDisposition::AfterDeferred => {
+            chain_has_target_sink_after_deferred_effect(Some(child))
+        }
+    })
 }
 
 fn chain_has_target_sink_after_deferred_effect(sub_ability: Option<&ResolvedAbility>) -> bool {
     let Some(sub_ability) = sub_ability else {
         return false;
     };
-    if defers_conditional_target_selection(sub_ability) {
+    if after_deferred_disposition(sub_ability).is_none() {
         return false;
     }
-    if skips_stack_targets_after_deferred_effect(&sub_ability.effect) {
+    if after_deferred_disposition(sub_ability) == Some(AnnouncementDisposition::AfterDeferred) {
         return chain_has_target_sink_after_deferred_effect(sub_ability.sub_ability.as_deref());
     }
     chain_has_target_sink(sub_ability)
@@ -11936,29 +12085,26 @@ fn descend_retarget_slots(
     bindings: &mut Vec<RetargetSlotBinding>,
     next_run: &mut usize,
 ) {
-    if defers_sub_ability_target_selection(&ability.effect) {
-        descend_retarget_slots_after_deferred_effect(
-            ability.sub_ability.as_deref(),
-            path,
-            bindings,
-            next_run,
-        );
-        return;
-    }
-    if let Some(sub) = ability.sub_ability.as_deref() {
-        if defers_conditional_target_selection(sub) {
-            // Chosen at resolution; not addressable now.
-        } else if rider_entries_are_inherited(ability, sub) {
-            // An inheriting rider owns no addressable slot, but the chain below
-            // it (a later chained mode) does.
-            let mut sub_path = path.to_vec();
-            sub_path.push(ChainStep::SubAbility);
-            descend_retarget_slots(sub, &sub_path, bindings, next_run);
-        } else {
-            let mut sub_path = path.to_vec();
-            sub_path.push(ChainStep::SubAbility);
-            emit_node(sub, &sub_path, false, bindings, next_run);
-            descend_retarget_slots(sub, &sub_path, bindings, next_run);
+    for (edge, child, disposition) in announced_child_links(ability) {
+        let mut child_path = path.to_vec();
+        child_path.push(edge);
+        match disposition {
+            AnnouncementDisposition::Declare => {
+                emit_node(child, &child_path, false, bindings, next_run);
+                descend_retarget_slots(child, &child_path, bindings, next_run);
+            }
+            AnnouncementDisposition::Inherited => {
+                descend_retarget_slots(child, &child_path, bindings, next_run)
+            }
+            AnnouncementDisposition::AfterDeferred => {
+                // The route already names the skipped immediate child.
+                descend_retarget_slots_after_deferred_effect(
+                    child.sub_ability.as_deref(),
+                    &child_path,
+                    bindings,
+                    next_run,
+                );
+            }
         }
     }
 }
@@ -11979,12 +12125,12 @@ fn descend_retarget_slots_after_deferred_effect(
     let Some(sub) = sub_ability else {
         return;
     };
-    if defers_conditional_target_selection(sub) {
+    if after_deferred_disposition(sub).is_none() {
         return;
     }
     let mut sub_path = path.to_vec();
     sub_path.push(ChainStep::SubAbility);
-    if skips_stack_targets_after_deferred_effect(&sub.effect) {
+    if after_deferred_disposition(sub) == Some(AnnouncementDisposition::AfterDeferred) {
         descend_retarget_slots_after_deferred_effect(
             sub.sub_ability.as_deref(),
             &sub_path,
@@ -12043,6 +12189,7 @@ pub(crate) fn node_at<'a>(
         node = match step {
             ChainStep::SubAbility => node.sub_ability.as_deref()?,
             ChainStep::ElseAbility => node.else_ability.as_deref()?,
+            ChainStep::CoinFlipBranch { result } => node.coin_branches.as_deref()?.get(*result)?,
         };
     }
     Some(node)
@@ -12155,6 +12302,9 @@ pub(crate) fn node_at_mut<'a>(
         node = match step {
             ChainStep::SubAbility => node.sub_ability.as_deref_mut()?,
             ChainStep::ElseAbility => node.else_ability.as_deref_mut()?,
+            ChainStep::CoinFlipBranch { result } => {
+                node.coin_branches.as_deref_mut()?.get_mut(*result)?
+            }
         };
     }
     Some(node)
@@ -12596,6 +12746,12 @@ pub(crate) fn widen_dependent_retarget_pools(
 pub(crate) fn restamp_derived_chain_targets(ability: &mut ResolvedAbility) {
     fn remirror(ability: &mut ResolvedAbility) {
         let mut mirrored = None;
+        for (edge, child) in ability.child_links_mut() {
+            match edge {
+                ChainStep::CoinFlipBranch { .. } => remirror(child),
+                ChainStep::SubAbility | ChainStep::ElseAbility => {}
+            }
+        }
         if let Some(sub) = ability.sub_ability.as_deref_mut() {
             remirror(sub);
             if is_paid_instead_sub(&ability.context, sub) {
@@ -12665,11 +12821,16 @@ fn restamp_chosen_group_targets(ability: &mut ResolvedAbility) {
         if let Some(id) = node.reads_chosen_group {
             node.replace_target_occurrences(groups.get(&id).cloned().unwrap_or_default());
         }
-        if let Some(sub) = node.sub_ability.as_deref_mut() {
-            bind(sub, groups);
-        }
-        if let Some(other) = node.else_ability.as_deref_mut() {
-            bind(other, groups);
+        for (edge, child) in node.child_links_mut() {
+            match edge {
+                ChainStep::CoinFlipBranch { .. } => {
+                    // Branch-local publishers cannot bind a sibling's readers.
+                    let mut branch_groups = groups.clone();
+                    collect(child, &mut branch_groups);
+                    bind(child, &branch_groups);
+                }
+                ChainStep::SubAbility | ChainStep::ElseAbility => bind(child, groups),
+            }
         }
     }
 
@@ -12991,14 +13152,15 @@ fn minimum_targets_in_chain(state: &GameState, ability: &ResolvedAbility) -> usi
 /// `TargetReadOrigin::ParentAnnouncement` rider) contributes none of its own,
 /// but the chain below it — a later chained mode — still counts.
 fn minimum_targets_below(state: &GameState, ability: &ResolvedAbility) -> usize {
-    if defers_sub_ability_target_selection(&ability.effect) {
-        return minimum_targets_after_deferred_effect(state, ability.sub_ability.as_deref());
-    }
-    match ability.sub_ability.as_deref() {
-        Some(sub) if rider_entries_are_inherited(ability, sub) => minimum_targets_below(state, sub),
-        Some(sub) => minimum_targets_in_chain(state, sub),
-        None => 0,
-    }
+    announced_child_links(ability)
+        .map(|(_, child, disposition)| match disposition {
+            AnnouncementDisposition::Declare => minimum_targets_in_chain(state, child),
+            AnnouncementDisposition::Inherited => minimum_targets_below(state, child),
+            AnnouncementDisposition::AfterDeferred => {
+                minimum_targets_after_deferred_effect(state, Some(child))
+            }
+        })
+        .sum()
 }
 
 fn minimum_targets_after_deferred_effect(
@@ -13008,10 +13170,10 @@ fn minimum_targets_after_deferred_effect(
     let Some(sub_ability) = sub_ability else {
         return 0;
     };
-    if defers_conditional_target_selection(sub_ability) {
+    if after_deferred_disposition(sub_ability).is_none() {
         return 0;
     }
-    if skips_stack_targets_after_deferred_effect(&sub_ability.effect) {
+    if after_deferred_disposition(sub_ability) == Some(AnnouncementDisposition::AfterDeferred) {
         return minimum_targets_after_deferred_effect(state, sub_ability.sub_ability.as_deref());
     }
     minimum_targets_in_chain(state, sub_ability)

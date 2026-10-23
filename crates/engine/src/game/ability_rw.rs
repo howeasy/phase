@@ -4248,6 +4248,7 @@ fn walk_ability(
         effect,
         sub_ability,
         else_ability,
+        coin_branches,
         condition,
         duration,
         player_scope,
@@ -4341,6 +4342,14 @@ fn walk_ability(
     let child_root = own_scope.or(chain_root);
     let child_move_owner = effect_move_owner(effect).or(chain_move_owner);
 
+    if let Some(branches) = coin_branches {
+        for child in [branches.won.as_ref(), branches.lost.as_ref()]
+            .into_iter()
+            .flatten()
+        {
+            walk_ability(child, child_root, child_move_owner, pscope, acc);
+        }
+    }
     if let Some(sub) = sub_ability {
         walk_ability(sub, child_root, child_move_owner, pscope, acc);
     }

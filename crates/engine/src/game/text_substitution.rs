@@ -481,6 +481,7 @@ fn rewrite_resolved_ability(
         // The rest of the chain is rewritten recursively.
         sub_ability,
         else_ability,
+        coin_branches: _,
         // Runtime state, never text: choices, identities, paid costs and display strings are fixed at announcement (CR 601.2b) and keep the old words.
         targets: _,
         declares_chosen_group: _,
