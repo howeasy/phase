@@ -17,9 +17,10 @@ use serde::{Deserialize, Deserializer};
 use serde_json::value::Serializer as ValueSerializer;
 use serde_json::{Map, Value};
 
-/// The serde newtype name the rules projection recognizes. It is not a Rust identifier,
-/// so no derived newtype can carry it, and every wire codec renders a named newtype as
-/// its inner value, so the name never reaches a serialized form.
+/// The serde newtype name the rules projection recognizes: a reserved serialization name,
+/// not a Rust identifier, so no type should be given it (a `#[serde(rename)]` could, and a
+/// repository grep keeps it to this one definition). Every wire codec renders a named
+/// newtype as its inner value, so the name never reaches a serialized form.
 const DISPLAY_ONLY_MARKER: &str = "$phase_engine::private::DisplayOnly";
 
 /// A value shown to players that no rule and no AI decision may read.
