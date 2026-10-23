@@ -2054,6 +2054,8 @@ mod welcome_the_dead;
 #[cfg(feature = "test-support")]
 mod owned_you_target_authority;
 
+mod attack_target_latch;
+mod attacked_player_referent;
 mod base_pt_designation_filter;
 mod controller_anaphor_binds_through_context;
 mod declared_group_identity;
@@ -2067,6 +2069,7 @@ mod issue_9886_dralnus_pet;
 mod keyword_activation_cancel;
 mod partner_family_keyword_remainder;
 mod rally_the_righteous_radiance_pump;
+mod resolution_tap_x_binding;
 mod starting_intensity_keyword;
 mod tidebinder_source_type_gate;
 
