@@ -1440,16 +1440,41 @@ pub fn evaluate_deck_format_gate_js(request: JsValue) -> Result<JsValue, JsValue
 /// `validate_deck_printings_bounds`; throws the reason on abuse. Needs no card database.
 #[wasm_bindgen(js_name = checkDeckPrintingsBounds)]
 pub fn check_deck_printings_bounds_js(printings: JsValue) -> Result<(), JsValue> {
-    check_printings_bounds(serde_wasm_bindgen::Deserializer::from(printings))
-        .map_err(|e| JsValue::from_str(&e))
+    check_printings_bounds(serde_wasm_bindgen::Deserializer::from(printings)).map_err(|e| match e {
+        // The decoder's own error is already a JS `Error` whose `.message` is the bare
+        // reason; its `Display` would prefix "Error: " (`String(error)`).
+        PrintingsRefusal::Decode(e) => JsValue::from(e),
+        PrintingsRefusal::Bounds(reason) => JsValue::from_str(&reason),
+    })
+}
+
+/// Why `check_printings_bounds` refused a guest deck's `printings` value.
+#[derive(Debug)]
+enum PrintingsRefusal<E> {
+    /// The sidecar decoder refused it (the entry cap).
+    Decode(E),
+    /// `validate_deck_printings_bounds` refused it (the byte caps).
+    Bounds(String),
+}
+
+impl<E: std::fmt::Display> std::fmt::Display for PrintingsRefusal<E> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Decode(e) => e.fmt(f),
+            Self::Bounds(reason) => f.write_str(reason),
+        }
+    }
 }
 
 /// The P2P admission half of D8: decodes a guest deck's `printings` value with the one
 /// sidecar decoder (the entry cap) and applies `validate_deck_printings_bounds` (the byte
-/// caps). Native-testable body of `checkDeckPrintingsBounds`.
-fn check_printings_bounds<'de, D: serde::Deserializer<'de>>(printings: D) -> Result<(), String> {
-    let printings = deserialize_deck_printings(printings).map_err(|e| e.to_string())?;
-    validate_deck_printings_bounds("printings", &printings)
+/// caps). Native-testable body of `checkDeckPrintingsBounds`; the two refusal sources stay
+/// distinct so the export can surface each in its native JS form.
+fn check_printings_bounds<'de, D: serde::Deserializer<'de>>(
+    printings: D,
+) -> Result<(), PrintingsRefusal<D::Error>> {
+    let printings = deserialize_deck_printings(printings).map_err(PrintingsRefusal::Decode)?;
+    validate_deck_printings_bounds("printings", &printings).map_err(PrintingsRefusal::Bounds)
 }
 
 /// Axis A: capture a lobby's live, fully-resolved `FormatConfig` as a saved
@@ -7762,14 +7787,17 @@ mod deck_list_seat_validation_tests {
 
         // Reach guards: the same helper admits invalid annotations (the decoder ran
         // and the check passed them) and a deck with no `printings` key (`null`).
-        assert_eq!(check(invalid_annotations()), Ok(()));
-        assert_eq!(check(serde_json::Value::Null), Ok(()));
-        assert_eq!(check(serde_json::json!(vec![0; 2048])), Ok(()));
+        assert!(check(invalid_annotations()).is_ok());
+        assert!(check(serde_json::Value::Null).is_ok());
+        assert!(check(serde_json::json!(vec![0; 2048])).is_ok());
 
-        // Decode-time cap: 2049 elements the lenient decoder would drop.
+        // Decode-time cap: 2049 elements the lenient decoder would drop. It surfaces as
+        // the decoder's own error (a JS `Error` object on the real path), not a string.
         let err = check(serde_json::json!(vec![0; 2049])).unwrap_err();
+        assert!(matches!(err, PrintingsRefusal::Decode(_)), "{err}");
         assert!(
-            err.contains("printings must contain at most 2048 entries"),
+            err.to_string()
+                .contains("printings must contain at most 2048 entries"),
             "{err}"
         );
 
@@ -7779,9 +7807,11 @@ mod deck_list_seat_validation_tests {
             "section": "main_deck", "name": "Plains", "count": 1,
             "printing": { "set_code": "s".repeat(33), "collector_number": "1" },
         }]);
-        assert_eq!(
-            check(long_code),
-            Err("printings[0].printing.set_code must be at most 32 bytes".to_string())
+        let err = check(long_code).unwrap_err();
+        assert!(
+            matches!(&err, PrintingsRefusal::Bounds(reason)
+                if reason == "printings[0].printing.set_code must be at most 32 bytes"),
+            "{err}"
         );
     }
 }
