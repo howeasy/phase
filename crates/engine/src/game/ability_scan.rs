@@ -6704,6 +6704,8 @@ fn replacement_definition_axes(
         // Event kinds, zones, scopes, fixed amounts, flags, ids and a label.
         event: _,
         choice_authority: _,
+        // Fixed recipient identity, not a dynamic quantity or history read.
+        triggering_spell: _,
         description: _,
         destination_zone: _,
         active_zones: _,

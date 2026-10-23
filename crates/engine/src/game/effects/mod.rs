@@ -9207,6 +9207,8 @@ fn replacement_matchers_read_filter_population(
         mode,
         choice_authority: _,
         valid_card,
+        // A captured recipient pin contains no filter-population operand.
+        triggering_spell: _,
         description: _,
         condition,
         destination_zone: _,

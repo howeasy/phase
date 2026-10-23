@@ -323,6 +323,7 @@ fn brewing_rider_follows_the_spell_after_aethersnatch() {
     let rider = &runner.state().pending_damage_replacements[0];
     assert_eq!(rider.source_object, Some(brewing));
     assert_eq!(rider.source_controller, Some(P0));
+    assert_eq!(rider.triggering_spell, Some(cast_pin));
     assert!(!rider.is_consumed, "the rider is installed before theft");
     assert!(matches!(
         runner.state().waiting_for,
@@ -416,6 +417,7 @@ fn runadi_rider_does_not_follow_a_remanded_recast(restore_after_remand: bool) {
     assert_eq!(runner.state().pending_damage_replacements.len(), 1);
     let stale_rider = runner.state().pending_damage_replacements[0].clone();
     assert_eq!(stale_rider.source_object, Some(runadi));
+    assert_eq!(stale_rider.triggering_spell, Some(first_cast));
     assert!(!stale_rider.is_consumed, "the first rider must await entry");
     let library_before = runner.state().players[P0.0 as usize].library.len();
     runner
@@ -464,6 +466,10 @@ fn runadi_rider_does_not_follow_a_remanded_recast(restore_after_remand: bool) {
             runner.state().pending_damage_replacements[0].source_object,
             Some(runadi)
         );
+        assert_eq!(
+            runner.state().pending_damage_replacements[0].triggering_spell,
+            Some(first_cast)
+        );
         assert!(!runner.state().pending_damage_replacements[0].is_consumed);
         assert!(runner.state().stack.is_empty());
         assert!(matches!(
@@ -494,6 +500,10 @@ fn runadi_rider_does_not_follow_a_remanded_recast(restore_after_remand: bool) {
     assert_eq!(
         runner.state().pending_damage_replacements[1].source_object,
         Some(runadi)
+    );
+    assert_eq!(
+        runner.state().pending_damage_replacements[1].triggering_spell,
+        Some(second_cast)
     );
     assert!(!runner.state().pending_damage_replacements[1].is_consumed);
     runner
@@ -675,6 +685,10 @@ fn departed_runadi_cast_trigger_installs_no_rider_or_installation_event() {
         runner.state().pending_damage_replacements[0].source_object,
         Some(runadi)
     );
+    assert_eq!(
+        runner.state().pending_damage_replacements[0].triggering_spell,
+        Some(second_cast)
+    );
     assert!(!runner.state().pending_damage_replacements[0].is_consumed);
     runner
         .act(GameAction::PassPriority)
@@ -761,6 +775,10 @@ fn tenacious_pup_boon_follows_a_stolen_spell_and_is_used_only_once() {
         .expect("resolve the boon's cast trigger");
     assert_eq!(runner.state().stack.len(), 1);
     assert_eq!(runner.state().pending_damage_replacements.len(), 1);
+    assert_eq!(
+        runner.state().pending_damage_replacements[0].triggering_spell,
+        Some(cast_pin)
+    );
     assert!(!runner.state().pending_damage_replacements[0].is_consumed);
     assert!(matches!(
         runner.state().waiting_for,
