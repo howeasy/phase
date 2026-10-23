@@ -1127,8 +1127,9 @@ mod tests {
         assert!(serde_json::from_str::<TriggerMode>(r#""NotAMode""#).is_err());
     }
 
-    /// Forge's `ChangesController` string carries no direction; the engine's
-    /// `from_str` keeps its historical meaning (lose control).
+    /// The legacy source-level variant name decodes to its only historical
+    /// meaning (lose control) so the enum stays enumerable; Forge imports do not
+    /// use this path (`translate_trigger_mode` fails closed).
     #[test]
     fn changes_controller_from_str_is_loses() {
         assert_eq!(

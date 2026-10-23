@@ -11192,7 +11192,8 @@ fn trigger_when_you_lose_control_maps_to_changes_controller() {
 /// constraint (CR 110.2: a control change always comes from the prior
 /// controller) so `valid_target` stays empty. The body is the shared
 /// choose-creature-and-opponent coin-flip chain and must not leak
-/// `Unimplemented` (the reach guard for the hostile rows in P3).
+/// `Unimplemented` (the reach guard for
+/// `trigger_gain_control_hostile_shapes_stay_unknown`).
 #[test]
 fn trigger_when_you_gain_control_from_another_player_maps_to_gains() {
     let def = parse_trigger_line(
