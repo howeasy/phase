@@ -1238,6 +1238,7 @@ mod must_attack_player_attribution;
 mod must_be_blocked_blocker_prompt;
 mod mutable_pupa_perpetual_keyword_mirror;
 mod mycoloth_upkeep_trigger;
+mod myriad_landscape_shared_land_type;
 mod myrkul_crew_phase1_incarnation;
 mod mystic_forge_regression;
 mod n_or_more_creatures_attack_any_player;

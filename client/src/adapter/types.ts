@@ -1528,9 +1528,12 @@ export type ChooseFromZoneConstraint =
   | { type: "DistinctCardTypes"; categories: string[] }
   | { type: "TotalManaValue"; comparator: string; value: number };
 
+// Mirrors Rust `SharedQualityRelation` (relation among the chosen cards).
+export type SharedQualityRelation = "Shares" | "DoesNotShare";
+
 export type SearchSelectionConstraint =
   | { type: "None" }
-  | { type: "DistinctQualities"; qualities: string[] }
+  | { type: "SharesQualities"; qualities: string[]; relation: SharedQualityRelation }
   | { type: "TotalManaValue"; comparator: string; value: number }
   | { type: "MatchEachFilter"; filters: TargetFilter[] };
 

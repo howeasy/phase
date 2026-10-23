@@ -4990,6 +4990,13 @@ fn parse_control_count_ge_distinct_quality(input: &str) -> OracleResult<'_, Stat
 /// objects. The group/count layer split likewise carries no CR number of its
 /// own. This function moves the constraint from the filter to that authority.
 ///
+/// The marker is equally inert inside a library-search filter
+/// (`evaluate_shares_quality` answers true per card), so
+/// `oracle_effect::search::parse_search_library_details` is the second consumer
+/// of this lift: it moves the marker into
+/// `SearchSelectionConstraint::SharesQualities { relation: Shares }`
+/// (CR 608.2c + CR 701.23a).
+///
 /// Declines, leaving the filter untouched, for:
 ///   * `reference: Some(..)` — that IS a per-object predicate and
 ///     `ObjectCount` is correct for it;
@@ -5004,7 +5011,7 @@ fn parse_control_count_ge_distinct_quality(input: &str) -> OracleResult<'_, Stat
 /// `oracle_trigger::try_extract_intervening`) turn one into an UNCONDITIONAL
 /// static or an unhoisted intervening-if — strictly worse than the shape they
 /// would refuse.
-fn take_group_shared_quality(filter: &mut TargetFilter) -> Option<SharedQuality> {
+pub(crate) fn take_group_shared_quality(filter: &mut TargetFilter) -> Option<SharedQuality> {
     let TargetFilter::Typed(tf) = filter else {
         return None;
     };

@@ -12840,14 +12840,6 @@ fn most_prevalent_creature_types_in_zone(
         .collect()
 }
 
-/// CR 608.2b: Validate that all targeted objects share at least one value of the named quality.
-/// This is a group constraint that cannot be checked per-object — it requires the full set.
-/// Checked at resolution time per CR 608.2b (verifying target legality on resolution).
-///
-/// Returns `true` if the constraint is satisfied (or if there are fewer than 2 targets).
-/// For "creature type": all objects must share at least one creature subtype.
-/// For "color": all objects must share at least one color.
-/// For "card type": all objects must share at least one card type.
 /// CR 608.2c + CR 201.2: True when two objects share at least one value of the
 /// named quality. Used by `AbilityCondition::ObjectsShareQuality`.
 pub fn objects_share_quality(
@@ -12868,6 +12860,13 @@ pub fn objects_share_quality(
 }
 
 /// CR 608.2b: Validate that all targeted objects share at least one value of the named quality.
+/// This is a group constraint that cannot be checked per-object — it requires the full set.
+/// Checked at resolution time per CR 608.2b (verifying target legality on resolution).
+///
+/// Returns `true` if the constraint is satisfied (or if there are fewer than 2 targets).
+/// For "creature type": all objects must share at least one creature subtype.
+/// For "color": all objects must share at least one color.
+/// For "card type": all objects must share at least one card type.
 pub fn validate_shares_quality(
     state: &GameState,
     targets: &[TargetRef],
@@ -12880,15 +12879,29 @@ pub fn validate_shares_quality(
             TargetRef::Player(_) => None,
         })
         .collect();
+    objects_have_common_quality_value(state, &obj_ids, quality)
+}
 
+/// Whether some value of `quality` is common to every object in `ids`
+/// (group form; contrast the pairwise `objects_share_quality`).
+/// Vacuously true for fewer than two ids, decided before any lookup; with
+/// two or more ids, false if any id is missing from `state.objects`,
+/// otherwise true iff the objects' value sets have a non-empty intersection.
+/// Shared group core for target validation (`validate_shares_quality`) and
+/// library-search selection (`search_library::selection_satisfies_constraint`).
+pub fn objects_have_common_quality_value(
+    state: &GameState,
+    ids: &[ObjectId],
+    quality: &SharedQuality,
+) -> bool {
     // Fewer than 2 objects — constraint is trivially satisfied.
-    if obj_ids.len() < 2 {
+    if ids.len() < 2 {
         return true;
     }
 
     let mut sets = Vec::new();
-    for id in obj_ids {
-        let Some(obj) = state.objects.get(&id) else {
+    for id in ids {
+        let Some(obj) = state.objects.get(id) else {
             return false;
         };
         sets.push(object_shared_quality_values(

@@ -13103,7 +13103,9 @@ mod tests {
     /// only uniquely-named cards.
     #[test]
     fn gifts_ungiven_search_choice_returns_quickly_with_distinct_names() {
-        use engine::types::ability::{SearchSelectionConstraint, SharedQuality};
+        use engine::types::ability::{
+            SearchSelectionConstraint, SharedQuality, SharedQualityRelation,
+        };
         use std::time::Instant;
 
         let mut state = make_state();
@@ -13139,8 +13141,9 @@ mod tests {
             reveal: true,
             up_to: true,
             allows_partial_find: false,
-            constraint: SearchSelectionConstraint::DistinctQualities {
+            constraint: SearchSelectionConstraint::SharesQualities {
                 qualities: vec![SharedQuality::Name],
+                relation: SharedQualityRelation::DoesNotShare,
             },
             ordering_hint: Default::default(),
             split: None,
