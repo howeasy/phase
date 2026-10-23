@@ -1252,7 +1252,8 @@ fn legacy_v7_flip_n_save_is_refused_current_completes() {
     );
 
     assert_legacy_coin_refused(legacy);
-    for (label, wire) in [("current", current)] {
+    {
+        let (label, wire) = ("current", current);
         restore_wire(&mut runner, wire);
         let (events, kept) = drive_keeps(&mut runner, |_| 0);
         assert_eq!(kept.len(), 3, "{label}: three prompts in total");
@@ -1286,7 +1287,8 @@ fn legacy_v7_until_lose_frame_without_wins_is_refused() {
     );
 
     assert_legacy_coin_refused(legacy);
-    for (label, wire) in [("current", current)] {
+    {
+        let (label, wire) = ("current", current);
         restore_wire(&mut runner, wire);
         let (events, kept) = drive_keeps(&mut runner, |_| 0);
         let kept_wins = kept.iter().filter(|won| **won).count() as i32;
@@ -1343,7 +1345,8 @@ fn legacy_v7_until_lose_frame_with_owed_rewards_is_refused() {
     );
 
     assert_legacy_coin_refused(legacy);
-    for (label, wire) in [("current", current)] {
+    {
+        let (label, wire) = ("current", current);
         restore_wire(&mut runner, wire);
         let (events, kept) = drive_keeps(&mut runner, |_| 0);
         let wins_after_restore = kept.iter().filter(|won| **won).count() as i32;
