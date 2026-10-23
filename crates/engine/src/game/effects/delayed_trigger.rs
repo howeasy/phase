@@ -611,8 +611,8 @@ pub fn resolve(
     // referent, so a chain naming both the event's subject and its object slot
     // does not hand one clause the other's object.
     //
-    // MUST run after `set_target_incarnations_recursive` (which overwrites every
-    // node's pins with the root's) and after the root `targets` assignment —
+    // MUST run after `set_target_incarnations_recursive` (which stamps the
+    // inherited-reference scope) and after the root `targets` assignment —
     // either would otherwise clobber the per-node bindings.
     //
     // Gated on the same creation-time-provenance test as the root snapshot:

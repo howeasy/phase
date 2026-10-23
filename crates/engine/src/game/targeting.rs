@@ -1442,6 +1442,16 @@ pub(crate) fn resolving_root_ability<'a>(
 /// the mode now resolving (the parser numbers slots within one mode's text), else the chain root.
 fn parent_slot_base<'a>(state: &'a GameState, ability: &'a ResolvedAbility) -> &'a ResolvedAbility {
     let root = resolving_root_ability(state, ability);
+    // CR 608.2c: a selected outcome carries its lexical base explicitly.
+    // The carrier remains unpruned, preserving the outer CR 608.2b offset.
+    if let Some(base) = ability
+        .context
+        .coin_branch_slot_base
+        .as_deref()
+        .and_then(|path| super::ability_utils::node_at(root, path))
+    {
+        return base;
+    }
     // `resolving_modal_instruction` outlives its resolution, so it names a mode only of the carrier's chain.
     let Some(ordinal) = state
         .resolving_modal_instruction

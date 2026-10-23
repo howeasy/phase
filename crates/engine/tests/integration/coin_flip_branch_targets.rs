@@ -4198,3 +4198,259 @@ fn non_coin_forwarded_parent_target_resolution_rider_keeps_its_bound_object() {
         .contains_key(&CounterType::Plus1Plus1));
     assert_finished(&runner);
 }
+
+#[test]
+fn coin_lost_dependent_target_uses_its_lexical_creature_not_won_artifact() {
+    use engine::game::ability_utils::{build_resolved_from_def, build_target_slots};
+    use engine::types::ability::{
+        AbilityDefinition, AbilityKind, FilterProp, SharedQuality, SharedQualityRelation,
+        TypedFilter,
+    };
+    let declare =
+        |target| AbilityDefinition::new(AbilityKind::Spell, Effect::TargetOnly { target });
+    let lost =
+        declare(TargetFilter::Typed(TypedFilter::creature())).sub_ability(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Destroy {
+                target: TargetFilter::Typed(TypedFilter::permanent().properties(vec![
+                    FilterProp::SharesQuality {
+                        quality: SharedQuality::CardType,
+                        reference: Some(Box::new(TargetFilter::ParentTarget)),
+                        relation: SharedQualityRelation::Shares,
+                    },
+                ])),
+                cant_regenerate: false,
+            },
+        ));
+    let definition = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::FlipCoins {
+            flips: CoinFlipRun::single(),
+            win_effect: Some(Box::new(declare(TargetFilter::Typed(TypedFilter::new(
+                engine::types::ability::TypeFilter::Artifact,
+            ))))),
+            lose_effect: Some(Box::new(lost)),
+            flipper: TargetFilter::Controller,
+        },
+    );
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let a = scenario
+        .add_artifact_from_oracle(P0, "Won artifact", "")
+        .id();
+    let b = scenario.add_creature(P0, "Lost antecedent", 2, 2).id();
+    let c = scenario.add_creature(P1, "Shared creature type", 3, 3).id();
+    let spell = scenario
+        .add_spell_to_hand(P0, "Synthetic lexical target coin", true)
+        .with_ability_definition(definition.clone())
+        .id();
+    let mut runner = scenario.build();
+    let resolved = build_resolved_from_def(&definition, spell, P0);
+    let slots = build_target_slots(runner.state(), &resolved).unwrap();
+    assert!(slots[2].legal_targets.contains(&TargetRef::Object(c)));
+    assert!(!slots[2].legal_targets.contains(&TargetRef::Object(a)));
+    pin_outcomes(&mut runner, &[false]);
+    let card_id = runner.state().objects[&spell].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: spell,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .unwrap();
+    for target in [a, b] {
+        runner
+            .act(GameAction::ChooseTarget {
+                target: Some(TargetRef::Object(target)),
+            })
+            .unwrap();
+    }
+    let WaitingFor::TargetSelection { selection, .. } = &runner.state().waiting_for else {
+        panic!("required dependent lost-branch target prompt");
+    };
+    assert!(selection
+        .current_legal_targets
+        .contains(&TargetRef::Object(c)));
+    assert!(!selection
+        .current_legal_targets
+        .contains(&TargetRef::Object(a)));
+    runner
+        .act(GameAction::ChooseTarget {
+            target: Some(TargetRef::Object(c)),
+        })
+        .unwrap();
+    let mut events = Vec::new();
+    finish(&mut runner, &mut events);
+    assert_eq!(flips(&events), vec![false]);
+    assert_eq!(runner.state().objects[&c].zone, Zone::Graveyard);
+    assert_eq!(runner.state().objects[&a].zone, Zone::Battlefield);
+    assert_eq!(runner.state().objects[&b].zone, Zone::Battlefield);
+    assert_finished(&runner);
+}
+
+#[test]
+fn coin_lost_numbered_reference_keeps_branch_base_and_outer_legality_across_restore() {
+    use engine::types::ability::{
+        AbilityDefinition, AbilityKind, ControllerRef, QuantityExpr, TypedFilter,
+    };
+    use engine::types::counter::CounterType;
+    use engine::types::game_state::PersistedGameState;
+    for thumb in [false, true] {
+        for illegal in [None, Some(0), Some(1)] {
+            let declare = |controller| {
+                AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::TargetOnly {
+                        target: TargetFilter::Typed(TypedFilter::creature().controller(controller)),
+                    },
+                )
+            };
+            let lost = declare(ControllerRef::You).sub_ability(
+                declare(ControllerRef::Opponent).sub_ability(AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::PutCounter {
+                        counter_type: CounterType::Plus1Plus1,
+                        count: QuantityExpr::Fixed { value: 2 },
+                        target: TargetFilter::ParentTargetSlot { index: 0 },
+                    },
+                )),
+            );
+            let mut scenario = GameScenario::new();
+            scenario.at_phase(Phase::PreCombatMain);
+            if thumb {
+                scenario.add_artifact_from_oracle(
+                    P0,
+                    "Krark's Thumb",
+                    "If you would flip a coin, instead flip two coins and ignore one.",
+                );
+            }
+            let a = scenario.add_creature(P0, "Won creature A", 2, 4).id();
+            let b = scenario.add_creature(P0, "Lost creature B", 3, 4).id();
+            let c = scenario.add_creature(P1, "Lost opponent C", 4, 4).id();
+            let spell = scenario
+                .add_spell_to_hand(P0, "Synthetic numbered coin", true)
+                .with_ability(Effect::FlipCoins {
+                    flips: CoinFlipRun::single(),
+                    win_effect: Some(Box::new(declare(ControllerRef::You))),
+                    lose_effect: Some(Box::new(lost)),
+                    flipper: TargetFilter::Controller,
+                })
+                .id();
+            let mut runner = scenario.build();
+            pin_outcomes(&mut runner, &[false, true]);
+            drop(runner.cast(spell).target_objects(&[a, b, c]).commit());
+            if let Some(index) = illegal {
+                // CR 608.2b: an opponent-controlled creature no longer satisfies "you control".
+                runner
+                    .state_mut()
+                    .objects
+                    .get_mut(&[a, b][index])
+                    .unwrap()
+                    .controller = P1;
+            }
+            let mut events = Vec::new();
+            if thumb {
+                pass_to_coin_keep(&mut runner, &mut events);
+                runner.state_mut().capture_rng_word_pos();
+                let wire =
+                    serde_json::to_value(PersistedGameState::capture(runner.state().clone()))
+                        .unwrap();
+                *runner.state_mut() = serde_json::from_value::<PersistedGameState>(wire)
+                    .unwrap()
+                    .into_game_state()
+                    .unwrap();
+                events.extend(
+                    runner
+                        .act(GameAction::SelectCoinFlips {
+                            keep_indices: vec![0],
+                        })
+                        .unwrap()
+                        .events,
+                );
+            }
+            finish(&mut runner, &mut events);
+            assert_eq!(
+                flips(&events),
+                vec![false],
+                "thumb={thumb}, illegal={illegal:?}"
+            );
+            for (target, expected) in [(a, 0), (b, if illegal == Some(1) { 0 } else { 2 }), (c, 0)]
+            {
+                assert_eq!(
+                    runner.state().objects[&target]
+                        .counters
+                        .get(&CounterType::Plus1Plus1)
+                        .copied()
+                        .unwrap_or(0),
+                    expected,
+                    "target={target:?}, thumb={thumb}, illegal={illegal:?}"
+                );
+            }
+            assert_finished(&runner);
+        }
+    }
+}
+
+#[test]
+fn declaring_root_delayed_pin_still_guards_its_inherited_counter_rider() {
+    use engine::game::ability_utils::build_resolved_from_def;
+    use engine::game::effects;
+    use engine::types::ability::{AbilityDefinition, AbilityKind, QuantityExpr, TypedFilter};
+    use engine::types::counter::CounterType;
+    use engine::types::identifiers::ObjectIncarnationRef;
+    for stale in [false, true] {
+        let definition = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::TargetOnly {
+                target: TargetFilter::Typed(TypedFilter::creature()),
+            },
+        )
+        .sub_ability(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::PutCounter {
+                counter_type: CounterType::Plus1Plus1,
+                count: QuantityExpr::Fixed { value: 3 },
+                target: TargetFilter::ParentTarget,
+            },
+        ));
+        let mut scenario = GameScenario::new();
+        let target = scenario
+            .add_creature(P0, "Captured delayed referent", 2, 2)
+            .id();
+        let mut runner = scenario.build();
+        let pin = ObjectIncarnationRef::from_object(&runner.state().objects[&target]);
+        let mut root = build_resolved_from_def(&definition, ObjectId(100), P0);
+        root.set_unpinned_targets(vec![TargetRef::Object(target)]);
+        root.sub_ability
+            .as_mut()
+            .unwrap()
+            .set_unpinned_targets(vec![TargetRef::Object(target)]);
+        root.set_target_incarnations_recursive(vec![pin]);
+        if stale {
+            runner
+                .state_mut()
+                .objects
+                .get_mut(&target)
+                .unwrap()
+                .incarnation += 1;
+        }
+        let mut events = Vec::new();
+        effects::resolve_ability_chain(
+            runner.state_mut(),
+            root.sub_ability.as_ref().unwrap(),
+            &mut events,
+            0,
+        )
+        .unwrap();
+        assert_eq!(
+            runner.state().objects[&target]
+                .counters
+                .get(&CounterType::Plus1Plus1)
+                .copied()
+                .unwrap_or(0),
+            if stale { 0 } else { 3 }
+        );
+        assert_finished(&runner);
+    }
+}

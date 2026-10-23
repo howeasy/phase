@@ -25372,6 +25372,28 @@ fn generic_static_depends_on_missing_forward_result(
     }
 }
 
+/// CR 608.2c: Whether the absent forwarded object is named by this instruction
+/// through one of the hidden ROLE slots the effect resolves itself, which
+/// [`effect_refs_parent_target`] does not surface (it reads only
+/// `target_filter()`): `Fight.subject` ("that creature fights ...") and
+/// `MoveCounters.source` ("put counters from that creature"). The other hidden
+/// object slots — `Attach.attachment`, `UnattachAll.attachment`,
+/// `Token.attach_to` and `CopyTokenOf.target` — are already covered there via
+/// `effect_parent_ref_slots`.
+///
+/// Scoped to the declaring-node boundary in
+/// [`without_missing_forward_result_dependencies`]: these roles are consulted
+/// only when the node already announced its own target, leaving the
+/// non-declaring path byte-identical to the established
+/// [`effect_chain_depends_on_missing_forward_result`] contract.
+fn declaring_node_role_refs_missing_forward_result(effect: &Effect) -> bool {
+    match effect {
+        Effect::Fight { subject, .. } => filter_refs_parent_target(subject),
+        Effect::MoveCounters { source, .. } => filter_refs_parent_target(source),
+        _ => false,
+    }
+}
+
 /// CR 608.2c: Does this application filter *require* the object the preceding
 /// forward-result instruction failed to produce?
 ///
@@ -25430,6 +25452,13 @@ fn without_missing_forward_result_dependencies(
         || (matches!(ability.effect, Effect::TargetOnly { .. })
             && awaits_resolution_object_choice(ability))
     {
+        // CR 608.2c: an announced recipient does not supply a missing
+        // subject, attachment, or counter source used by this effect itself.
+        if effect_chain_depends_on_missing_forward_result(&ability.effect)
+            || declaring_node_role_refs_missing_forward_result(&ability.effect)
+        {
+            return first_independent_forward_result_sibling(ability.sub_ability.as_deref());
+        }
         return Some(ability.clone());
     }
     let mut remaining = ability.clone();
@@ -61615,5 +61644,42 @@ mod untargeted_target_only_choice_tests {
                     .map(|context| context.targets.is_empty())
             });
         assert_eq!(stamped, Some(true));
+    }
+
+    #[test]
+    fn missing_forward_result_prunes_declaring_fight_but_keeps_independent_payoff() {
+        use crate::types::ability::TypedFilter;
+        let mut runner = GameScenario::new().build();
+        let mut payoff = gain_life(4);
+        payoff.sub_link = SubAbilityLink::SequentialSibling;
+        let declaring = ResolvedAbility::new(
+            Effect::Fight {
+                target: TargetFilter::Typed(TypedFilter::creature()),
+                subject: TargetFilter::ParentTarget,
+            },
+            vec![],
+            ObjectId(100),
+            P0,
+        )
+        .sub_ability(payoff);
+        assert!(crate::game::ability_utils::node_has_stack_target_declaration(&declaring));
+        let remaining = without_missing_forward_result_dependencies(&declaring).unwrap();
+        assert!(
+            matches!(remaining.effect, Effect::GainLife { .. }),
+            "the missing-subject instruction must be pruned before its independent payoff"
+        );
+        let mut events = Vec::new();
+        resolve_ability_chain(runner.state_mut(), &remaining, &mut events, 0).unwrap();
+        assert_eq!(runner.state().players[0].life, 24);
+        assert!(
+            !events.iter().any(|event| matches!(
+                event,
+                GameEvent::EffectResolved {
+                    kind: crate::types::ability::EffectKind::Fight,
+                    ..
+                }
+            )),
+            "a declaring target does not supply the missing fight subject"
+        );
     }
 }

@@ -31736,6 +31736,12 @@ pub struct SpellContext {
     /// `finalize_cast`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub chain_root_targets: Vec<TargetRef>,
+    /// CR 608.2c: the selected coin outcome's declared-slot numbering base,
+    /// addressed in the resolution carrier's original chain. Unlike source
+    /// identity, this distinguishes Won and Lost and survives parked choices.
+    /// Absent on ordinary non-coin chains.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub coin_branch_slot_base: Option<Vec<crate::types::game_state::ChainStep>>,
     /// CR 601.2 + CR 608.2c: Presence filters the controller matched as the
     /// spell was cast. Used by effects that say "if you controlled a [filter]
     /// as you cast this spell"; the resolver checks this snapshot instead of
@@ -38576,15 +38582,17 @@ impl ResolvedAbility {
     }
 
     /// CR 400.7 + CR 603.7c: Pin inherited delayed-trigger referents to their
-    /// creation-time incarnations. An independent declaration starts a new
-    /// occurrence scope; neither it nor its descendants inherit these pins.
+    /// creation-time incarnations. A declaring root retains its own authority
+    /// but still pins its non-declaring riders. A declaring child starts a new
+    /// scope; neither it nor its descendants inherit the incoming pins.
     pub fn set_target_incarnations_recursive(&mut self, pins: Vec<ObjectIncarnationRef>) {
-        if crate::game::ability_utils::node_has_stack_target_declaration(self) {
-            return;
+        if !crate::game::ability_utils::node_has_stack_target_declaration(self) {
+            self.target_incarnations = pins.clone();
         }
-        self.target_incarnations = pins.clone();
         for (_, child) in self.child_links_mut() {
-            child.set_target_incarnations_recursive(pins.clone());
+            if !crate::game::ability_utils::node_has_stack_target_declaration(child) {
+                child.set_target_incarnations_recursive(pins.clone());
+            }
         }
     }
 

@@ -493,9 +493,7 @@ fn find_first_filter_after_deferred(ability: &ResolvedAbility) -> Option<&Target
             .sub_ability
             .as_deref()
             .and_then(find_first_filter_after_deferred),
-        AnnouncementDisposition::Inherited => {
-            unreachable!("deferred nodes do not inherit declarations")
-        }
+        AnnouncementDisposition::Inherited => find_first_announced_filter_below(ability),
     }
 }
 
@@ -535,6 +533,11 @@ struct SlotAccumulator {
     /// `groups[i]` is the group `slots[i]` was announced under; index-parallel with
     /// `slots` by construction (`push` is the only writer).
     groups: Vec<Option<crate::types::ability::ChosenGroupId>>,
+    /// CR 608.2c: only coin paths use lexical object antecedents; other paths
+    /// retain the established full-prefix lookup.
+    coin_depth: usize,
+    current_node_start: usize,
+    prior_object_range: Option<std::ops::Range<usize>>,
 }
 
 impl Default for SlotAccumulator {
@@ -554,6 +557,9 @@ impl Default for SlotAccumulator {
             current_effect_detail: TargetEffectDetail::None,
             current_group: None,
             groups: Vec::new(),
+            coin_depth: 0,
+            current_node_start: 0,
+            prior_object_range: None,
         }
     }
 }
@@ -576,6 +582,15 @@ impl SlotAccumulator {
         BuiltSlots {
             slots: &self.slots,
             groups: &self.groups,
+            object_slots: if self.coin_depth > 0 {
+                Some(
+                    self.prior_object_range
+                        .as_ref()
+                        .map_or(&[], |range| &self.slots[range.clone()]),
+                )
+            } else {
+                None
+            },
         }
     }
 }
@@ -585,12 +600,14 @@ impl SlotAccumulator {
 struct BuiltSlots<'a> {
     slots: &'a [TargetSelectionSlot],
     groups: &'a [Option<crate::types::ability::ChosenGroupId>],
+    object_slots: Option<&'a [TargetSelectionSlot]>,
 }
 
 impl BuiltSlots<'static> {
     const NONE: Self = Self {
         slots: &[],
         groups: &[],
+        object_slots: None,
     };
 }
 
@@ -3118,6 +3135,7 @@ pub(crate) fn validate_targets_in_chain_with_view(
         false,
         DeclaredNumbering::of(ability),
         &[],
+        &mut Vec::new(),
     );
     (validated, view)
 }
@@ -3199,6 +3217,7 @@ enum NodeValidation {
     },
 }
 
+#[allow(clippy::too_many_arguments)]
 fn validate_targets_in_chain_inner(
     state: &GameState,
     ability: &ResolvedAbility,
@@ -3212,6 +3231,7 @@ fn validate_targets_in_chain_inner(
     // own parent's block through). Read by the implicit-fight referent and by
     // the generic arm's prior-object recheck (`target_filter_binds_prior_target`).
     parent_block: &[JudgedOccurrence],
+    path: &mut Vec<ChainStep>,
 ) -> ResolvedAbility {
     // Classify provenance before pruning the parent's declaration.
     let sub_origin = if ability
@@ -3224,6 +3244,15 @@ fn validate_targets_in_chain_inner(
         TargetReadOrigin::OwnAnnouncement
     };
     let mut validated = ability.clone();
+    // CR 608.2c: numbered anaphors count the selected outcome's declarations.
+    // Its address names the pristine carrier, so illegal-target compaction
+    // cannot renumber later references or lose the outer legality offset.
+    if let Some(last_coin) = path.iter().rposition(|step| match step {
+        ChainStep::CoinFlipBranch { .. } => true,
+        ChainStep::SubAbility | ChainStep::ElseAbility => false,
+    }) {
+        validated.context.coin_branch_slot_base = Some(path[..=last_coin].to_vec());
+    }
     // The declared positions of every EARLIER node, as validated; read only by
     // filters that depend on another declared slot.
     let view_snapshot = view_out.clone();
@@ -3989,6 +4018,7 @@ fn validate_targets_in_chain_inner(
         for (edge, child) in validated.child_links_mut() {
             match edge {
                 ChainStep::CoinFlipBranch { .. } => {
+                    path.push(edge);
                     *child = validate_targets_in_chain_inner(
                         state,
                         child,
@@ -3997,7 +4027,9 @@ fn validate_targets_in_chain_inner(
                         false,
                         numbering,
                         child_block,
+                        path,
                     );
+                    path.pop();
                 }
                 ChainStep::SubAbility | ChainStep::ElseAbility => {}
             }
@@ -4015,6 +4047,7 @@ fn validate_targets_in_chain_inner(
                 .as_deref()
                 .is_some_and(|declared_sub| rider_entries_are_inherited(ability, declared_sub))
         };
+        path.push(ChainStep::SubAbility);
         **sub_ability = validate_targets_in_chain_inner(
             state,
             sub_ability,
@@ -4023,7 +4056,9 @@ fn validate_targets_in_chain_inner(
             sub_inherited,
             numbering,
             child_block,
+            path,
         );
+        path.pop();
     }
     // CR 608.2b: an inheriting rider's entry is a snapshot of its immediate
     // parent's object target, not a target it specified, so the context-ref keep
@@ -4033,6 +4068,7 @@ fn validate_targets_in_chain_inner(
     // determine any information instead of reading a stale object.
     restamp_inherited_rider_target(&mut validated);
     if let Some(else_ability) = validated.else_ability.as_mut() {
+        path.push(ChainStep::ElseAbility);
         **else_ability = validate_targets_in_chain_inner(
             state,
             else_ability,
@@ -4041,7 +4077,9 @@ fn validate_targets_in_chain_inner(
             false,
             numbering,
             child_block,
+            path,
         );
+        path.pop();
     }
     restamp_chosen_group_targets(&mut validated);
     validated
@@ -4559,8 +4597,10 @@ fn collect_target_slots(
         target_effect_detail(&ability.effect),
     );
     let previous_group = std::mem::replace(&mut acc.current_group, ability.declares_chosen_group);
+    let previous_node_start = std::mem::replace(&mut acc.current_node_start, acc.slots.len());
     let result = collect_target_slots_inner(state, ability, acc);
     acc.current_group = previous_group;
+    acc.current_node_start = previous_node_start;
     acc.current_chooser = previous_chooser;
     acc.current_effect_kind = previous_effect_kind;
     acc.current_effect_detail = previous_effect_detail;
@@ -5119,16 +5159,35 @@ fn collect_sub_chain_slots(
     ability: &ResolvedAbility,
     acc: &mut SlotAccumulator,
 ) -> Result<(), TargetSlotBuildError> {
-    for (_, child, disposition) in announced_child_links(ability) {
-        match disposition {
-            AnnouncementDisposition::Declare => collect_target_slots(state, child, acc)?,
-            AnnouncementDisposition::Inherited => collect_sub_chain_slots(state, child, acc)?,
-            AnnouncementDisposition::AfterDeferred => {
-                collect_target_slots_after_deferred_effect(state, Some(child), acc)?
-            }
-        }
+    let own_slots = acc.current_node_start..acc.slots.len();
+    let previous_range = acc.prior_object_range.clone();
+    if !own_slots.is_empty() {
+        acc.prior_object_range = Some(own_slots);
     }
-    Ok(())
+    let result = (|| {
+        for (edge, child, disposition) in announced_child_links(ability) {
+            let enters_coin = matches!(edge, ChainStep::CoinFlipBranch { .. });
+            acc.coin_depth += usize::from(enters_coin);
+            let result = match disposition {
+                AnnouncementDisposition::Declare => collect_target_slots(state, child, acc),
+                AnnouncementDisposition::Inherited => {
+                    let previous_start =
+                        std::mem::replace(&mut acc.current_node_start, acc.slots.len());
+                    let result = collect_sub_chain_slots(state, child, acc);
+                    acc.current_node_start = previous_start;
+                    result
+                }
+                AnnouncementDisposition::AfterDeferred => {
+                    collect_target_slots_after_deferred_effect(state, Some(child), acc)
+                }
+            };
+            acc.coin_depth -= usize::from(enters_coin);
+            result?;
+        }
+        Ok(())
+    })();
+    acc.prior_object_range = previous_range;
+    result
 }
 
 fn no_legal_target_slots() -> TargetSlotBuildError {
@@ -8217,7 +8276,9 @@ fn legal_targets_for_relative_filter(
         // See `union_over_prior_object_candidates`'s doc for why a union (not
         // exact narrowing) is correct here.
         if target_filter_binds_prior_target(filter) {
-            if let Some(prior) = first_prior_object_slot(existing_slots.slots) {
+            if let Some(prior) =
+                first_prior_object_slot(existing_slots.object_slots.unwrap_or(existing_slots.slots))
+            {
                 return union_over_prior_object_candidates(state, ability, filter, prior);
             }
         }
@@ -8941,15 +9002,40 @@ fn legal_targets_for_selected_slot(
                 )
             }
         } else {
-            let bound = target_filter_binds_prior_target(&enumeration_filter)
-                .then(|| bind_prior_object_targets(ability, selected_slots))
-                .flatten();
+            // CR 601.2c + CR 608.2c: the nearest declaring ancestor shadows
+            // earlier instructions, including the opposite coin outcome.
+            let lexical_path = spec.is_in_coin_branch().then(|| {
+                prior_specs
+                    .iter()
+                    .filter(|prior| {
+                        prior.path.len() < spec.path.len() && spec.path.starts_with(&prior.path)
+                    })
+                    .max_by_key(|prior| prior.path.len())
+                    .map_or(spec.path.as_slice(), |prior| prior.path.as_slice())
+            });
+            let bound = if target_filter_binds_prior_target(&enumeration_filter) {
+                if let Some(path) = lexical_path {
+                    let prior = prior_specs
+                        .iter()
+                        .zip(selected_slots)
+                        .filter(|(prior, _)| prior.path == path)
+                        .find_map(|(_, selected)| match selected {
+                            Some(TargetRef::Object(id)) => Some(*id),
+                            _ => None,
+                        });
+                    prior.map(|id| resolved_ability_with_bound_object_target(declaring_node, id))
+                } else {
+                    bind_prior_object_targets(ability, selected_slots)
+                }
+            } else {
+                None
+            };
             #[cfg(feature = "test-support")]
             if bound.is_some() {
                 crate::game::perf_counters::record_prior_target_binding_selection();
             }
-            let enumeration_ability = bound.as_ref().unwrap_or(ability);
-            if bound.is_some() || slot_needs_ability_context(&enumeration_filter, ability) {
+            let enumeration_ability = bound.as_ref().unwrap_or(declaring_node);
+            if bound.is_some() || slot_needs_ability_context(&enumeration_filter, declaring_node) {
                 if controller == ability.controller {
                     targeting::find_legal_targets_for_ability(
                         state,
