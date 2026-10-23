@@ -4357,8 +4357,6 @@ fn bind_forwarded_result_targets_for_legacy_effect(child: &mut ResolvedAbility) 
     if !matches!(&child.effect, Effect::GenericEffect { .. })
         && child.targets.is_empty()
         && effect_refs_parent_target(&child.effect)
-        && !crate::game::ability_utils::node_has_stack_target_declaration(child)
-        && !awaits_resolution_object_choice(child)
     {
         if let Some(context) = &child.context.forwarded_result_context {
             let targets = context.targets.clone();
@@ -25425,12 +25423,12 @@ fn generic_effect_depends_on_missing_forward_result(effect: &Effect) -> bool {
 fn without_missing_forward_result_dependencies(
     ability: &ResolvedAbility,
 ) -> Option<ResolvedAbility> {
-    // CR 608.2c + CR 115.10a: an untargeted resolution-time choice ("choose a
-    // creature you control") is a NEW producer. Its own subtree names ITS pick,
-    // not the earlier producer's absent referent, so pruning stops here; the
-    // chooser re-binds (and supersedes the inherited marker) when it resolves.
-    if matches!(ability.effect, Effect::TargetOnly { .. })
-        && awaits_resolution_object_choice(ability)
+    // CR 601.2c + CR 608.2c: an independent announcement starts a new
+    // reference scope. Its riders name its own target, not the earlier empty
+    // producer. The same boundary applies to a new resolution-time chooser.
+    if crate::game::ability_utils::node_has_stack_target_declaration(ability)
+        || (matches!(ability.effect, Effect::TargetOnly { .. })
+            && awaits_resolution_object_choice(ability))
     {
         return Some(ability.clone());
     }

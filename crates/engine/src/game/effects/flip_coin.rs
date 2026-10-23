@@ -133,7 +133,14 @@ fn run_flip_branch(
         let mut sub = bound.clone();
         sub.set_chain_root_targets_recursive(chain_root_targets.to_vec());
         sub.context.forwarded_result_context = branch_context.forwarded_result_context.clone();
-        super::bind_forwarded_result_targets_for_legacy_effect(&mut sub);
+        // CR 601.2c + CR 608.2d: only coin entry protects independently
+        // declared/unchosen branch slots; ordinary legacy hand-offs keep their
+        // existing forwarded-result binding behavior.
+        if !crate::game::ability_utils::node_has_stack_target_declaration(&sub)
+            && !super::awaits_resolution_object_choice(&sub)
+        {
+            super::bind_forwarded_result_targets_for_legacy_effect(&mut sub);
+        }
         // CR 601.2c + CR 608.2d: declarations belong to this branch, not the
         // parent's incoming referent. Resolution-time choosers make their own
         // choice. Preserve the incoming channel through independent instructions
@@ -145,6 +152,19 @@ fn run_flip_branch(
                 || matches!(sub.effect, Effect::FlipCoins { .. }))
         {
             sub.replace_target_occurrences(branch_context.parent_occurrences.occurrences());
+            // CR 400.7 + CR 603.7c: these are incoming references, not this
+            // branch's announcements. Legacy reference readers use the keyed
+            // authority; preserve the captured pins rather than re-pinning to
+            // the board after a keep-choice restore.
+            sub.set_target_incarnations_recursive(
+                branch_context
+                    .parent_occurrences
+                    .pins
+                    .iter()
+                    .flatten()
+                    .copied()
+                    .collect(),
+            );
         }
         // CR 608.2c: "that opponent" in the branch names the player chosen
         // earlier in this resolution.

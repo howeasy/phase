@@ -38604,34 +38604,31 @@ impl ResolvedAbility {
     /// CR 400.7 + CR 603.7c: True when `id` may still be affected by this
     /// ability.
     ///
-    /// An ID projection, not a positional lookup. If this node carries
-    /// positional pins for `id`, at least one such occurrence must still be
-    /// current. Position-sensitive consumers use `target_pin_at` instead.
-    /// Independently declared targets never inherit a delayed reference's
-    /// keyed pin; undeclaring referents fall back to that creation-time pin.
-    /// An ID for which neither authority recorded a pin remains unpinned.
+    /// An ID projection, not a positional lookup. Only independently declaring
+    /// instructions consult announcement pins. Inherited reference riders keep
+    /// the keyed creation-time authority: a preceding instruction may have moved
+    /// their referent to a public zone (CR 400.7j), making its announcement pin
+    /// stale without invalidating that instruction's reference.
+    /// Position-sensitive consumers use `target_pin_at` instead.
     pub fn target_pin_is_current(
         &self,
         id: ObjectId,
         state: &crate::types::game_state::GameState,
     ) -> bool {
-        // CR 400.7 + CR 601.2c: an occurrence's positional authority takes
-        // precedence over a delayed reference that reused the same storage id.
-        let mut positional = self
-            .targets
-            .iter()
-            .enumerate()
-            .filter_map(|(index, target)| {
-                (*target == TargetRef::Object(id))
-                    .then(|| self.target_pin_at(index))
-                    .flatten()
-            })
-            .peekable();
-        if positional.peek().is_some() {
-            return positional.any(|pin| pin.is_current(state));
-        }
+        // CR 400.7 + CR 601.2c: a new declaration owns its occurrences, not a
+        // delayed reference that happened to reuse the same storage id.
         if crate::game::ability_utils::node_has_stack_target_declaration(self) {
-            return true;
+            let mut positional = self
+                .targets
+                .iter()
+                .enumerate()
+                .filter_map(|(index, target)| {
+                    (*target == TargetRef::Object(id))
+                        .then(|| self.target_pin_at(index))
+                        .flatten()
+                })
+                .peekable();
+            return positional.peek().is_none() || positional.any(|pin| pin.is_current(state));
         }
         self.target_incarnations
             .iter()
@@ -38664,16 +38661,20 @@ impl ResolvedAbility {
         state: &crate::types::game_state::GameState,
         excluded: Option<usize>,
     ) -> Vec<TargetRef> {
+        let declares_targets = crate::game::ability_utils::node_has_stack_target_declaration(self);
         self.targets
             .iter()
             .enumerate()
             .filter(|(index, target)| {
                 Some(*index) != excluded
                     && match target {
-                        TargetRef::Object(id) => self.target_pin_at(*index).map_or_else(
-                            || self.target_pin_is_current(*id, state),
-                            |pin| pin.is_current(state),
-                        ),
+                        TargetRef::Object(id) => self
+                            .target_pin_at(*index)
+                            .filter(|_| declares_targets)
+                            .map_or_else(
+                                || self.target_pin_is_current(*id, state),
+                                |pin| pin.is_current(state),
+                            ),
                         TargetRef::Player(_) => true,
                     }
             })
@@ -38690,11 +38691,12 @@ impl ResolvedAbility {
         &self,
         state: &crate::types::game_state::GameState,
     ) -> bool {
-        (!self.target_incarnations.is_empty() || self.target_pins.iter().any(Option::is_some))
+        (!self.target_incarnations.is_empty()
+            || (crate::game::ability_utils::node_has_stack_target_declaration(self)
+                && self.target_pins.iter().any(Option::is_some)))
             && self.targets.iter().any(|target| matches!(target, TargetRef::Object(_)))
-            && !self.targets.iter().enumerate().any(|(index, target)| {
-                matches!(target, TargetRef::Object(id) if self.target_pin_at(index)
-                    .map_or_else(|| self.target_pin_is_current(*id, state), |pin| pin.is_current(state)))
+            && !self.targets.iter().any(|target| {
+                matches!(target, TargetRef::Object(id) if self.target_pin_is_current(*id, state))
             })
     }
 

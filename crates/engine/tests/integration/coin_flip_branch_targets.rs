@@ -3743,6 +3743,11 @@ fn non_coin_delayed_reference_retains_its_creation_pin_across_a_blink() {
                 .cast(flicker)
                 .target_objects(&[creature, land])
                 .resolve();
+            assert_eq!(
+                runner.state().objects[&creature].zone,
+                Zone::Battlefield,
+                "reach: the blink must return the delayed referent"
+            );
             assert_ne!(
                 runner.state().objects[&creature].incarnation,
                 incarnation,
@@ -3763,4 +3768,428 @@ fn non_coin_delayed_reference_retains_its_creation_pin_across_a_blink() {
         );
         assert_finished(&runner);
     }
+}
+
+#[test]
+fn non_coin_blink_and_exile_life_riders_follow_the_moved_object() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let creature = scenario
+        .add_creature(P0, "Non-coin rider referent", 4, 4)
+        .id();
+    let blink = scenario.add_spell_to_hand_from_oracle(P0, "Cloudshift", true,
+        "Exile target creature you control, then return that card to the battlefield under your control.").id();
+    let exile = scenario
+        .add_spell_to_hand_from_oracle(
+            P0,
+            "Swords to Plowshares",
+            true,
+            "Exile target creature. Its controller gains life equal to its power.",
+        )
+        .id();
+    let mut runner = scenario.build();
+    let incarnation = runner.state().objects[&creature].incarnation;
+    runner.cast(blink).target_object(creature).resolve();
+    assert_ne!(
+        runner.state().objects[&creature].incarnation,
+        incarnation,
+        "reach: exile happened"
+    );
+    assert_eq!(runner.state().objects[&creature].zone, Zone::Battlefield);
+    assert_finished(&runner);
+    runner.cast(exile).target_object(creature).resolve();
+    assert_eq!(
+        runner.state().objects[&creature].zone,
+        Zone::Exile,
+        "reach: exile happened"
+    );
+    assert_eq!(
+        runner.life(P0),
+        24,
+        "the rider still reads the exiled creature's power"
+    );
+    assert_finished(&runner);
+}
+
+#[test]
+fn coin_damage_any_target_legality_uses_the_declaring_instruction() {
+    use engine::types::ability::{AbilityDefinition, AbilityKind, QuantityExpr, TypedFilter};
+    for replacement in [false, true] {
+        let damage = if replacement {
+            serde_json::from_value(serde_json::json!({
+                "type": "CreateDamageReplacement",
+                "redirect_to": { "type": "ChosenTarget" },
+                "redirect_object_filter": { "type": "Any" }
+            }))
+            .unwrap()
+        } else {
+            Effect::DealDamage {
+                target: TargetFilter::Any,
+                amount: QuantityExpr::Fixed { value: 2 },
+                damage_source: None,
+                excess: None,
+            }
+        };
+        let mut branch = AbilityDefinition::new(AbilityKind::Spell, damage);
+        if replacement {
+            branch = AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::TargetOnly {
+                    target: TargetFilter::Typed(TypedFilter::creature()),
+                },
+            )
+            .sub_ability(branch);
+        }
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let creature = scenario.add_creature(P1, "Damage candidate", 4, 4).id();
+        let land = scenario
+            .add_land_from_oracle(P1, "Not a damage target", "")
+            .id();
+        let artifact = scenario
+            .add_artifact_from_oracle(P1, "Not a creature", "")
+            .id();
+        let spell = scenario
+            .add_spell_to_hand(P0, "Synthetic damage target coin", true)
+            .with_ability(Effect::FlipCoins {
+                flips: CoinFlipRun::single(),
+                win_effect: Some(Box::new(branch)),
+                lose_effect: None,
+                flipper: TargetFilter::Controller,
+            })
+            .id();
+        let mut runner = scenario.build();
+        pin_outcomes(&mut runner, &[true]);
+        let card_id = runner.state().objects[&spell].card_id;
+        let mut events = runner
+            .act(GameAction::CastSpell {
+                object_id: spell,
+                card_id,
+                targets: vec![],
+                payment_mode: CastPaymentMode::Auto,
+            })
+            .unwrap()
+            .events;
+        if replacement {
+            runner
+                .act(GameAction::ChooseTarget {
+                    target: Some(TargetRef::Object(creature)),
+                })
+                .unwrap();
+        }
+        let WaitingFor::TargetSelection { selection, .. } = &runner.state().waiting_for else {
+            panic!("required any-target prompt");
+        };
+        let offered = selection.current_legal_targets.clone();
+        for legal in [
+            TargetRef::Player(P0),
+            TargetRef::Player(P1),
+            TargetRef::Object(creature),
+        ] {
+            assert!(offered.contains(&legal), "reach: {legal:?} offered");
+        }
+        for illegal in [land, artifact] {
+            assert!(
+                !offered.contains(&TargetRef::Object(illegal)),
+                "non-damage permanent offered (replacement={replacement})"
+            );
+            assert!(runner
+                .act(GameAction::ChooseTarget {
+                    target: Some(TargetRef::Object(illegal))
+                })
+                .is_err());
+        }
+        events.extend(
+            runner
+                .act(GameAction::ChooseTarget {
+                    target: Some(TargetRef::Player(P1)),
+                })
+                .unwrap()
+                .events,
+        );
+        finish(&mut runner, &mut events);
+        assert_eq!(flips(&events), vec![true]);
+        if replacement {
+            assert_eq!(
+                runner.state().pending_damage_replacements.len(),
+                1,
+                "reach: shield installed"
+            );
+        } else {
+            assert_eq!(runner.life(P1), 18, "reach: selected player damaged");
+        }
+        assert_finished(&runner);
+    }
+}
+
+#[test]
+fn coin_own_declaration_shadows_an_empty_incoming_result_inline_and_after_restore() {
+    use engine::types::ability::{
+        AbilityDefinition, AbilityKind, ControllerRef, TargetChoiceTiming, TypedFilter,
+    };
+    use engine::types::game_state::PersistedGameState;
+    for thumb in [false, true] {
+        let branch = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::TargetOnly {
+                target: TargetFilter::Typed(TypedFilter::creature()),
+            },
+        )
+        .sub_ability(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::GiveControl {
+                target: TargetFilter::ParentTarget,
+                recipient: TargetFilter::SpecificPlayer { id: P0 },
+            },
+        ));
+        let mut definition = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::TargetOnly {
+                target: TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
+            },
+        )
+        .sub_ability(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::FlipCoins {
+                flips: CoinFlipRun::single(),
+                win_effect: Some(Box::new(branch)),
+                lose_effect: None,
+                flipper: TargetFilter::Controller,
+            },
+        ));
+        definition.target_choice_timing = TargetChoiceTiming::Resolution;
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        if thumb {
+            scenario.add_artifact_from_oracle(
+                P0,
+                "Krark's Thumb",
+                "If you would flip a coin, instead flip two coins and ignore one.",
+            );
+        }
+        let chosen = scenario
+            .add_creature(P1, "Branch's declared referent", 2, 2)
+            .id();
+        let other = scenario.add_creature(P1, "Unchosen referent", 3, 3).id();
+        let spell = scenario
+            .add_spell_to_hand(P0, "Synthetic empty then declared coin", true)
+            .with_ability_definition(definition)
+            .id();
+        let mut runner = scenario.build();
+        pin_outcomes(&mut runner, &[true, false]);
+        drop(runner.cast(spell).target_object(chosen).commit());
+        let mut events = Vec::new();
+        if thumb {
+            pass_to_coin_keep(&mut runner, &mut events);
+            assert!(
+                runner
+                    .state()
+                    .active_coin_flip_frame()
+                    .unwrap()
+                    .branch_context
+                    .forwarded_result_context
+                    .as_ref()
+                    .unwrap()
+                    .targets
+                    .is_empty(),
+                "reach: completed empty choice"
+            );
+            runner.state_mut().capture_rng_word_pos();
+            let wire =
+                serde_json::to_value(PersistedGameState::capture(runner.state().clone())).unwrap();
+            *runner.state_mut() = serde_json::from_value::<PersistedGameState>(wire)
+                .unwrap()
+                .into_game_state()
+                .unwrap();
+            events.extend(
+                runner
+                    .act(GameAction::SelectCoinFlips {
+                        keep_indices: vec![0],
+                    })
+                    .unwrap()
+                    .events,
+            );
+        }
+        finish(&mut runner, &mut events);
+        assert_eq!(flips(&events), vec![true], "reach: selected branch ran");
+        assert_eq!(
+            runner.state().objects[&chosen].controller,
+            P0,
+            "own target must reach its rider"
+        );
+        assert_eq!(runner.state().objects[&other].controller, P1);
+        assert_finished(&runner);
+    }
+}
+
+#[test]
+fn coin_attachment_host_uses_its_own_branch_aura() {
+    use engine::game::effects::attach::attach_to;
+    use engine::types::ability::{AbilityDefinition, AbilityKind, AttachSelection, TypedFilter};
+    use engine::types::keywords::Keyword;
+    let branch = || {
+        AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::TargetOnly {
+                target: TargetFilter::Typed(TypedFilter::permanent()),
+            },
+        )
+        .sub_ability(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Attach {
+                attachment: TargetFilter::ParentTarget,
+                target: TargetFilter::Typed(TypedFilter::permanent()),
+                selection: AttachSelection::Targeted,
+            },
+        ))
+    };
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let original_creature = scenario
+        .add_creature(P0, "Original creature host", 2, 2)
+        .id();
+    let new_creature = scenario.add_creature(P0, "New creature host", 3, 3).id();
+    let original_land = scenario
+        .add_land_from_oracle(P0, "Original land host", "")
+        .id();
+    let new_land = scenario.add_land_from_oracle(P0, "New land host", "").id();
+    let aura_a = scenario
+        .add_creature(P0, "Enchant land Aura", 0, 0)
+        .as_enchantment()
+        .with_subtypes(vec!["Aura"])
+        .with_keyword(Keyword::Enchant(TargetFilter::Typed(TypedFilter::land())))
+        .id();
+    let aura_b = scenario
+        .add_creature(P0, "Enchant creature Aura", 0, 0)
+        .as_enchantment()
+        .with_subtypes(vec!["Aura"])
+        .with_keyword(Keyword::Enchant(TargetFilter::Typed(
+            TypedFilter::creature(),
+        )))
+        .id();
+    let spell = scenario
+        .add_spell_to_hand(P0, "Synthetic two Aura branches", true)
+        .with_ability(Effect::FlipCoins {
+            flips: CoinFlipRun::single(),
+            win_effect: Some(Box::new(branch())),
+            lose_effect: Some(Box::new(branch())),
+            flipper: TargetFilter::Controller,
+        })
+        .id();
+    let mut runner = scenario.build();
+    attach_to(runner.state_mut(), aura_a, original_land);
+    attach_to(runner.state_mut(), aura_b, original_creature);
+    pin_outcomes(&mut runner, &[false]);
+    let card_id = runner.state().objects[&spell].card_id;
+    let mut events = runner
+        .act(GameAction::CastSpell {
+            object_id: spell,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .unwrap()
+        .events;
+    for target in [aura_a, new_land, aura_b] {
+        events.extend(
+            runner
+                .act(GameAction::ChooseTarget {
+                    target: Some(TargetRef::Object(target)),
+                })
+                .unwrap()
+                .events,
+        );
+    }
+    let WaitingFor::TargetSelection { selection, .. } = &runner.state().waiting_for else {
+        panic!("required lose-branch host prompt");
+    };
+    assert!(
+        selection
+            .current_legal_targets
+            .contains(&TargetRef::Object(new_creature)),
+        "reach: B's creature host offered"
+    );
+    assert!(
+        !selection
+            .current_legal_targets
+            .contains(&TargetRef::Object(new_land)),
+        "A's land restriction must not leak"
+    );
+    assert!(runner
+        .act(GameAction::ChooseTarget {
+            target: Some(TargetRef::Object(new_land))
+        })
+        .is_err());
+    events.extend(
+        runner
+            .act(GameAction::ChooseTarget {
+                target: Some(TargetRef::Object(new_creature)),
+            })
+            .unwrap()
+            .events,
+    );
+    finish(&mut runner, &mut events);
+    assert_eq!(flips(&events), vec![false]);
+    // Announcement-pool/validation coverage only. The existing Attach chain
+    // binding loss documented in effects/attach.rs is not repaired here.
+    assert_finished(&runner);
+}
+
+#[test]
+fn non_coin_forwarded_parent_target_resolution_rider_keeps_its_bound_object() {
+    use engine::types::ability::{
+        AbilityDefinition, AbilityKind, QuantityExpr, TargetChoiceTiming,
+    };
+    use engine::types::counter::CounterType;
+    let mut definition = parse_oracle_text(
+        "Return target creature card from your graveyard to the battlefield.",
+        "Synthetic non-coin forwarding",
+        &[],
+        &["Instant".into()],
+        &[],
+    )
+    .abilities
+    .remove(0);
+    assert!(matches!(
+        definition.effect.as_ref(),
+        Effect::ChangeZone { .. }
+    ));
+    definition.forward_result = true;
+    let mut rider = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::PutCounter {
+            counter_type: CounterType::Plus1Plus1,
+            count: QuantityExpr::Fixed { value: 2 },
+            target: TargetFilter::ParentTarget,
+        },
+    );
+    rider.target_choice_timing = TargetChoiceTiming::Resolution;
+    definition.sub_ability = Some(Box::new(rider));
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let target = scenario
+        .add_creature_to_graveyard(P0, "Returned non-coin referent", 2, 2)
+        .id();
+    let other = scenario.add_creature(P0, "Unrelated creature", 3, 3).id();
+    let spell = scenario
+        .add_spell_to_hand(P0, "Synthetic non-coin forwarding", true)
+        .with_ability_definition(definition)
+        .id();
+    let mut runner = scenario.build();
+    runner.cast(spell).target_object(target).resolve();
+    assert_eq!(
+        runner.state().objects[&target].zone,
+        Zone::Battlefield,
+        "reach: producer moved the object"
+    );
+    assert_eq!(
+        runner.state().objects[&target]
+            .counters
+            .get(&CounterType::Plus1Plus1),
+        Some(&2)
+    );
+    assert!(!runner.state().objects[&other]
+        .counters
+        .contains_key(&CounterType::Plus1Plus1));
+    assert_finished(&runner);
 }

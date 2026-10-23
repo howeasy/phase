@@ -8368,6 +8368,7 @@ fn attach_host_enchant_filter(
     state: &GameState,
     ability: &ResolvedAbility,
     spec: &TargetSlotSpec,
+    prior_specs: &[TargetSlotSpec],
     selected_slots: &[Option<TargetRef>],
 ) -> Option<(TargetFilter, ObjectId, PlayerId)> {
     let node = node_at(ability, &spec.path)?;
@@ -8385,10 +8386,36 @@ fn attach_host_enchant_filter(
     // Resolve the attachment (the moved Aura) to a concrete object id.
     let attachment_id = match attachment_filter {
         TargetFilter::SelfRef => ability.source_id,
-        TargetFilter::ParentTarget => selected_slots.iter().find_map(|sel| match sel {
-            Some(TargetRef::Object(id)) => Some(*id),
-            _ => None,
-        })?,
+        TargetFilter::ParentTarget => {
+            // CR 608.2c: a coin outcome's antecedent is lexical, never an
+            // object announced by the opposite outcome. Keep the established
+            // non-coin prefix lookup unchanged.
+            let in_coin_branch = spec
+                .path
+                .iter()
+                .any(|edge| matches!(edge, ChainStep::CoinFlipBranch { .. }));
+            let antecedent = prior_specs
+                .iter()
+                .filter(|prior| spec.path.starts_with(&prior.path))
+                .max_by_key(|prior| prior.path.len())
+                .map(|prior| &prior.path);
+            selected_slots
+                .iter()
+                .enumerate()
+                .find_map(|(index, selected)| {
+                    if in_coin_branch
+                        && !prior_specs
+                            .get(index)
+                            .is_some_and(|prior| antecedent.is_some_and(|path| &prior.path == path))
+                    {
+                        return None;
+                    }
+                    match selected {
+                        Some(TargetRef::Object(id)) => Some(*id),
+                        _ => None,
+                    }
+                })?
+        }
         _ => return None,
     };
 
@@ -8749,6 +8776,11 @@ fn legal_targets_for_selected_slot(
     prior_specs: &[TargetSlotSpec],
     selected_slots: &[Option<TargetRef>],
 ) -> Vec<TargetRef> {
+    // CR 601.2c: instruction-specific legality belongs to the declaration.
+    // An empty path resolves to the targeting root unchanged.
+    let Some(declaring_node) = node_at(ability, &spec.path) else {
+        return Vec::new();
+    };
     // CR 120.3a + CR 603.7c: The companion `TargetFilter::Player` slot for a
     // damage-to-player trigger binds "that player" to the damaged player carried
     // by the triggering event, not a free choice among every player. This is the
@@ -8759,11 +8791,11 @@ fn legal_targets_for_selected_slot(
     // controller in multiplayer. The constraint itself is gated inside the
     // helper, so non-damage-trigger Player slots still offer every player.
     if matches!(spec.filter, TargetFilter::Player)
-        && ability_needs_companion_target_player_slot(ability)
+        && ability_needs_companion_target_player_slot(declaring_node)
     {
         return companion_target_player_legal_targets(
             state,
-            ability,
+            declaring_node,
             &state.pending_trigger_event_batch,
         );
     }
@@ -8771,11 +8803,12 @@ fn legal_targets_for_selected_slot(
     // distinctness filter (CR 601.2c + CR 115.3) is then applied ONCE at the
     // single tail return. For single-target / separate-instance / early-return
     // cases `already_in_instance` is empty, so the tail filter is a no-op.
-    // CR 601.2c: recompute each fanout pair in its declaring instruction's
-    // context. An empty path resolves to the targeting root unchanged.
-    let Some(declaring_node) = node_at(ability, &spec.path) else {
-        return Vec::new();
-    };
+    // CR 601.2c + CR 115.4: instruction-specific target roles are numbered
+    // within their declaring node, not across preceding branch declarations.
+    let local_index = prior_specs
+        .iter()
+        .filter(|prior| prior.path == spec.path)
+        .count();
     let per_opponent_fanout_targets = if is_per_opponent_target_fanout(declaring_node) {
         if let TargetFilter::SpecificPlayer { id } = spec.filter {
             Some(per_opponent_fanout_constraint_targets(
@@ -8820,13 +8853,13 @@ fn legal_targets_for_selected_slot(
         None
     };
 
-    let mut legal: Vec<TargetRef> = if matches!(ability.effect, Effect::PairWith { .. }) {
-        pair_with_legal_choices(state, ability, &spec.filter)
+    let mut legal: Vec<TargetRef> = if matches!(declaring_node.effect, Effect::PairWith { .. }) {
+        pair_with_legal_choices(state, declaring_node, &spec.filter)
     } else if let Some(targets) = damage_any_target_legal_targets(
         state,
-        ability,
+        declaring_node,
         AbilityTargetSlot::Declared {
-            index: prior_specs.len(),
+            index: local_index,
             filter: &spec.filter,
         },
     ) {
@@ -8937,7 +8970,7 @@ fn legal_targets_for_selected_slot(
     // legally enchant. Restrict offered hosts to those matching the moved aura's own
     // Enchant filter; no Enchant keyword => no restriction (any host).
     if let Some((enchant_filter, aura_id, aura_controller)) =
-        attach_host_enchant_filter(state, ability, spec, selected_slots)
+        attach_host_enchant_filter(state, ability, spec, prior_specs, selected_slots)
     {
         let ctx = crate::game::filter::FilterContext::from_source_with_controller(
             aura_id,

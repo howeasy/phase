@@ -1297,11 +1297,11 @@ pub fn resolved_targets(
     // `effects::resolved_effect_object_ids` binds the slot through the live
     // slot authority instead.
     //
-    // CR 400.7 + CR 603.7c: a delayed ability's pinned referent that has since
-    // become a new object is dropped here — it "left that zone and then
-    // returned", so the ability won't affect it. Unpinned targets (every
-    // non-delayed ability, and every delayed trigger whose condition names a
-    // zone change of the referent) pass through unchanged.
+    // CR 400.7 + CR 603.7c: delayed-reference riders use their keyed creation
+    // pins. Announcement pins govern independent declarations, not inherited
+    // riders: CR 400.7j lets a later instruction find a card the same effect
+    // moved to a public zone. Such a rider must not be rejected merely because
+    // the original announcement pin names its pre-move incarnation.
     //
     // ORDERING IS LOAD-BEARING: at this line `ability.targets` is non-empty, so
     // the `is_empty()` fallbacks above have ALREADY been passed and returning an
