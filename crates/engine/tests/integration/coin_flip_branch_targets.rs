@@ -4454,3 +4454,384 @@ fn declaring_root_delayed_pin_still_guards_its_inherited_counter_rider() {
         assert_finished(&runner);
     }
 }
+
+fn same_node_coin_scope(won: bool) {
+    use engine::types::ability::{
+        AbilityDefinition, AbilityKind, FilterProp, SharedQuality, SharedQualityRelation,
+        TypedFilter,
+    };
+    let branch = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::Fight {
+            subject: TargetFilter::Typed(TypedFilter::creature()),
+            target: TargetFilter::Typed(TypedFilter::permanent().properties(vec![
+                FilterProp::SharesQuality {
+                    quality: SharedQuality::CardType,
+                    reference: Some(Box::new(TargetFilter::ParentTarget)),
+                    relation: SharedQualityRelation::Shares,
+                },
+            ])),
+        },
+    );
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let first = scenario.add_creature(P0, "First fighter", 2, 2).id();
+    let second = scenario.add_creature(P1, "Second fighter", 3, 3).id();
+    let artifact = scenario
+        .add_artifact_from_oracle(P0, "Unrelated artifact", "")
+        .id();
+    let machine = scenario
+        .add_creature(P0, "Artifact creature fighter", 4, 4)
+        .as_artifact_creature()
+        .id();
+    let spell = scenario
+        .add_spell_to_hand(P0, "Synthetic same-node coin targets", true)
+        .with_ability(Effect::FlipCoins {
+            flips: CoinFlipRun::single(),
+            win_effect: won.then(|| Box::new(branch.clone())),
+            lose_effect: (!won).then(|| Box::new(branch)),
+            flipper: TargetFilter::Controller,
+        })
+        .id();
+    let mut runner = scenario.build();
+    pin_outcomes(&mut runner, &[won]);
+    let card_id = runner.state().objects[&spell].card_id;
+    let mut events = runner
+        .act(GameAction::CastSpell {
+            object_id: spell,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("same-node dependency admits the spell")
+        .events;
+    let WaitingFor::TargetSelection { target_slots, .. } = &runner.state().waiting_for else {
+        panic!("required first fighter prompt");
+    };
+    // CR 601.2c: the later pool ranges over this instruction's earlier object slot.
+    let static_pool = target_slots[1].legal_targets.clone();
+    assert!(static_pool.contains(&TargetRef::Object(first)));
+    assert!(static_pool.contains(&TargetRef::Object(second)));
+    assert!(static_pool.contains(&TargetRef::Object(machine)));
+    assert!(static_pool.contains(&TargetRef::Object(artifact)));
+    events.extend(
+        runner
+            .act(GameAction::ChooseTarget {
+                target: Some(TargetRef::Object(first)),
+            })
+            .unwrap()
+            .events,
+    );
+    let WaitingFor::TargetSelection { selection, .. } = &runner.state().waiting_for else {
+        panic!("required second fighter prompt");
+    };
+    let narrowed_pool: Vec<_> = static_pool
+        .into_iter()
+        .filter(|target| *target != TargetRef::Object(artifact))
+        .collect();
+    assert_eq!(selection.current_legal_targets, narrowed_pool);
+    events.extend(
+        runner
+            .act(GameAction::ChooseTarget {
+                target: Some(TargetRef::Object(second)),
+            })
+            .unwrap()
+            .events,
+    );
+    finish(&mut runner, &mut events);
+    assert_eq!(
+        flips(&events),
+        vec![won],
+        "reach: the requested outcome executes"
+    );
+    assert_eq!(runner.state().objects[&first].zone, Zone::Graveyard);
+    assert_eq!(runner.state().objects[&second].zone, Zone::Battlefield);
+    assert_eq!(runner.state().objects[&artifact].zone, Zone::Battlefield);
+    assert_eq!(runner.state().objects[&machine].zone, Zone::Battlefield);
+    assert_finished(&runner);
+}
+
+#[test]
+fn coin_scope_same_node_won_static_pool_matches_live_prompt() {
+    same_node_coin_scope(true);
+}
+
+#[test]
+fn coin_scope_same_node_lost_static_pool_matches_live_prompt() {
+    same_node_coin_scope(false);
+}
+
+#[test]
+fn coin_scope_numbered_declared_view_uses_lost_branch_base() {
+    use engine::game::effects::attach::attach_to;
+    use engine::types::ability::{
+        AbilityDefinition, AbilityKind, AttachmentReferent, FilterProp, TypedFilter,
+    };
+    let declare = || {
+        AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::TargetOnly {
+                target: TargetFilter::Typed(TypedFilter::creature()),
+            },
+        )
+    };
+    let lost = declare().sub_ability(AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::Destroy {
+            target: TargetFilter::Typed(TypedFilter::permanent().properties(vec![
+                FilterProp::AttachedTo {
+                    to: AttachmentReferent::DeclaredTarget { slot: 0 },
+                },
+            ])),
+            cant_regenerate: false,
+        },
+    ));
+    let definition = declare().sub_ability(AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::FlipCoins {
+            flips: CoinFlipRun::single(),
+            win_effect: Some(Box::new(declare())),
+            lose_effect: Some(Box::new(lost)),
+            flipper: TargetFilter::Controller,
+        },
+    ));
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let outer = scenario.add_creature(P0, "Outer target", 2, 2).id();
+    let won = scenario.add_creature(P0, "Won target", 2, 2).id();
+    let lost = scenario.add_creature(P1, "Lost target", 2, 2).id();
+    let wrong = scenario
+        .add_artifact_from_oracle(P0, "Outer attachment", "")
+        .with_subtypes(vec!["Equipment"])
+        .id();
+    let right = scenario
+        .add_artifact_from_oracle(P0, "Lost attachment", "")
+        .with_subtypes(vec!["Equipment"])
+        .id();
+    let spell = scenario
+        .add_spell_to_hand(P0, "Synthetic numbered attachment coin", true)
+        .with_ability_definition(definition)
+        .id();
+    let mut runner = scenario.build();
+    attach_to(runner.state_mut(), wrong, outer);
+    attach_to(runner.state_mut(), right, lost);
+    pin_outcomes(&mut runner, &[false]);
+    let card_id = runner.state().objects[&spell].card_id;
+    let mut events = runner
+        .act(GameAction::CastSpell {
+            object_id: spell,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .unwrap()
+        .events;
+    for target in [outer, won, lost] {
+        events.extend(
+            runner
+                .act(GameAction::ChooseTarget {
+                    target: Some(TargetRef::Object(target)),
+                })
+                .unwrap()
+                .events,
+        );
+    }
+    let WaitingFor::TargetSelection { selection, .. } = &runner.state().waiting_for else {
+        panic!("required branch-local attachment prompt");
+    };
+    // CR 601.2c: the numbered referent is the lost branch's first declaration.
+    assert_eq!(
+        selection.current_legal_targets,
+        vec![TargetRef::Object(right)]
+    );
+    events.extend(
+        runner
+            .act(GameAction::ChooseTarget {
+                target: Some(TargetRef::Object(right)),
+            })
+            .unwrap()
+            .events,
+    );
+    // CR 704.5p: legal Equipment must remain attached through announcement;
+    // a plain artifact would be detached before the resolution check.
+    assert_eq!(
+        runner.state().objects[&right]
+            .attached_to
+            .and_then(|host| host.as_object()),
+        Some(lost)
+    );
+    assert_eq!(
+        runner.state().objects[&wrong]
+            .attached_to
+            .and_then(|host| host.as_object()),
+        Some(outer)
+    );
+    finish(&mut runner, &mut events);
+    assert_eq!(flips(&events), vec![false]);
+    // CR 608.2b: stack resolution re-validates the chain through the branch-local
+    // view (`coin_view_base`), so the numbered referent still names the lost
+    // branch's first declaration; the outer attachment is never a legal target.
+    assert_eq!(runner.state().objects[&right].zone, Zone::Graveyard);
+    assert_eq!(runner.state().objects[&wrong].zone, Zone::Battlefield);
+    assert_finished(&runner);
+}
+
+#[test]
+fn coin_scope_player_declaration_does_not_shadow_object_antecedent() {
+    use engine::types::ability::{
+        AbilityDefinition, AbilityKind, FilterProp, SharedQuality, SharedQualityRelation,
+        TypedFilter,
+    };
+    let branch = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::TargetOnly {
+            target: TargetFilter::Typed(TypedFilter::creature()),
+        },
+    )
+    .sub_ability(
+        AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::TargetOnly {
+                target: TargetFilter::Player,
+            },
+        )
+        .sub_ability(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Destroy {
+                target: TargetFilter::Typed(TypedFilter::permanent().properties(vec![
+                    FilterProp::SharesQuality {
+                        quality: SharedQuality::CardType,
+                        reference: Some(Box::new(TargetFilter::ParentTarget)),
+                        relation: SharedQualityRelation::Shares,
+                    },
+                ])),
+                cant_regenerate: false,
+            },
+        )),
+    );
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let antecedent = scenario.add_creature(P0, "Object antecedent", 2, 2).id();
+    let victim = scenario.add_creature(P1, "Dependent victim", 3, 3).id();
+    let artifact = scenario
+        .add_artifact_from_oracle(P0, "Unrelated artifact", "")
+        .id();
+    let spell = scenario
+        .add_spell_to_hand(P0, "Synthetic player-interposed coin", true)
+        .with_ability(Effect::FlipCoins {
+            flips: CoinFlipRun::single(),
+            win_effect: None,
+            lose_effect: Some(Box::new(branch)),
+            flipper: TargetFilter::Controller,
+        })
+        .id();
+    let mut runner = scenario.build();
+    pin_outcomes(&mut runner, &[false]);
+    let outcome = runner
+        .cast(spell)
+        .target_objects(&[antecedent, victim])
+        .target_player(P1)
+        .resolve();
+    assert_eq!(
+        flips(outcome.events()),
+        vec![false],
+        "reach: lost branch executes"
+    );
+    assert_eq!(outcome.zone_of(victim), Zone::Graveyard);
+    assert_eq!(outcome.zone_of(antecedent), Zone::Battlefield);
+    assert_eq!(outcome.zone_of(artifact), Zone::Battlefield);
+    assert_finished(&runner);
+}
+
+#[test]
+fn non_coin_scope_keeps_first_prefix_object_across_later_declarations() {
+    use engine::types::ability::{
+        AbilityDefinition, AbilityKind, FilterProp, SharedQuality, SharedQualityRelation,
+        TypeFilter, TypedFilter,
+    };
+    let declare =
+        |target| AbilityDefinition::new(AbilityKind::Spell, Effect::TargetOnly { target });
+    let definition = declare(TargetFilter::Typed(TypedFilter::new(TypeFilter::Artifact)))
+        .sub_ability(
+            declare(TargetFilter::Typed(TypedFilter::creature())).sub_ability(
+                declare(TargetFilter::Player).sub_ability(AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::Destroy {
+                        target: TargetFilter::Typed(TypedFilter::permanent().properties(vec![
+                            FilterProp::SharesQuality {
+                                quality: SharedQuality::CardType,
+                                reference: Some(Box::new(TargetFilter::ParentTarget)),
+                                relation: SharedQualityRelation::Shares,
+                            },
+                        ])),
+                        cant_regenerate: false,
+                    },
+                )),
+            ),
+        );
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let first = scenario
+        .add_artifact_from_oracle(P0, "First prefix artifact", "")
+        .id();
+    let later = scenario
+        .add_creature(P0, "Later prefix creature", 2, 2)
+        .id();
+    let victim = scenario
+        .add_artifact_from_oracle(P1, "Matching artifact", "")
+        .id();
+    let spell = scenario
+        .add_spell_to_hand(P0, "Synthetic non-coin prefix targets", true)
+        .with_ability_definition(definition)
+        .id();
+    let mut runner = scenario.build();
+    let card_id = runner.state().objects[&spell].card_id;
+    let mut events = runner
+        .act(GameAction::CastSpell {
+            object_id: spell,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .unwrap()
+        .events;
+    let WaitingFor::TargetSelection { target_slots, .. } = &runner.state().waiting_for else {
+        panic!("required first declaration prompt");
+    };
+    let expected = vec![TargetRef::Object(first), TargetRef::Object(victim)];
+    // Non-coin preservation: the full prefix's first object, not the nearest
+    // declaring node, remains the established announcement antecedent.
+    assert_eq!(target_slots[3].legal_targets, expected);
+    for target in [
+        TargetRef::Object(first),
+        TargetRef::Object(later),
+        TargetRef::Player(P1),
+    ] {
+        events.extend(
+            runner
+                .act(GameAction::ChooseTarget {
+                    target: Some(target),
+                })
+                .unwrap()
+                .events,
+        );
+    }
+    let WaitingFor::TargetSelection { selection, .. } = &runner.state().waiting_for else {
+        panic!("required non-coin dependent target prompt");
+    };
+    assert_eq!(selection.current_legal_targets, expected);
+    events.extend(
+        runner
+            .act(GameAction::ChooseTarget {
+                target: Some(TargetRef::Object(victim)),
+            })
+            .unwrap()
+            .events,
+    );
+    finish(&mut runner, &mut events);
+    assert_eq!(runner.state().objects[&victim].zone, Zone::Graveyard);
+    assert_eq!(runner.state().objects[&first].zone, Zone::Battlefield);
+    assert_eq!(runner.state().objects[&later].zone, Zone::Battlefield);
+    assert!(flips(&events).is_empty());
+    assert_finished(&runner);
+}

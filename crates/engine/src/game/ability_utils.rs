@@ -538,6 +538,7 @@ struct SlotAccumulator {
     coin_depth: usize,
     current_node_start: usize,
     prior_object_range: Option<std::ops::Range<usize>>,
+    coin_branch_slot_base: usize,
 }
 
 impl Default for SlotAccumulator {
@@ -560,6 +561,7 @@ impl Default for SlotAccumulator {
             coin_depth: 0,
             current_node_start: 0,
             prior_object_range: None,
+            coin_branch_slot_base: 0,
         }
     }
 }
@@ -578,19 +580,43 @@ impl SlotAccumulator {
         self.groups.push(self.current_group);
     }
 
+    fn coin_scope(&self) -> CoinPathSlotScope {
+        coin_path_slot_scope(
+            self.slots.len(),
+            (0..self.slots.len()).map(|index| {
+                let depth = if index >= self.current_node_start {
+                    Some(1)
+                } else if self
+                    .prior_object_range
+                    .as_ref()
+                    .is_some_and(|range| range.contains(&index))
+                {
+                    Some(0)
+                } else {
+                    None
+                };
+                (index, depth, index >= self.coin_branch_slot_base)
+            }),
+            |index| {
+                self.slots[index]
+                    .legal_targets
+                    .iter()
+                    .any(|target| matches!(target, TargetRef::Object(_)))
+            },
+        )
+    }
+
     fn built(&self) -> BuiltSlots<'_> {
+        let scope = (self.coin_depth > 0).then(|| self.coin_scope());
         BuiltSlots {
             slots: &self.slots,
             groups: &self.groups,
-            object_slots: if self.coin_depth > 0 {
-                Some(
-                    self.prior_object_range
-                        .as_ref()
-                        .map_or(&[], |range| &self.slots[range.clone()]),
-                )
-            } else {
-                None
-            },
+            object_slots: scope.map(|scope| {
+                scope
+                    .object_slot
+                    .map_or(&[][..], |index| &self.slots[index..=index])
+            }),
+            declared_slots: scope.map(|scope| &self.slots[scope.slot_base..]),
         }
     }
 }
@@ -601,6 +627,7 @@ struct BuiltSlots<'a> {
     slots: &'a [TargetSelectionSlot],
     groups: &'a [Option<crate::types::ability::ChosenGroupId>],
     object_slots: Option<&'a [TargetSelectionSlot]>,
+    declared_slots: Option<&'a [TargetSelectionSlot]>,
 }
 
 impl BuiltSlots<'static> {
@@ -608,6 +635,7 @@ impl BuiltSlots<'static> {
         slots: &[],
         groups: &[],
         object_slots: None,
+        declared_slots: None,
     };
 }
 
@@ -1510,6 +1538,70 @@ impl TargetSlotSpec {
         self.path.iter().any(|step| match step {
             ChainStep::CoinFlipBranch { .. } => true,
             ChainStep::SubAbility | ChainStep::ElseAbility => false,
+        })
+    }
+}
+
+/// CR 601.2c: coin-path lookups share one lexical scope at pool construction
+/// and selection. A node's earlier slots precede its ancestors; player-only
+/// declarations do not shadow an object. Numbered slots start at the latest
+/// coin edge, independently of which ancestor supplies the object anaphor.
+#[derive(Clone, Copy)]
+struct CoinPathSlotScope {
+    object_slot: Option<usize>,
+    slot_base: usize,
+}
+
+fn coin_path_slot_scope(
+    prefix_len: usize,
+    origins: impl Iterator<Item = (usize, Option<usize>, bool)>,
+    has_object: impl Fn(usize) -> bool,
+) -> CoinPathSlotScope {
+    let mut scope = CoinPathSlotScope {
+        object_slot: None,
+        slot_base: prefix_len,
+    };
+    let mut object_depth = None;
+    for (index, ancestor_depth, in_branch) in origins {
+        if in_branch {
+            scope.slot_base = scope.slot_base.min(index);
+        }
+        if let Some(depth) = ancestor_depth {
+            if has_object(index) && object_depth.is_none_or(|nearest| depth > nearest) {
+                scope.object_slot = Some(index);
+                object_depth = Some(depth);
+            }
+        }
+    }
+    scope
+}
+
+impl TargetSlotSpec {
+    fn coin_scope(
+        &self,
+        prior_specs: &[TargetSlotSpec],
+        selected_slots: &[Option<TargetRef>],
+    ) -> Option<CoinPathSlotScope> {
+        self.is_in_coin_branch().then(|| {
+            let last_coin = self
+                .path
+                .iter()
+                .rposition(|step| matches!(step, ChainStep::CoinFlipBranch { .. }))
+                .expect("coin-path spec has a coin edge");
+            let branch = &self.path[..=last_coin];
+            coin_path_slot_scope(
+                prior_specs.len(),
+                prior_specs.iter().enumerate().map(|(index, prior)| {
+                    (
+                        index,
+                        self.path
+                            .starts_with(&prior.path)
+                            .then_some(prior.path.len()),
+                        prior.path.starts_with(branch),
+                    )
+                }),
+                |index| matches!(selected_slots.get(index), Some(Some(TargetRef::Object(_)))),
+            )
         })
     }
 }
@@ -3135,6 +3227,8 @@ pub(crate) fn validate_targets_in_chain_with_view(
         false,
         DeclaredNumbering::of(ability),
         &[],
+        &[],
+        None,
         &mut Vec::new(),
     );
     (validated, view)
@@ -3231,8 +3325,15 @@ fn validate_targets_in_chain_inner(
     // own parent's block through). Read by the implicit-fight referent and by
     // the generic arm's prior-object recheck (`target_filter_binds_prior_target`).
     parent_block: &[JudgedOccurrence],
+    coin_parent_block: &[JudgedOccurrence],
+    coin_view_base: Option<usize>,
     path: &mut Vec<ChainStep>,
 ) -> ResolvedAbility {
+    let parent_block = if coin_view_base.is_some() {
+        coin_parent_block
+    } else {
+        parent_block
+    };
     // Classify provenance before pruning the parent's declaration.
     let sub_origin = if ability
         .sub_ability
@@ -3256,7 +3357,8 @@ fn validate_targets_in_chain_inner(
     // The declared positions of every EARLIER node, as validated; read only by
     // filters that depend on another declared slot.
     let view_snapshot = view_out.clone();
-    let view: Option<&[Option<targeting::DeclaredSlotBinding>]> = Some(&view_snapshot);
+    let view: Option<&[Option<targeting::DeclaredSlotBinding>]> =
+        Some(&view_snapshot[coin_view_base.unwrap_or(0)..]);
     // CR 608.2b: every arm judges each announced occurrence of this node
     // (`OccurrenceVerdict`, aligned with `validated.targets`); storage, the
     // declared view and the fizzle stamp are each derived from the verdicts.
@@ -4014,11 +4116,23 @@ fn validate_targets_in_chain_inner(
     } else {
         parent_block
     };
+    // CR 601.2c + CR 608.2b: preserve the nearest object declaration for
+    // coin descendants even when an intervening node announces only a player.
+    // Ordinary paths continue to read their established immediate declaration.
+    let child_coin_block = if child_block
+        .iter()
+        .any(|((target, _), _)| matches!(target, TargetRef::Object(_)))
+    {
+        child_block
+    } else {
+        coin_parent_block
+    };
     if numbering.delegate(ability).is_none() {
         for (edge, child) in validated.child_links_mut() {
             match edge {
                 ChainStep::CoinFlipBranch { .. } => {
                     path.push(edge);
+                    let branch_view_base = view_out.len();
                     *child = validate_targets_in_chain_inner(
                         state,
                         child,
@@ -4027,6 +4141,8 @@ fn validate_targets_in_chain_inner(
                         false,
                         numbering,
                         child_block,
+                        child_coin_block,
+                        Some(branch_view_base),
                         path,
                     );
                     path.pop();
@@ -4056,6 +4172,8 @@ fn validate_targets_in_chain_inner(
             sub_inherited,
             numbering,
             child_block,
+            child_coin_block,
+            coin_view_base,
             path,
         );
         path.pop();
@@ -4077,6 +4195,8 @@ fn validate_targets_in_chain_inner(
             false,
             numbering,
             child_block,
+            child_coin_block,
+            coin_view_base,
             path,
         );
         path.pop();
@@ -5159,14 +5279,19 @@ fn collect_sub_chain_slots(
     ability: &ResolvedAbility,
     acc: &mut SlotAccumulator,
 ) -> Result<(), TargetSlotBuildError> {
-    let own_slots = acc.current_node_start..acc.slots.len();
     let previous_range = acc.prior_object_range.clone();
-    if !own_slots.is_empty() {
-        acc.prior_object_range = Some(own_slots);
-    }
+    // Track object-bearing ancestors before a coin edge too: a later coin
+    // descendant may need them across player-only declarations. `built()` gates
+    // both lexical views on `coin_depth`; non-coin slots still read the full
+    // prefix, regardless of this bookkeeping.
+    acc.prior_object_range = acc.coin_scope().object_slot.map(|index| index..index + 1);
     let result = (|| {
         for (edge, child, disposition) in announced_child_links(ability) {
             let enters_coin = matches!(edge, ChainStep::CoinFlipBranch { .. });
+            let previous_base = acc.coin_branch_slot_base;
+            if enters_coin {
+                acc.coin_branch_slot_base = acc.slots.len();
+            }
             acc.coin_depth += usize::from(enters_coin);
             let result = match disposition {
                 AnnouncementDisposition::Declare => collect_target_slots(state, child, acc),
@@ -5182,6 +5307,7 @@ fn collect_sub_chain_slots(
                 }
             };
             acc.coin_depth -= usize::from(enters_coin);
+            acc.coin_branch_slot_base = previous_base;
             result?;
         }
         Ok(())
@@ -8171,7 +8297,9 @@ fn legal_targets_for_ability_filter_uncapped(
             state,
             ability,
             &bound_filter,
-            existing_slots.slots,
+            existing_slots
+                .declared_slots
+                .unwrap_or(existing_slots.slots),
             &[ability.controller],
         );
     }
@@ -8460,28 +8588,16 @@ fn attach_host_enchant_filter(
             // CR 608.2c: a coin outcome's antecedent is lexical, never an
             // object announced by the opposite outcome. Keep the established
             // non-coin prefix lookup unchanged.
-            let in_coin_branch = spec.is_in_coin_branch();
-            let antecedent = prior_specs
-                .iter()
-                .filter(|prior| spec.path.starts_with(&prior.path))
-                .max_by_key(|prior| prior.path.len())
-                .map(|prior| &prior.path);
-            selected_slots
-                .iter()
-                .enumerate()
-                .find_map(|(index, selected)| {
-                    if in_coin_branch
-                        && !prior_specs
-                            .get(index)
-                            .is_some_and(|prior| antecedent.is_some_and(|path| &prior.path == path))
-                    {
-                        return None;
-                    }
-                    match selected {
-                        Some(TargetRef::Object(id)) => Some(*id),
-                        _ => None,
-                    }
-                })?
+            let scope = spec.coin_scope(prior_specs, selected_slots);
+            let slots = scope.as_ref().map_or(selected_slots, |scope| {
+                scope
+                    .object_slot
+                    .map_or(&[][..], |index| &selected_slots[index..=index])
+            });
+            slots.iter().find_map(|selected| match selected {
+                Some(TargetRef::Object(id)) => Some(*id),
+                Some(TargetRef::Player(_)) | None => None,
+            })?
         }
         _ => return None,
     };
@@ -8857,6 +8973,7 @@ fn legal_targets_for_selected_slot(
     } else {
         (ability, prior_specs.len())
     };
+    let coin_scope = spec.coin_scope(prior_specs, selected_slots);
     // CR 120.3a + CR 603.7c: The companion `TargetFilter::Player` slot for a
     // damage-to-player trigger binds "that player" to the damaged player carried
     // by the triggering event, not a free choice among every player. This is the
@@ -8989,41 +9106,32 @@ fn legal_targets_for_selected_slot(
             if !declared_slot_filter_is_bindable(&bound_filter) {
                 Vec::new()
             } else {
-                let view: Vec<Option<targeting::DeclaredSlotBinding>> = selected_slots
+                let selected_view = coin_scope
+                    .as_ref()
+                    .map_or(selected_slots, |scope| &selected_slots[scope.slot_base..]);
+                let view: Vec<Option<targeting::DeclaredSlotBinding>> = selected_view
                     .iter()
                     .map(|slot| slot.clone().map(targeting::DeclaredSlotBinding::Elected))
                     .collect();
                 targeting::find_legal_targets_for_ability_with_view(
                     state,
                     &bound_filter,
-                    ability,
+                    declaring_node,
                     ability.controller,
                     &view,
                 )
             }
         } else {
-            // CR 601.2c + CR 608.2c: the nearest declaring ancestor shadows
-            // earlier instructions, including the opposite coin outcome.
-            let lexical_path = spec.is_in_coin_branch().then(|| {
-                prior_specs
-                    .iter()
-                    .filter(|prior| {
-                        prior.path.len() < spec.path.len() && spec.path.starts_with(&prior.path)
-                    })
-                    .max_by_key(|prior| prior.path.len())
-                    .map_or(spec.path.as_slice(), |prior| prior.path.as_slice())
-            });
             let bound = if target_filter_binds_prior_target(&enumeration_filter) {
-                if let Some(path) = lexical_path {
-                    let prior = prior_specs
-                        .iter()
-                        .zip(selected_slots)
-                        .filter(|(prior, _)| prior.path == path)
-                        .find_map(|(_, selected)| match selected {
-                            Some(TargetRef::Object(id)) => Some(*id),
-                            _ => None,
-                        });
-                    prior.map(|id| resolved_ability_with_bound_object_target(declaring_node, id))
+                if let Some(scope) = &coin_scope {
+                    scope
+                        .object_slot
+                        .and_then(|index| match selected_slots[index] {
+                            Some(TargetRef::Object(id)) => Some(
+                                resolved_ability_with_bound_object_target(declaring_node, id),
+                            ),
+                            Some(TargetRef::Player(_)) | None => None,
+                        })
                 } else {
                     bind_prior_object_targets(ability, selected_slots)
                 }
