@@ -1488,6 +1488,15 @@ struct TargetSlotSpec {
     path: Vec<ChainStep>,
 }
 
+impl TargetSlotSpec {
+    fn is_in_coin_branch(&self) -> bool {
+        self.path.iter().any(|step| match step {
+            ChainStep::CoinFlipBranch { .. } => true,
+            ChainStep::SubAbility | ChainStep::ElseAbility => false,
+        })
+    }
+}
+
 struct AbilityTargetingView<'a> {
     state: &'a GameState,
     ability: &'a ResolvedAbility,
@@ -8390,10 +8399,7 @@ fn attach_host_enchant_filter(
             // CR 608.2c: a coin outcome's antecedent is lexical, never an
             // object announced by the opposite outcome. Keep the established
             // non-coin prefix lookup unchanged.
-            let in_coin_branch = spec
-                .path
-                .iter()
-                .any(|edge| matches!(edge, ChainStep::CoinFlipBranch { .. }));
+            let in_coin_branch = spec.is_in_coin_branch();
             let antecedent = prior_specs
                 .iter()
                 .filter(|prior| spec.path.starts_with(&prior.path))
@@ -8757,8 +8763,8 @@ fn target_filter_has_another_target_marker(filter: &TargetFilter) -> bool {
 /// order). The two are zipped so we can tell which prior selections belong to
 /// `spec.instance`. Callers must pass a `prior_specs`/`selected_slots` pair that
 /// lines up one-for-one.
-/// Fanout constraints belong to the slot's declaring instruction, including
-/// instructions nested under a coin branch, rather than the targeting root.
+/// Coin-branch instruction constraints use the declaring node; ordinary paths
+/// retain the targeting root's established legality dispatch.
 ///
 /// CR 601.2c + CR 115.3 NOTE: the parallel SLOT-ONLY lattice
 /// (`legal_targets_for_slot` / `has_legal_completion` /
@@ -8776,10 +8782,19 @@ fn legal_targets_for_selected_slot(
     prior_specs: &[TargetSlotSpec],
     selected_slots: &[Option<TargetRef>],
 ) -> Vec<TargetRef> {
-    // CR 601.2c: instruction-specific legality belongs to the declaration.
-    // An empty path resolves to the targeting root unchanged.
-    let Some(declaring_node) = node_at(ability, &spec.path) else {
-        return Vec::new();
+    // CR 601.2c: coin-branch declarations own their instruction-specific target
+    // roles. Preserve root dispatch and chain-wide numbering for non-coin paths.
+    let (declaring_node, local_index) = if spec.is_in_coin_branch() {
+        let Some(node) = node_at(ability, &spec.path) else {
+            return Vec::new();
+        };
+        let index = prior_specs
+            .iter()
+            .filter(|prior| prior.path == spec.path)
+            .count();
+        (node, index)
+    } else {
+        (ability, prior_specs.len())
     };
     // CR 120.3a + CR 603.7c: The companion `TargetFilter::Player` slot for a
     // damage-to-player trigger binds "that player" to the damaged player carried
@@ -8803,12 +8818,6 @@ fn legal_targets_for_selected_slot(
     // distinctness filter (CR 601.2c + CR 115.3) is then applied ONCE at the
     // single tail return. For single-target / separate-instance / early-return
     // cases `already_in_instance` is empty, so the tail filter is a no-op.
-    // CR 601.2c + CR 115.4: instruction-specific target roles are numbered
-    // within their declaring node, not across preceding branch declarations.
-    let local_index = prior_specs
-        .iter()
-        .filter(|prior| prior.path == spec.path)
-        .count();
     let per_opponent_fanout_targets = if is_per_opponent_target_fanout(declaring_node) {
         if let TargetFilter::SpecificPlayer { id } = spec.filter {
             Some(per_opponent_fanout_constraint_targets(

@@ -1308,7 +1308,7 @@ fn independent_coin_declaration_owns_its_pins_even_when_incoming_id_is_reused() 
     use engine::types::ability::{AbilityDefinition, AbilityKind, QuantityExpr, TypedFilter};
     use engine::types::counter::CounterType;
     use engine::types::identifiers::ObjectIncarnationRef;
-    for legacy_keyed_child in [false, true] {
+    for keyed_child in [None, Some(false), Some(true)] {
         let coin = Effect::FlipCoins {
             flips: CoinFlipRun::single(),
             win_effect: Some(Box::new(AbilityDefinition::new(
@@ -1355,16 +1355,21 @@ fn independent_coin_declaration_owns_its_pins_even_when_incoming_id_is_reused() 
             "incoming delayed-reference pins never stamp an independent declaration"
         );
         assert_eq!(child.target_pin_at(0), Some(current));
-        if legacy_keyed_child {
-            // A pre-existing keyed reference cannot veto a fresh positional occurrence.
-            child.target_incarnations = vec![old];
+        if let Some(stale) = keyed_child {
+            // CR 400.7 + CR 603.7c: a child's own keyed pin is still authoritative.
+            child.target_incarnations = vec![if stale { old } else { current }];
         }
         let mut events = Vec::new();
         finish(&mut runner, &mut events);
-        assert_eq!(flips(&events), vec![true]);
+        let stale = keyed_child == Some(true);
+        assert_eq!(flips(&events), if stale { vec![] } else { vec![true] });
         assert_eq!(
-            runner.state().objects[&target].counters[&CounterType::Plus1Plus1],
-            3
+            runner.state().objects[&target]
+                .counters
+                .get(&CounterType::Plus1Plus1)
+                .copied()
+                .unwrap_or(0),
+            if stale { 0 } else { 3 }
         );
         assert!(!runner.state().objects[&distractor]
             .counters

@@ -38604,19 +38604,28 @@ impl ResolvedAbility {
     /// CR 400.7 + CR 603.7c: True when `id` may still be affected by this
     /// ability.
     ///
-    /// An ID projection, not a positional lookup. Only independently declaring
-    /// instructions consult announcement pins. Inherited reference riders keep
-    /// the keyed creation-time authority: a preceding instruction may have moved
-    /// their referent to a public zone (CR 400.7j), making its announcement pin
-    /// stale without invalidating that instruction's reference.
-    /// Position-sensitive consumers use `target_pin_at` instead.
+    /// An ID projection, not a positional lookup. Every node honors its keyed
+    /// creation-time pins; independently declaring instructions also consult
+    /// announcement pins. Inherited reference riders do not consult announcement
+    /// pins: a preceding instruction may have moved their referent to a public
+    /// zone (CR 400.7j) without invalidating that instruction's reference.
+    /// Position-sensitive consumers additionally use `target_pin_at`.
     pub fn target_pin_is_current(
         &self,
         id: ObjectId,
         state: &crate::types::game_state::GameState,
     ) -> bool {
-        // CR 400.7 + CR 601.2c: a new declaration owns its occurrences, not a
-        // delayed reference that happened to reuse the same storage id.
+        // CR 400.7 + CR 603.7c: a recorded delayed/event reference remains an
+        // independent constraint, even when this node also declares targets.
+        if self
+            .target_incarnations
+            .iter()
+            .find(|pin| pin.object_id == id)
+            .is_some_and(|pin| !pin.is_current(state))
+        {
+            return false;
+        }
+        // CR 400.7 + CR 601.2c: a new declaration owns its occurrences.
         if crate::game::ability_utils::node_has_stack_target_declaration(self) {
             let mut positional = self
                 .targets
@@ -38630,10 +38639,7 @@ impl ResolvedAbility {
                 .peekable();
             return positional.peek().is_none() || positional.any(|pin| pin.is_current(state));
         }
-        self.target_incarnations
-            .iter()
-            .find(|pin| pin.object_id == id)
-            .is_none_or(|pin| pin.is_current(state))
+        true
     }
 
     /// CR 603.7c + CR 400.7: The subset of `targets` this ability may still
@@ -38668,13 +38674,13 @@ impl ResolvedAbility {
             .filter(|(index, target)| {
                 Some(*index) != excluded
                     && match target {
-                        TargetRef::Object(id) => self
-                            .target_pin_at(*index)
-                            .filter(|_| declares_targets)
-                            .map_or_else(
-                                || self.target_pin_is_current(*id, state),
-                                |pin| pin.is_current(state),
-                            ),
+                        TargetRef::Object(id) => {
+                            self.target_pin_is_current(*id, state)
+                                && self
+                                    .target_pin_at(*index)
+                                    .filter(|_| declares_targets)
+                                    .is_none_or(|pin| pin.is_current(state))
+                        }
                         TargetRef::Player(_) => true,
                     }
             })

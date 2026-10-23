@@ -191,7 +191,7 @@ impl FlipBranchContext {
 
     /// CR 400.7: both persistence directions require captured object identity.
     /// Neither writing nor restoring can invent a pin from a later board.
-    fn validate_pins(&self) -> Result<(), String> {
+    fn validate_incoming_pins(&self) -> Result<(), String> {
         let incoming = &self.parent_occurrences;
         crate::game::target_occurrences::pins_align_with(&incoming.targets, &incoming.pins)
             .map_err(|error| error.to_string())?;
@@ -295,7 +295,7 @@ pub struct PendingCoinFlip {
 impl Serialize for PendingCoinFlip {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         self.branch_context
-            .validate_pins()
+            .validate_incoming_pins()
             .map_err(serde::ser::Error::custom)?;
         #[derive(Serialize)]
         struct Branches<'a> {
@@ -354,7 +354,7 @@ impl<'de> Deserialize<'de> for PendingCoinFlip {
             )
         })?;
         wire.branch_context
-            .validate_pins()
+            .validate_incoming_pins()
             .map_err(serde::de::Error::custom)?;
         Ok(Self {
             source_id: wire.source_id,
