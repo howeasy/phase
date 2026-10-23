@@ -7384,19 +7384,7 @@ impl DeckResolver for ServerDeckResolver<'_> {
         // that caused it. Validating here causes the reducer to return `Err`,
         // which phase-server then surfaces to the client.
         server_core::resolve_deck(self.db, &deck)?;
-        Ok(engine::game::deck_loading::PlayerDeckList {
-            main_deck: deck.main_deck,
-            sideboard: deck.sideboard,
-            commander: deck.commander,
-            companion: deck.companion,
-            planar_deck: deck.planar_deck,
-            scheme_deck: deck.scheme_deck,
-            attraction_deck: deck.attraction_deck,
-            contraption_deck: deck.contraption_deck,
-            sticker_sheets: deck.sticker_sheets,
-            signature_spell: deck.signature_spell,
-            bracket_tier: deck.bracket_tier,
-        })
+        Ok(engine::game::deck_loading::PlayerDeckList::from(deck))
     }
 }
 

@@ -7,7 +7,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::database::CardDatabase;
 use crate::game::bracket_estimate::CommanderBracketTier;
+use crate::starter_decks::DeckData;
 use crate::types::card::CardFace;
+use crate::types::card_printing::DeckPrinting;
 use crate::types::card_type::CoreType;
 use crate::types::game_state::GameState;
 use crate::types::identifiers::CardId;
@@ -100,6 +102,15 @@ pub struct PlayerDeckPayload {
     /// field continue to deserialize correctly.
     #[serde(default)]
     pub bracket_tier: CommanderBracketTier,
+    /// The owner's explicit printing choices for this player's cards, carried
+    /// unchanged from the submitted list. Display-only (CR 203.1 + CR 206.1):
+    /// nothing in resolution or loading reads it. Absent from the wire when empty.
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "crate::types::card_printing::deserialize_deck_printings"
+    )]
+    pub printings: Vec<DeckPrinting>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -149,6 +160,85 @@ pub struct PlayerDeckList {
     /// omit it, which `#[serde(default)]` handles transparently).
     #[serde(default)]
     pub bracket_tier: CommanderBracketTier,
+    /// The owner's explicit printing choices for this list's cards, keyed by
+    /// section and name. Display-only (CR 203.1 + CR 206.1). Absent from the wire
+    /// when empty; decoded by `deserialize_deck_printings`.
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "crate::types::card_printing::deserialize_deck_printings"
+    )]
+    pub printings: Vec<DeckPrinting>,
+}
+
+/// `DeckData` (the wire deck) and `PlayerDeckList` (the engine's name-only seat list)
+/// carry the same fields. These conversions are the single authority between them:
+/// each destructures its source and builds its target without `..`, so a field added
+/// to either type is a build error here, not a value one transport silently drops.
+impl From<DeckData> for PlayerDeckList {
+    fn from(deck: DeckData) -> Self {
+        let DeckData {
+            main_deck,
+            sideboard,
+            commander,
+            companion,
+            attraction_deck,
+            planar_deck,
+            scheme_deck,
+            contraption_deck,
+            sticker_sheets,
+            signature_spell,
+            bracket_tier,
+            printings,
+        } = deck;
+        Self {
+            main_deck,
+            sideboard,
+            commander,
+            companion,
+            attraction_deck,
+            planar_deck,
+            scheme_deck,
+            contraption_deck,
+            sticker_sheets,
+            signature_spell,
+            bracket_tier,
+            printings,
+        }
+    }
+}
+
+impl From<PlayerDeckList> for DeckData {
+    fn from(list: PlayerDeckList) -> Self {
+        let PlayerDeckList {
+            main_deck,
+            sideboard,
+            commander,
+            companion,
+            attraction_deck,
+            planar_deck,
+            scheme_deck,
+            contraption_deck,
+            sticker_sheets,
+            signature_spell,
+            bracket_tier,
+            printings,
+        } = list;
+        Self {
+            main_deck,
+            sideboard,
+            commander,
+            companion,
+            attraction_deck,
+            planar_deck,
+            scheme_deck,
+            contraption_deck,
+            sticker_sheets,
+            signature_spell,
+            bracket_tier,
+            printings,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -264,6 +354,8 @@ fn resolve_names(db: &CardDatabase, names: &[String]) -> Vec<DeckEntry> {
 /// already carries the declared tier, so there is no separate parameter to
 /// keep in sync. Callers that need a specific tier set it on the
 /// `PlayerDeckList` before calling.
+///
+/// The printings sidecar is carried unchanged; nothing in resolution reads it.
 pub fn resolve_player_deck_list(db: &CardDatabase, list: &PlayerDeckList) -> PlayerDeckPayload {
     PlayerDeckPayload {
         main_deck: resolve_names(db, &list.main_deck),
@@ -277,60 +369,27 @@ pub fn resolve_player_deck_list(db: &CardDatabase, list: &PlayerDeckList) -> Pla
         sticker_sheets: list.sticker_sheets.clone(),
         signature_spell: resolve_names(db, &list.signature_spell),
         bracket_tier: list.bracket_tier,
+        printings: list.printings.clone(),
     }
 }
 
 /// Resolve a DeckList (name-only) into a DeckPayload (full CardFace objects)
 /// using a CardDatabase for lookup. Unresolvable names are silently skipped.
 ///
-/// Each `PlayerDeckList`'s `bracket_tier` field is forwarded directly to the
-/// corresponding `PlayerDeckPayload`, so callers that populate the tier before
-/// calling this function receive correctly-tiered payloads. Old payloads that
-/// omit the field deserialize with `CommanderBracketTier::Core` (the `default`).
+/// Each seat (player, opponent and every AI deck) resolves through
+/// `resolve_player_deck_list`, so each `PlayerDeckList`'s `bracket_tier` and
+/// printings sidecar are forwarded directly to the corresponding
+/// `PlayerDeckPayload`. Callers that populate the tier before calling this
+/// function receive correctly-tiered payloads. Old payloads that omit the field
+/// deserialize with `CommanderBracketTier::Core` (the `default`).
 pub fn resolve_deck_list(db: &CardDatabase, list: &DeckList) -> DeckPayload {
     DeckPayload {
-        player: PlayerDeckPayload {
-            main_deck: resolve_names(db, &list.player.main_deck),
-            sideboard: resolve_names(db, &list.player.sideboard),
-            commander: resolve_names(db, &list.player.commander),
-            companion: resolve_names(db, &list.player.companion),
-            attraction_deck: resolve_names(db, &list.player.attraction_deck),
-            planar_deck: resolve_names(db, &list.player.planar_deck),
-            scheme_deck: resolve_names(db, &list.player.scheme_deck),
-            contraption_deck: resolve_names(db, &list.player.contraption_deck),
-            sticker_sheets: list.player.sticker_sheets.clone(),
-            signature_spell: resolve_names(db, &list.player.signature_spell),
-            bracket_tier: list.player.bracket_tier,
-        },
-        opponent: PlayerDeckPayload {
-            main_deck: resolve_names(db, &list.opponent.main_deck),
-            sideboard: resolve_names(db, &list.opponent.sideboard),
-            commander: resolve_names(db, &list.opponent.commander),
-            companion: resolve_names(db, &list.opponent.companion),
-            attraction_deck: resolve_names(db, &list.opponent.attraction_deck),
-            planar_deck: resolve_names(db, &list.opponent.planar_deck),
-            scheme_deck: resolve_names(db, &list.opponent.scheme_deck),
-            contraption_deck: resolve_names(db, &list.opponent.contraption_deck),
-            sticker_sheets: list.opponent.sticker_sheets.clone(),
-            signature_spell: resolve_names(db, &list.opponent.signature_spell),
-            bracket_tier: list.opponent.bracket_tier,
-        },
+        player: resolve_player_deck_list(db, &list.player),
+        opponent: resolve_player_deck_list(db, &list.opponent),
         ai_decks: list
             .ai_decks
             .iter()
-            .map(|deck| PlayerDeckPayload {
-                main_deck: resolve_names(db, &deck.main_deck),
-                sideboard: resolve_names(db, &deck.sideboard),
-                commander: resolve_names(db, &deck.commander),
-                companion: resolve_names(db, &deck.companion),
-                attraction_deck: resolve_names(db, &deck.attraction_deck),
-                planar_deck: resolve_names(db, &deck.planar_deck),
-                scheme_deck: resolve_names(db, &deck.scheme_deck),
-                contraption_deck: resolve_names(db, &deck.contraption_deck),
-                sticker_sheets: deck.sticker_sheets.clone(),
-                signature_spell: resolve_names(db, &deck.signature_spell),
-                bracket_tier: deck.bracket_tier,
-            })
+            .map(|deck| resolve_player_deck_list(db, deck))
             .collect(),
         // ai_difficulties is carried through from the DeckList so the caller's
         // per-seat difficulty annotations survive resolution.
@@ -527,6 +586,8 @@ fn main_deck_only_payload(main_deck: Vec<DeckEntry>) -> PlayerDeckPayload {
         sticker_sheets: Vec::new(),
         signature_spell: Vec::new(),
         bracket_tier: CommanderBracketTier::default(),
+        // The re-packaged pile carries no printings sidecar in this phase.
+        printings: Vec::new(),
     }
 }
 

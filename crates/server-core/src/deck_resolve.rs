@@ -96,6 +96,9 @@ pub fn resolve_deck(db: &CardDatabase, deck: &DeckData) -> Result<PlayerDeckPayl
         signature_spell,
         sticker_sheets: deck.sticker_sheets.clone(),
         bracket_tier: deck.bracket_tier,
+        // The owner's printing choices ride along unchanged. Display-only
+        // (CR 203.1 + CR 206.1): nothing here validates or reads them.
+        printings: deck.printings.clone(),
     })
 }
 
@@ -154,12 +157,16 @@ pub fn deck_data_from_payload(db: &CardDatabase, payload: &PlayerDeckPayload) ->
         // Decides `validate_cedh_bracket`, which `start_game` runs whenever an
         // AI seat is at cEDH difficulty.
         bracket_tier: payload.bracket_tier,
+        // Display-only (CR 203.1 + CR 206.1): carried so a restored or re-paired
+        // seat keeps the owner's printing choices.
+        printings: payload.printings.clone(),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use engine::types::card_printing::{CardPrinting, DeckPrinting, DeckSection};
     use serde_json::{json, Value};
 
     fn deck(main: &[&str], sideboard: &[&str], commander: &[&str]) -> DeckData {
@@ -185,6 +192,158 @@ mod tests {
 
         let payload = resolve_deck(&db, &deck).expect("deck resolves");
         assert_eq!(payload.sticker_sheets, deck.sticker_sheets);
+    }
+
+    /// One Forest annotation in the main deck: a fixed point of any later
+    /// normalization (a resolvable name, a section that holds it, a count within
+    /// the deck's).
+    fn forest_printing() -> DeckPrinting {
+        DeckPrinting {
+            section: DeckSection::MainDeck,
+            name: "Forest".to_string(),
+            count: 1,
+            printing: CardPrinting {
+                set_code: "lea".to_string(),
+                collector_number: "294".to_string(),
+            },
+        }
+    }
+
+    #[test]
+    fn resolve_deck_carries_the_printings_sidecar() {
+        let db = db_from(&["Forest"]);
+        let mut deck = deck(&["Forest"], &[], &[]);
+        deck.printings = vec![forest_printing()];
+
+        let payload = resolve_deck(&db, &deck).expect("deck resolves");
+        // Reach guard: the deck itself resolved, so the carry below is not a
+        // by-product of an early return.
+        assert_eq!(payload.main_deck.len(), 1);
+        assert_eq!(payload.printings, deck.printings);
+    }
+
+    /// The V3 mixed array: fifteen elements of which exactly three decode. Kept, in
+    /// order: a valid `main_deck` annotation, one whose section this build does not
+    /// know (`Unknown`), and a `commander` annotation with an extra key. Dropped:
+    /// count -1, 1.5 and 4294967296; a numeric section; a missing `printing`; a
+    /// string `printing`; and scalar, array and nested-map elements. Copied verbatim
+    /// into the engine integration test `owner_printing_sidecar.rs` (test code
+    /// cannot be shared across the crates).
+    const MIXED_PRINTINGS: &str = r#"[
+        {"section":"main_deck","name":"Forest","count":2,"printing":{"set_code":"lea","collector_number":"294"}},
+        {"section":"main_deck","name":"Forest","count":-1,"printing":{"set_code":"lea","collector_number":"294"}},
+        {"section":"main_deck","name":"Forest","count":1.5,"printing":{"set_code":"lea","collector_number":"294"}},
+        {"section":"main_deck","name":"Forest","count":4294967296,"printing":{"set_code":"lea","collector_number":"294"}},
+        {"section":7,"name":"Forest","count":1,"printing":{"set_code":"lea","collector_number":"294"}},
+        {"section":"main_deck","name":"Forest","count":1},
+        {"section":"main_deck","name":"Forest","count":1,"printing":"lea/294"},
+        7,
+        "text",
+        null,
+        true,
+        [1,2,[3]],
+        {"a":{"b":[{"c":1}]}},
+        {"section":"sticker_sheets","name":"Sheet","count":1,"printing":{"set_code":"lea","collector_number":"294"}},
+        {"section":"commander","name":"Forest","count":1,"printing":{"set_code":"lea","collector_number":"294"},"extra":{"k":[1]}}
+    ]"#;
+
+    fn mixed_printings_kept() -> Vec<DeckPrinting> {
+        let lea = || CardPrinting {
+            set_code: "lea".to_string(),
+            collector_number: "294".to_string(),
+        };
+        vec![
+            DeckPrinting {
+                section: DeckSection::MainDeck,
+                name: "Forest".to_string(),
+                count: 2,
+                printing: lea(),
+            },
+            DeckPrinting {
+                section: DeckSection::Unknown,
+                name: "Sheet".to_string(),
+                count: 1,
+                printing: lea(),
+            },
+            DeckPrinting {
+                section: DeckSection::Commander,
+                name: "Forest".to_string(),
+                count: 1,
+                printing: lea(),
+            },
+        ]
+    }
+
+    /// The sidecar decodes leniently inside the real adjacently tagged frames, in both
+    /// key orders. With `data` first serde buffers the whole `data` object through its
+    /// private `Content` before any field decoder runs, so this reaches
+    /// `deserialize_deck_printings` through `ContentDeserializer`. Reverting the
+    /// `deserialize_with` attribute fails every frame here (the malformed elements
+    /// become a decode error).
+    #[test]
+    fn the_printings_sidecar_decodes_leniently_inside_adjacently_tagged_deck_frames() {
+        use seat_reducer::types::DeckChoice;
+
+        let data_first = r#"{"data":{"main_deck":["Forest"],"printings":MIXED,"sticker_sheets":["Sheet"]},"type":"DeckList"}"#
+            .replace("MIXED", MIXED_PRINTINGS);
+        let type_first = r#"{"type":"DeckList","data":{"main_deck":["Forest"],"printings":MIXED,"sticker_sheets":["Sheet"]}}"#
+            .replace("MIXED", MIXED_PRINTINGS);
+        for (order, frame) in [("data first", data_first), ("type first", type_first)] {
+            let choice: DeckChoice = serde_json::from_str(&frame)
+                .unwrap_or_else(|err| panic!("{order}: the frame must decode: {err}"));
+            let DeckChoice::DeckList(deck) = choice else {
+                panic!("{order}: expected a DeckList choice");
+            };
+            assert_eq!(deck.printings, mixed_printings_kept(), "{order}");
+            // Reach guard: the field after `printings` decoded, so the stream
+            // continued past the dropped elements.
+            assert_eq!(deck.sticker_sheets, vec!["Sheet".to_string()], "{order}");
+        }
+
+        // A non-array value is an empty sidecar, not a frame error.
+        let non_array = r#"{"data":{"main_deck":["Forest"],"printings":5,"sticker_sheets":["Sheet"]},"type":"DeckList"}"#;
+        let DeckChoice::DeckList(deck) =
+            serde_json::from_str::<DeckChoice>(non_array).expect("a non-array sidecar decodes")
+        else {
+            panic!("expected a DeckList choice");
+        };
+        assert!(deck.printings.is_empty());
+        assert_eq!(deck.sticker_sheets, vec!["Sheet".to_string()]);
+
+        // The native server's frame type: `deck` first, so `display_name` and the
+        // required `public` are read after the buffered `deck` object.
+        let create = r#"{"data":{"deck":{"main_deck":["Forest"],"printings":MIXED,"sticker_sheets":["Sheet"]},"display_name":"Host","public":false},"type":"CreateGameWithSettings"}"#
+            .replace("MIXED", MIXED_PRINTINGS);
+        let message: crate::protocol::ClientMessage =
+            serde_json::from_str(&create).expect("the create frame decodes");
+        let crate::protocol::ClientMessage::CreateGameWithSettings {
+            deck, display_name, ..
+        } = message
+        else {
+            panic!("expected CreateGameWithSettings");
+        };
+        assert_eq!(deck.printings, mixed_printings_kept());
+        assert_eq!(display_name, "Host");
+    }
+
+    /// A well-formed element whose object key is serde_json's private raw-value
+    /// token never fails the deck. This lives in server-core, not the engine test
+    /// binary, on purpose: `lobby-broker` turns on `serde_json/raw_value`, and
+    /// cargo unifies it into every server-core build, while the engine-only graph
+    /// has it off, so the row would be vacuous there. With `raw_value` on,
+    /// `serde_json::Value`'s own `Deserialize` re-parses such an object as an
+    /// embedded raw document and fails the deck; the decoder's own element
+    /// materialiser never consults the token.
+    #[test]
+    fn a_raw_value_token_key_inside_an_element_never_fails_the_deck() {
+        let frame = r#"{"main_deck":["Forest"],"printings":[
+            {"$serde_json::private::RawValue":"not json"},
+            {"section":"main_deck","name":"Forest","count":1,"printing":{"set_code":"lea","collector_number":"294"},"extra":{"$serde_json::private::RawValue":"not json"}}
+        ],"sticker_sheets":["Sheet"]}"#;
+        let deck: DeckData =
+            serde_json::from_str(frame).expect("a token-keyed element must not fail the deck");
+        assert_eq!(deck.printings, vec![forest_printing()]);
+        assert_eq!(deck.sticker_sheets, vec!["Sheet".to_string()]);
     }
 
     fn card(name: &str) -> Value {
@@ -356,6 +515,7 @@ mod tests {
         let mut source = deck(&["Forest"], &[], &[]);
         source.sticker_sheets = vec!["Vampire Champion Fury".to_string()];
         source.bracket_tier = engine::game::bracket_estimate::CommanderBracketTier::Cedh;
+        source.printings = vec![forest_printing()];
 
         let payload = resolve_deck(&db, &source).expect("source resolves");
         let recovered = deck_data_from_payload(&db, &payload);
@@ -363,6 +523,8 @@ mod tests {
 
         assert_eq!(round_tripped.sticker_sheets, source.sticker_sheets);
         assert_eq!(round_tripped.bracket_tier, source.bracket_tier);
+        // The printings sidecar is carried unchanged through the inverse.
+        assert_eq!(round_tripped.printings, source.printings);
         // Both are load-bearing downstream: this one gates `start_game`.
         assert!(engine::database::legality::validate_cedh_bracket(&[&round_tripped]).is_ok());
     }

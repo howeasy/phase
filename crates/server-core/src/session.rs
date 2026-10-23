@@ -1184,21 +1184,11 @@ impl GameSession {
         // server-core's `self.decks` stores the fully-resolved `PlayerDeckPayload`
         // because `start_game` and the broadcast paths consume that shape.
         // Resolve at the boundary using the live `CardDatabase`. `resolve_deck`
-        // takes a `DeckData` which has the same shape as `PlayerDeckList`.
+        // takes a `DeckData` which has the same shape as `PlayerDeckList`; the
+        // engine's conversion carries every field (sticker sheets, bracket tier
+        // and the printings sidecar included).
         for (seat_idx, _, ref deck) in &delta.new_ai {
-            let deck_data = crate::starter_decks::DeckData {
-                main_deck: deck.main_deck.clone(),
-                sideboard: deck.sideboard.clone(),
-                commander: deck.commander.clone(),
-                companion: deck.companion.clone(),
-                planar_deck: deck.planar_deck.clone(),
-                scheme_deck: deck.scheme_deck.clone(),
-                attraction_deck: deck.attraction_deck.clone(),
-                contraption_deck: deck.contraption_deck.clone(),
-                sticker_sheets: deck.sticker_sheets.clone(),
-                signature_spell: deck.signature_spell.clone(),
-                bracket_tier: deck.bracket_tier,
-            };
+            let deck_data = crate::starter_decks::DeckData::from(deck.clone());
             // The resolver (`ServerDeckResolver::resolve` in phase-server)
             // has already validated these names against the same `db`, so
             // this should never error in practice. The `Err` arm exists as
@@ -9497,6 +9487,73 @@ mod tests {
             .iter()
             .flat_map(|entry| std::iter::repeat_n(entry.card.name.clone(), entry.count as usize))
             .collect()
+    }
+
+    /// Mirrors `phase-server`'s `ServerDeckResolver` without its database check: a
+    /// `DeckList` converts through the engine's `From<DeckData> for PlayerDeckList`,
+    /// so every field the wire list carries reaches the seat delta.
+    struct ConvertingResolver;
+
+    impl seat_reducer::types::DeckResolver for ConvertingResolver {
+        fn resolve(
+            &self,
+            choice: &DeckChoice,
+        ) -> Result<engine::game::deck_loading::PlayerDeckList, String> {
+            match choice {
+                DeckChoice::DeckList(data) => Ok(engine::game::deck_loading::PlayerDeckList::from(
+                    (**data).clone(),
+                )),
+                DeckChoice::Named(_) | DeckChoice::Random => {
+                    Err("this resolver only converts submitted lists".to_string())
+                }
+            }
+        }
+    }
+
+    /// An AI seat's submitted list keeps its printings sidecar through the reducer's
+    /// delta into the session's stored payload. Reverting `apply_seat_delta` to a
+    /// hand-written `DeckData` literal without the field leaves `decks[1].printings`
+    /// empty and fails the last assertion.
+    #[test]
+    fn an_ai_seat_deck_list_keeps_its_printings_through_apply_seat_delta() {
+        use engine::types::card_printing::{CardPrinting, DeckPrinting, DeckSection};
+
+        let mut mgr = SessionManager::new();
+        let (code, _token) = mgr.create_game(make_deck(), None);
+        let db = lands_db();
+        let mut data = name_deck("Forest", 1);
+        data.printings = vec![DeckPrinting {
+            section: DeckSection::MainDeck,
+            name: "Forest".to_string(),
+            count: 1,
+            printing: CardPrinting {
+                set_code: "lea".to_string(),
+                collector_number: "294".to_string(),
+            },
+        }];
+
+        let resolver = ConvertingResolver;
+        let ctx = seat_reducer::types::ReducerCtx {
+            platform: Platform::Native,
+            deck_resolver: &resolver,
+        };
+        let mut seat_state = mgr.try_session(&code).unwrap().seat_state();
+        let delta = seat_reducer::apply(
+            &mut seat_state,
+            seat_ai_at(1, DeckChoice::DeckList(Box::new(data.clone()))),
+            &ctx,
+        )
+        .expect("legal mutation");
+        mgr.try_session(&code)
+            .unwrap()
+            .apply_seat_delta(seat_state, &delta, &db);
+
+        let session = mgr.try_session(&code).unwrap();
+        let payload = session.decks[1].as_ref().expect("the AI seat resolved");
+        // Reach guard: the seat's deck resolved, so the sidecar assertion below
+        // is not reading a seat that was cleared.
+        assert_eq!(main_deck_names(payload), vec!["Forest".to_string()]);
+        assert_eq!(payload.printings, data.printings);
     }
 
     #[test]

@@ -5,6 +5,7 @@ pub mod action_stable_order;
 pub mod actions;
 pub mod attribution;
 pub mod card;
+pub mod card_printing;
 pub mod card_type;
 pub mod casting_costs;
 pub mod contest;

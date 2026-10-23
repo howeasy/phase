@@ -20,6 +20,7 @@ import type {
   SubmitResult,
   ViewerSnapshot,
   WaitingFor,
+  DeckPrinting,
 } from "./types";
 import type {
   InteractionPreview,
@@ -183,6 +184,8 @@ interface DeckSeatPayload {
   planar_deck?: string[];
   scheme_deck?: string[];
   bracket_tier?: CommanderBracketTier;
+  /** The owner's explicit printing choices; display-only. Omitted when empty. */
+  printings?: DeckPrinting[];
 }
 
 interface DeckListPayload {

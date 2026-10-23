@@ -4368,21 +4368,11 @@ pub fn apply_seat_mutation(state_json: &str, mutation_json: &str) -> Result<JsVa
             // Stay at the name-only layer — `wasm.initialize_game` re-resolves
             // against `CARD_DB` when the game actually starts, so resolving
             // here would be wasted work and would force a name-vs-resolved
-            // shape coercion at every JS boundary. The declared bracket_tier is
-            // carried through so a cEDH seat's declaration survives the round-trip.
-            Ok(PlayerDeckList {
-                main_deck: deck_data.main_deck,
-                sideboard: deck_data.sideboard,
-                commander: deck_data.commander,
-                companion: deck_data.companion,
-                attraction_deck: deck_data.attraction_deck,
-                planar_deck: deck_data.planar_deck,
-                scheme_deck: deck_data.scheme_deck,
-                contraption_deck: deck_data.contraption_deck,
-                sticker_sheets: deck_data.sticker_sheets,
-                signature_spell: deck_data.signature_spell,
-                bracket_tier: deck_data.bracket_tier,
-            })
+            // shape coercion at every JS boundary. Every field, the declared
+            // bracket tier (so a cEDH seat's declaration survives the round-trip)
+            // and the printings sidecar included, is carried by the engine's
+            // conversion.
+            Ok(PlayerDeckList::from(deck_data))
         }
     }
 

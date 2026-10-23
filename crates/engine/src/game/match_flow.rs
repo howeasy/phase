@@ -149,6 +149,9 @@ fn deck_payload_from_current_pools(state: &GameState) -> Result<DeckPayload, Str
     //
     // Seats >= 2 are AI players (e.g., cEDH 4-player Bo3). Collect their pools
     // so `bracket_tier = Cedh` is not silently dropped between games.
+    //
+    // The printings sidecar is display-only and is not retained in `GameState`,
+    // so a payload rebuilt from the pools carries none.
     let ai_decks = state
         .deck_pools
         .iter()
@@ -172,6 +175,7 @@ fn deck_payload_from_current_pools(state: &GameState) -> Result<DeckPayload, Str
                 .unwrap_or_default(),
             signature_spell: (*p.current_signature_spell).clone(),
             bracket_tier: p.bracket_tier,
+            printings: Vec::new(),
         })
         .collect();
 
@@ -188,6 +192,7 @@ fn deck_payload_from_current_pools(state: &GameState) -> Result<DeckPayload, Str
             sticker_sheets: state.players[0].sticker_sheets.clone(),
             signature_spell: (*p0.current_signature_spell).clone(),
             bracket_tier: p0.bracket_tier,
+            printings: Vec::new(),
         },
         opponent: PlayerDeckPayload {
             main_deck: (*p1.current_main).clone(),
@@ -201,6 +206,7 @@ fn deck_payload_from_current_pools(state: &GameState) -> Result<DeckPayload, Str
             sticker_sheets: state.players[1].sticker_sheets.clone(),
             signature_spell: (*p1.current_signature_spell).clone(),
             bracket_tier: p1.bracket_tier,
+            printings: Vec::new(),
         },
         ai_decks,
         // cEDH bracket validation ran at game 1 setup; decks haven't

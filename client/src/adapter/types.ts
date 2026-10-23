@@ -551,6 +551,26 @@ export interface MatchScore {
   draws: number;
 }
 
+/** Mirrors the engine's `DeckSection`: the deck-list field a printing annotates.
+ *  `"unknown"` is a section a newer peer sent that this build does not know. */
+export type DeckSection =
+  | "main_deck" | "sideboard" | "commander" | "companion" | "attraction_deck"
+  | "planar_deck" | "scheme_deck" | "contraption_deck" | "signature_spell" | "unknown";
+
+/** Mirrors the engine's `CardPrinting`. */
+export interface CardPrinting {
+  set_code: string;
+  collector_number: string;
+}
+
+/** Mirrors the engine's `DeckPrinting`: an owner's explicit printing for `count` copies. */
+export interface DeckPrinting {
+  section: DeckSection;
+  name: string;
+  count: number;
+  printing: CardPrinting;
+}
+
 /** Name-only per-player deck list, mirroring the engine's `PlayerDeckList`. */
 export interface ReplayPlayerDeckList {
   main_deck: string[];
@@ -562,6 +582,8 @@ export interface ReplayPlayerDeckList {
   sticker_sheets: string[];
   signature_spell: string[];
   bracket_tier: string;
+  /** The owner's explicit printing choices; display-only. Absent when empty. */
+  printings?: DeckPrinting[];
 }
 
 /** Mirrors the engine's `DeckList` — the name-only deck payload `initializeGame` accepts. */
