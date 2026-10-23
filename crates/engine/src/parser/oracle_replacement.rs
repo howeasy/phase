@@ -6294,8 +6294,8 @@ enum CastEntersWithShape<'a> {
     /// graveyard. That <type> enters with …" — a cast trigger whose first
     /// instruction exiles its source and whose second gives the triggering
     /// spell's permanent its counters. The line is owned here so it fails closed
-    /// whole: no part of it is built. Entry riders now carry the exact triggering
-    /// spell occurrence independently of continued control, but this form still
+    /// whole: no part of it is built. Entry riders carry the exact triggering
+    /// spell occurrence independently of continued control; this form still
     /// needs ordered self-exile plus rider construction. Publishing the exile
     /// alone would drop the second instruction, so the grammar stays unsupported.
     SelfExilePrelude,
@@ -28873,10 +28873,10 @@ mod tests {
     /// with mana value 5 or greater, that creature enters with X additional
     /// +1/+1 counters on it, where X is its mana value minus 4.") parses into
     /// a `SpellCast` trigger (not a static replacement scoped to Runadi
-    /// herself — issue #6492 regression), whose resolution installs a
-    /// floating one-shot `ChangeZone` replacement gated on mana value >= 5,
-    /// with a composite offset quantity over the entering creature's own
-    /// mana value.
+    /// herself — issue #6492 regression), whose mana-value-qualified trigger
+    /// installs a floating one-shot `ChangeZone` replacement bound to the
+    /// triggering spell occurrence, with a composite offset quantity over the
+    /// entering creature's own mana value.
     #[test]
     fn parses_runadi_behemoth_caller_trigger() {
         let text = "Whenever you cast a creature spell with mana value 5 or greater, that creature enters with X additional +1/+1 counters on it, where X is its mana value minus 4.";

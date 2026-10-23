@@ -271,7 +271,8 @@ fn unenforceable_lifetime(ability: &ResolvedAbility) -> EffectError {
 /// supplies both the concrete selector and the installed identity; a later cast
 /// with the same storage id cannot inherit it, even after a control change.
 ///
-/// CR 614.4: installation needs the original spell still live on the stack.
+/// CR 400.7: installation needs the original spell still live on the stack; a
+/// departed occurrence is a new object the rider can never name.
 /// Missing, departed, or mismatched authority rejects the install rather than
 /// storing a raw-id fallback or a permanently stale rider. Definitions without
 /// the placeholder retain their unchanged installation path.
