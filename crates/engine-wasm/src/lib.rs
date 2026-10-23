@@ -41,6 +41,7 @@ use engine::game::{
     PlayerDeckList, ReplayPlayer,
 };
 use engine::types::actions::{DebugAction, DebugCardCreationKind};
+use engine::types::card_printing::{deserialize_deck_printings, validate_deck_printings_bounds};
 use engine::types::custom_format::{CustomFormatDef, CustomFormatRules};
 use engine::types::events::GameEvent;
 use engine::types::format::{
@@ -1432,6 +1433,25 @@ pub fn evaluate_deck_format_gate_js(request: JsValue) -> Result<JsValue, JsValue
     })
 }
 
+/// Resource bounds on one deck list's printings sidecar, for the P2P host's guest
+/// admission (`handleNewGuest` in `client/src/adapter/p2p-adapter.ts`). Takes the
+/// guest deck's `printings` value as received. Decodes it with the one sidecar decoder
+/// (which refuses more than `MAX_DECK_PRINTING_ENTRIES` elements of any shape) and applies
+/// `validate_deck_printings_bounds`; throws the reason on abuse. Needs no card database.
+#[wasm_bindgen(js_name = checkDeckPrintingsBounds)]
+pub fn check_deck_printings_bounds_js(printings: JsValue) -> Result<(), JsValue> {
+    check_printings_bounds(serde_wasm_bindgen::Deserializer::from(printings))
+        .map_err(|e| JsValue::from_str(&e))
+}
+
+/// The P2P admission half of D8: decodes a guest deck's `printings` value with the one
+/// sidecar decoder (the entry cap) and applies `validate_deck_printings_bounds` (the byte
+/// caps). Native-testable body of `checkDeckPrintingsBounds`.
+fn check_printings_bounds<'de, D: serde::Deserializer<'de>>(printings: D) -> Result<(), String> {
+    let printings = deserialize_deck_printings(printings).map_err(|e| e.to_string())?;
+    validate_deck_printings_bounds("printings", &printings)
+}
+
 /// Axis A: capture a lobby's live, fully-resolved `FormatConfig` as a saved
 /// custom-format DEFINITION (`CustomFormatDef`), which the client persists
 /// locally. Never produces an active config — `formatConfigForCustomRules`
@@ -1690,6 +1710,35 @@ pub fn initialize_multiplayer_host_game(
     )
 }
 
+/// Every seat of a `DeckList` with the label its refusal reasons carry: the local
+/// player, the AI opponent, then each further AI player.
+fn labelled_seats(deck_list: &DeckList) -> impl Iterator<Item = (String, &PlayerDeckList)> {
+    [
+        ("Player".to_string(), &deck_list.player),
+        ("AI opponent".to_string(), &deck_list.opponent),
+    ]
+    .into_iter()
+    .chain(
+        deck_list
+            .ai_decks
+            .iter()
+            .enumerate()
+            .map(|(idx, deck)| (format!("AI player {}", idx + 2), deck)),
+    )
+}
+
+/// The WASM initialize half of the printings sidecar's resource bound (A3/D8):
+/// applies the engine's single `validate_deck_printings_bounds` to every seat's
+/// sidecar, returning `Some(reasons)` at the first refusal and `None` when every
+/// seat is in bounds. Native-testable for the same reason as `validate_deck_list_seats`.
+fn deck_list_printings_violations(deck_list: &DeckList) -> Option<Vec<String>> {
+    labelled_seats(deck_list).find_map(|(seat, deck)| {
+        validate_deck_printings_bounds("printings", &deck.printings)
+            .err()
+            .map(|reason| vec![format!("{seat} deck: {reason}")])
+    })
+}
+
 /// Validate every seat's deck in a `DeckList` against the selected format,
 /// returning `Some(reasons)` at the first refusal and `None` when every seat
 /// passes. Each reason is labelled with the seat it came from, because the
@@ -1707,19 +1756,7 @@ fn validate_deck_list_seats(
     match_type: Option<MatchType>,
     player_count: usize,
 ) -> Option<Vec<String>> {
-    let seats = [
-        ("Player".to_string(), &deck_list.player),
-        ("AI opponent".to_string(), &deck_list.opponent),
-    ]
-    .into_iter()
-    .chain(
-        deck_list
-            .ai_decks
-            .iter()
-            .enumerate()
-            .map(|(idx, deck)| (format!("AI player {}", idx + 2), deck)),
-    );
-    for (seat, deck) in seats {
+    for (seat, deck) in labelled_seats(deck_list) {
         if let Err(reasons) = validate_name_deck_for_format_full(
             db,
             &deck.main_deck,
@@ -1831,6 +1868,14 @@ fn initialize_game_impl(
                 }));
             }
         };
+        // Resource bound on every seat's printings sidecar (the decoder has already
+        // refused more than the entry cap): refused before the list is recorded.
+        if let Some(reasons) = deck_list_printings_violations(&deck_list) {
+            return to_js(&serde_json::json!({
+                "error": true,
+                "reasons": reasons,
+            }));
+        }
         recorded_deck_list = Some(deck_list.clone());
 
         let card_db_missing = CARD_DB.with(|cell| cell.borrow().is_none());
@@ -7609,6 +7654,134 @@ mod deck_list_seat_validation_tests {
                  being a commander: Plains"
                     .to_string()
             ]),
+        );
+    }
+
+    fn printing_entry(set_code: &str) -> engine::types::card_printing::DeckPrinting {
+        use engine::types::card_printing::{CardPrinting, DeckPrinting, DeckSection};
+        DeckPrinting {
+            section: DeckSection::MainDeck,
+            name: "Plains".to_string(),
+            count: 1,
+            printing: CardPrinting {
+                set_code: set_code.to_string(),
+                collector_number: "1".to_string(),
+            },
+        }
+    }
+
+    fn seat_with_printings(
+        printings: Vec<engine::types::card_printing::DeckPrinting>,
+    ) -> PlayerDeckList {
+        PlayerDeckList {
+            printings,
+            ..Default::default()
+        }
+    }
+
+    /// P2-V6 (D8): the WASM initialize half applies the engine's printings bound to
+    /// EVERY seat, labelling the refusal with the seat it came from.
+    #[test]
+    fn printings_bound_is_applied_to_every_seat_with_its_label() {
+        let oversized = || seat_with_printings(vec![printing_entry(&"s".repeat(33))]);
+        // Invalid but in-bounds annotations: the reach guard that the `None` below is
+        // a real acceptance of a non-empty sidecar, not a loop over empty seats.
+        let invalid_in_bounds = || {
+            seat_with_printings(vec![
+                printing_entry(""),
+                printing_entry("M\u{0}21"),
+                printing_entry("ZZZ"),
+            ])
+        };
+        let all_in_bounds = DeckList {
+            player: invalid_in_bounds(),
+            opponent: invalid_in_bounds(),
+            ai_decks: vec![invalid_in_bounds(), invalid_in_bounds()],
+            ..Default::default()
+        };
+        assert_eq!(deck_list_printings_violations(&all_in_bounds), None);
+
+        let violation = |reason_seat: &str| {
+            Some(vec![format!(
+                "{reason_seat} deck: printings[0].printing.set_code must be at most 32 bytes"
+            )])
+        };
+        let on_ai_player_3 = DeckList {
+            ai_decks: vec![invalid_in_bounds(), oversized()],
+            ..all_in_bounds.clone()
+        };
+        assert_eq!(
+            deck_list_printings_violations(&on_ai_player_3),
+            violation("AI player 3")
+        );
+        let on_opponent = DeckList {
+            opponent: oversized(),
+            ..all_in_bounds.clone()
+        };
+        assert_eq!(
+            deck_list_printings_violations(&on_opponent),
+            violation("AI opponent")
+        );
+        let on_player = DeckList {
+            player: oversized(),
+            ..all_in_bounds.clone()
+        };
+        assert_eq!(
+            deck_list_printings_violations(&on_player),
+            violation("Player")
+        );
+    }
+
+    /// A valid element followed by invalid annotations, the array `lobby-broker`'s
+    /// frame tests (P2-V4) use too: none of them is resource abuse.
+    fn invalid_annotations() -> serde_json::Value {
+        serde_json::json!([
+            { "section": "main_deck", "name": "Plains", "count": 1,
+              "printing": { "set_code": "M21", "collector_number": "1" } },
+            { "section": "mystery_zone", "name": "Plains", "count": 1,
+              "printing": { "set_code": "M21", "collector_number": "1" } },
+            0,
+            { "section": "main_deck", "name": "Plains", "count": "one",
+              "printing": { "set_code": "M21", "collector_number": "1" } },
+            { "section": "main_deck", "name": "", "count": 1,
+              "printing": { "set_code": "", "collector_number": "" } },
+            { "section": "main_deck", "name": "Bad\nName", "count": 1,
+              "printing": { "set_code": "M21", "collector_number": "1" } },
+            { "section": "main_deck", "name": "No Such Card Anywhere", "count": 1,
+              "printing": { "set_code": "M21", "collector_number": "1" } },
+            { "section": "main_deck", "name": "Plains", "count": 0,
+              "printing": { "set_code": "M21", "collector_number": "1" } },
+        ])
+    }
+
+    /// P2-V13: the P2P admission export's engine verdict applies the decode-time
+    /// entry cap and the byte caps, and admits a guest deck with no sidecar.
+    #[test]
+    fn admission_check_applies_the_entry_cap_and_the_byte_caps() {
+        let check = check_printings_bounds::<serde_json::Value>;
+
+        // Reach guards: the same helper admits invalid annotations (the decoder ran
+        // and the check passed them) and a deck with no `printings` key (`null`).
+        assert_eq!(check(invalid_annotations()), Ok(()));
+        assert_eq!(check(serde_json::Value::Null), Ok(()));
+        assert_eq!(check(serde_json::json!(vec![0; 2048])), Ok(()));
+
+        // Decode-time cap: 2049 elements the lenient decoder would drop.
+        let err = check(serde_json::json!(vec![0; 2049])).unwrap_err();
+        assert!(
+            err.contains("printings must contain at most 2048 entries"),
+            "{err}"
+        );
+
+        // Byte cap: fails if the `validate_deck_printings_bounds` line is removed,
+        // because the decoder alone admits it.
+        let long_code = serde_json::json!([{
+            "section": "main_deck", "name": "Plains", "count": 1,
+            "printing": { "set_code": "s".repeat(33), "collector_number": "1" },
+        }]);
+        assert_eq!(
+            check(long_code),
+            Err("printings[0].printing.set_code must be at most 32 bytes".to_string())
         );
     }
 }

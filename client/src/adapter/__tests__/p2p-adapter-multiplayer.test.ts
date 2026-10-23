@@ -23,7 +23,7 @@ import { FakeDataConnection } from "../../network/__tests__/fakeDataConnection";
 import { PEER_CONNECT_OPTIONS } from "../../network/connection";
 import { WIRE_PROTOCOL_VERSION, encodeWireMessage, type P2PMessage } from "../../network/protocol";
 import { p2pFinalStateCommitment } from "../../services/p2pTerminalResult";
-import { ownsP2PHostLease } from "../../services/p2pSession";
+import { claimP2PHostLease, ownsP2PHostLease } from "../../services/p2pSession";
 import type { PersistedP2PHostSession } from "../../services/gamePersistence";
 
 /** `multiplayer:reconnectRejected.hostDisconnectedBeforeSetup`, rendered in English. */
@@ -112,6 +112,11 @@ const mocks = vi.hoisted(() => {
     compatible: true,
     reasons: [] as string[],
   }));
+  // The engine's resource bound on a guest deck's printings sidecar: resolves
+  // when in bounds, rejects with the engine's reason on abuse. The host's
+  // admission check is fail-closed, so a mock that did not resolve would kick
+  // every guest in this suite.
+  const checkDeckPrintingsBounds = vi.fn(async (_printings: unknown) => undefined);
   const getViewerSnapshot = vi.fn(async (pid: number) => ({
     state: { filteredFor: pid, players: [] },
     actions: [],
@@ -135,6 +140,7 @@ const mocks = vi.hoisted(() => {
     })),
     checkDeckCompatibility,
     evaluateDeckFormatGate,
+    checkDeckPrintingsBounds,
     getState,
     getLegalActions,
     /**
@@ -360,10 +366,12 @@ const mockSubmitAiActionProposal = mocks.submitAiActionProposal as unknown as As
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
-  const promise = new Promise<T>((r) => {
-    resolve = r;
+  let reject!: (reason: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
   });
-  return { promise, resolve };
+  return { promise, resolve, reject };
 }
 
 function debugLogEntry(value: string): GameLogEntry {
@@ -429,6 +437,7 @@ vi.mock("../wasm-adapter", () => {
     previewInteraction: mocks.previewInteraction,
     checkDeckCompatibility: mocks.checkDeckCompatibility,
     evaluateDeckFormatGate: mocks.evaluateDeckFormatGate,
+    checkDeckPrintingsBounds: mocks.checkDeckPrintingsBounds,
     getState: mocks.getState,
     getLegalActions: mocks.getLegalActions,
     getSnapshot: mocks.getSnapshot,
@@ -470,6 +479,10 @@ beforeEach(() => {
   mockSubmitAction.mockClear();
   mockCheckDeckCompatibility.mockClear();
   mockEvaluateDeckFormatGate.mockClear();
+  // `mockReset`, then a resolving default: a pending or rejecting override must
+  // never leak into the next test's admission.
+  mocks.checkDeckPrintingsBounds.mockReset();
+  mocks.checkDeckPrintingsBounds.mockResolvedValue(undefined);
   mockGetViewerSnapshot.mockReset();
   mockGetViewerSnapshot.mockImplementation(async (pid: number) => ({
     state: { filteredFor: pid, players: [] },
@@ -2037,6 +2050,220 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
     ]);
   });
 
+  // ── Printings-sidecar resource bound at admission (phase 2, A3/D8) ────────
+  // The ENGINE decides (`checkDeckPrintingsBounds`, mocked here); these tests pin
+  // the adapter's routing of the verdict: where it sits relative to storing,
+  // persisting, the native attach and the start, and that it fails closed.
+
+  /** What a client would put in a guest deck's `printings` (two entries). */
+  const GUEST_PRINTINGS = [
+    { section: "main_deck", name: "Plains", count: 1, printing: { set_code: "M21", collector_number: "1" } },
+    { section: "main_deck", name: "Island", count: 2, printing: { set_code: "M21", collector_number: "2" } },
+  ];
+
+  const sentTypes = (messages: unknown[]) => messages.map((message) => (message as { type?: string }).type);
+
+  it("refuses an abusive guest sidecar through the engine before the seat is taken or the game starts", async () => {
+    mocks.checkDeckPrintingsBounds.mockRejectedValueOnce(
+      new Error("printings must contain at most 2048 entries"),
+    );
+    // No format configured: the bound is not a format rule, unlike `validateGuestDeck`.
+    const { adapter, emitConnection } = makeHost(2);
+    await adapter.initialize();
+
+    const guest = await joinGuest(emitConnection, {
+      type: "guest_deck",
+      deckData: { player: { main_deck: ["Plains"], sideboard: [], printings: GUEST_PRINTINGS } },
+    });
+    await flushPromises(20);
+
+    // Reach guard: the engine was asked about the guest's own sidecar (after the
+    // fake connection's wire round trip), so the refusal below is its verdict.
+    expect(mocks.checkDeckPrintingsBounds).toHaveBeenCalledTimes(1);
+    expect(mocks.checkDeckPrintingsBounds).toHaveBeenCalledWith(GUEST_PRINTINGS);
+
+    expect(await guest.getSentMessages()).toContainEqual(
+      expect.objectContaining({
+        type: "kick",
+        reason: "Deck rejected: printings must contain at most 2048 entries",
+      }),
+    );
+    expect(guest.open).toBe(false);
+    expect(adapter.getPlayerSlots().map((slot) => slot.kind.type)).toEqual([
+      "HostHuman",
+      "WaitingHuman",
+    ]);
+    expect(mockInitializeHostGame).not.toHaveBeenCalled();
+    adapter.dispose();
+  });
+
+  it("admits a guest whose sidecar is in bounds, and one with no sidecar", async () => {
+    const { adapter, emitConnection } = makeHost(3);
+    await adapter.initialize();
+
+    const withSidecar = await joinGuest(emitConnection, {
+      type: "guest_deck",
+      deckData: { player: { main_deck: ["Plains"], sideboard: [], printings: GUEST_PRINTINGS } },
+    });
+    await flushPromises(20);
+    const withoutSidecar = await joinGuest(emitConnection, {
+      type: "guest_deck",
+      deckData: { player: { main_deck: ["Island"], sideboard: [] } },
+    });
+    await flushPromises(20);
+
+    // Reach guards: the engine was asked about each guest, with exactly what each sent.
+    expect(mocks.checkDeckPrintingsBounds.mock.calls).toEqual([[GUEST_PRINTINGS], [undefined]]);
+    for (const guest of [withSidecar, withoutSidecar]) {
+      expect(sentTypes(await guest.getSentMessages())).not.toContain("kick");
+      expect(guest.open).toBe(true);
+    }
+    expect(adapter.getPlayerSlots().map((slot) => slot.kind.type)).toEqual([
+      "HostHuman",
+      "JoinedHuman",
+      "JoinedHuman",
+    ]);
+    adapter.dispose();
+  });
+
+  it("fails closed: a failing sidecar check kicks the guest instead of admitting it unchecked", async () => {
+    mocks.checkDeckPrintingsBounds.mockRejectedValueOnce("engine worker unavailable");
+    const { adapter, emitConnection } = makeHost(2);
+    await adapter.initialize();
+
+    const guest = await joinGuest(emitConnection, {
+      type: "guest_deck",
+      deckData: { player: { main_deck: ["Plains"], sideboard: [] } },
+    });
+    await flushPromises(20);
+
+    expect(mocks.checkDeckPrintingsBounds).toHaveBeenCalledTimes(1);
+    expect(await guest.getSentMessages()).toContainEqual(
+      expect.objectContaining({
+        type: "kick",
+        reason: "Deck rejected: engine worker unavailable",
+      }),
+    );
+    expect(guest.open).toBe(false);
+    expect(adapter.getPlayerSlots()[1]?.kind.type).toBe("WaitingHuman");
+    adapter.dispose();
+  });
+
+  it("checks a guest sidecar before any native attach, so a native refusal cannot fall back to an unchecked admission", async () => {
+    const { adapter, emitConnection } = makeNativeHost();
+    nativeWebSocketMocks.waitForPlayerSlots.mockResolvedValue([]);
+    nativeWebSocketMocks.initializePregame.mockResolvedValueOnce(NATIVE_HOST_ATTACHMENT);
+    mocks.checkDeckPrintingsBounds.mockRejectedValueOnce(
+      new Error("printings must contain at most 2048 entries"),
+    );
+    await adapter.initialize();
+    // Reach guard: only the host's own attach has happened.
+    expect(nativeWebSocketMocks.initializePregame).toHaveBeenCalledTimes(1);
+
+    const guest = await joinGuest(emitConnection, {
+      type: "guest_deck",
+      deckData: { player: { main_deck: ["Plains"], sideboard: [], printings: GUEST_PRINTINGS } },
+    });
+    await flushPromises(20);
+
+    expect(mocks.checkDeckPrintingsBounds).toHaveBeenCalledWith(GUEST_PRINTINGS);
+    // No native "join" was constructed for the refused guest.
+    expect(nativeWebSocketMocks.initializePregame).toHaveBeenCalledTimes(1);
+    expect(await guest.getSentMessages()).toContainEqual(
+      expect.objectContaining({
+        type: "kick",
+        reason: "Deck rejected: printings must contain at most 2048 entries",
+      }),
+    );
+    expect(guest.open).toBe(false);
+    expect(adapter.getPlayerSlots()[1]?.kind.type).toBe("WaitingHuman");
+    adapter.dispose();
+  });
+
+  describe("admission await re-checks host authority and connection closure", () => {
+    /**
+     * A native host whose guest-sidecar check is parked on `check`, with the guest's
+     * `guest_deck` already inside that await (the check mock has been called once),
+     * so an event that lands next lands inside the admission await and not before
+     * the existing pre-check, which would pass vacuously.
+     */
+    async function parkedAdmission() {
+      const { adapter, emitConnection } = makeNativeHost(2, { gameId: "native-game", roomCode: "ABCDE" });
+      nativeWebSocketMocks.waitForPlayerSlots.mockResolvedValue([]);
+      nativeWebSocketMocks.initializePregame
+        .mockResolvedValueOnce(NATIVE_HOST_ATTACHMENT)
+        .mockResolvedValueOnce(NATIVE_GUEST_ATTACHMENT);
+      await adapter.initialize();
+      const check = deferred<undefined>();
+      mocks.checkDeckPrintingsBounds.mockImplementationOnce(() => check.promise);
+      persistenceMocks.saveP2PHostSession.mockClear();
+      const guest = await joinGuest(emitConnection, {
+        type: "guest_deck",
+        deckData: { player: { main_deck: ["Plains"], sideboard: [], printings: GUEST_PRINTINGS } },
+      });
+      await vi.waitFor(() => expect(mocks.checkDeckPrintingsBounds).toHaveBeenCalledTimes(1));
+      const host = adapter as unknown as {
+        authority: { sessionKey: string };
+        guestSessions: Map<number, unknown>;
+        guestDecks: Map<number, unknown>;
+      };
+      return { adapter, guest, check, host };
+    }
+
+    it("attaches and adopts the guest once the check settles with neither event", async () => {
+      const { adapter, guest, check, host } = await parkedAdmission();
+      // Nothing is attached, seated or persisted while the check is parked.
+      expect(nativeWebSocketMocks.initializePregame).toHaveBeenCalledTimes(1);
+      expect(host.guestSessions.has(1)).toBe(false);
+
+      check.resolve(undefined);
+      await flushPromises(20);
+
+      // Reach guard for the negatives below: the native attach and adoption run once
+      // the await settles.
+      expect(nativeWebSocketMocks.initializePregame).toHaveBeenCalledTimes(2);
+      expect(host.guestSessions.has(1)).toBe(true);
+      expect(sentTypes(await guest.getSentMessages())).not.toContain("kick");
+      adapter.dispose();
+    });
+
+    for (const verdict of ["admitting", "refusing"] as const) {
+      it(`does not attach a stale host's guest when the lease is replaced during the ${verdict} check`, async () => {
+        const { adapter, guest, check, host } = await parkedAdmission();
+
+        claimP2PHostLease(host.authority.sessionKey);
+        if (verdict === "admitting") check.resolve(undefined);
+        else check.reject(new Error("printings must contain at most 2048 entries"));
+        await flushPromises(20);
+
+        expect(nativeWebSocketMocks.initializePregame).toHaveBeenCalledTimes(1);
+        const messages = await guest.getSentMessages();
+        expect(messages).toContainEqual({ type: "reconnect_rejected", reason: "Host session superseded" });
+        expect(sentTypes(messages)).not.toContain("kick");
+        expect(host.guestSessions.has(1)).toBe(false);
+        expect(host.guestDecks.has(1)).toBe(false);
+        adapter.dispose();
+      });
+
+      it(`neither attaches nor persists a guest that disconnected during the ${verdict} check`, async () => {
+        const { adapter, guest, check, host } = await parkedAdmission();
+
+        guest.simulateClose();
+        if (verdict === "admitting") check.resolve(undefined);
+        else check.reject(new Error("printings must contain at most 2048 entries"));
+        await flushPromises(20);
+
+        // Nothing was attached, so nothing is released.
+        expect(nativeWebSocketMocks.initializePregame).toHaveBeenCalledTimes(1);
+        expect(nativeWebSocketMocks.sendSeatMutation).not.toHaveBeenCalled();
+        expect(host.guestSessions.has(1)).toBe(false);
+        expect(host.guestDecks.has(1)).toBe(false);
+        expect(persistenceMocks.saveP2PHostSession).not.toHaveBeenCalled();
+        adapter.dispose();
+      });
+    }
+  });
+
   /**
    * CR 903.13f(3): `commander_draft_partner_grant` computes the Commander
    * Masters partner grant from the request's `draft_set_codes`. This gate KICKS
@@ -2252,6 +2479,9 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
       deckData: { player: { main_deck: ["Swamp"], sideboard: [] } },
       wireProtocolVersion: WIRE_PROTOCOL_VERSION,
     });
+    // The first join reaches its seat projection only after the engine's sidecar
+    // check settles, so wait for it rather than for a fixed number of microtasks.
+    await vi.waitFor(() => expect(firstStateJson).not.toBe(""));
     await flushPromises();
 
     secondConn.simulateClose();
