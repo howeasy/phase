@@ -1648,3 +1648,1734 @@ fn thumb_completed_empty_choice_restores_and_runs_only_independent_instructions(
         assert_finished(&runner);
     }
 }
+
+// T2: synthetic clauses with disjoint target pools expose traversal order.
+#[test]
+fn coin_children_precede_a_targeted_successor_and_nested_children() {
+    use engine::types::ability::{AbilityDefinition, AbilityKind};
+    for nested in [false, true] {
+        for won in [false, true] {
+            for bulk in [false, true] {
+                let mut root = parse_oracle_text(
+                    TWO_BRANCHES,
+                    "Synthetic ordered branches",
+                    &[],
+                    &["Artifact".into()],
+                    &[],
+                )
+                .abilities
+                .remove(0);
+                root.cost = None;
+                root.sub_ability = Some(Box::new(
+                    parse_oracle_text(
+                        "Exile target artifact.",
+                        "Synthetic independent successor",
+                        &[],
+                        &["Instant".into()],
+                        &[],
+                    )
+                    .abilities
+                    .remove(0),
+                ));
+                if nested {
+                    root = AbilityDefinition::new(
+                        AbilityKind::Activated,
+                        Effect::FlipCoins {
+                            flips: CoinFlipRun::single(),
+                            win_effect: Some(Box::new(root)),
+                            lose_effect: None,
+                            flipper: TargetFilter::Controller,
+                        },
+                    );
+                }
+                let mut scenario = GameScenario::new();
+                scenario.at_phase(Phase::PreCombatMain);
+                let source = scenario
+                    .add_artifact_from_oracle(P0, "Ordered source", "")
+                    .with_ability_definition(root)
+                    .id();
+                let own = scenario.add_creature(P0, "Own occurrence", 2, 2).id();
+                let opponent = scenario.add_creature(P1, "Opponent occurrence", 3, 3).id();
+                let distractor = scenario.add_creature(P1, "Creature distractor", 4, 4).id();
+                let later = scenario
+                    .add_artifact_from_oracle(P1, "Later artifact", "")
+                    .id();
+                let spare = scenario
+                    .add_artifact_from_oracle(P1, "Artifact distractor", "")
+                    .id();
+                let mut runner = scenario.build();
+                let expected = if nested { vec![true, won] } else { vec![won] };
+                pin_outcomes(&mut runner, &expected);
+                let events = if bulk {
+                    runner
+                        .act(GameAction::ActivateAbility {
+                            source_id: source,
+                            ability_index: 0,
+                            payment_mode: CastPaymentMode::Auto,
+                        })
+                        .unwrap();
+                    let mut events = runner
+                        .act(GameAction::SelectTargets {
+                            targets: [opponent, own, later].map(TargetRef::Object).to_vec(),
+                        })
+                        .expect("compact declaration follows Won, Lost, successor order")
+                        .events;
+                    finish(&mut runner, &mut events);
+                    events
+                } else {
+                    runner
+                        .activate(source, 0)
+                        .target_objects(&[opponent, own, later])
+                        .resolve()
+                        .events()
+                        .to_vec()
+                };
+                assert_eq!(flips(&events), expected);
+                assert_eq!(
+                    runner.state().objects[&opponent].zone,
+                    if won {
+                        Zone::Graveyard
+                    } else {
+                        Zone::Battlefield
+                    }
+                );
+                assert_eq!(
+                    runner.state().objects[&own].zone,
+                    if won {
+                        Zone::Battlefield
+                    } else {
+                        Zone::Graveyard
+                    }
+                );
+                assert_eq!(runner.state().objects[&later].zone, Zone::Exile);
+                assert_eq!(runner.state().objects[&spare].zone, Zone::Battlefield);
+                assert_eq!(runner.state().objects[&distractor].zone, Zone::Battlefield);
+                assert_eq!(
+                    events
+                        .iter()
+                        .filter(|event| matches!(
+                            event,
+                            GameEvent::EffectResolved {
+                                kind: EffectKind::ChangeZone,
+                                ..
+                            }
+                        ))
+                        .count(),
+                    1,
+                    "the independent successor executes once"
+                );
+                assert_finished(&runner);
+            }
+        }
+    }
+}
+
+#[test]
+fn chaotic_strike_loss_still_draws_without_pumping_either_creature() {
+    let (mut runner, spell, creatures) = chaotic_fixture(true);
+    pin_outcomes(&mut runner, &[false]);
+    let outcome = runner.cast(spell).target_object(creatures[0]).resolve();
+    assert_eq!(flips(outcome.events()), vec![false]);
+    outcome.assert_hand_drawn(P0, 1);
+    assert_eq!(outcome.power_toughness(creatures[0]), (2, 2));
+    assert_eq!(outcome.power_toughness(creatures[1]), (4, 4));
+    assert_finished(&runner);
+}
+
+// T4: remove announced targets with actual response spells, not fixture edits.
+#[test]
+fn illegal_coin_children_do_not_substitute_distractors_or_suppress_a_legal_tail() {
+    use engine::types::ability::{AbilityDefinition, AbilityKind, QuantityExpr};
+    for removed in [0, 1, 2, 3] {
+        for won in [false, true] {
+            let mut definition = parse_oracle_text(
+                TWO_BRANCHES,
+                "Synthetic legality coin",
+                &[],
+                &["Artifact".into()],
+                &[],
+            )
+            .abilities
+            .remove(0);
+            definition.cost = None;
+            definition.sub_ability = Some(Box::new(AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::GainLife {
+                    amount: QuantityExpr::Fixed { value: 2 },
+                    player: TargetFilter::Controller,
+                },
+            )));
+            let mut scenario = GameScenario::new();
+            scenario.at_phase(Phase::PreCombatMain);
+            let source = scenario
+                .add_artifact_from_oracle(P0, "Legality source", "")
+                .with_ability_definition(definition)
+                .id();
+            let own = scenario.add_creature(P0, "Own target", 2, 2).id();
+            let opponent = scenario.add_creature(P1, "Opponent target", 3, 3).id();
+            let own_spare = scenario.add_creature(P0, "Own distractor", 4, 4).id();
+            let opponent_spare = scenario.add_creature(P1, "Opponent distractor", 5, 5).id();
+            let responses: Vec<_> = (0..2)
+                .map(|_| {
+                    scenario
+                        .add_spell_to_hand_from_oracle(
+                            P0,
+                            "Synthetic removal response",
+                            true,
+                            "Exile target creature.",
+                        )
+                        .with_mana_cost(ManaCost::zero())
+                        .id()
+                })
+                .collect();
+            let mut runner = scenario.build();
+            pin_outcomes(&mut runner, &[won]);
+            let mut events = runner
+                .act(GameAction::ActivateAbility {
+                    source_id: source,
+                    ability_index: 0,
+                    payment_mode: CastPaymentMode::Auto,
+                })
+                .unwrap()
+                .events;
+            for target in [opponent, own] {
+                events.extend(
+                    runner
+                        .act(GameAction::ChooseTarget {
+                            target: Some(TargetRef::Object(target)),
+                        })
+                        .unwrap()
+                        .events,
+                );
+            }
+            assert_eq!(
+                runner.state().stack.len(),
+                1,
+                "reach: both targets announced"
+            );
+            for (bit, response, target) in [(1, responses[0], opponent), (2, responses[1], own)] {
+                if removed & bit != 0 {
+                    runner.cast(response).target_object(target).commit();
+                    for _ in 0..3 {
+                        if !runner
+                            .state()
+                            .stack
+                            .iter()
+                            .any(|entry| entry.id == response)
+                        {
+                            break;
+                        }
+                        events.extend(runner.act(GameAction::PassPriority).unwrap().events);
+                    }
+                    assert_eq!(
+                        runner.state().objects[&target].zone,
+                        Zone::Exile,
+                        "reach: response removed its target"
+                    );
+                }
+            }
+            // CR 608.2b: legality is local to each occurrence, not the root.
+            let ability = runner.state().stack.front().unwrap().ability().unwrap();
+            let validated =
+                engine::game::ability_utils::validate_targets_in_chain(runner.state(), ability);
+            let children = validated.coin_branches.as_ref().unwrap();
+            assert_eq!(
+                children.won.as_ref().unwrap().illegal_local_target_slots,
+                if removed & 1 != 0 { vec![0] } else { vec![] }
+            );
+            assert_eq!(
+                children.lost.as_ref().unwrap().illegal_local_target_slots,
+                if removed & 2 != 0 { vec![0] } else { vec![] }
+            );
+            finish(&mut runner, &mut events);
+            assert_eq!(
+                flips(&events),
+                if removed == 3 { vec![] } else { vec![won] }
+            );
+            assert_eq!(runner.life(P0), if removed == 3 { 20 } else { 22 });
+            for (target, bit, selected) in [(opponent, 1, won), (own, 2, !won)] {
+                assert_eq!(
+                    runner.state().objects[&target].zone,
+                    if removed & bit != 0 {
+                        Zone::Exile
+                    } else if selected {
+                        Zone::Graveyard
+                    } else {
+                        Zone::Battlefield
+                    }
+                );
+            }
+            assert_eq!(runner.state().objects[&own_spare].zone, Zone::Battlefield);
+            assert_eq!(
+                runner.state().objects[&opponent_spare].zone,
+                Zone::Battlefield
+            );
+            assert_finished(&runner);
+        }
+    }
+}
+
+#[test]
+fn separate_coin_target_occurrences_allow_the_same_creature() {
+    // CR 115.3: each branch contains a separate occurrence of "target".
+    for won in [false, true] {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let source = scenario.add_artifact_from_oracle(P0, "Synthetic repeated target",
+            "{T}: Flip a coin. If you win the flip, destroy target creature. If you lose the flip, destroy target creature.").id();
+        let target = scenario.add_creature(P1, "Shared target", 2, 2).id();
+        let spare = scenario.add_creature(P1, "Unselected target", 3, 3).id();
+        let mut runner = scenario.build();
+        pin_outcomes(&mut runner, &[won]);
+        let outcome = runner
+            .activate(source, 0)
+            .target_objects(&[target, target])
+            .resolve();
+        assert_eq!(flips(outcome.events()), vec![won]);
+        assert_eq!(outcome.zone_of(target), Zone::Graveyard);
+        assert_eq!(outcome.zone_of(spare), Zone::Battlefield);
+        assert_finished(&runner);
+    }
+}
+
+// T2/T8: the engine supplies opaque addresses; the public answer is positional.
+#[test]
+fn restored_retarget_changes_only_the_addressed_coin_or_later_occurrence() {
+    use engine::types::ability::{AbilityDefinition, AbilityKind, CoinFlipResult};
+    use engine::types::game_state::{ChainStep, RetargetScope, RetargetSlotAddress};
+    use engine::types::resolution::ResolutionStateWire;
+    for changed in 0..3 {
+        for won in [false, true] {
+            for stale_current in [false, true] {
+                let mut definition = parse_oracle_text(
+                "Flip a coin. If you win the flip, destroy target creature an opponent controls. If you lose the flip, destroy target creature you control.",
+                "Synthetic retarget coin", &[], &["Instant".into()], &[],
+            ).abilities.remove(0);
+                definition.sub_ability = Some(Box::new(
+                    parse_oracle_text(
+                        "Exile target artifact.",
+                        "Synthetic artifact tail",
+                        &[],
+                        &["Instant".into()],
+                        &[],
+                    )
+                    .abilities
+                    .remove(0),
+                ));
+                let mut scenario = GameScenario::new();
+                scenario.at_phase(Phase::PreCombatMain);
+                let old = [
+                    scenario.add_creature(P1, "Old won", 2, 2).id(),
+                    scenario.add_creature(P0, "Old lost", 3, 3).id(),
+                    scenario.add_artifact_from_oracle(P1, "Old tail", "").id(),
+                ];
+                let new = [
+                    scenario.add_creature(P1, "New won", 4, 4).id(),
+                    scenario.add_creature(P0, "New lost", 5, 5).id(),
+                    scenario.add_artifact_from_oracle(P1, "New tail", "").id(),
+                ];
+                let spell = scenario
+                    .add_spell_to_hand(P0, "Synthetic retarget coin", true)
+                    .with_ability_definition(definition)
+                    .with_mana_cost(ManaCost::zero())
+                    .id();
+                let redirect = scenario
+                    .add_spell_to_hand(P0, "Synthetic redirect", true)
+                    .with_ability_definition(AbilityDefinition::new(
+                        AbilityKind::Spell,
+                        Effect::ChangeTargets {
+                            target: TargetFilter::StackSpell,
+                            scope: RetargetScope::All,
+                            forced_to: None,
+                        },
+                    ))
+                    .with_mana_cost(ManaCost::zero())
+                    .id();
+                let removal = scenario
+                    .add_spell_to_hand_from_oracle(
+                        P0,
+                        "Synthetic stale-target response",
+                        true,
+                        "Exile target creature.",
+                    )
+                    .with_mana_cost(ManaCost::zero())
+                    .id();
+                let mut runner = scenario.build();
+                pin_outcomes(&mut runner, &[won]);
+                runner.cast(spell).target_objects(&old).commit();
+                if stale_current {
+                    runner.cast(removal).target_object(old[0]).commit();
+                    for _ in 0..4 {
+                        if !runner.state().stack.iter().any(|entry| entry.id == removal) {
+                            break;
+                        }
+                        runner.act(GameAction::PassPriority).unwrap();
+                    }
+                    assert_eq!(runner.state().objects[&old[0]].zone, Zone::Exile);
+                }
+                runner.cast(redirect).target_object(spell).commit();
+                for _ in 0..4 {
+                    if !matches!(runner.state().waiting_for, WaitingFor::Priority { .. }) {
+                        break;
+                    }
+                    runner.act(GameAction::PassPriority).unwrap();
+                }
+                let WaitingFor::RetargetChoice {
+                    slots,
+                    slot_pools,
+                    current_targets,
+                    ..
+                } = &runner.state().waiting_for
+                else {
+                    panic!(
+                        "required public retarget choice: {:?}",
+                        runner.state().waiting_for
+                    );
+                };
+                assert_eq!(*current_targets, old.map(TargetRef::Object));
+                assert_eq!(
+                    *slots,
+                    vec![
+                        RetargetSlotAddress {
+                            path: vec![ChainStep::CoinFlipBranch {
+                                result: CoinFlipResult::Won
+                            }],
+                            slot: 0
+                        },
+                        RetargetSlotAddress {
+                            path: vec![ChainStep::CoinFlipBranch {
+                                result: CoinFlipResult::Lost
+                            }],
+                            slot: 0
+                        },
+                        RetargetSlotAddress {
+                            path: vec![ChainStep::SubAbility],
+                            slot: 0
+                        },
+                    ]
+                );
+                for (position, replacement) in new.iter().enumerate() {
+                    assert!(slot_pools[position].contains(&TargetRef::Object(*replacement)));
+                }
+                let before = runner.state().waiting_for.clone();
+                runner.state_mut().capture_rng_word_pos();
+                let wire = serde_json::to_value(ResolutionStateWire::from_game_state(
+                    runner.state().clone(),
+                ))
+                .unwrap();
+                assert_eq!(wire["resolution_state_version"], 10);
+                *runner.state_mut() =
+                    serde_json::from_value::<engine::types::game_state::PersistedGameState>(wire)
+                        .unwrap()
+                        .into_game_state()
+                        .expect("production restore validates the parked positional retarget");
+                assert_eq!(runner.state().waiting_for, before);
+                let mut illegal = vec![None; 3];
+                illegal[0] = Some(TargetRef::Object(new[1]));
+                assert!(
+                    runner
+                        .act(GameAction::RetargetSpell {
+                            new_targets: illegal
+                        })
+                        .is_err(),
+                    "an own creature is illegal for the Won occurrence after restore"
+                );
+                assert_eq!(
+                    runner.state().waiting_for,
+                    before,
+                    "rejection leaves the positional prompt intact"
+                );
+                let mut picks = vec![None; 3];
+                picks[changed] = Some(TargetRef::Object(new[changed]));
+                let mut events = runner
+                    .act(GameAction::RetargetSpell { new_targets: picks })
+                    .unwrap()
+                    .events;
+                finish(&mut runner, &mut events);
+                assert_eq!(flips(&events), vec![won]);
+                for position in 0..3 {
+                    let executed =
+                        position == 2 || (position == 0 && won) || (position == 1 && !won);
+                    let affected = if position == 2 {
+                        Zone::Exile
+                    } else {
+                        Zone::Graveyard
+                    };
+                    assert_eq!(
+                        runner.state().objects[&old[position]].zone,
+                        if stale_current && position == 0 {
+                            Zone::Exile
+                        } else if executed && changed != position {
+                            affected
+                        } else {
+                            Zone::Battlefield
+                        }
+                    );
+                    assert_eq!(
+                        runner.state().objects[&new[position]].zone,
+                        if executed && changed == position {
+                            affected
+                        } else {
+                            Zone::Battlefield
+                        }
+                    );
+                }
+                assert_finished(&runner);
+            }
+        }
+    }
+}
+
+#[test]
+fn ai_required_coin_branch_slots_generate_only_the_current_legal_pool() {
+    let (mut runner, source, own, opposing) = two_branch_fixture(true, true);
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: source,
+            ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .unwrap();
+    for (required, forbidden) in [(&opposing, &own), (&own, &opposing)] {
+        let actions = legal_actions(runner.state());
+        for target in required {
+            assert!(actions.contains(&GameAction::ChooseTarget {
+                target: Some(TargetRef::Object(*target))
+            }));
+        }
+        for target in forbidden {
+            assert!(!actions.contains(&GameAction::ChooseTarget {
+                target: Some(TargetRef::Object(*target))
+            }));
+        }
+        assert!(!actions.contains(&GameAction::ChooseTarget { target: None }));
+        runner
+            .act(GameAction::ChooseTarget {
+                target: Some(TargetRef::Object(required[0])),
+            })
+            .unwrap();
+    }
+    if matches!(runner.state().waiting_for, WaitingFor::ManaPayment { .. }) {
+        runner.act(GameAction::PassPriority).unwrap();
+    }
+    let mut events = Vec::new();
+    finish(&mut runner, &mut events);
+    assert_eq!(flips(&events), vec![true]);
+    assert_eq!(runner.state().objects[&opposing[0]].zone, Zone::Graveyard);
+    assert_finished(&runner);
+}
+
+#[test]
+fn aleatory_draws_once_at_the_next_upkeep_on_either_coin_outcome() {
+    // Verbatim authoritative MTGJSON Oracle, checked before building this fixture.
+    const ALEATORY: &str = "Cast this spell only during combat after blockers are declared.\nFlip a coin. If you win the flip, target creature gets +1/+1 until end of turn.\nDraw a card at the beginning of the next turn's upkeep.";
+    for won in [false, true] {
+        let parsed = parse_oracle_text(ALEATORY, "Aleatory", &[], &["Instant".into()], &[]);
+        assert_eq!(parsed.abilities.len(), 1);
+        let root = &parsed.abilities[0];
+        let Effect::FlipCoins {
+            flips: run,
+            win_effect: Some(win),
+            lose_effect: None,
+            ..
+        } = root.effect.as_ref()
+        else {
+            panic!("Aleatory must retain exactly one targeted Won branch: {root:#?}");
+        };
+        assert_eq!(*run, CoinFlipRun::single());
+        assert!(matches!(win.effect.as_ref(), Effect::Pump { .. }));
+        assert!(win.sub_ability.is_none());
+        let delayed = root
+            .sub_ability
+            .as_ref()
+            .expect("independent next-upkeep draw");
+        let Effect::CreateDelayedTrigger { effect, .. } = delayed.effect.as_ref() else {
+            panic!("Aleatory must create the independent delayed draw: {delayed:#?}");
+        };
+        assert!(matches!(effect.effect.as_ref(), Effect::Draw { .. }));
+        assert!(effect.sub_ability.is_none());
+        assert!(delayed.sub_ability.is_none());
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::EndCombat);
+        scenario.with_library_top(
+            P0,
+            &["Aleatory draw witness", "P0 reserve A", "P0 reserve B"],
+        );
+        scenario.with_library_top(P1, &["P1 reserve A", "P1 reserve B"]);
+        let target = scenario.add_creature(P0, "Aleatory target", 2, 2).id();
+        let spare = scenario.add_creature(P1, "Aleatory distractor", 4, 4).id();
+        let spell = scenario
+            .add_spell_to_hand_from_oracle(P0, "Aleatory", true, ALEATORY)
+            .with_mana_cost(ManaCost::zero())
+            .id();
+        let mut runner = scenario.build();
+        pin_outcomes(&mut runner, &[won]);
+        let outcome = runner.cast(spell).target_object(target).resolve();
+        assert_eq!(flips(outcome.events()), vec![won]);
+        outcome.assert_hand_drawn(P0, 0);
+        assert_eq!(
+            outcome.power_toughness(target),
+            if won { (3, 3) } else { (2, 2) }
+        );
+        assert_eq!(outcome.power_toughness(spare), (4, 4));
+        assert_finished(&runner);
+        let mut events = Vec::new();
+        let mut upkeeps = 0;
+        let mut last_upkeep_turn = runner.state().turn_number;
+        for _ in 0..100 {
+            if runner.state().phase == Phase::Upkeep
+                && runner.state().turn_number > last_upkeep_turn
+            {
+                upkeeps += 1;
+                last_upkeep_turn = runner.state().turn_number;
+                finish(&mut runner, &mut events);
+                let draws = events
+                    .iter()
+                    .filter(|event| {
+                        matches!(event,
+                            GameEvent::CardDrawn { player_id, .. } if *player_id == P0
+                        )
+                    })
+                    .count();
+                assert_eq!(
+                    draws, 1,
+                    "Aleatory draws at the first upkeep, never again at the second"
+                );
+                assert!(runner.state().stack.is_empty());
+                assert!(runner.state().resolution_stack.is_empty());
+                assert!(matches!(
+                    runner.state().waiting_for,
+                    WaitingFor::Priority { .. }
+                ));
+                if upkeeps == 2 {
+                    break;
+                }
+            }
+            let action = match runner.state().waiting_for {
+                WaitingFor::Priority { .. } => GameAction::PassPriority,
+                WaitingFor::DeclareAttackers { .. } => GameAction::DeclareAttackers {
+                    attacks: vec![],
+                    bands: vec![],
+                },
+                WaitingFor::DeclareBlockers { .. } => GameAction::DeclareBlockers {
+                    assignments: vec![],
+                },
+                ref other => panic!("unexpected turn progress prompt: {other:?}"),
+            };
+            events.extend(runner.act(action).unwrap().events);
+        }
+        assert_eq!(upkeeps, 2, "reach: exercised both following upkeeps");
+        assert_finished(&runner);
+    }
+}
+
+#[test]
+fn one_coin_occurrence_rejects_duplicate_targets_but_accepts_two_distinct_creatures() {
+    use engine::types::ability::{AbilityDefinition, AbilityKind, MultiTargetSpec, TypedFilter};
+    let mut child = AbilityDefinition::new(
+        AbilityKind::Activated,
+        Effect::Destroy {
+            target: TargetFilter::Typed(TypedFilter::creature()),
+            cant_regenerate: false,
+        },
+    );
+    child.multi_target = Some(MultiTargetSpec::fixed(2, 2));
+    let root = AbilityDefinition::new(
+        AbilityKind::Activated,
+        Effect::FlipCoins {
+            flips: CoinFlipRun::single(),
+            win_effect: Some(Box::new(child)),
+            lose_effect: None,
+            flipper: TargetFilter::Controller,
+        },
+    );
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let source = scenario
+        .add_artifact_from_oracle(P0, "Synthetic two-target occurrence", "")
+        .with_ability_definition(root)
+        .id();
+    let first = scenario
+        .add_creature(P1, "First distinct target", 2, 2)
+        .id();
+    let second = scenario
+        .add_creature(P1, "Second distinct target", 3, 3)
+        .id();
+    let mut runner = scenario.build();
+    pin_outcomes(&mut runner, &[true]);
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: source,
+            ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .unwrap();
+    runner
+        .act(GameAction::ChooseTarget {
+            target: Some(TargetRef::Object(first)),
+        })
+        .unwrap();
+    let before = runner.state().clone();
+    // CR 115.3: two selections within this one occurrence must be distinct.
+    assert!(runner
+        .act(GameAction::ChooseTarget {
+            target: Some(TargetRef::Object(first))
+        })
+        .is_err());
+    assert_eq!(*runner.state(), before);
+    runner
+        .act(GameAction::ChooseTarget {
+            target: Some(TargetRef::Object(second)),
+        })
+        .unwrap();
+    let mut events = Vec::new();
+    finish(&mut runner, &mut events);
+    assert_eq!(
+        flips(&events),
+        vec![true],
+        "reach: the distinct assignment resolves"
+    );
+    assert_eq!(runner.state().objects[&first].zone, Zone::Graveyard);
+    assert_eq!(runner.state().objects[&second].zone, Zone::Graveyard);
+    assert_finished(&runner);
+}
+
+#[test]
+fn cross_controller_activated_copy_rebinds_each_branch_without_mutating_original() {
+    use engine::types::ability::{
+        AbilityDefinition, AbilityKind, CopyRetargetPermission, StackAbilityKind,
+    };
+    use engine::types::player::PlayerId;
+    for won in [false, true] {
+        let p2 = PlayerId(2);
+        let mut scenario = GameScenario::new_n_player(3, 7);
+        scenario.at_phase(Phase::PreCombatMain);
+        let mut definition = parse_oracle_text(
+            TWO_BRANCHES,
+            "Synthetic copied activation",
+            &[],
+            &["Artifact".into()],
+            &[],
+        )
+        .abilities
+        .remove(0);
+        definition.cost = None;
+        let source = scenario
+            .add_artifact_from_oracle(P0, "Original ability source", "")
+            .with_ability_definition(definition)
+            .id();
+        let original_own = scenario.add_creature(P0, "Original own target", 2, 2).id();
+        let original_opponent = scenario
+            .add_creature(P1, "Original opponent target", 3, 3)
+            .id();
+        let copy_own = scenario.add_creature(P1, "Copy own target", 4, 4).id();
+        let copy_opponent = scenario.add_creature(p2, "Copy opponent target", 5, 5).id();
+        let spare = scenario.add_creature(p2, "Copy distractor", 6, 6).id();
+        let copy_spell = scenario
+            .add_spell_to_hand(P1, "Synthetic ability copier", true)
+            .with_ability_definition(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::CopySpell {
+                    target: TargetFilter::StackAbility {
+                        controller: None,
+                        tag: None,
+                        kind: Some(StackAbilityKind::Activated),
+                    },
+                    retarget: CopyRetargetPermission::MayChooseNewTargets,
+                    copier: None,
+                    additional_modifications: vec![],
+                    starting_loyalty_from_casualty_sacrifice: false,
+                },
+            ))
+            .with_mana_cost(ManaCost::zero())
+            .id();
+        let mut runner = scenario.build();
+        pin_outcomes(&mut runner, &[won, won]);
+        runner
+            .act(GameAction::ActivateAbility {
+                source_id: source,
+                ability_index: 0,
+                payment_mode: CastPaymentMode::Auto,
+            })
+            .unwrap();
+        for target in [original_opponent, original_own] {
+            runner
+                .act(GameAction::ChooseTarget {
+                    target: Some(TargetRef::Object(target)),
+                })
+                .unwrap();
+        }
+        let original = runner.state().stack.back().unwrap().clone();
+        runner.act(GameAction::PassPriority).unwrap();
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { player: P1 }
+        ));
+        runner.cast(copy_spell).target_object(original.id).commit();
+        for _ in 0..6 {
+            if !matches!(runner.state().waiting_for, WaitingFor::Priority { .. }) {
+                break;
+            }
+            runner.act(GameAction::PassPriority).unwrap();
+        }
+        let WaitingFor::CopyRetarget {
+            player,
+            copy_id,
+            target_slots,
+            ..
+        } = &runner.state().waiting_for
+        else {
+            panic!(
+                "required activated copy retarget: {:?}",
+                runner.state().waiting_for
+            );
+        };
+        assert_eq!(*player, P1);
+        let copy_id = *copy_id;
+        assert_eq!(target_slots.len(), 2);
+        assert!(target_slots[0]
+            .legal_alternatives
+            .contains(&TargetRef::Object(copy_opponent)));
+        assert!(!target_slots[0]
+            .legal_alternatives
+            .contains(&TargetRef::Object(copy_own)));
+        assert!(
+            runner
+                .act(GameAction::ChooseTarget {
+                    target: Some(TargetRef::Object(copy_own))
+                })
+                .is_err(),
+            "copy's won branch cannot choose its controller's creature"
+        );
+        runner
+            .act(GameAction::ChooseTarget {
+                target: Some(TargetRef::Object(copy_opponent)),
+            })
+            .unwrap();
+        runner
+            .act(GameAction::ChooseTarget {
+                target: Some(TargetRef::Object(copy_own)),
+            })
+            .unwrap();
+        let copy = runner
+            .state()
+            .stack
+            .iter()
+            .find(|entry| entry.id == copy_id)
+            .unwrap();
+        assert_eq!(copy.controller, P1);
+        assert_eq!(copy.source_id, source);
+        assert_eq!(
+            copy.ability()
+                .unwrap()
+                .coin_branches
+                .as_ref()
+                .unwrap()
+                .won
+                .as_ref()
+                .unwrap()
+                .controller,
+            P1
+        );
+        assert_eq!(
+            runner
+                .state()
+                .stack
+                .iter()
+                .find(|entry| entry.id == original.id)
+                .unwrap(),
+            &original
+        );
+        let mut events = Vec::new();
+        finish(&mut runner, &mut events);
+        let actual: Vec<_> = events
+            .iter()
+            .filter_map(|event| match event {
+                GameEvent::CoinFlipped { player_id, won } => Some((*player_id, *won)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(actual, vec![(P1, won), (P0, won)]);
+        for (target, selected) in [
+            (original_opponent, won),
+            (original_own, !won),
+            (copy_opponent, won),
+            (copy_own, !won),
+        ] {
+            assert_eq!(
+                runner.state().objects[&target].zone,
+                if selected {
+                    Zone::Graveyard
+                } else {
+                    Zone::Battlefield
+                }
+            );
+        }
+        assert_eq!(runner.state().objects[&spare].zone, Zone::Battlefield);
+        assert_finished(&runner);
+    }
+}
+
+#[test]
+fn three_seat_borrowed_source_and_target_keep_controller_and_incarnation_authority() {
+    use engine::types::player::PlayerId;
+    for alteration in ["unchanged", "source leaves", "blink", "control changes"] {
+        for won in [false, true] {
+            let p2 = PlayerId(2);
+            let mut scenario = GameScenario::new_n_player(3, 7);
+            scenario.at_phase(Phase::PreCombatMain);
+            let mut definition = parse_oracle_text(
+                TWO_BRANCHES,
+                "Synthetic borrowed source",
+                &[],
+                &["Artifact".into()],
+                &[],
+            )
+            .abilities
+            .remove(0);
+            definition.cost = None;
+            let source = scenario
+                .add_artifact_from_oracle(P0, "Borrowed source", "")
+                .with_ability_definition(definition)
+                .id();
+            let own = scenario.add_creature(P0, "Borrowed own target", 2, 2).id();
+            let opponent = scenario
+                .add_creature(p2, "Third-seat opponent target", 3, 3)
+                .id();
+            let spare = scenario
+                .add_creature(P1, "Owner-seat distractor", 4, 4)
+                .id();
+            let land = scenario
+                .add_land_from_oracle(P0, "Blink companion", "")
+                .id();
+            let remove = scenario
+                .add_spell_to_hand_from_oracle(
+                    P0,
+                    "Synthetic source removal",
+                    true,
+                    "Destroy target artifact.",
+                )
+                .with_mana_cost(ManaCost::zero())
+                .id();
+            let blink = scenario.add_spell_to_hand_from_oracle(P0, "Synthetic two-object blink", true,
+                "Exile two target artifacts, creatures, and/or lands you control, then return those cards to the battlefield under your control.")
+                .with_mana_cost(ManaCost::zero()).id();
+            let steal = scenario
+                .add_spell_to_hand_from_oracle(
+                    P1,
+                    "Synthetic control response",
+                    true,
+                    "Gain control of target creature.",
+                )
+                .with_mana_cost(ManaCost::zero())
+                .id();
+            let mut runner = scenario.build();
+            // Fixture ownership differs from live control before announcement.
+            runner.state_mut().objects.get_mut(&source).unwrap().owner = p2;
+            runner.state_mut().objects.get_mut(&own).unwrap().owner = P1;
+            pin_outcomes(&mut runner, &[won]);
+            runner
+                .act(GameAction::ActivateAbility {
+                    source_id: source,
+                    ability_index: 0,
+                    payment_mode: CastPaymentMode::Auto,
+                })
+                .unwrap();
+            for target in [opponent, own] {
+                runner
+                    .act(GameAction::ChooseTarget {
+                        target: Some(TargetRef::Object(target)),
+                    })
+                    .unwrap();
+            }
+            let old_pin = runner
+                .state()
+                .stack
+                .back()
+                .unwrap()
+                .ability()
+                .unwrap()
+                .coin_branches
+                .as_ref()
+                .unwrap()
+                .lost
+                .as_ref()
+                .unwrap()
+                .target_pin_at(0)
+                .unwrap();
+            let response = match alteration {
+                "unchanged" => None,
+                "source leaves" => {
+                    runner.cast(remove).target_object(source).commit();
+                    Some(remove)
+                }
+                "blink" => {
+                    runner.cast(blink).target_objects(&[own, land]).commit();
+                    Some(blink)
+                }
+                "control changes" => {
+                    runner.act(GameAction::PassPriority).unwrap();
+                    runner.cast(steal).target_object(own).commit();
+                    Some(steal)
+                }
+                _ => unreachable!(),
+            };
+            let mut events = Vec::new();
+            if let Some(response) = response {
+                for _ in 0..8 {
+                    if !runner
+                        .state()
+                        .stack
+                        .iter()
+                        .any(|entry| entry.id == response)
+                    {
+                        break;
+                    }
+                    events.extend(runner.act(GameAction::PassPriority).unwrap().events);
+                }
+            }
+            match alteration {
+                "source leaves" => {
+                    assert_eq!(runner.state().objects[&source].zone, Zone::Graveyard)
+                }
+                "blink" => assert_ne!(
+                    runner.state().objects[&own].incarnation,
+                    old_pin.incarnation
+                ),
+                "control changes" => assert_eq!(runner.state().objects[&own].controller, P1),
+                "unchanged" => assert_eq!(runner.state().objects[&own].controller, P0),
+                _ => unreachable!(),
+            }
+            finish(&mut runner, &mut events);
+            assert_eq!(
+                flips(&events),
+                vec![won],
+                "another legal occurrence keeps the coin live"
+            );
+            assert_eq!(
+                runner.state().objects[&opponent].zone,
+                if won {
+                    Zone::Graveyard
+                } else {
+                    Zone::Battlefield
+                }
+            );
+            let own_dies = !won && matches!(alteration, "unchanged" | "source leaves");
+            assert_eq!(
+                runner.state().objects[&own].zone,
+                if own_dies {
+                    Zone::Graveyard
+                } else {
+                    Zone::Battlefield
+                }
+            );
+            assert_eq!(runner.state().objects[&spare].zone, Zone::Battlefield);
+            assert_finished(&runner);
+        }
+    }
+}
+
+#[test]
+fn optional_empty_coin_slot_does_not_steal_the_later_target() {
+    for empty in [false, true] {
+        let mut definition = parse_oracle_text(
+            TWO_BRANCHES,
+            "Synthetic optional branch",
+            &[],
+            &["Artifact".into()],
+            &[],
+        )
+        .abilities
+        .remove(0);
+        definition.cost = None;
+        let Effect::FlipCoins { win_effect, .. } = definition.effect.as_mut() else {
+            unreachable!()
+        };
+        win_effect.as_mut().unwrap().optional_targeting = true;
+        definition.sub_ability = Some(Box::new(
+            parse_oracle_text(
+                "Exile target artifact.",
+                "Synthetic optional tail",
+                &[],
+                &["Instant".into()],
+                &[],
+            )
+            .abilities
+            .remove(0),
+        ));
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let source = scenario
+            .add_artifact_from_oracle(P0, "Optional source", "")
+            .with_ability_definition(definition)
+            .id();
+        let own = scenario
+            .add_creature(P0, "Mandatory lost target", 2, 2)
+            .id();
+        let opponent =
+            (!empty).then(|| scenario.add_creature(P1, "Optional won target", 3, 3).id());
+        let later = scenario
+            .add_artifact_from_oracle(P1, "Mandatory tail target", "")
+            .id();
+        let mut runner = scenario.build();
+        pin_outcomes(&mut runner, &[true]);
+        runner
+            .act(GameAction::ActivateAbility {
+                source_id: source,
+                ability_index: 0,
+                payment_mode: CastPaymentMode::Auto,
+            })
+            .unwrap();
+        let WaitingFor::TargetSelection {
+            target_slots,
+            selection,
+            ..
+        } = &runner.state().waiting_for
+        else {
+            panic!("required target prompt")
+        };
+        assert_eq!(target_slots.len(), 3);
+        if let Some(opponent) = opponent {
+            assert_eq!(selection.current_slot, 0);
+            runner
+                .act(GameAction::ChooseTarget {
+                    target: Some(TargetRef::Object(opponent)),
+                })
+                .unwrap();
+        } else {
+            assert_eq!(
+                selection.current_slot, 1,
+                "empty optional pool is already completed"
+            );
+            assert_eq!(selection.selected_slots, vec![None]);
+        }
+        for target in [own, later] {
+            runner
+                .act(GameAction::ChooseTarget {
+                    target: Some(TargetRef::Object(target)),
+                })
+                .unwrap();
+        }
+        let mut events = Vec::new();
+        finish(&mut runner, &mut events);
+        assert_eq!(flips(&events), vec![true]);
+        if let Some(opponent) = opponent {
+            assert_eq!(runner.state().objects[&opponent].zone, Zone::Graveyard);
+        }
+        assert_eq!(runner.state().objects[&own].zone, Zone::Battlefield);
+        assert_eq!(runner.state().objects[&later].zone, Zone::Exile);
+        assert_finished(&runner);
+    }
+}
+
+#[test]
+fn separate_piles_materializes_targetless_coin_children_before_execution() {
+    use engine::types::ability::{
+        AbilityDefinition, AbilityKind, PileSource, PlayerScope, QuantityExpr, TypedFilter,
+        VoterScope,
+    };
+    use engine::types::game_state::PileSide;
+    for won in [false, true] {
+        let reward = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 3 },
+                player: TargetFilter::Controller,
+            },
+        );
+        let punishment = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::LoseLife {
+                amount: QuantityExpr::Fixed { value: 2 },
+                target: Some(TargetFilter::Controller),
+            },
+        );
+        let coin = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::FlipCoins {
+                flips: CoinFlipRun::single(),
+                win_effect: Some(Box::new(reward)),
+                lose_effect: Some(Box::new(punishment)),
+                flipper: TargetFilter::Controller,
+            },
+        );
+        let mut canonical = GameScenario::new();
+        canonical.at_phase(Phase::PreCombatMain);
+        let ordinary = canonical
+            .add_spell_to_hand(P0, "Synthetic canonical coin control", true)
+            .with_ability_definition(coin.clone())
+            .with_mana_cost(ManaCost::zero())
+            .id();
+        let mut canonical = canonical.build();
+        pin_outcomes(&mut canonical, &[won]);
+        let control = canonical.cast(ordinary).resolve();
+        assert_eq!(flips(control.events()), vec![won]);
+        assert_eq!(canonical.life(P0), if won { 23 } else { 18 });
+        assert_finished(&canonical);
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let a = scenario.add_creature(P1, "Pile A member", 2, 2).id();
+        let b = scenario.add_creature(P1, "Pile B member", 3, 3).id();
+        let spell = scenario
+            .add_spell_to_hand(P0, "Synthetic pile coin", false)
+            .with_ability(Effect::SeparateIntoPiles {
+                partition_subject: VoterScope::EachOpponent,
+                object_filter: TargetFilter::Typed(TypedFilter::creature()),
+                chooser: PlayerScope::Controller,
+                chosen_pile_effect: Box::new(coin),
+                pile_source: PileSource::Battlefield,
+                unchosen_pile_effect: None,
+            })
+            .with_mana_cost(ManaCost::zero())
+            .id();
+        let mut runner = scenario.build();
+        pin_outcomes(&mut runner, &[won]);
+        let outcome = runner.cast(spell).resolve();
+        assert!(matches!(
+            outcome.final_waiting_for(),
+            WaitingFor::SeparatePilesPartition { player: P1, .. }
+        ));
+        let mut events = outcome.events().to_vec();
+        events.extend(
+            runner
+                .act(GameAction::SubmitPilePartition { pile_a: vec![a] })
+                .unwrap()
+                .events,
+        );
+        let WaitingFor::SeparatePilesChoice { player, .. } = runner.state().waiting_for else {
+            panic!("required pile choice")
+        };
+        assert_eq!(player, P0);
+        events.extend(
+            runner
+                .act(GameAction::ChoosePile { pile: PileSide::A })
+                .unwrap()
+                .events,
+        );
+        finish(&mut runner, &mut events);
+        assert_eq!(flips(&events), vec![won]);
+        assert_eq!(runner.life(P0), if won { 23 } else { 18 });
+        assert_eq!(
+            runner.life(P1),
+            20,
+            "pile-local subject is not substituted for the coin controller"
+        );
+        assert_eq!(runner.state().objects[&a].zone, Zone::Battlefield);
+        assert_eq!(runner.state().objects[&b].zone, Zone::Battlefield);
+        assert_finished(&runner);
+    }
+}
+
+#[test]
+fn copied_coin_child_re_elects_a_departed_announcer_without_rebinding_other_groups() {
+    use engine::types::game_state::CopyChoiceMode;
+    use engine::types::player::PlayerId;
+    let p2 = PlayerId(2);
+    let mut definition = parse_oracle_text(
+        "Flip a coin. If you win the flip, destroy target creature an opponent controls. If you lose the flip, destroy target artifact.",
+        "Synthetic opponent-announced coin", &[], &["Instant".into()], &[],
+    ).abilities.remove(0);
+    let Effect::FlipCoins {
+        win_effect,
+        lose_effect,
+        ..
+    } = definition.effect.as_mut()
+    else {
+        unreachable!()
+    };
+    win_effect.as_mut().unwrap().target_chooser = Some(TargetFilter::Opponent);
+    lose_effect.as_mut().unwrap().target_chooser = Some(TargetFilter::Opponent);
+    definition.sub_ability = Some(Box::new(
+        parse_oracle_text(
+            "Exile target land.",
+            "Synthetic caster-announced tail",
+            &[],
+            &["Instant".into()],
+            &[],
+        )
+        .abilities
+        .remove(0),
+    ));
+    let mut scenario = GameScenario::new_n_player(3, 7);
+    scenario.at_phase(Phase::PreCombatMain);
+    let creature = scenario.add_creature(P1, "Chosen coin creature", 2, 2).id();
+    let spare = scenario.add_creature(P1, "Creature distractor", 3, 3).id();
+    let artifact = scenario
+        .add_artifact_from_oracle(P1, "Lost branch artifact", "")
+        .id();
+    let land = scenario
+        .add_land_from_oracle(P0, "Caster's later land", "")
+        .id();
+    let source = scenario
+        .add_spell_to_graveyard(P0, "Synthetic opponent-announced coin", true)
+        .with_ability_definition(definition)
+        .id();
+    let mastery = scenario.add_spell_to_hand(P0, "Mizzix's Mastery", false)
+        .from_oracle_text_with_keywords(&["Overload"],
+            "Exile target card that's an instant or sorcery from your graveyard. For each card exiled this way, copy it, and you may cast the copy without paying its mana cost. Exile Mizzix's Mastery.\nOverload {5}{R}{R}{R} (You may cast this spell for its overload cost. If you do, change \"target\" in its text to \"each.\")")
+        .with_mana_cost(ManaCost::zero()).id();
+    let mut runner = scenario.build();
+    pin_outcomes(&mut runner, &[true]);
+    runner.cast(mastery).target_object(source).commit();
+    for _ in 0..6 {
+        if !matches!(runner.state().waiting_for, WaitingFor::Priority { .. }) {
+            break;
+        }
+        runner.act(GameAction::PassPriority).unwrap();
+    }
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::ChooseFromZoneChoice { .. }
+    ));
+    runner
+        .act(GameAction::SelectCards {
+            cards: vec![source],
+        })
+        .unwrap();
+    let WaitingFor::CopyRetarget {
+        copy_id,
+        mode: Some(CopyChoiceMode::Announce),
+        announcer_election: Some(_),
+        ..
+    } = runner.state().waiting_for
+    else {
+        panic!(
+            "required copy announcement election: {:?}",
+            runner.state().waiting_for
+        )
+    };
+    for opponent in [p2, P1] {
+        runner
+            .act(GameAction::ChooseAnnouncingOpponent { opponent })
+            .unwrap();
+    }
+    let WaitingFor::CopyRetarget {
+        player: asked,
+        current_slot,
+        ..
+    } = &runner.state().waiting_for
+    else {
+        panic!("required coin child target choice")
+    };
+    assert_eq!(*asked, p2);
+    assert_eq!(*current_slot, 0, "the first declaration belongs to Won");
+    assert_eq!(
+        runner
+            .state()
+            .stack
+            .iter()
+            .find(|entry| entry.id == copy_id)
+            .unwrap()
+            .ability()
+            .unwrap()
+            .coin_branches
+            .as_ref()
+            .unwrap()
+            .won
+            .as_ref()
+            .unwrap()
+            .context
+            .announcing_opponent,
+        Some(p2)
+    );
+    runner.act(GameAction::Concede { player_id: p2 }).unwrap();
+    let WaitingFor::CopyRetarget {
+        player: asked,
+        current_slot,
+        ..
+    } = &runner.state().waiting_for
+    else {
+        panic!("required re-elected child choice")
+    };
+    assert_eq!(
+        *asked, P1,
+        "remaining opponent replaces the departed child announcer"
+    );
+    assert_eq!(
+        *current_slot, 0,
+        "replacement resumes the same child occurrence"
+    );
+    assert_eq!(
+        runner
+            .state()
+            .stack
+            .iter()
+            .find(|entry| entry.id == copy_id)
+            .unwrap()
+            .ability()
+            .unwrap()
+            .coin_branches
+            .as_ref()
+            .unwrap()
+            .won
+            .as_ref()
+            .unwrap()
+            .context
+            .announcing_opponent,
+        Some(P1)
+    );
+    for (target, expected_chooser) in [(creature, P1), (artifact, P1), (land, P0)] {
+        let WaitingFor::CopyRetarget { player, .. } = runner.state().waiting_for else {
+            panic!("required remaining announcement")
+        };
+        assert_eq!(player, expected_chooser);
+        runner
+            .act(GameAction::ChooseTarget {
+                target: Some(TargetRef::Object(target)),
+            })
+            .unwrap();
+    }
+    let ability = runner
+        .state()
+        .stack
+        .iter()
+        .find(|entry| entry.id == copy_id)
+        .unwrap()
+        .ability()
+        .unwrap();
+    let branches = ability.coin_branches.as_ref().unwrap();
+    assert_eq!(
+        branches.won.as_ref().unwrap().context.announcing_opponent,
+        Some(P1)
+    );
+    assert_eq!(
+        branches.lost.as_ref().unwrap().context.announcing_opponent,
+        Some(P1)
+    );
+    assert_eq!(
+        ability
+            .sub_ability
+            .as_ref()
+            .unwrap()
+            .context
+            .announcing_opponent,
+        None
+    );
+    let mut events = Vec::new();
+    finish(&mut runner, &mut events);
+    assert_eq!(flips(&events), vec![true]);
+    assert_eq!(runner.state().objects[&creature].zone, Zone::Graveyard);
+    assert_eq!(runner.state().objects[&spare].zone, Zone::Battlefield);
+    assert_eq!(runner.state().objects[&artifact].zone, Zone::Battlefield);
+    assert_eq!(runner.state().objects[&land].zone, Zone::Exile);
+    assert_finished(&runner);
+}
+
+#[test]
+fn differently_bound_coin_children_do_not_coalesce_and_each_resolves_its_own_target() {
+    use engine::game::stack::stack_display_groups;
+    for same in [false, true] {
+        let (mut runner, source, own, opposing) = two_branch_fixture(true, true);
+        // Synthetic no-cost repeated activation; all declaration and resolution
+        // still go through the production activation pipeline.
+        let mut abilities = runner.state().objects[&source].abilities.as_ref().clone();
+        abilities[0].cost = None;
+        let object = runner.state_mut().objects.get_mut(&source).unwrap();
+        object.abilities = std::sync::Arc::new(abilities.clone());
+        object.base_abilities = std::sync::Arc::new(abilities);
+        pin_outcomes(&mut runner, &[true, true]);
+        for opponent in [opposing[0], if same { opposing[0] } else { opposing[1] }] {
+            runner
+                .act(GameAction::ActivateAbility {
+                    source_id: source,
+                    ability_index: 0,
+                    payment_mode: CastPaymentMode::Auto,
+                })
+                .unwrap();
+            for target in [opponent, own[0]] {
+                runner
+                    .act(GameAction::ChooseTarget {
+                        target: Some(TargetRef::Object(target)),
+                    })
+                    .unwrap();
+            }
+        }
+        assert_eq!(runner.state().stack.len(), 2);
+        let groups = stack_display_groups(runner.state());
+        assert_eq!(
+            groups.iter().map(|group| group.count).collect::<Vec<_>>(),
+            if same { vec![2] } else { vec![1, 1] },
+            "different child declarations are not presented as identical stack entries"
+        );
+        let mut events = Vec::new();
+        finish(&mut runner, &mut events);
+        assert_eq!(flips(&events), vec![true, true]);
+        assert_eq!(runner.state().objects[&opposing[0]].zone, Zone::Graveyard);
+        assert_eq!(
+            runner.state().objects[&opposing[1]].zone,
+            if same {
+                Zone::Battlefield
+            } else {
+                Zone::Graveyard
+            }
+        );
+        assert_eq!(runner.state().objects[&own[0]].zone, Zone::Battlefield);
+        assert_finished(&runner);
+    }
+}
+
+#[test]
+fn viewer_projection_redacts_hidden_coin_child_context_but_keeps_public_sibling_context() {
+    use engine::game::visibility::filter_state_for_viewer;
+    use engine::types::ability::CostPaidObjectSnapshot;
+    use engine::types::game_state::ManaSpentSourceSnapshot;
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let mut definition = parse_oracle_text(
+        TWO_BRANCHES,
+        "Synthetic redacted coin",
+        &[],
+        &["Artifact".into()],
+        &[],
+    )
+    .abilities
+    .remove(0);
+    definition.cost = None;
+    let source = scenario
+        .add_artifact_from_oracle(P0, "Public coin source", "")
+        .with_ability_definition(definition)
+        .id();
+    let hidden = scenario
+        .add_spell_to_hand(P0, "Hidden payment sentinel", true)
+        .id();
+    let own = scenario.add_creature(P0, "Public own target", 2, 2).id();
+    let opponent = scenario
+        .add_creature(P1, "Public opponent target", 3, 3)
+        .id();
+    scenario.add_creature(P0, "Public own distractor", 4, 4);
+    scenario.add_creature(P1, "Public opponent distractor", 5, 5);
+    scenario.with_library_top(P0, &["Hidden library sentinel", "Library reserve"]);
+    let mut runner = scenario.build();
+    pin_outcomes(&mut runner, &[true]);
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: source,
+            ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .unwrap();
+    for target in [opponent, own] {
+        runner
+            .act(GameAction::ChooseTarget {
+                target: Some(TargetRef::Object(target)),
+            })
+            .unwrap();
+    }
+    let library = runner.state().players[0].library[0];
+    let snapshot = |id| {
+        CostPaidObjectSnapshot::capture(
+            &runner.state().objects[&id],
+            runner.state().objects[&id].snapshot_public_characteristics(),
+        )
+    };
+    let hidden_library = snapshot(library);
+    let visible_object = snapshot(own);
+    let mut context = runner.state().objects[&source]
+        .snapshot_for_zone_change(source, Some(Zone::Battlefield), Zone::Battlefield)
+        .trigger_source_context
+        .unwrap();
+    context.mana_spent_source_snapshots = vec![
+        ManaSpentSourceSnapshot {
+            source_id: hidden,
+            lki: runner.state().objects[&hidden].snapshot_for_mana_spent(),
+        },
+        ManaSpentSourceSnapshot {
+            source_id: own,
+            lki: runner.state().objects[&own].snapshot_for_mana_spent(),
+        },
+    ];
+    // Hostile metadata fixture on an actually announced stack ability. These
+    // snapshots exercise projection, not a fabricated effect-resolution path.
+    let branches = runner
+        .state_mut()
+        .stack
+        .back_mut()
+        .unwrap()
+        .ability_mut()
+        .unwrap()
+        .coin_branches
+        .as_mut()
+        .unwrap();
+    branches.won.as_mut().unwrap().trigger_source = Some(context.clone());
+    branches.won.as_mut().unwrap().effect_context_object = Some(hidden_library);
+    branches.lost.as_mut().unwrap().trigger_source = Some(context.clone());
+    branches.lost.as_mut().unwrap().effect_context_object = Some(visible_object.clone());
+    let authoritative = runner.state().clone();
+    let view = filter_state_for_viewer(runner.state(), P1);
+    let projected = view
+        .stack
+        .back()
+        .unwrap()
+        .ability()
+        .unwrap()
+        .coin_branches
+        .as_ref()
+        .unwrap();
+    assert_eq!(
+        authoritative.objects[&hidden].name,
+        "Hidden payment sentinel"
+    );
+    for child in [
+        projected.won.as_ref().unwrap(),
+        projected.lost.as_ref().unwrap(),
+    ] {
+        let payment = &child
+            .trigger_source
+            .as_ref()
+            .unwrap()
+            .mana_spent_source_snapshots;
+        assert_eq!(payment[0].source_id, hidden);
+        assert_eq!(payment[0].lki.name, "Hidden Card");
+        assert_eq!(payment[1], context.mana_spent_source_snapshots[1]);
+    }
+    assert!(projected
+        .won
+        .as_ref()
+        .unwrap()
+        .effect_context_object
+        .is_none());
+    assert_eq!(
+        projected.lost.as_ref().unwrap().effect_context_object,
+        Some(visible_object)
+    );
+    assert_eq!(
+        *runner.state(),
+        authoritative,
+        "projection never mutates execution authority"
+    );
+    let mut events = Vec::new();
+    finish(&mut runner, &mut events);
+    assert_eq!(flips(&events), vec![true]);
+    assert_eq!(runner.state().objects[&opponent].zone, Zone::Graveyard);
+    assert_eq!(runner.state().objects[&own].zone, Zone::Battlefield);
+    assert_finished(&runner);
+}
+
+#[test]
+fn copied_coin_targets_preserve_single_and_separate_occurrence_uniqueness() {
+    use engine::types::ability::{
+        AbilityDefinition, AbilityKind, CopyRetargetPermission, MultiTargetSpec, StackAbilityKind,
+        TypedFilter,
+    };
+    for single_occurrence in [false, true] {
+        let destroy = || {
+            AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::Destroy {
+                    target: TargetFilter::Typed(TypedFilter::creature()),
+                    cant_regenerate: false,
+                },
+            )
+        };
+        let mut win = destroy();
+        if single_occurrence {
+            win.multi_target = Some(MultiTargetSpec::fixed(2, 2));
+        }
+        let coin = AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::FlipCoins {
+                flips: CoinFlipRun::single(),
+                win_effect: Some(Box::new(win)),
+                lose_effect: (!single_occurrence).then(|| Box::new(destroy())),
+                flipper: TargetFilter::Controller,
+            },
+        );
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let source = scenario
+            .add_artifact_from_oracle(P0, "Synthetic occurrence copier source", "")
+            .with_ability_definition(coin)
+            .id();
+        let targets: Vec<_> = ["Original A", "Original B", "Copy C", "Copy D"]
+            .iter()
+            .map(|name| scenario.add_creature(P1, name, 2, 2).id())
+            .collect();
+        let copier = scenario
+            .add_spell_to_hand(P0, "Synthetic occurrence copier", true)
+            .with_ability(Effect::CopySpell {
+                target: TargetFilter::StackAbility {
+                    controller: None,
+                    tag: None,
+                    kind: Some(StackAbilityKind::Activated),
+                },
+                retarget: CopyRetargetPermission::MayChooseNewTargets,
+                copier: None,
+                additional_modifications: vec![],
+                starting_loyalty_from_casualty_sacrifice: false,
+            })
+            .with_mana_cost(ManaCost::zero())
+            .id();
+        let mut runner = scenario.build();
+        pin_outcomes(&mut runner, &[true, true]);
+        runner
+            .act(GameAction::ActivateAbility {
+                source_id: source,
+                ability_index: 0,
+                payment_mode: CastPaymentMode::Auto,
+            })
+            .unwrap();
+        for target in [targets[0], targets[usize::from(single_occurrence)]] {
+            runner
+                .act(GameAction::ChooseTarget {
+                    target: Some(TargetRef::Object(target)),
+                })
+                .unwrap();
+        }
+        let original = runner.state().stack.back().unwrap().clone();
+        runner.cast(copier).target_object(original.id).commit();
+        for _ in 0..4 {
+            if !matches!(runner.state().waiting_for, WaitingFor::Priority { .. }) {
+                break;
+            }
+            runner.act(GameAction::PassPriority).unwrap();
+        }
+        let WaitingFor::CopyRetarget { target_slots, .. } = &runner.state().waiting_for else {
+            panic!("required occurrence-aware copy retarget");
+        };
+        assert_eq!(target_slots.len(), 2);
+        runner
+            .act(GameAction::ChooseTarget {
+                target: Some(TargetRef::Object(targets[2])),
+            })
+            .unwrap();
+        if single_occurrence {
+            // CR 115.3: changing targets cannot duplicate one occurrence's target.
+            assert!(runner
+                .act(GameAction::ChooseTarget {
+                    target: Some(TargetRef::Object(targets[2]))
+                })
+                .is_err());
+        }
+        runner
+            .act(GameAction::ChooseTarget {
+                target: Some(TargetRef::Object(
+                    targets[if single_occurrence { 3 } else { 2 }],
+                )),
+            })
+            .unwrap();
+        assert_eq!(
+            runner
+                .state()
+                .stack
+                .iter()
+                .find(|entry| entry.id == original.id)
+                .unwrap(),
+            &original
+        );
+        let mut events = Vec::new();
+        finish(&mut runner, &mut events);
+        assert_eq!(flips(&events), vec![true, true]);
+        for (index, target) in targets.iter().enumerate() {
+            let dies = single_occurrence || index % 2 == 0;
+            assert_eq!(
+                runner.state().objects[target].zone,
+                if dies {
+                    Zone::Graveyard
+                } else {
+                    Zone::Battlefield
+                }
+            );
+        }
+        assert_finished(&runner);
+    }
+}
