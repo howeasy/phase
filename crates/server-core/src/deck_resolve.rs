@@ -222,7 +222,7 @@ mod tests {
         assert_eq!(payload.printings, deck.printings);
     }
 
-    /// The V3 mixed array: fifteen elements of which exactly three decode. Kept, in
+    /// The mixed annotation array: fifteen elements of which exactly three decode. Kept, in
     /// order: a valid `main_deck` annotation, one whose section this build does not
     /// know (`Unknown`), and a `commander` annotation with an extra key. Dropped:
     /// count -1, 1.5 and 4294967296; a numeric section; a missing `printing`; a

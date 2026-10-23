@@ -586,7 +586,7 @@ fn main_deck_only_payload(main_deck: Vec<DeckEntry>) -> PlayerDeckPayload {
         sticker_sheets: Vec::new(),
         signature_spell: Vec::new(),
         bracket_tier: CommanderBracketTier::default(),
-        // The re-packaged pile carries no printings sidecar in this phase.
+        // The re-packaged pile carries no printings sidecar.
         printings: Vec::new(),
     }
 }

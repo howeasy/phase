@@ -21,7 +21,7 @@ use engine::types::card_printing::{
 use serde::de::value::{BytesDeserializer, Error as ValueError, MapDeserializer, SeqDeserializer};
 use serde_json::{json, Value};
 
-/// The V3 mixed array: fifteen elements of which exactly three decode. Kept, in
+/// The mixed annotation array: fifteen elements of which exactly three decode. Kept, in
 /// order: a valid `main_deck` annotation, one whose section this build does not
 /// know (`Unknown`), and a `commander` annotation with an extra key. Dropped:
 /// count -1, 1.5 and 4294967296; a numeric section; a missing `printing`; a string
@@ -117,8 +117,9 @@ fn frame_with(printings: &str) -> String {
 
 /// A name-only list serializes without a `printings` key on all three types, so
 /// every existing payload keeps its bytes. Reverting `skip_serializing_if` makes
-/// `"printings":[]` appear and fails the exact-string and key-set assertions. V5 is
-/// the positive control: a non-empty sidecar IS serialized.
+/// `"printings":[]` appear and fails the exact-string and key-set assertions.
+/// `sidecar_round_trips_and_an_unknown_section_stays_unknown` is the positive control: a
+/// non-empty sidecar IS serialized.
 #[test]
 fn name_only_deck_lists_serialize_without_a_printings_key() {
     let wire = DeckData {
@@ -338,8 +339,9 @@ fn non_sequence_sidecar_values_decode_as_empty() {
 }
 
 /// A non-empty sidecar round-trips, and a section a newer peer names stays
-/// `Unknown` through re-serialization. This is also V1's positive control: the
-/// `printings` key IS present when the sidecar is not empty.
+/// `Unknown` through re-serialization. This is also the positive control for
+/// `name_only_deck_lists_serialize_without_a_printings_key`: the `printings` key IS present
+/// when the sidecar is not empty.
 #[test]
 fn sidecar_round_trips_and_an_unknown_section_stays_unknown() {
     let wire = DeckData {
