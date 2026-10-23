@@ -13,6 +13,7 @@ pub mod counter;
 pub mod custom_format;
 pub mod definitions;
 pub(crate) mod deterministic_serde;
+pub mod display_only;
 pub mod events;
 pub mod format;
 pub mod game_state;
