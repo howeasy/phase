@@ -22,15 +22,16 @@ use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
     ChangeZoneMemberEntry, CostResume, DrainStatus, DrawSequenceStack, GameState, GameStateDecode,
-    GameStateDecodeMode, PayCostKind, PendingBatchDeliveries, PendingChangeZoneIteration,
-    PendingChooseOneOf, PendingConniveReentry, PendingContinuation, PendingCopyTokenResolution,
-    PendingCounterAdditionQueue, PendingCounterMoveQueue, PendingCounterRemoval,
-    PendingCounterRemovalInFlight, PendingCounterRemovalQueue, PendingDebugCardEntries,
-    PendingEachPlayerCopyChosen, PendingLifeTotalAssignment, PendingMultiDraw,
-    PendingPerCategoryZoneChoice, PendingPerPlayerZoneChoice, PendingRepeatIteration,
-    PendingRepeatUntil, PendingSpellResolution, PendingVoteBallotIteration, PostReplacementDrain,
-    PostReplacementDrainDispatch, PostReplacementDrainStack, PostReplacementFrameId,
-    RepeatIterationChoice, ResidentDrainPolicy, ResolvingTriggerContext, WaitingFor,
+    GameStateDecodeMode, ParentTargetOccurrences, PayCostKind, PendingBatchDeliveries,
+    PendingChangeZoneIteration, PendingChooseOneOf, PendingConniveReentry, PendingContinuation,
+    PendingCopyTokenResolution, PendingCounterAdditionQueue, PendingCounterMoveQueue,
+    PendingCounterRemoval, PendingCounterRemovalInFlight, PendingCounterRemovalQueue,
+    PendingDebugCardEntries, PendingEachPlayerCopyChosen, PendingLifeTotalAssignment,
+    PendingMultiDraw, PendingPerCategoryZoneChoice, PendingPerPlayerZoneChoice,
+    PendingRepeatIteration, PendingRepeatUntil, PendingSpellResolution, PendingVoteBallotIteration,
+    PostReplacementDrain, PostReplacementDrainDispatch, PostReplacementDrainStack,
+    PostReplacementFrameId, RepeatIterationChoice, ResidentDrainPolicy, ResolvingTriggerContext,
+    WaitingFor,
 };
 use crate::types::identifiers::{DiscardFrameId, ObjectId};
 use crate::types::player::PlayerId;
@@ -123,36 +124,53 @@ pub enum PendingCoinFlipKind {
     UntilLoss { wins_so_far: u32 },
 }
 
-/// CR 608.2c: What a coin-flip branch inherits from the resolution that
-/// flipped: the players chosen earlier in it, and a completed-but-empty
-/// forwarded result (CR 609.3) so a branch naming that absent object does
-/// nothing.
-///
-/// `forwarded_result_context` is set ONLY when the flipping node's result is
-/// completed-but-empty (`Some([])`); a non-empty result already rides the
-/// branch's `targets`. It reuses the existing [`ForwardedResultContext`]
-/// vocabulary rather than a new marker type, so "named nothing" has exactly one
-/// representation.
+/// CR 608.2c: Lexical inputs to the selected coin branch, separate from its
+/// independently announced targets. Forwarded results preserve the distinction
+/// between no producer, a completed empty producer, and a populated result.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FlipBranchContext {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub chosen_players: Vec<PlayerId>,
+    #[serde(default)]
+    pub parent_occurrences: ParentTargetOccurrences,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub forwarded_result_context: Option<Box<ForwardedResultContext>>,
 }
 
 impl FlipBranchContext {
-    /// Capture what the flipping `ability` hands to its branches. A non-empty
-    /// forwarded result is deliberately not captured: it already reaches the
-    /// branch through its `targets`.
-    pub fn from_ability(ability: &ResolvedAbility) -> Self {
+    /// Capture incoming occurrences, preferring their existing identity authority.
+    /// Resolution-time choices without an earlier pin are captured at this live
+    /// handoff, never during restore.
+    pub fn from_ability(ability: &ResolvedAbility, state: &GameState) -> Self {
         Self {
             chosen_players: ability.chosen_players.clone(),
+            parent_occurrences: {
+                let mut occurrences = ParentTargetOccurrences::of(ability);
+                if occurrences.pins.is_empty() {
+                    let pins = ability
+                        .context
+                        .forwarded_result_context
+                        .as_deref()
+                        .map_or(ability.target_incarnations.as_slice(), |context| {
+                            context.object_incarnations.as_slice()
+                        });
+                    occurrences.pins = occurrences
+                        .targets
+                        .iter()
+                        .map(|target| match target {
+                            TargetRef::Object(id) => pins.iter()
+                                .find(|pin| pin.object_id == *id).copied()
+                                .or_else(|| state.objects.get(id).map(crate::types::identifiers::ObjectIncarnationRef::from_object)),
+                            TargetRef::Player(_) => None,
+                        })
+                        .collect();
+                }
+                occurrences
+            },
             forwarded_result_context: ability
                 .context
                 .forwarded_result_context
                 .as_deref()
-                .filter(|context| context.targets.is_empty())
                 .cloned()
                 .map(Box::new),
         }
@@ -160,7 +178,9 @@ impl FlipBranchContext {
 
     /// `true` when the branch inherits nothing (the serialized default).
     pub fn is_empty(&self) -> bool {
-        self.chosen_players.is_empty() && self.forwarded_result_context.is_none()
+        self.chosen_players.is_empty()
+            && self.parent_occurrences.targets.is_empty()
+            && self.forwarded_result_context.is_none()
     }
 }
 
@@ -210,7 +230,6 @@ pub struct PendingCoinFlip {
     /// CR 705.2: The player who flips (and therefore wins or loses) the coin.
     /// Current frames preserve this independently of the controller.
     pub flipper: PlayerId,
-    pub targets: Vec<TargetRef>,
     /// Pristine announced branches, including their local target occurrences
     /// and legality verdicts. Each execution works from an independent copy.
     pub win_effect: Option<Box<ResolvedAbility>>,
@@ -242,7 +261,6 @@ impl Serialize for PendingCoinFlip {
             source_id: ObjectId,
             controller: PlayerId,
             flipper: PlayerId,
-            targets: &'a [TargetRef],
             bound_branches: Branches<'a>,
             kind: &'a PendingCoinFlipKind,
             chain_root_targets: &'a [TargetRef],
@@ -253,7 +271,6 @@ impl Serialize for PendingCoinFlip {
             source_id: self.source_id,
             controller: self.controller,
             flipper: self.flipper,
-            targets: &self.targets,
             bound_branches: Branches {
                 won: self.win_effect.as_deref(),
                 lost: self.lose_effect.as_deref(),
@@ -274,7 +291,6 @@ impl<'de> Deserialize<'de> for PendingCoinFlip {
             controller: PlayerId,
             #[serde(default)]
             flipper: PlayerId,
-            targets: Vec<TargetRef>,
             #[serde(default)]
             bound_branches: Option<crate::types::ability::ResolvedCoinBranches>,
             kind: PendingCoinFlipKind,
@@ -289,11 +305,40 @@ impl<'de> Deserialize<'de> for PendingCoinFlip {
                 "INVALID_COIN_BRANCH_BINDINGS: parked coin flip is missing bound_branches",
             )
         })?;
+        // CR 400.7: current parked references must retain their captured pins;
+        // restoring never invents an incarnation from the current board.
+        let incoming = &wire.branch_context.parent_occurrences;
+        crate::game::target_occurrences::pins_align_with(&incoming.targets, &incoming.pins)
+            .map_err(serde::de::Error::custom)?;
+        if incoming.targets.iter().enumerate().any(|(index, target)| {
+            matches!(target, TargetRef::Object(_))
+                && incoming.pins.get(index).is_none_or(Option::is_none)
+        }) {
+            return Err(serde::de::Error::custom(
+                "INVALID_COIN_BRANCH_BINDINGS: incoming object reference is missing its pin",
+            ));
+        }
+        if let Some(context) = wire.branch_context.forwarded_result_context.as_deref() {
+            let mut pins = context.object_incarnations.iter();
+            for target in &context.targets {
+                if let TargetRef::Object(id) = target {
+                    if pins.next().is_none_or(|pin| pin.object_id != *id) {
+                        return Err(serde::de::Error::custom(
+                            "INVALID_COIN_BRANCH_BINDINGS: forwarded object pins do not match references",
+                        ));
+                    }
+                }
+            }
+            if pins.next().is_some() {
+                return Err(serde::de::Error::custom(
+                    "INVALID_COIN_BRANCH_BINDINGS: forwarded object pins exceed references",
+                ));
+            }
+        }
         Ok(Self {
             source_id: wire.source_id,
             controller: wire.controller,
             flipper: wire.flipper,
-            targets: wire.targets,
             win_effect: branches.won.map(Box::new),
             lose_effect: branches.lost.map(Box::new),
             kind: wire.kind,
@@ -7104,7 +7149,6 @@ mod tests {
             source_id: ObjectId(5),
             controller: PlayerId(0),
             flipper: PlayerId(0),
-            targets: Vec::new(),
             win_effect: None,
             lose_effect: None,
             kind: PendingCoinFlipKind::Exactly { remaining: 0 },
@@ -7169,7 +7213,6 @@ mod tests {
             source_id: ObjectId(6),
             controller: PlayerId(0),
             flipper: PlayerId(0),
-            targets: Vec::new(),
             win_effect: None,
             lose_effect: None,
             kind: PendingCoinFlipKind::Exactly { remaining: 0 },
@@ -7484,7 +7527,6 @@ mod tests {
             source_id: ObjectId(5),
             controller: PlayerId(0),
             flipper: PlayerId(0),
-            targets: Vec::new(),
             win_effect: None,
             lose_effect: None,
             kind: PendingCoinFlipKind::Exactly { remaining: 0 },
@@ -7576,7 +7618,6 @@ mod tests {
             source_id: ObjectId(5),
             controller: PlayerId(0),
             flipper: PlayerId(0),
-            targets: Vec::new(),
             win_effect: None,
             lose_effect: None,
             kind: PendingCoinFlipKind::Exactly { remaining: 0 },
@@ -7975,7 +8016,6 @@ mod tests {
                 source_id: ObjectId(103),
                 controller: PlayerId(0),
                 flipper: PlayerId(0),
-                targets: Vec::new(),
                 win_effect: None,
                 lose_effect: None,
                 kind: PendingCoinFlipKind::Exactly { remaining: 0 },
@@ -9331,7 +9371,6 @@ mod tests {
             source_id: ObjectId(151),
             controller: PlayerId(0),
             flipper: PlayerId(0),
-            targets: Vec::new(),
             win_effect: None,
             lose_effect: None,
             kind: PendingCoinFlipKind::Exactly { remaining: 0 },
@@ -9508,7 +9547,6 @@ mod tests {
             source_id: ObjectId(155),
             controller: PlayerId(0),
             flipper: PlayerId(0),
-            targets: Vec::new(),
             win_effect: None,
             lose_effect: None,
             kind: PendingCoinFlipKind::Exactly { remaining: 0 },
@@ -9652,7 +9690,6 @@ mod tests {
             source_id: ObjectId(7),
             controller: PlayerId(0),
             flipper: PlayerId(0),
-            targets: Vec::new(),
             win_effect: None,
             lose_effect: None,
             kind: PendingCoinFlipKind::Exactly { remaining: 0 },
@@ -9674,6 +9711,7 @@ mod tests {
     fn non_empty_branch_context(state: &GameState) -> FlipBranchContext {
         FlipBranchContext {
             chosen_players: vec![PlayerId(1)],
+            parent_occurrences: ParentTargetOccurrences::default(),
             forwarded_result_context: Some(Box::new(ForwardedResultContext::from_object_ids(
                 state,
                 &[],
@@ -9764,43 +9802,6 @@ mod tests {
         assert!(
             error.contains(LEGACY_COIN_BRANCH_BINDINGS_RESTORE_ERROR),
             "{error}"
-        );
-    }
-
-    /// `FlipBranchContext::from_ability` keeps a completed-but-empty forwarded
-    /// result and drops a non-empty one (which already rides the branch's
-    /// `targets`).
-    #[test]
-    fn flip_branch_context_captures_only_the_empty_forwarded_result() {
-        use crate::types::ability::{Effect, QuantityExpr, TargetFilter};
-        let state = GameState::new_two_player(42);
-        let mut ability = ResolvedAbility::new(
-            Effect::Draw {
-                count: QuantityExpr::Fixed { value: 1 },
-                target: TargetFilter::Controller,
-            },
-            Vec::new(),
-            ObjectId(1),
-            PlayerId(0),
-        );
-        assert!(FlipBranchContext::from_ability(&ability).is_empty());
-
-        ability.chosen_players = vec![PlayerId(1)];
-        ability.context.forwarded_result_context = Some(Box::new(
-            ForwardedResultContext::from_object_ids(&state, &[]),
-        ));
-        let captured = FlipBranchContext::from_ability(&ability);
-        assert_eq!(captured.chosen_players, vec![PlayerId(1)]);
-        assert!(captured.forwarded_result_context.is_some());
-
-        ability.context.forwarded_result_context = Some(Box::new(
-            ForwardedResultContext::from_object_ids(&state, &[ObjectId(3)]),
-        ));
-        assert!(
-            FlipBranchContext::from_ability(&ability)
-                .forwarded_result_context
-                .is_none(),
-            "a non-empty result is not captured"
         );
     }
 

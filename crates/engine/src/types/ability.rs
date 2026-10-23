@@ -38504,11 +38504,13 @@ impl ResolvedAbility {
         }
     }
 
-    /// CR 400.7 + CR 603.7c: Pin this ability's object referents — and every
-    /// continuation branch's — to the incarnations observed at delayed-trigger
-    /// creation. Recursive because chain propagation copies `targets` into
-    /// sub-abilities at fire time, so each link must carry the same pins.
+    /// CR 400.7 + CR 603.7c: Pin inherited delayed-trigger referents to their
+    /// creation-time incarnations. An independent declaration starts a new
+    /// occurrence scope; neither it nor its descendants inherit these pins.
     pub fn set_target_incarnations_recursive(&mut self, pins: Vec<ObjectIncarnationRef>) {
+        if crate::game::ability_utils::node_has_stack_target_declaration(self) {
+            return;
+        }
         self.target_incarnations = pins.clone();
         for (_, child) in self.child_links_mut() {
             child.set_target_incarnations_recursive(pins.clone());
@@ -38531,23 +38533,35 @@ impl ResolvedAbility {
     /// CR 400.7 + CR 603.7c: True when `id` may still be affected by this
     /// ability.
     ///
-    /// KEYED, not positional: the same predicate applies to an id drawn from
-    /// `self.targets` or from any handler's local projection — which is why the
-    /// handler-direct reads share one authority. It also means a wholesale
-    /// `targets` overwrite (`triggers.rs`, the Stationed/VehicleCrewed/Saddled
-    /// reseed) degrades safely: the new id has no pin and passes through.
-    ///
-    /// FAIL-OPEN AT THE LOOKUP, NEVER AT THE PIN: `is_none_or` here means "no
-    /// pin was ever recorded for this id, so this is not a pinned
-    /// delayed-trigger referent and it passes through unchanged". Once a pin
-    /// exists it is compared by strict equality with no escape hatch. Do not
-    /// convert this to an `Option` on the element — that reintroduces the
-    /// `source_is_current` anti-pattern.
+    /// An ID projection, not a positional lookup. If this node carries
+    /// positional pins for `id`, at least one such occurrence must still be
+    /// current. Position-sensitive consumers use `target_pin_at` instead.
+    /// Independently declared targets never inherit a delayed reference's
+    /// keyed pin; undeclaring referents fall back to that creation-time pin.
+    /// An ID for which neither authority recorded a pin remains unpinned.
     pub fn target_pin_is_current(
         &self,
         id: ObjectId,
         state: &crate::types::game_state::GameState,
     ) -> bool {
+        // CR 400.7 + CR 601.2c: an occurrence's positional authority takes
+        // precedence over a delayed reference that reused the same storage id.
+        let mut positional = self
+            .targets
+            .iter()
+            .enumerate()
+            .filter_map(|(index, target)| {
+                (*target == TargetRef::Object(id))
+                    .then(|| self.target_pin_at(index))
+                    .flatten()
+            })
+            .peekable();
+        if positional.peek().is_some() {
+            return positional.any(|pin| pin.is_current(state));
+        }
+        if crate::game::ability_utils::node_has_stack_target_declaration(self) {
+            return true;
+        }
         self.target_incarnations
             .iter()
             .find(|pin| pin.object_id == id)
@@ -38582,12 +38596,17 @@ impl ResolvedAbility {
         self.targets
             .iter()
             .enumerate()
-            .filter(|(index, _)| Some(*index) != excluded)
-            .map(|(_, target)| target)
-            .filter(|target| match target {
-                TargetRef::Object(id) => self.target_pin_is_current(*id, state),
-                TargetRef::Player(_) => true,
+            .filter(|(index, target)| {
+                Some(*index) != excluded
+                    && match target {
+                        TargetRef::Object(id) => self.target_pin_at(*index).map_or_else(
+                            || self.target_pin_is_current(*id, state),
+                            |pin| pin.is_current(state),
+                        ),
+                        TargetRef::Player(_) => true,
+                    }
             })
+            .map(|(_, target)| target)
             .cloned()
             .collect()
     }
@@ -38600,14 +38619,12 @@ impl ResolvedAbility {
         &self,
         state: &crate::types::game_state::GameState,
     ) -> bool {
-        !self.target_incarnations.is_empty()
-            && self
-                .targets
-                .iter()
-                .any(|t| matches!(t, TargetRef::Object(_)))
-            && !self.targets.iter().any(
-                |t| matches!(t, TargetRef::Object(id) if self.target_pin_is_current(*id, state)),
-            )
+        (!self.target_incarnations.is_empty() || self.target_pins.iter().any(Option::is_some))
+            && self.targets.iter().any(|target| matches!(target, TargetRef::Object(_)))
+            && !self.targets.iter().enumerate().any(|(index, target)| {
+                matches!(target, TargetRef::Object(id) if self.target_pin_at(index)
+                    .map_or_else(|| self.target_pin_is_current(*id, state), |pin| pin.is_current(state)))
+            })
     }
 
     /// Test-only fixture helper for a triggered ability whose source has

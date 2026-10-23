@@ -123,7 +123,6 @@ fn flip_through_replacement(
 fn run_flip_branch(
     state: &mut GameState,
     branch: Option<&ResolvedAbility>,
-    targets: &[TargetRef],
     chain_root_targets: &[TargetRef],
     branch_context: &FlipBranchContext,
     events: &mut Vec<GameEvent>,
@@ -133,14 +132,18 @@ fn run_flip_branch(
         // binding, so one execution's mutations cannot alter later rewards.
         let mut sub = bound.clone();
         sub.set_chain_root_targets_recursive(chain_root_targets.to_vec());
+        sub.context.forwarded_result_context = branch_context.forwarded_result_context.clone();
+        super::bind_forwarded_result_targets_for_legacy_effect(&mut sub);
         // CR 601.2c + CR 608.2d: declarations belong to this branch, not the
         // parent's incoming referent. Resolution-time choosers make their own
         // choice; context-reference instructions can retain the earlier object.
         if !crate::game::ability_utils::node_has_stack_target_declaration(&sub)
             && super::can_inherit_parent_targets(&sub)
             && !super::awaits_resolution_object_choice(&sub)
+            && (super::effect_refs_parent_target(&sub.effect)
+                || matches!(sub.effect, Effect::FlipCoins { .. }))
         {
-            sub.targets = targets.to_vec();
+            sub.replace_target_occurrences(branch_context.parent_occurrences.occurrences());
         }
         // CR 608.2c: "that opponent" in the branch names the player chosen
         // earlier in this resolution.
@@ -152,11 +155,10 @@ fn run_flip_branch(
         // still happens. The shared missing-forward-result authority drops
         // exactly the dependent nodes; if the whole branch depended on the
         // absent object, there is nothing left to run.
-        let named_nothing = targets.is_empty()
-            && branch_context
-                .forwarded_result_context
-                .as_deref()
-                .is_some_and(|context| context.targets.is_empty());
+        let named_nothing = branch_context
+            .forwarded_result_context
+            .as_deref()
+            .is_some_and(|context| context.targets.is_empty());
         if named_nothing {
             let Some(pruned) = super::without_missing_forward_result_dependencies(&sub) else {
                 return Ok(());
@@ -190,12 +192,11 @@ struct FlipRun<'a> {
     source_id: ObjectId,
     controller: PlayerId,
     flipper: PlayerId,
-    targets: &'a [TargetRef],
     chain_root_targets: &'a [TargetRef],
     win_effect: Option<&'a ResolvedAbility>,
     lose_effect: Option<&'a ResolvedAbility>,
-    /// CR 608.2c: what the branches inherit from the flipping resolution (chosen players,
-    /// completed-empty result), carried across a Krark's Thumb suspension.
+    /// CR 608.2c: incoming pinned references and chosen players, retained
+    /// across a Krark's Thumb suspension.
     branch_context: &'a FlipBranchContext,
 }
 
@@ -208,7 +209,6 @@ impl FlipRun<'_> {
             source_id: self.source_id,
             controller: self.controller,
             flipper: self.flipper,
-            targets: self.targets.to_vec(),
             win_effect: self.win_effect.map(|d| Box::new(d.clone())),
             lose_effect: self.lose_effect.map(|d| Box::new(d.clone())),
             kind,
@@ -233,7 +233,6 @@ impl FlipRun<'_> {
         run_flip_branch(
             state,
             branch,
-            self.targets,
             self.chain_root_targets,
             self.branch_context,
             events,
@@ -460,6 +459,7 @@ pub fn resolve(
     let branches = ability.coin_branches.as_deref();
     if win_effect.is_some() != branches.is_some_and(|branches| branches.won.is_some())
         || lose_effect.is_some() != branches.is_some_and(|branches| branches.lost.is_some())
+        || (win_effect.is_none() && lose_effect.is_none() && branches.is_some())
     {
         return Err(EffectError::MissingParam(
             "resolved coin branches".to_string(),
@@ -502,13 +502,12 @@ pub fn resolve(
 
     // CR 608.2c: every flip's branch inherits this resolution's chosen players and
     // completed-empty result, inline or across a Krark's Thumb suspension.
-    let branch_context = FlipBranchContext::from_ability(ability);
+    let branch_context = FlipBranchContext::from_ability(ability, state);
 
     let run = FlipRun {
         source_id: ability.source_id,
         controller: ability.controller,
         flipper,
-        targets: &ability.targets,
         chain_root_targets: &ability.context.chain_root_targets,
         win_effect: branches.and_then(|branches| branches.won.as_ref()),
         lose_effect: branches.and_then(|branches| branches.lost.as_ref()),
@@ -544,7 +543,6 @@ pub fn resume_after_keep(
         source_id,
         controller,
         flipper,
-        targets,
         win_effect,
         lose_effect,
         kind,
@@ -574,7 +572,6 @@ pub fn resume_after_keep(
         source_id,
         controller,
         flipper,
-        targets: &targets,
         chain_root_targets: &chain_root_targets,
         win_effect: win_effect.as_deref(),
         lose_effect: lose_effect.as_deref(),
@@ -2267,7 +2264,6 @@ mod tests {
             source_id: ObjectId(1),
             controller: PlayerId(0),
             flipper: PlayerId(0),
-            targets: vec![],
             win_effect: Some(Box::new(
                 crate::game::ability_utils::build_resolved_from_def(
                     &gain_life_definition(1),
@@ -2517,7 +2513,7 @@ mod branch_context_tests {
 
     /// The Krark's-Thumb-parked image of `ability`'s flip, as `resolve` would
     /// push it.
-    fn parked(ability: &ResolvedAbility) -> PendingCoinFlip {
+    fn parked(ability: &ResolvedAbility, state: &GameState) -> PendingCoinFlip {
         let branches = ability
             .coin_branches
             .as_deref()
@@ -2526,12 +2522,11 @@ mod branch_context_tests {
             source_id: ability.source_id,
             controller: ability.controller,
             flipper: ability.controller,
-            targets: ability.targets.clone(),
             win_effect: None,
             lose_effect: branches.lost.clone().map(Box::new),
             kind: PendingCoinFlipKind::Exactly { remaining: 0 },
             chain_root_targets: ability.context.chain_root_targets.clone(),
-            branch_context: FlipBranchContext::from_ability(ability),
+            branch_context: FlipBranchContext::from_ability(ability, state),
         }
     }
 
@@ -2568,7 +2563,8 @@ mod branch_context_tests {
 
             let mut events = Vec::new();
             if resumed {
-                resume_after_keep(&mut state, parked(&ability), vec![false], &mut events).unwrap();
+                let pending = parked(&ability, &state);
+                resume_after_keep(&mut state, pending, vec![false], &mut events).unwrap();
             } else {
                 resolve(&mut state, &ability, &mut events).unwrap();
             }
@@ -2599,7 +2595,8 @@ mod branch_context_tests {
 
             let mut events = Vec::new();
             if resumed {
-                resume_after_keep(&mut state, parked(&ability), vec![false], &mut events).unwrap();
+                let pending = parked(&ability, &state);
+                resume_after_keep(&mut state, pending, vec![false], &mut events).unwrap();
             } else {
                 resolve(&mut state, &ability, &mut events).unwrap();
             }
@@ -2750,24 +2747,14 @@ mod branch_context_tests {
             }
             Path::Resumed => {
                 runner.state_mut().rng = GameRng::seed_from_u64(seed_for(&[nested_won]));
-                resume_after_keep(
-                    runner.state_mut(),
-                    parked(&ability),
-                    vec![false],
-                    &mut events,
-                )
-                .unwrap();
+                let pending = parked(&ability, runner.state());
+                resume_after_keep(runner.state_mut(), pending, vec![false], &mut events).unwrap();
             }
             Path::NestedKrark => {
                 runner.state_mut().rng =
                     GameRng::seed_from_u64(seed_for(&[nested_won, !nested_won]));
-                resume_after_keep(
-                    runner.state_mut(),
-                    parked(&ability),
-                    vec![false],
-                    &mut events,
-                )
-                .unwrap();
+                let pending = parked(&ability, runner.state());
+                resume_after_keep(runner.state_mut(), pending, vec![false], &mut events).unwrap();
                 let WaitingFor::CoinFlipKeepChoice { results, .. } =
                     runner.state().waiting_for.clone()
                 else {

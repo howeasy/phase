@@ -25665,7 +25665,6 @@ mod tests {
             source_id: spell,
             controller: root.controller,
             flipper: root.controller,
-            targets: Vec::new(),
             win_effect: Some(Box::new(
                 crate::game::ability_utils::build_resolved_from_def(
                     &win_effect,

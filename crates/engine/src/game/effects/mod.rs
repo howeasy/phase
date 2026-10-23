@@ -4356,6 +4356,8 @@ fn bind_forwarded_result_targets_for_legacy_effect(child: &mut ResolvedAbility) 
     if !matches!(&child.effect, Effect::GenericEffect { .. })
         && child.targets.is_empty()
         && effect_refs_parent_target(&child.effect)
+        && !crate::game::ability_utils::node_has_stack_target_declaration(child)
+        && !awaits_resolution_object_choice(child)
     {
         if let Some(context) = &child.context.forwarded_result_context {
             let targets = context.targets.clone();

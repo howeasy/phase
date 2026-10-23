@@ -1036,3 +1036,615 @@ fn delayed_parent_referent_never_reads_an_unselected_coin_siblings_declaration()
         assert_finished(&runner);
     }
 }
+
+fn pass_to_coin_keep(runner: &mut GameRunner, events: &mut Vec<GameEvent>) {
+    for _ in 0..20 {
+        if !matches!(runner.state().waiting_for, WaitingFor::Priority { .. }) {
+            break;
+        }
+        assert!(
+            !runner.state().stack.is_empty(),
+            "coin reaches its keep prompt"
+        );
+        events.extend(runner.act(GameAction::PassPriority).unwrap().events);
+    }
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::CoinFlipKeepChoice { player: P0, .. }
+        ),
+        "required keep prompt, got {:?}",
+        runner.state().waiting_for
+    );
+}
+
+#[test]
+fn thumb_restore_keeps_each_declared_branch_occurrence_and_refuses_pin_drift() {
+    use engine::types::ability::{AbilityDefinition, AbilityKind};
+    use engine::types::identifiers::ObjectIncarnationRef;
+    use engine::types::resolution::ResolutionStateWire;
+
+    for won in [false, true] {
+        for stale in [false, true] {
+            let mut scenario = GameScenario::new();
+            scenario.at_phase(Phase::PreCombatMain);
+            scenario.add_artifact_from_oracle(
+                P0,
+                "Krark's Thumb",
+                "If you would flip a coin, instead flip two coins and ignore one.",
+            );
+            let own = scenario
+                .add_creature(P0, "Own announced creature", 2, 2)
+                .id();
+            let opposing = scenario
+                .add_creature(P1, "Opponent announced creature", 3, 3)
+                .id();
+            let distractor = scenario.add_creature(P1, "Never announced", 4, 4).id();
+            let parsed = parse_oracle_text(
+                TWO_BRANCHES,
+                "Synthetic Scales",
+                &[],
+                &["Artifact".into()],
+                &[],
+            );
+            let definition: AbilityDefinition = parsed.abilities[0].clone();
+            assert_eq!(definition.kind, AbilityKind::Activated);
+            let source = scenario
+                .add_artifact_from_oracle(P0, "Synthetic Scales", TWO_BRANCHES)
+                .id();
+            mana(&mut scenario, 4);
+            let mut runner = scenario.build();
+            pin_outcomes(&mut runner, &[true, false]);
+            let mut events = runner
+                .act(GameAction::ActivateAbility {
+                    source_id: source,
+                    ability_index: 0,
+                    payment_mode: CastPaymentMode::Auto,
+                })
+                .unwrap()
+                .events;
+            assert!(matches!(
+                runner.state().waiting_for,
+                WaitingFor::TargetSelection { .. }
+            ));
+            for target in [opposing, own] {
+                events.extend(
+                    runner
+                        .act(GameAction::ChooseTarget {
+                            target: Some(TargetRef::Object(target)),
+                        })
+                        .unwrap()
+                        .events,
+                );
+            }
+            if matches!(runner.state().waiting_for, WaitingFor::ManaPayment { .. }) {
+                events.extend(runner.act(GameAction::PassPriority).unwrap().events);
+            }
+            pass_to_coin_keep(&mut runner, &mut events);
+            assert!(flips(&events).is_empty(), "ignored flips have not happened");
+            assert!(matches!(
+                runner.state().waiting_for,
+                WaitingFor::CoinFlipKeepChoice { player: P0, .. }
+            ));
+            let pending = runner.state().active_coin_flip_frame().unwrap();
+            for (branch, target) in [
+                (pending.win_effect.as_deref().unwrap(), opposing),
+                (pending.lose_effect.as_deref().unwrap(), own),
+            ] {
+                assert_eq!(branch.controller, P0);
+                assert_eq!(branch.targets, vec![TargetRef::Object(target)]);
+                assert_eq!(
+                    branch.target_pin_at(0),
+                    Some(ObjectIncarnationRef::from_object(
+                        &runner.state().objects[&target]
+                    ))
+                );
+            }
+            runner.state_mut().capture_rng_word_pos();
+            let wire =
+                serde_json::to_value(ResolutionStateWire::from_game_state(runner.state().clone()))
+                    .unwrap();
+            let mut malformed = wire.clone();
+            let frame = malformed["resolution_frames"]["frames"]
+                .as_array_mut()
+                .unwrap()
+                .iter_mut()
+                .find(|frame| frame["type"] == "CoinFlip")
+                .unwrap();
+            let branch = &mut frame["data"]["bound_branches"]["won"];
+            branch["target_pins"][0]["object_id"] = serde_json::to_value(distractor).unwrap();
+            let error = serde_json::from_value::<ResolutionStateWire>(malformed)
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains("target pin"), "{error}");
+            *runner.state_mut() = serde_json::from_value::<ResolutionStateWire>(wire)
+                .unwrap()
+                .into_game_state();
+            let selected = if won { opposing } else { own };
+            if stale {
+                // Saved-board hostile fixture: same storage id, different object identity.
+                runner
+                    .state_mut()
+                    .objects
+                    .get_mut(&selected)
+                    .unwrap()
+                    .incarnation += 1;
+            }
+            events.extend(
+                runner
+                    .act(GameAction::SelectCoinFlips {
+                        keep_indices: vec![usize::from(!won)],
+                    })
+                    .unwrap()
+                    .events,
+            );
+            finish(&mut runner, &mut events);
+            assert_eq!(flips(&events), vec![won]);
+            assert_eq!(
+                runner.state().objects[&selected].zone,
+                if stale {
+                    Zone::Battlefield
+                } else {
+                    Zone::Graveyard
+                }
+            );
+            assert_eq!(
+                runner.state().objects[&if won { own } else { opposing }].zone,
+                Zone::Battlefield
+            );
+            assert_eq!(runner.state().objects[&distractor].zone, Zone::Battlefield);
+            assert_finished(&runner);
+        }
+    }
+}
+
+#[test]
+fn malformed_coin_carrier_refuses_before_rng_or_mutation_and_canonical_executes() {
+    use engine::game::ability_utils::build_resolved_from_def;
+    use engine::game::effects::flip_coin;
+    use engine::types::ability::{
+        AbilityDefinition, AbilityKind, EffectError, QuantityExpr, ResolvedAbility,
+    };
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let source = scenario.add_creature(P0, "Synthetic source", 2, 2).id();
+    let mut runner = scenario.build();
+    pin_outcomes(&mut runner, &[true, false, true]);
+    let definition = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::FlipCoins {
+            flips: CoinFlipRun::single(),
+            win_effect: Some(Box::new(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::GainLife {
+                    amount: QuantityExpr::Fixed { value: 3 },
+                    player: TargetFilter::Controller,
+                },
+            ))),
+            lose_effect: None,
+            flipper: TargetFilter::Controller,
+        },
+    );
+    let malformed = ResolvedAbility::new((*definition.effect).clone(), vec![], source, P0);
+    let before = serde_json::to_value(runner.state()).unwrap();
+    let mut expected_rng = runner.state().rng.clone();
+    let mut events = Vec::new();
+    assert_eq!(
+        flip_coin::resolve(runner.state_mut(), &malformed, &mut events),
+        Err(EffectError::MissingParam("resolved coin branches".into()))
+    );
+    assert!(events.is_empty());
+    assert_eq!(serde_json::to_value(runner.state()).unwrap(), before);
+    let mut actual_rng = runner.state().rng.clone();
+    let expected: Vec<bool> = (0..3)
+        .map(|_| expected_rng.draw(RandomDraw::Outcome).random_bool(0.5))
+        .collect();
+    let actual: Vec<bool> = (0..3)
+        .map(|_| actual_rng.draw(RandomDraw::Outcome).random_bool(0.5))
+        .collect();
+    assert_eq!(actual, expected, "rejection consumes no outcome draw");
+    let canonical = build_resolved_from_def(&definition, source, P0);
+    flip_coin::resolve(runner.state_mut(), &canonical, &mut events).unwrap();
+    assert_eq!(flips(&events), vec![true]);
+    assert_eq!(runner.life(P0), 23);
+    assert_finished(&runner);
+}
+
+#[test]
+fn bangchuckers_shaped_loss_never_borrows_the_win_only_target() {
+    use engine::types::ability::{
+        AbilityDefinition, AbilityKind, DamageSource, QuantityExpr, TypedFilter,
+    };
+    for (won, self_damage) in [(true, false), (false, false), (false, true)] {
+        let damage = |target, damage_source| Effect::DealDamage {
+            amount: QuantityExpr::Fixed { value: 2 },
+            target,
+            damage_source,
+            excess: None,
+        };
+        let coin = Effect::FlipCoins {
+            flips: CoinFlipRun::single(),
+            win_effect: Some(Box::new(AbilityDefinition::new(
+                AbilityKind::Activated,
+                damage(TargetFilter::Typed(TypedFilter::creature()), None),
+            ))),
+            lose_effect: Some(Box::new(AbilityDefinition::new(
+                AbilityKind::Activated,
+                damage(
+                    if self_damage {
+                        TargetFilter::SelfRef
+                    } else {
+                        TargetFilter::ParentTarget
+                    },
+                    if self_damage {
+                        None
+                    } else {
+                        Some(DamageSource::Target)
+                    },
+                ),
+            ))),
+            flipper: TargetFilter::Controller,
+        };
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let source = scenario
+            .add_creature(P0, "Synthetic Bangchucker", 3, 5)
+            .with_ability_definition(AbilityDefinition::new(AbilityKind::Activated, coin))
+            .id();
+        let target = scenario.add_creature(P1, "Win-only target", 4, 5).id();
+        let distractor = scenario.add_creature(P1, "Distractor", 4, 5).id();
+        let mut runner = scenario.build();
+        pin_outcomes(&mut runner, &[won]);
+        let outcome = runner.activate(source, 0).target_object(target).resolve();
+        assert_eq!(flips(outcome.events()), vec![won]);
+        let dealt: Vec<_> = outcome
+            .events()
+            .iter()
+            .filter_map(|event| match event {
+                GameEvent::DamageDealt {
+                    source_id,
+                    target,
+                    amount,
+                    ..
+                } => Some((*source_id, target.clone(), *amount)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            dealt,
+            if won {
+                vec![(source, TargetRef::Object(target), 2)]
+            } else if self_damage {
+                vec![(source, TargetRef::Object(source), 2)]
+            } else {
+                vec![]
+            }
+        );
+        assert_eq!(runner.state().objects[&distractor].zone, Zone::Battlefield);
+        assert_finished(&runner);
+    }
+}
+
+#[test]
+fn repeated_bound_branch_recomputes_counter_quantity_from_a_pristine_template() {
+    use engine::types::ability::{
+        AbilityDefinition, AbilityKind, ObjectScope, QuantityExpr, QuantityRef, TypedFilter,
+    };
+    use engine::types::counter::CounterType;
+    for until_loss in [false, true] {
+        let coin = Effect::FlipCoins {
+            flips: if until_loss {
+                CoinFlipRun::UntilLoss
+            } else {
+                CoinFlipRun::Exactly {
+                    count: QuantityExpr::Fixed { value: 3 },
+                }
+            },
+            win_effect: Some(Box::new(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::PutCounter {
+                    counter_type: CounterType::Plus1Plus1,
+                    count: QuantityExpr::Ref {
+                        qty: QuantityRef::CountersOn {
+                            scope: ObjectScope::Target,
+                            counter_type: Some(CounterType::Plus1Plus1),
+                        },
+                    },
+                    target: TargetFilter::Typed(TypedFilter::creature()),
+                },
+            ))),
+            lose_effect: None,
+            flipper: TargetFilter::Controller,
+        };
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let target = scenario.add_creature(P0, "Repeated recipient", 2, 2).id();
+        scenario.with_counter(target, CounterType::Plus1Plus1, 2);
+        let distractor = scenario.add_creature(P1, "Unchanged recipient", 7, 7).id();
+        let spell = scenario
+            .add_spell_to_hand(P0, "Synthetic repeated growing reward", true)
+            .with_ability(coin)
+            .id();
+        let mut runner = scenario.build();
+        let expected_flips = if until_loss {
+            vec![true, true, true, false]
+        } else {
+            vec![true, true, true]
+        };
+        pin_outcomes(&mut runner, &expected_flips);
+        let outcome = runner.cast(spell).target_object(target).resolve();
+        assert_eq!(flips(outcome.events()), expected_flips);
+        let counters: Vec<_> = outcome
+            .events()
+            .iter()
+            .filter_map(|event| match event {
+                GameEvent::CounterAdded {
+                    object_id,
+                    counter_type: CounterType::Plus1Plus1,
+                    count,
+                    ..
+                } => {
+                    assert_eq!(*object_id, target);
+                    Some(*count)
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(counters, vec![2, 4, 8]);
+        #[derive(Debug, PartialEq, Eq)]
+        enum RunEvent {
+            Flip(bool),
+            Counter(u32),
+            Complete,
+        }
+        use RunEvent::{Complete, Counter, Flip};
+        let stream: Vec<_> = outcome
+            .events()
+            .iter()
+            .filter_map(|event| match event {
+                GameEvent::CoinFlipped { won, .. } => Some(Flip(*won)),
+                GameEvent::CounterAdded {
+                    object_id, count, ..
+                } if *object_id == target => Some(Counter(*count)),
+                GameEvent::EffectResolved {
+                    kind: EffectKind::FlipCoins,
+                    source_id,
+                    ..
+                } if *source_id == spell => Some(Complete),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            stream,
+            if until_loss {
+                vec![
+                    Flip(true),
+                    Flip(true),
+                    Flip(true),
+                    Flip(false),
+                    Counter(2),
+                    Counter(4),
+                    Counter(8),
+                    Complete,
+                ]
+            } else {
+                vec![
+                    Flip(true),
+                    Counter(2),
+                    Flip(true),
+                    Counter(4),
+                    Flip(true),
+                    Counter(8),
+                    Complete,
+                ]
+            }
+        );
+        assert_eq!(
+            runner.state().objects[&target].counters[&CounterType::Plus1Plus1],
+            16
+        );
+        assert_eq!(runner.state().objects[&distractor].power, Some(7));
+        assert_eq!(coin_terminals(outcome.events(), spell), 1);
+        assert_finished(&runner);
+    }
+}
+
+#[test]
+fn independent_coin_declaration_owns_its_pins_even_when_incoming_id_is_reused() {
+    use engine::types::ability::{AbilityDefinition, AbilityKind, QuantityExpr, TypedFilter};
+    use engine::types::counter::CounterType;
+    use engine::types::identifiers::ObjectIncarnationRef;
+    for legacy_keyed_child in [false, true] {
+        let coin = Effect::FlipCoins {
+            flips: CoinFlipRun::single(),
+            win_effect: Some(Box::new(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::PutCounter {
+                    counter_type: CounterType::Plus1Plus1,
+                    count: QuantityExpr::Fixed { value: 3 },
+                    target: TargetFilter::Typed(TypedFilter::creature()),
+                },
+            ))),
+            lose_effect: None,
+            flipper: TargetFilter::Controller,
+        };
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let target = scenario.add_creature(P0, "New incarnation", 2, 2).id();
+        let distractor = scenario.add_creature(P1, "Unchosen", 4, 4).id();
+        let spell = scenario
+            .add_spell_to_hand(P0, "Synthetic independently targeted coin", true)
+            .with_ability(coin)
+            .id();
+        let mut runner = scenario.build();
+        let old = ObjectIncarnationRef::from_object(&runner.state().objects[&target]);
+        runner
+            .state_mut()
+            .objects
+            .get_mut(&target)
+            .unwrap()
+            .incarnation += 1;
+        pin_outcomes(&mut runner, &[true]);
+        drop(runner.cast(spell).target_object(target).commit());
+        let current = ObjectIncarnationRef::from_object(&runner.state().objects[&target]);
+        let root = runner
+            .state_mut()
+            .stack
+            .back_mut()
+            .unwrap()
+            .ability_mut()
+            .unwrap();
+        root.set_target_incarnations_recursive(vec![old]);
+        let child = root.coin_branches.as_mut().unwrap().won.as_mut().unwrap();
+        assert!(
+            child.target_incarnations.is_empty(),
+            "incoming delayed-reference pins never stamp an independent declaration"
+        );
+        assert_eq!(child.target_pin_at(0), Some(current));
+        if legacy_keyed_child {
+            // A pre-existing keyed reference cannot veto a fresh positional occurrence.
+            child.target_incarnations = vec![old];
+        }
+        let mut events = Vec::new();
+        finish(&mut runner, &mut events);
+        assert_eq!(flips(&events), vec![true]);
+        assert_eq!(
+            runner.state().objects[&target].counters[&CounterType::Plus1Plus1],
+            3
+        );
+        assert!(!runner.state().objects[&distractor]
+            .counters
+            .contains_key(&CounterType::Plus1Plus1));
+        assert_finished(&runner);
+    }
+}
+
+#[test]
+fn thumb_completed_empty_choice_restores_and_runs_only_independent_instructions() {
+    use engine::types::ability::{
+        AbilityDefinition, AbilityKind, ControllerRef, QuantityExpr, SubAbilityLink,
+        TargetChoiceTiming, TypedFilter,
+    };
+    use engine::types::resolution::ResolutionStateWire;
+    for populated in [false, true] {
+        let mut life = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 5 },
+                player: TargetFilter::Controller,
+            },
+        );
+        life.sub_link = SubAbilityLink::SequentialSibling;
+        let loss = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::GiveControl {
+                target: TargetFilter::ParentTarget,
+                recipient: TargetFilter::SpecificPlayer { id: P1 },
+            },
+        )
+        .sub_ability(life);
+        let coin = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::FlipCoins {
+                flips: CoinFlipRun::single(),
+                win_effect: None,
+                lose_effect: Some(Box::new(loss)),
+                flipper: TargetFilter::Controller,
+            },
+        );
+        let mut choice = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::TargetOnly {
+                target: TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
+            },
+        )
+        .sub_ability(coin);
+        choice.target_choice_timing = TargetChoiceTiming::Resolution;
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        scenario.add_artifact_from_oracle(
+            P0,
+            "Krark's Thumb",
+            "If you would flip a coin, instead flip two coins and ignore one.",
+        );
+        let picked =
+            populated.then(|| scenario.add_creature(P0, "Only eligible choice", 2, 2).id());
+        let distractor = scenario.add_creature(P1, "Ineligible choice", 4, 4).id();
+        let spell = scenario
+            .add_spell_to_hand(P0, "Synthetic completed choice", true)
+            .with_ability_definition(choice)
+            .id();
+        let mut runner = scenario.build();
+        pin_outcomes(&mut runner, &[false, true]);
+        drop(runner.cast(spell).commit());
+        let mut events = Vec::new();
+        pass_to_coin_keep(&mut runner, &mut events);
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::CoinFlipKeepChoice { player: P0, .. }
+        ));
+        let context = runner
+            .state()
+            .active_coin_flip_frame()
+            .unwrap()
+            .branch_context
+            .clone();
+        if populated {
+            assert_eq!(
+                context.parent_occurrences.targets,
+                vec![TargetRef::Object(picked.unwrap())]
+            );
+            assert!(context.parent_occurrences.pins[0].is_some());
+            assert!(context.forwarded_result_context.is_none());
+        } else {
+            assert!(context.parent_occurrences.targets.is_empty());
+            assert!(context
+                .forwarded_result_context
+                .as_deref()
+                .unwrap()
+                .targets
+                .is_empty());
+        }
+        runner.state_mut().capture_rng_word_pos();
+        let wire =
+            serde_json::to_value(ResolutionStateWire::from_game_state(runner.state().clone()))
+                .unwrap();
+        *runner.state_mut() = serde_json::from_value::<ResolutionStateWire>(wire)
+            .unwrap()
+            .into_game_state();
+        assert_eq!(
+            runner
+                .state()
+                .active_coin_flip_frame()
+                .unwrap()
+                .branch_context,
+            context
+        );
+        events.extend(
+            runner
+                .act(GameAction::SelectCoinFlips {
+                    keep_indices: vec![0],
+                })
+                .unwrap()
+                .events,
+        );
+        finish(&mut runner, &mut events);
+        assert_eq!(flips(&events), vec![false]);
+        assert_eq!(
+            runner.life(P0),
+            25,
+            "independent instruction runs after the reference"
+        );
+        if let Some(picked) = picked {
+            assert_eq!(runner.state().objects[&picked].controller, P1);
+            assert!(events.iter().any(|event| matches!(event,
+                GameEvent::ControllerChanged { object_id, .. } if *object_id == picked)));
+        } else {
+            assert!(!events
+                .iter()
+                .any(|event| matches!(event, GameEvent::ControllerChanged { .. })));
+        }
+        assert_eq!(runner.state().objects[&distractor].controller, P1);
+        assert_finished(&runner);
+    }
+}
