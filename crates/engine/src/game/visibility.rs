@@ -378,6 +378,7 @@ pub(crate) fn capture_library_search_card_view(
         zone: object.zone,
         identity: ObjectIncarnationRef::from_object(object),
         card_id: object.card_id,
+        printing: crate::types::display_only::DisplayOnly::default(),
         current_face,
         front_face,
         back_face,
@@ -4561,6 +4562,7 @@ fn redact_damage_record_source(record: &mut crate::types::game_state::DamageReco
 fn redact_lki_snapshot(snapshot: &mut crate::types::game_state::LKISnapshot) {
     let crate::types::game_state::LKISnapshot {
         name,
+        printing: _,
         token_image_ref,
         power,
         toughness,

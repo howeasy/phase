@@ -26225,6 +26225,7 @@ mod tests {
             incarnation,
             LKISnapshot {
                 name: "Loop Entrant".to_string(),
+                printing: Default::default(),
                 token_image_ref: None,
                 power: Some(2),
                 toughness: Some(2),

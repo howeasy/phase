@@ -31,8 +31,10 @@ use crate::types::ability::{
 };
 use crate::types::attribution::EffectRef;
 use crate::types::card::TokenImageRef;
+use crate::types::card_printing::CardPrinting;
 use crate::types::card_type::CoreType;
 use crate::types::counter::{positive_counter_entries, CounterType};
+use crate::types::display_only::DisplayOnly;
 use crate::types::events::GameEvent;
 use crate::types::format::GameFormat;
 use crate::types::game_state::{
@@ -94,6 +96,11 @@ pub struct StackEntryDisplay {
     pub source_name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub token_image_ref: Option<TokenImageRef>,
+    /// The source card's printing for this row, derived from the viewer's filtered state.
+    /// Display-only: CR 203.1 + CR 206.1, a printing has no effect on game play, so no rules
+    /// or AI path reads it. Absent from the wire when empty.
+    #[serde(default, skip_serializing_if = "DisplayOnly::is_none")]
+    pub printing: DisplayOnly<Option<CardPrinting>>,
     pub kind_label: String,
     /// The typed template behind `kind_label` for activated and triggered
     /// ability entries (`StackAbilityKindView`); `None` for every other kind.
@@ -497,6 +504,11 @@ pub struct TurnOrderSlotView {
 pub struct DebugLibraryCardView {
     pub object_id: ObjectId,
     pub name: String,
+    /// The library card's printing, exposed only on this debug surface. Display-only:
+    /// CR 203.1 + CR 206.1, a printing has no effect on game play, so no rules or AI path
+    /// reads it. Absent from the wire when empty.
+    #[serde(default, skip_serializing_if = "DisplayOnly::is_none")]
+    pub printing: DisplayOnly<Option<CardPrinting>>,
 }
 
 /// Engine-authored identity for a candidate in a legend-rule choice.
@@ -2219,6 +2231,7 @@ fn debug_library_cards(state: &GameState, viewer: Option<PlayerId>) -> Vec<Debug
                 .map(|object| DebugLibraryCardView {
                     object_id: *object_id,
                     name: object.name.clone(),
+                    printing: DisplayOnly::default(),
                 })
         })
         .collect::<Vec<_>>();
@@ -2721,6 +2734,7 @@ fn stack_entry_detail(state: &GameState, entry: &StackEntry) -> StackEntryDispla
     StackEntryDisplay {
         source_name,
         token_image_ref: stack_source_token_image_ref(state, entry),
+        printing: DisplayOnly::default(),
         kind_label,
         ability_kind,
         ability_description,
@@ -3961,10 +3975,12 @@ mod tests {
                 DebugLibraryCardView {
                     object_id: own,
                     name: "Authorized Debug Card".to_string(),
+                    printing: Default::default(),
                 },
                 DebugLibraryCardView {
                     object_id: another_own,
                     name: "Second Authorized Debug Card".to_string(),
+                    printing: Default::default(),
                 },
             ],
             "the explicit debug surface must expose only the authorized viewer's own cards in a non-library order"
@@ -5474,6 +5490,7 @@ mod tests {
         let empty = StackEntryDisplay {
             source_name: "Spell".to_string(),
             token_image_ref: None,
+            printing: Default::default(),
             kind_label: "Spell".to_string(),
             ability_kind: None,
             ability_description: None,
@@ -9305,6 +9322,7 @@ mod tests {
             vec![DebugLibraryCardView {
                 object_id: card,
                 name: "Shared Pile Card".to_string(),
+                printing: Default::default(),
             }]
         );
     }

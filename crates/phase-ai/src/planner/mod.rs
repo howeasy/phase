@@ -3602,6 +3602,168 @@ mod tests {
         );
     }
 
+    /// One real `TriggerSourceContext` at each serialized planner root: a parked
+    /// optional-effect event, a stack trigger's source context and a waiting-state event.
+    /// `powers` is the rules fact each position carries beside the printing.
+    fn printing_carrier_fixture(
+        printing: Option<engine::types::card_printing::CardPrinting>,
+        powers: [i32; 3],
+    ) -> GameState {
+        use engine::types::events::GameEvent;
+        use engine::types::resolution::OptionalEffectFrame;
+
+        let mut state = make_state();
+        let id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Carrier Bear".to_string(),
+            Zone::Battlefield,
+        );
+        let record = |power: i32| {
+            let mut record = state
+                .objects
+                .get(&id)
+                .expect("the carrier object exists")
+                .snapshot_for_zone_change(id, Some(Zone::Battlefield), Zone::Graveyard);
+            let context = record
+                .trigger_source_context
+                .as_mut()
+                .expect("a real record carries its source context");
+            context.lki.printing = DisplayOnly::new(printing.clone());
+            context.lki.power = Some(power);
+            record
+        };
+        let event = |power: i32| GameEvent::ZoneChanged {
+            object_id: id,
+            from: Some(Zone::Battlefield),
+            to: Zone::Graveyard,
+            record: Box::new(record(power)),
+        };
+        let optional_event = event(powers[0]);
+        let waiting_event = event(powers[2]);
+        let mut trigger_ability = ResolvedAbility::new(Effect::NoOp, vec![], id, PlayerId(0));
+        trigger_ability.trigger_source = record(powers[1]).trigger_source_context;
+
+        state.push_optional_effect_frame(OptionalEffectFrame {
+            ability: Box::new(ResolvedAbility::new(Effect::NoOp, vec![], id, PlayerId(0))),
+            trigger_event: Some(optional_event),
+            trigger_events: Vec::new(),
+            trigger_match_count: None,
+            return_result_occurrence: None,
+        });
+        state.stack.push_back(StackEntry {
+            id: ObjectId(600),
+            source_id: id,
+            controller: PlayerId(0),
+            kind: StackEntryKind::TriggeredAbility {
+                source_id: id,
+                ability: Box::new(trigger_ability),
+                condition: None,
+                trigger_event: None,
+                description: None,
+                source_name: String::new(),
+                subject_match_count: None,
+                die_result: None,
+                provenance: None,
+            },
+        });
+        state.waiting_for = WaitingFor::TriggerTargetSelection {
+            player: PlayerId(0),
+            trigger_controller: None,
+            trigger_event: Some(waiting_event),
+            trigger_events: Vec::new(),
+            target_slots: Vec::new(),
+            mode_labels: Vec::new(),
+            target_constraints: Vec::new(),
+            selection: Default::default(),
+            source_id: None,
+            description: None,
+        };
+        state
+    }
+
+    fn planner_keys(state: &GameState) -> [u64; 4] {
+        [
+            quick_state_hash(state),
+            search_position_hash(state),
+            candidate_cache_key(state),
+            transposition_key(state),
+        ]
+    }
+
+    #[test]
+    fn planner_keys_ignore_printing_in_real_carriers() {
+        use engine::types::card_printing::CardPrinting;
+
+        let s1 = CardPrinting {
+            set_code: "SNTA".to_string(),
+            collector_number: "1".to_string(),
+        };
+        let s2 = CardPrinting {
+            set_code: "SNTB".to_string(),
+            collector_number: "2".to_string(),
+        };
+        let powers = [2, 2, 2];
+        let none = printing_carrier_fixture(None, powers);
+        let first = printing_carrier_fixture(Some(s1.clone()), powers);
+        let second = printing_carrier_fixture(Some(s2), powers);
+
+        // Reach: every root really carries the printing on the wire, and the projection the
+        // keys fold omits it.
+        for (label, wire, projected) in [
+            (
+                "resolution stack",
+                serde_json::to_string(&first.resolution_stack).unwrap(),
+                serde_json::to_string(&rules_projection(&first.resolution_stack).unwrap()).unwrap(),
+            ),
+            (
+                "stack entry",
+                serde_json::to_string(&first.stack[0]).unwrap(),
+                serde_json::to_string(&rules_projection(&first.stack[0]).unwrap()).unwrap(),
+            ),
+            (
+                "waiting state",
+                serde_json::to_string(&first.waiting_for).unwrap(),
+                serde_json::to_string(&rules_projection(&first.waiting_for).unwrap()).unwrap(),
+            ),
+        ] {
+            assert!(
+                wire.contains("SNTA"),
+                "{label}: the wire carries the printing"
+            );
+            assert!(
+                !projected.contains("SNTA"),
+                "{label}: the projection omits it"
+            );
+        }
+
+        // Revert-failing: a root hashed from `serde_json::to_value` would tell these apart.
+        let keys = planner_keys(&none);
+        assert_eq!(keys, planner_keys(&first));
+        assert_eq!(keys, planner_keys(&second));
+
+        // Positive controls, one per position: the same `lki.power` changed under a printing
+        // moves exactly the keys that read that root.
+        let changed =
+            |powers: [i32; 3]| planner_keys(&printing_carrier_fixture(Some(s1.clone()), powers));
+        let [quick, position, candidate, transposition] = keys;
+        let [q, p, c, t] = changed([3, 2, 2]);
+        assert!(q != quick && p != position && c != candidate && t != transposition);
+        let [q, p, c, t] = changed([2, 3, 2]);
+        assert!(
+            q == quick && c == candidate,
+            "the stack entry is not in the cheap keys"
+        );
+        assert!(p != position && t != transposition);
+        let [q, p, c, t] = changed([2, 2, 3]);
+        assert!(
+            q == quick && p == position,
+            "the waiting state is not in the position keys"
+        );
+        assert!(c != candidate && t != transposition);
+    }
+
     #[test]
     fn planner_key_roots_project_to_their_wire_form() {
         let state = planner_key_root_fixture();

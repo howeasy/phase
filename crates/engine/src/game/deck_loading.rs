@@ -1258,6 +1258,7 @@ pub fn load_deck_into_state(state: &mut GameState, payload: &DeckPayload) {
                 obj.emblem_source = Some(crate::game::game_object::EmblemSource {
                     name: MOMIR_EMBLEM_SOURCE_NAME.to_string(),
                     printed_ref: None,
+                    printing: crate::types::display_only::DisplayOnly::default(),
                 });
             }
         }
