@@ -1813,12 +1813,8 @@ fn flag_member_bound_write_target(p: &mut RwProfile, target: &TargetFilter) {
 /// `legacy_batch_prompt` (CR 603.3b batch-ordering parity).
 fn contains_legacy_event_ref(a: &ResolvedAbility) -> bool {
     legacy_effect(&a.effect)
-        || a.sub_ability
-            .as_deref()
-            .is_some_and(contains_legacy_event_ref)
-        || a.else_ability
-            .as_deref()
-            .is_some_and(contains_legacy_event_ref)
+        || a.child_links()
+            .any(|(_, child)| contains_legacy_event_ref(child))
         || a.condition.as_ref().is_some_and(legacy_ability_condition)
         || a.duration.as_ref().is_some_and(legacy_duration)
         || a.player_scope.as_ref().is_some_and(legacy_player_filter)

@@ -2522,6 +2522,36 @@ pub(crate) fn declared_target_entries_in_chain(
     entries
 }
 
+/// CR 608.2c: ParentTarget's lexical chain excludes unselected coin outcomes.
+/// Reuse declaration numbering rather than treating the aggregate target view
+/// as an incoming reference channel. An empty declaration is still a referent.
+pub(crate) fn lexical_parent_chain_referents(ability: &ResolvedAbility) -> Option<Vec<TargetRef>> {
+    let mut targets = Vec::new();
+    let mut declares_empty = false;
+    walk_declared_slots(
+        ability,
+        DeclaredNumbering::of(ability),
+        &mut |node, path, declared| {
+            if path
+                .iter()
+                .any(|edge| matches!(edge, ChainStep::CoinFlipBranch { .. }))
+            {
+                return;
+            }
+            declares_empty |= node.multi_target.is_some() || node.optional_targeting;
+            if let Some(declared) = declared {
+                targets.extend(
+                    declared
+                        .positions
+                        .iter()
+                        .map(|&position| node.targets[position].clone()),
+                );
+            }
+        },
+    );
+    (!targets.is_empty() || declares_empty).then_some(targets)
+}
+
 /// How a chain's declared targets are numbered.
 #[derive(Clone, Copy)]
 enum DeclaredNumbering {

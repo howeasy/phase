@@ -9636,25 +9636,15 @@ pub(crate) enum PendingTriggeredManaClass {
     Ordinary(Box<PendingTriggerContext>),
 }
 
-/// True iff any reachable `sub_ability` / `else_ability` link satisfies `pred`.
+/// True iff any reachable live child link satisfies `pred`.
 pub(crate) fn any_reachable_link(
     ability: &ResolvedAbility,
     pred: &dyn Fn(&ResolvedAbility) -> bool,
 ) -> bool {
-    if pred(ability) {
-        return true;
-    }
-    if let Some(sub) = ability.sub_ability.as_deref() {
-        if any_reachable_link(sub, pred) {
-            return true;
-        }
-    }
-    if let Some(else_branch) = ability.else_ability.as_deref() {
-        if any_reachable_link(else_branch, pred) {
-            return true;
-        }
-    }
-    false
+    pred(ability)
+        || ability
+            .child_links()
+            .any(|(_, child)| any_reachable_link(child, pred))
 }
 
 /// True iff any reachable link carries an `unless_pay` modifier

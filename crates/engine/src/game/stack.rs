@@ -5432,12 +5432,9 @@ fn normalize_ability_source(ability: &ResolvedAbility) -> ResolvedAbility {
     out.trigger_source = None;
     out.trigger_definition_ref = None;
     out.may_trigger_origin = None;
-    out.sub_ability = out
-        .sub_ability
-        .map(|sub| Box::new(normalize_ability_source(&sub)));
-    out.else_ability = out
-        .else_ability
-        .map(|alt| Box::new(normalize_ability_source(&alt)));
+    for (_, child) in out.child_links_mut() {
+        *child = normalize_ability_source(child);
+    }
     out
 }
 
@@ -5630,7 +5627,21 @@ fn inert_trigger_abilities_eq_ignoring_provenance(
     } = b;
 
     a_effect == b_effect
-        && a_coin_branches == b_coin_branches
+        && match (a_coin_branches.as_deref(), b_coin_branches.as_deref()) {
+            (None, None) => true,
+            (Some(a), Some(b)) => {
+                (match (&a.won, &b.won) {
+                    (None, None) => true,
+                    (Some(a), Some(b)) => inert_trigger_abilities_eq_ignoring_provenance(a, b),
+                    (None, Some(_)) | (Some(_), None) => false,
+                }) && match (&a.lost, &b.lost) {
+                    (None, None) => true,
+                    (Some(a), Some(b)) => inert_trigger_abilities_eq_ignoring_provenance(a, b),
+                    (None, Some(_)) | (Some(_), None) => false,
+                }
+            }
+            (None, Some(_)) | (Some(_), None) => false,
+        }
         && a_targets == b_targets
         && a_declares_chosen_group == b_declares_chosen_group
         && a_reads_chosen_group == b_reads_chosen_group

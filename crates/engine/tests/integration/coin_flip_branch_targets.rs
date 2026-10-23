@@ -786,3 +786,253 @@ fn text_substitution_reaches_both_live_coin_branch_filters() {
         }
     }
 }
+
+#[test]
+fn installed_coin_replacements_round_trip_and_execute_the_selected_bound_branch() {
+    use engine::types::ability::{AbilityDefinition, AbilityKind, QuantityExpr};
+    use engine::types::card_type::CoreType;
+    use engine::types::identifiers::CardId;
+    use engine::types::replacements::ReplacementEvent;
+    use engine::types::resolution::ResolutionStateWire;
+
+    for family in [ReplacementEvent::Draw, ReplacementEvent::Planeswalk] {
+        // None is the non-coin substitute control; both coin outcomes are pinned.
+        for outcome in [Some(true), Some(false), None] {
+            let gain = |amount| Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: amount },
+                player: TargetFilter::Controller,
+            };
+            let substitute = match outcome {
+                Some(_) => {
+                    let mut won = AbilityDefinition::new(AbilityKind::Spell, gain(3));
+                    won.description = Some("Synthetic replacement: won".into());
+                    let mut lost = AbilityDefinition::new(AbilityKind::Spell, gain(7));
+                    lost.description = Some("Synthetic replacement: lost".into());
+                    Effect::FlipCoins {
+                        flips: CoinFlipRun::single(),
+                        win_effect: Some(Box::new(won)),
+                        lose_effect: Some(Box::new(lost)),
+                        flipper: TargetFilter::Controller,
+                    }
+                }
+                None => gain(11),
+            };
+            let install = match family {
+                ReplacementEvent::Draw => Effect::CreateDrawReplacement {
+                    replacement_effect: Box::new(substitute),
+                },
+                ReplacementEvent::Planeswalk => Effect::CreatePlaneswalkReplacement {
+                    replacement_effect: Box::new(substitute),
+                },
+                _ => unreachable!(),
+            };
+            let mut scenario = GameScenario::new();
+            scenario.at_phase(Phase::PreCombatMain);
+            let top = scenario.add_card_to_library_top(P0, "Library control");
+            let installer = scenario
+                .add_spell_to_hand(P0, "Synthetic replacement installer", true)
+                .with_ability(install)
+                .id();
+            let draw = scenario
+                .add_spell_to_hand(P0, "Synthetic draw producer", true)
+                .with_ability(Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
+                })
+                .id();
+            let mut runner = scenario.build();
+            if family == ReplacementEvent::Planeswalk {
+                let state = runner.state_mut();
+                state.format_config = engine::types::format::FormatConfig::planechase();
+                let plane = engine::game::zones::create_object(
+                    state,
+                    CardId(90_032),
+                    P0,
+                    "Synthetic active plane".into(),
+                    Zone::Command,
+                );
+                state.objects.get_mut(&plane).unwrap().card_types.core_types =
+                    vec![CoreType::Plane];
+                state.command_zone.push_back(plane);
+                state.planar_controller = Some(P0);
+            }
+            runner.cast(installer).resolve();
+            assert_finished(&runner);
+            assert_eq!(
+                runner.state().pending_damage_replacements.len(),
+                1,
+                "reach: installed shield"
+            );
+            let runtime = runner.state().pending_damage_replacements[0]
+                .runtime_execute
+                .as_ref()
+                .unwrap();
+            assert_eq!(
+                runtime.coin_branches.is_some(),
+                outcome.is_some(),
+                "reach: constructor materialized both outcomes"
+            );
+            let wire =
+                serde_json::to_value(ResolutionStateWire::from_game_state(runner.state().clone()))
+                    .unwrap();
+            *runner.state_mut() = serde_json::from_value::<ResolutionStateWire>(wire)
+                .unwrap()
+                .into_game_state();
+            let life = runner.state().players[0].life;
+            let mut events = Vec::new();
+            if family == ReplacementEvent::Draw {
+                pin_outcomes(&mut runner, &[outcome.unwrap_or(true)]);
+                events.extend_from_slice(runner.cast(draw).resolve().events());
+                assert_eq!(
+                    runner.state().objects[&top].zone,
+                    Zone::Library,
+                    "replaced draw did not draw"
+                );
+            } else {
+                let seed = (0..100_000)
+                    .find(|&seed| {
+                        let mut rng = GameRng::seed_from_u64(seed);
+                        rng.draw(RandomDraw::Outcome).random_range(1..=6) == 1
+                            && outcome.is_none_or(|won| {
+                                rng.draw(RandomDraw::Outcome).random_bool(0.5) == won
+                            })
+                    })
+                    .expect("seed pins planar symbol followed by coin outcome");
+                let state = runner.state_mut();
+                state.rng_seed = seed;
+                state.rng_word_pos = 0;
+                state.rng = GameRng::seed_from_u64(seed);
+                events.extend(
+                    runner
+                        .act(GameAction::RollPlanarDie)
+                        .expect("roll planar die through production action")
+                        .events,
+                );
+                assert!(
+                    events.iter().any(|event| matches!(
+                        event,
+                        GameEvent::PlanarDieRolled {
+                            face: engine::game::planechase::PlanarDieFace::Planeswalk,
+                            ..
+                        }
+                    )),
+                    "reach: actual planeswalking roll"
+                );
+                finish(&mut runner, &mut events);
+            }
+            assert_eq!(
+                flips(&events),
+                outcome.into_iter().collect::<Vec<_>>(),
+                "exact coin event, absent for non-coin control"
+            );
+            assert_eq!(
+                runner.state().players[0].life,
+                life + match outcome {
+                    Some(true) => 3,
+                    Some(false) => 7,
+                    None => 11,
+                },
+                "{family:?}: selected substitute payoff"
+            );
+            assert_finished(&runner);
+        }
+    }
+}
+
+#[test]
+fn delayed_parent_referent_never_reads_an_unselected_coin_siblings_declaration() {
+    use engine::types::ability::{
+        AbilityDefinition, AbilityKind, DelayedTriggerCondition, QuantityExpr, TypedFilter,
+    };
+    use engine::types::counter::CounterType;
+
+    for has_ancestor in [false, true] {
+        let counter = |target| Effect::PutCounter {
+            counter_type: CounterType::Plus1Plus1,
+            count: QuantityExpr::Fixed { value: 1 },
+            target,
+        };
+        let creature = TargetFilter::Typed(TypedFilter::creature());
+        let coin = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::FlipCoins {
+                flips: CoinFlipRun::single(),
+                win_effect: Some(Box::new(AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::CreateDelayedTrigger {
+                        condition: DelayedTriggerCondition::AtNextPhase { phase: Phase::End },
+                        effect: Box::new(AbilityDefinition::new(
+                            AbilityKind::Spell,
+                            counter(TargetFilter::ParentTarget),
+                        )),
+                        uses_tracked_set: false,
+                    },
+                ))),
+                lose_effect: Some(Box::new(AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    counter(creature.clone()),
+                ))),
+                flipper: TargetFilter::Controller,
+            },
+        );
+        let definition = if has_ancestor {
+            AbilityDefinition::new(AbilityKind::Spell, Effect::TargetOnly { target: creature })
+                .sub_ability(coin)
+        } else {
+            coin
+        };
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PostCombatMain);
+        let ancestor = scenario
+            .add_creature(P0, "Earlier chosen creature", 2, 2)
+            .id();
+        let sibling = scenario
+            .add_creature(P1, "Unselected sibling target", 2, 2)
+            .id();
+        let spell = scenario
+            .add_spell_to_hand(P0, "Synthetic lexical coin probe", true)
+            .with_ability_definition(definition)
+            .id();
+        let mut runner = scenario.build();
+        pin_outcomes(&mut runner, &[true]);
+        let targets = if has_ancestor {
+            vec![ancestor, sibling]
+        } else {
+            vec![sibling]
+        };
+        let outcome = runner.cast(spell).target_objects(&targets).resolve();
+        assert_eq!(
+            flips(outcome.events()),
+            vec![true],
+            "reach: win creates delayed instruction, loss target remains unselected"
+        );
+        assert_finished(&runner);
+        runner.advance_to_end_step();
+        assert_eq!(
+            runner.state().phase,
+            Phase::End,
+            "reach: actual next end step"
+        );
+        finish(&mut runner, &mut Vec::new());
+        // CR 608.2c: the delayed clause's anaphor reads its antecedent, not an
+        // object announced solely for the other random outcome.
+        assert_eq!(
+            runner.state().objects[&sibling]
+                .counters
+                .get(&CounterType::Plus1Plus1)
+                .copied()
+                .unwrap_or(0),
+            0
+        );
+        assert_eq!(
+            runner.state().objects[&ancestor]
+                .counters
+                .get(&CounterType::Plus1Plus1)
+                .copied()
+                .unwrap_or(0),
+            u32::from(has_ancestor),
+            "positive control: genuine incoming antecedent remains bound"
+        );
+        assert_finished(&runner);
+    }
+}

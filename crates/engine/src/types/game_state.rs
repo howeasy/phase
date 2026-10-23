@@ -12790,13 +12790,8 @@ pub(crate) fn has_return_result_metadata(ability: &ResolvedAbility) -> bool {
     ability.declares_return_result.is_some()
         || ability.reads_return_result.is_some()
         || ability
-            .sub_ability
-            .as_deref()
-            .is_some_and(has_return_result_metadata)
-        || ability
-            .else_ability
-            .as_deref()
-            .is_some_and(has_return_result_metadata)
+            .child_links()
+            .any(|(_, child)| has_return_result_metadata(child))
 }
 
 pub(crate) fn reads_return_result_id(ability: &ResolvedAbility, result_id: ReturnResultId) -> bool {
@@ -12805,13 +12800,8 @@ pub(crate) fn reads_return_result_id(ability: &ResolvedAbility, result_id: Retur
         .as_ref()
         .is_some_and(|(id, _)| *id == result_id)
         || ability
-            .sub_ability
-            .as_deref()
-            .is_some_and(|sub| reads_return_result_id(sub, result_id))
-        || ability
-            .else_ability
-            .as_deref()
-            .is_some_and(|branch| reads_return_result_id(branch, result_id))
+            .child_links()
+            .any(|(_, child)| reads_return_result_id(child, result_id))
 }
 
 pub(crate) fn live_return_result_occurrences(
@@ -15066,11 +15056,8 @@ impl GameState {
                     return Err(format!("root {label} {:?} is not a seat", player));
                 }
             }
-            if let Some(sub) = ability.sub_ability.as_deref() {
-                validate_ability(sub, valid)?;
-            }
-            if let Some(otherwise) = ability.else_ability.as_deref() {
-                validate_ability(otherwise, valid)?;
+            for (_, child) in ability.child_links() {
+                validate_ability(child, valid)?;
             }
             Ok(())
         }
