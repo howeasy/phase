@@ -136,11 +136,12 @@ fn run_flip_branch(
         super::bind_forwarded_result_targets_for_legacy_effect(&mut sub);
         // CR 601.2c + CR 608.2d: declarations belong to this branch, not the
         // parent's incoming referent. Resolution-time choosers make their own
-        // choice; context-reference instructions can retain the earlier object.
+        // choice. Preserve the incoming channel through independent instructions
+        // when a later instruction in this branch still names its antecedent.
         if !crate::game::ability_utils::node_has_stack_target_declaration(&sub)
             && super::can_inherit_parent_targets(&sub)
             && !super::awaits_resolution_object_choice(&sub)
-            && (super::effect_refs_parent_target(&sub.effect)
+            && (super::ability_refs_parent_target(&sub)
                 || matches!(sub.effect, Effect::FlipCoins { .. }))
         {
             sub.replace_target_occurrences(branch_context.parent_occurrences.occurrences());

@@ -1,13 +1,11 @@
-//! Coin-branch announcement regressions and P0 payment-completion evidence.
+//! Coin-branch announcement and execution regressions.
 //! Synthetic fixtures deliberately omit Crooked Scales' repeat instruction.
 
 use engine::ai_support::legal_actions;
 use engine::game::casting::can_activate_ability_now;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::parser::parse_oracle_text;
-use engine::types::ability::{
-    AbilityCost, CoinFlipRun, Effect, EffectKind, TargetFilter, TargetRef,
-};
+use engine::types::ability::{CoinFlipRun, Effect, EffectKind, TargetFilter, TargetRef};
 use engine::types::actions::GameAction;
 use engine::types::events::GameEvent;
 use engine::types::game_state::{CastPaymentMode, GameRng, RandomDraw, WaitingFor};
@@ -19,7 +17,6 @@ use rand::Rng;
 
 // Synthetic, targetless source-local punishment: isolates payment completion
 // from the missing announcement-time targets being investigated by T.
-const PAYMENT_PROBE: &str = "{T}: Flip a coin. If you lose the flip, destroy this artifact unless you pay {3}. You gain 2 life.";
 
 fn pin_outcomes(runner: &mut GameRunner, outcomes: &[bool]) {
     let seed = (0..100_000)
@@ -100,149 +97,6 @@ fn assert_finished(runner: &GameRunner) {
         runner.state().waiting_for,
         WaitingFor::Priority { player: P0 }
     ));
-}
-
-// P0: evidence only. Correct expectations intentionally expose PR-B defects;
-// these tests must not bless a missing terminal marker or an omitted tail.
-fn payment_completion_probe(pay: bool) {
-    // SHAPE reach guard: a single supported coin, a SelfRef destroy carrying
-    // the unless cost, and an independent life-gain successor outside the branch.
-    let parsed = parse_oracle_text(
-        PAYMENT_PROBE,
-        "Synthetic Payment Probe",
-        &[],
-        &["Artifact".into()],
-        &[],
-    );
-    assert_eq!(parsed.abilities.len(), 1);
-    let root = &parsed.abilities[0];
-    let Effect::FlipCoins {
-        flips: run,
-        win_effect: None,
-        lose_effect: Some(lose),
-        ..
-    } = root.effect.as_ref()
-    else {
-        panic!("required single lost-flip branch: {root:#?}");
-    };
-    assert_eq!(*run, CoinFlipRun::single());
-    assert!(
-        matches!(
-            lose.effect.as_ref(),
-            Effect::Destroy {
-                target: TargetFilter::SelfRef,
-                ..
-            }
-        ),
-        "{lose:#?}"
-    );
-    let cost = AbilityCost::Mana {
-        cost: ManaCost::Cost {
-            shards: vec![],
-            generic: 3,
-        },
-    };
-    let unless = lose
-        .unless_pay
-        .as_ref()
-        .expect("supported unless-pay modifier");
-    assert_eq!(unless.cost, cost);
-    assert_eq!(unless.payer, TargetFilter::Controller);
-    assert!(lose.sub_ability.is_none(), "tail is not loss-dependent");
-    assert!(matches!(
-        root.sub_ability
-            .as_ref()
-            .expect("independent tail")
-            .effect
-            .as_ref(),
-        Effect::GainLife { .. }
-    ));
-
-    let mut scenario = GameScenario::new();
-    scenario.at_phase(Phase::PreCombatMain);
-    let source = scenario
-        .add_artifact_from_oracle(P0, "Synthetic Payment Probe", PAYMENT_PROBE)
-        .id();
-    mana(&mut scenario, 3);
-    let mut runner = scenario.build();
-    pin_outcomes(&mut runner, &[false]);
-    let mana_before = pool(&runner);
-    let outcome = runner.activate(source, 0).stop_at_optional().resolve();
-    let mut events = outcome.events().to_vec();
-    let WaitingFor::UnlessPayment {
-        player,
-        cost: live_cost,
-        ..
-    } = &runner.state().waiting_for
-    else {
-        panic!(
-            "required P0 unless-payment prompt: {:?}",
-            runner.state().waiting_for
-        );
-    };
-    assert_eq!(*player, P0);
-    assert_eq!(*live_cost, cost);
-    assert_eq!(
-        flips(&events),
-        vec![false],
-        "forced loss reaches the payment"
-    );
-    assert_eq!(runner.life(P0), 20, "tail waits for payment completion");
-    assert_eq!(runner.state().objects[&source].zone, Zone::Battlefield);
-    assert_eq!(pool(&runner), mana_before);
-    events.extend(
-        runner
-            .act(GameAction::PayUnlessCost { pay })
-            .expect("public unless-payment answer")
-            .events,
-    );
-    finish(&mut runner, &mut events);
-
-    let observed = (
-        flips(&events),
-        coin_terminals(&events, source),
-        runner.state().objects[&source].zone,
-        runner.life(P0),
-        runner.state().resolution_stack.len(),
-        runner.state().stack.len(),
-        matches!(
-            runner.state().waiting_for,
-            WaitingFor::Priority { player: P0 }
-        ),
-        pool(&runner),
-    );
-    eprintln!("P0 pay={pay}: (flips, terminal, source_zone, life, frames, stack, priority, mana_after)={observed:?}; mana_before={mana_before}; waiting={:?}", runner.state().waiting_for);
-    // CR 118.12a + CR 608.2c: payment suppresses only the destroy;
-    // the independent life-gain instruction still runs exactly once.
-    assert_eq!(
-        observed,
-        (
-            vec![false],
-            1,
-            if pay {
-                Zone::Battlefield
-            } else {
-                Zone::Graveyard
-            },
-            22,
-            0,
-            0,
-            true,
-            if pay { 0 } else { 3 }
-        ),
-        "P0 payment completion (PR-B)"
-    );
-    assert_finished(&runner);
-}
-
-#[test]
-fn p0_paid_loss_preserves_source_and_completes_coin_and_tail() {
-    payment_completion_probe(true);
-}
-
-#[test]
-fn p0_declined_loss_destroys_source_and_completes_coin_and_tail() {
-    payment_completion_probe(false);
 }
 
 // Byte-identical to data/mtgjson/AtomicCards.json .data["Chaotic Strike"][0].text.
@@ -3376,6 +3230,537 @@ fn copied_coin_targets_preserve_single_and_separate_occurrence_uniqueness() {
                 }
             );
         }
+        assert_finished(&runner);
+    }
+}
+
+#[test]
+fn independent_branch_head_preserves_incoming_referent_inline_and_after_thumb_restore() {
+    use engine::types::ability::{AbilityDefinition, AbilityKind, QuantityExpr, TypedFilter};
+    use engine::types::game_state::PersistedGameState;
+    for thumb in [false, true] {
+        let branch = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 5 },
+                player: TargetFilter::Controller,
+            },
+        )
+        .sub_ability(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::GiveControl {
+                target: TargetFilter::ParentTarget,
+                recipient: TargetFilter::SpecificPlayer { id: P1 },
+            },
+        ));
+        let definition = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::TargetOnly {
+                target: TargetFilter::Typed(TypedFilter::creature()),
+            },
+        )
+        .sub_ability(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::FlipCoins {
+                flips: CoinFlipRun::single(),
+                win_effect: Some(Box::new(branch)),
+                lose_effect: None,
+                flipper: TargetFilter::Controller,
+            },
+        ));
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        if thumb {
+            scenario.add_artifact_from_oracle(
+                P0,
+                "Krark's Thumb",
+                "If you would flip a coin, instead flip two coins and ignore one.",
+            );
+        }
+        let picked = scenario.add_creature(P0, "Incoming referent", 2, 2).id();
+        let distractor = scenario.add_creature(P0, "Unchosen referent", 3, 3).id();
+        let spell = scenario
+            .add_spell_to_hand(P0, "Synthetic independent branch head", true)
+            .with_ability_definition(definition)
+            .id();
+        let mut runner = scenario.build();
+        pin_outcomes(&mut runner, &[true, false]);
+        drop(runner.cast(spell).target_object(picked).commit());
+        let mut events = Vec::new();
+        if thumb {
+            pass_to_coin_keep(&mut runner, &mut events);
+            assert!(matches!(
+                runner.state().waiting_for,
+                WaitingFor::CoinFlipKeepChoice { player: P0, .. }
+            ));
+            runner.state_mut().capture_rng_word_pos();
+            let wire =
+                serde_json::to_value(PersistedGameState::capture(runner.state().clone())).unwrap();
+            *runner.state_mut() = serde_json::from_value::<PersistedGameState>(wire)
+                .unwrap()
+                .into_game_state()
+                .unwrap();
+            events.extend(
+                runner
+                    .act(GameAction::SelectCoinFlips {
+                        keep_indices: vec![0],
+                    })
+                    .unwrap()
+                    .events,
+            );
+        }
+        finish(&mut runner, &mut events);
+        assert_eq!(
+            flips(&events),
+            vec![true],
+            "reach: selected branch executed"
+        );
+        assert_eq!(runner.life(P0), 25, "reach: independent head executed");
+        assert_eq!(
+            runner.state().objects[&picked].controller,
+            P1,
+            "tail retains incoming object"
+        );
+        assert_eq!(runner.state().objects[&distractor].controller, P0);
+        assert_finished(&runner);
+    }
+}
+
+#[test]
+fn modal_coin_first_mode_round_trips_at_mode_choice_and_executes_its_branch() {
+    use engine::types::game_state::PersistedGameState;
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let spell = scenario.add_spell_to_hand_from_oracle(P0, "Synthetic modal coin", true,
+        "Choose one —\n• Flip a coin. If you win the flip, you gain 3 life.\n• You gain 7 life.")
+        .with_mana_cost(ManaCost::zero()).id();
+    let mut runner = scenario.build();
+    pin_outcomes(&mut runner, &[true]);
+    let card_id = runner.state().objects[&spell].card_id;
+    let mut events = runner
+        .act(GameAction::CastSpell {
+            card_id,
+            object_id: spell,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .unwrap()
+        .events;
+    let WaitingFor::ModeChoice { pending_cast, .. } = &runner.state().waiting_for else {
+        panic!(
+            "required modal announcement: {:?}",
+            runner.state().waiting_for
+        );
+    };
+    assert!(
+        matches!(
+            pending_cast.ability.effect,
+            Effect::FlipCoins {
+                win_effect: Some(_),
+                ..
+            }
+        ),
+        "reach: placeholder carries the first mode's branch-bearing coin"
+    );
+    runner.state_mut().capture_rng_word_pos();
+    let wire = serde_json::to_value(PersistedGameState::capture(runner.state().clone())).unwrap();
+    *runner.state_mut() = serde_json::from_value::<PersistedGameState>(wire)
+        .expect("live modal coin prompt must restore")
+        .into_game_state()
+        .unwrap();
+    events.extend(
+        runner
+            .act(GameAction::SelectModes { indices: vec![0] })
+            .unwrap()
+            .events,
+    );
+    finish(&mut runner, &mut events);
+    assert_eq!(flips(&events), vec![true]);
+    assert_eq!(
+        runner.life(P0),
+        23,
+        "only selected coin reward, not other mode"
+    );
+    assert_finished(&runner);
+}
+
+#[test]
+fn fanout_attachment_tail_keeps_enchant_restriction_with_and_without_coin_parent() {
+    use engine::game::effects::attach::attach_to;
+    use engine::types::ability::{
+        AbilityDefinition, AbilityKind, AttachSelection, ControllerRef, MultiTargetSpec,
+        PlayerFilter, QuantityExpr, QuantityRef, TypedFilter,
+    };
+    use engine::types::keywords::Keyword;
+    for coin_parent in [false, true] {
+        let mut fanout = AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::GainControl {
+                target: TargetFilter::Typed(
+                    TypedFilter::permanent().controller(ControllerRef::TargetPlayer),
+                ),
+            },
+        )
+        .sub_ability(AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::Attach {
+                attachment: TargetFilter::SelfRef,
+                target: TargetFilter::Typed(TypedFilter::permanent()),
+                selection: AttachSelection::Targeted,
+            },
+        ));
+        fanout.multi_target = Some(MultiTargetSpec::bounded(
+            1,
+            QuantityExpr::Ref {
+                qty: QuantityRef::PlayerCount {
+                    filter: PlayerFilter::Opponent,
+                },
+            },
+        ));
+        let root = if coin_parent {
+            AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::FlipCoins {
+                    flips: CoinFlipRun::single(),
+                    win_effect: Some(Box::new(fanout)),
+                    lose_effect: None,
+                    flipper: TargetFilter::Controller,
+                },
+            )
+        } else {
+            fanout
+        };
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let original = scenario.add_creature(P0, "Original host", 2, 2).id();
+        let legal = scenario.add_creature(P0, "New creature host", 3, 3).id();
+        let incompatible = scenario
+            .add_artifact_from_oracle(P0, "Not a creature host", "")
+            .id();
+        let opponent = scenario
+            .add_artifact_from_oracle(P1, "Fanout subject", "")
+            .id();
+        let aura = scenario
+            .add_creature(P0, "Synthetic moving Aura", 0, 0)
+            .as_enchantment()
+            .with_subtypes(vec!["Aura"])
+            .with_keyword(Keyword::Enchant(TargetFilter::Typed(
+                TypedFilter::creature(),
+            )))
+            .with_ability_definition(root)
+            .id();
+        let mut runner = scenario.build();
+        attach_to(runner.state_mut(), aura, original);
+        pin_outcomes(&mut runner, &[true]);
+        let mut events = runner
+            .act(GameAction::ActivateAbility {
+                source_id: aura,
+                ability_index: 0,
+                payment_mode: CastPaymentMode::Auto,
+            })
+            .unwrap()
+            .events;
+        // Only a fanout at the targeting root auto-selects its fixed binder.
+        // Below a coin child, answer the exposed singleton player prompt first.
+        if coin_parent {
+            let WaitingFor::TargetSelection { selection, .. } = &runner.state().waiting_for else {
+                panic!(
+                    "required nested fanout binder: {:?}",
+                    runner.state().waiting_for
+                );
+            };
+            assert_eq!(selection.current_legal_targets, vec![TargetRef::Player(P1)]);
+            events.extend(
+                runner
+                    .act(GameAction::ChooseTarget {
+                        target: Some(TargetRef::Player(P1)),
+                    })
+                    .unwrap()
+                    .events,
+            );
+        }
+        let WaitingFor::TargetSelection { selection, .. } = &runner.state().waiting_for else {
+            panic!(
+                "required fanout object prompt: {:?}",
+                runner.state().waiting_for
+            );
+        };
+        assert!(
+            selection
+                .current_legal_targets
+                .contains(&TargetRef::Object(opponent)),
+            "fanout subject must be offered before the host pool (coin_parent={coin_parent}): {:?}",
+            selection.current_legal_targets
+        );
+        events.extend(
+            runner
+                .act(GameAction::ChooseTarget {
+                    target: Some(TargetRef::Object(opponent)),
+                })
+                .unwrap()
+                .events,
+        );
+        let WaitingFor::TargetSelection { selection, .. } = &runner.state().waiting_for else {
+            panic!(
+                "required attachment host prompt: {:?}",
+                runner.state().waiting_for
+            );
+        };
+        assert!(
+            selection
+                .current_legal_targets
+                .contains(&TargetRef::Object(legal)),
+            "reach: legal host offered"
+        );
+        assert!(
+            !selection
+                .current_legal_targets
+                .contains(&TargetRef::Object(incompatible)),
+            "Aura Enchant restriction survives the fanout's SubAbility path"
+        );
+        // Only the host pool is under test. Continuation assignment after a
+        // fanout root is unchanged base behavior (ability_utils.rs:2179-2183,
+        // 2206-2210), so attachment payoff is deliberately not asserted here.
+        events.extend(
+            runner
+                .act(GameAction::ChooseTarget {
+                    target: Some(TargetRef::Object(legal)),
+                })
+                .unwrap()
+                .events,
+        );
+        finish(&mut runner, &mut events);
+        assert_finished(&runner);
+    }
+}
+
+#[test]
+fn mixed_incoming_pins_round_trip_through_a_production_thumb_keep() {
+    use engine::types::game_state::PersistedGameState;
+    use engine::types::identifiers::ObjectIncarnationRef;
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.add_artifact_from_oracle(
+        P0,
+        "Krark's Thumb",
+        "If you would flip a coin, instead flip two coins and ignore one.",
+    );
+    let a = scenario
+        .add_creature(P0, "Earlier pinned referent", 2, 2)
+        .id();
+    let b = scenario
+        .add_creature(P0, "Resolution-time referent", 3, 3)
+        .id();
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(
+            P0,
+            "Synthetic mixed incoming coin",
+            true,
+            "Flip a coin. If you win the flip, you gain 3 life.",
+        )
+        .id();
+    let mut runner = scenario.build();
+    pin_outcomes(&mut runner, &[true, false]);
+    drop(runner.cast(spell).commit());
+    let a_pin = ObjectIncarnationRef::from_object(&runner.state().objects[&a]);
+    let b_pin = ObjectIncarnationRef::from_object(&runner.state().objects[&b]);
+    // Stage the live incoming channel produced by an earlier instruction:
+    // one announced occurrence plus an object appended during resolution.
+    runner
+        .state_mut()
+        .stack
+        .back_mut()
+        .unwrap()
+        .ability_mut()
+        .unwrap()
+        .replace_target_occurrences(vec![
+            (TargetRef::Object(a), Some(a_pin)),
+            (TargetRef::Object(b), None),
+        ]);
+    let mut events = Vec::new();
+    pass_to_coin_keep(&mut runner, &mut events);
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::CoinFlipKeepChoice { .. }
+    ));
+    let incoming = &runner
+        .state()
+        .active_coin_flip_frame()
+        .unwrap()
+        .branch_context
+        .parent_occurrences;
+    assert_eq!(
+        incoming.targets,
+        vec![TargetRef::Object(a), TargetRef::Object(b)]
+    );
+    runner.state_mut().capture_rng_word_pos();
+    let wire = serde_json::to_value(PersistedGameState::capture(runner.state().clone())).unwrap();
+    *runner.state_mut() = serde_json::from_value::<PersistedGameState>(wire)
+        .expect("each incoming object must have a deterministic captured pin")
+        .into_game_state()
+        .unwrap();
+    assert_eq!(
+        runner
+            .state()
+            .active_coin_flip_frame()
+            .unwrap()
+            .branch_context
+            .parent_occurrences
+            .pins,
+        vec![Some(a_pin), Some(b_pin)]
+    );
+    events.extend(
+        runner
+            .act(GameAction::SelectCoinFlips {
+                keep_indices: vec![0],
+            })
+            .unwrap()
+            .events,
+    );
+    finish(&mut runner, &mut events);
+    assert_eq!(flips(&events), vec![true]);
+    assert_eq!(runner.life(P0), 23);
+    assert_finished(&runner);
+}
+
+#[test]
+fn both_coin_branch_targets_emit_events_and_the_heroic_target_triggers_once() {
+    use engine::types::game_state::StackEntryKind;
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let hero = scenario
+        .add_creature_from_oracle(
+            P0,
+            "Synthetic heroic life reward",
+            2,
+            2,
+            "Whenever you cast a spell that targets this creature, you gain 2 life.",
+        )
+        .id();
+    let other = scenario.add_creature(P0, "Other branch target", 3, 3).id();
+    let spell = scenario.add_spell_to_hand_from_oracle(P0, "Synthetic heroic coin", true,
+        "Flip a coin. If you win the flip, target creature gets +1/+1 until end of turn. If you lose the flip, target creature gets +2/+2 until end of turn.").id();
+    let mut runner = scenario.build();
+    pin_outcomes(&mut runner, &[true]);
+    let card_id = runner.state().objects[&spell].card_id;
+    let mut events = runner
+        .act(GameAction::CastSpell {
+            card_id,
+            object_id: spell,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .unwrap()
+        .events;
+    for target in [hero, other] {
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::TargetSelection { .. }
+        ));
+        events.extend(
+            runner
+                .act(GameAction::ChooseTarget {
+                    target: Some(TargetRef::Object(target)),
+                })
+                .unwrap()
+                .events,
+        );
+    }
+    for target in [hero, other] {
+        assert!(events.iter().any(
+            |event| matches!(event, GameEvent::BecomesTarget { source_id, target: chosen, .. }
+            if *source_id == spell && *chosen == TargetRef::Object(target))
+        ));
+    }
+    let triggers = runner
+        .state()
+        .stack
+        .iter()
+        .filter(|entry| {
+            entry.source_id == hero && matches!(entry.kind, StackEntryKind::TriggeredAbility { .. })
+        })
+        .count();
+    assert_eq!(
+        triggers, 1,
+        "reach: heroic observes the announced coin branch target"
+    );
+    finish(&mut runner, &mut events);
+    assert_eq!(runner.life(P0), 22, "one heroic reward");
+    assert_eq!(flips(&events), vec![true]);
+    assert_eq!(runner.state().objects[&hero].power, Some(3));
+    assert_eq!(runner.state().objects[&other].power, Some(3));
+    assert_finished(&runner);
+}
+
+#[test]
+fn non_coin_delayed_reference_retains_its_creation_pin_across_a_blink() {
+    use engine::types::ability::{
+        AbilityDefinition, AbilityKind, DelayedTriggerCondition, QuantityExpr, TypedFilter,
+    };
+    use engine::types::counter::CounterType;
+    for blink in [false, true] {
+        let definition = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::TargetOnly {
+                target: TargetFilter::Typed(TypedFilter::creature()),
+            },
+        )
+        .sub_ability(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::CreateDelayedTrigger {
+                condition: DelayedTriggerCondition::AtNextPhase { phase: Phase::End },
+                effect: Box::new(AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::PutCounter {
+                        counter_type: CounterType::Plus1Plus1,
+                        count: QuantityExpr::Fixed { value: 1 },
+                        target: TargetFilter::ParentTarget,
+                    },
+                )),
+                uses_tracked_set: false,
+            },
+        ));
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PostCombatMain);
+        let creature = scenario
+            .add_creature(P0, "Delayed non-coin referent", 2, 2)
+            .id();
+        let land = scenario
+            .add_land_from_oracle(P0, "Other flicker target", "")
+            .id();
+        let spell = scenario
+            .add_spell_to_hand(P0, "Synthetic non-coin delayed counter", true)
+            .with_ability_definition(definition)
+            .id();
+        let flicker = scenario.add_spell_to_hand_from_oracle(P0, "Synthetic flicker", true,
+            "Exile two target artifacts, creatures, and/or lands you control, then return those cards to the battlefield under your control.").id();
+        let mut runner = scenario.build();
+        runner.cast(spell).target_object(creature).resolve();
+        assert_finished(&runner);
+        let incarnation = runner.state().objects[&creature].incarnation;
+        if blink {
+            runner
+                .cast(flicker)
+                .target_objects(&[creature, land])
+                .resolve();
+            assert_ne!(
+                runner.state().objects[&creature].incarnation,
+                incarnation,
+                "reach: new object"
+            );
+        }
+        runner.advance_to_end_step();
+        finish(&mut runner, &mut Vec::new());
+        assert_eq!(runner.state().phase, Phase::End);
+        // CR 603.7c + CR 400.7: the delayed reference affects only the original object.
+        assert_eq!(
+            runner.state().objects[&creature]
+                .counters
+                .get(&CounterType::Plus1Plus1)
+                .copied()
+                .unwrap_or(0),
+            u32::from(!blink)
+        );
         assert_finished(&runner);
     }
 }

@@ -752,33 +752,22 @@ pub fn additional_cost_instead_spell_has_legal_targets(
 /// The resulting slots are slot-for-slot identical (order and count) to the
 /// whole-chain `build_target_slots(&build_chained_resolved(...))` pass for every
 /// current card, which the resolver relies on because it consumes the COMBINED
-/// chain and maps selected targets back by slot index. There is one fixed and
-/// one remaining unreachable-today divergence:
-///   1. FIXED: `Effect::ExchangeControl` / `Effect::ExchangeLifeTotals` head
-///      modes used to return unconditionally without descending into the
-///      sub-chain, silently truncating any later mode's slots from the
-///      whole-chain pass (Shifting Grift). The paired-subject collect arm now
-///      descends (`collect_sub_chain_slots`), so this divergence no longer
-///      exists.
-///   2. A deferred-effect-head mode (Scry/Dig/Surveil/Choose/ChooseCard/
-///      SearchLibrary/RevealHand) immediately followed in sorted order by a
+/// chain and maps selected targets back by slot index. ExchangeControl,
+/// ExchangeLifeTotals and Fight head modes descend through the shared child
+/// routing, so later modes retain their declarations.
+///
+/// One divergence remains: a deferred-effect-head mode
+/// (Scry/Dig/Surveil/Choose/ChooseCard/SearchLibrary/RevealHand)
+/// immediately followed in sorted order by a
 ///      targeting skip-stack mode (ChangeZone/Shuffle/PutAtLibraryPosition): the
 ///      whole-chain pass routes the following mode through
 ///      `collect_target_slots_after_deferred_effect` (applying
 ///      `skips_stack_targets_after_deferred_effect`), but this per-mode build
 ///      collects it via plain `collect_target_slots`, so it may surface one
 ///      extra slot. (0 cards.)
-///   3. `Effect::Fight` head modes: `collect_target_slots_inner`'s `Fight` arm
-///      returns unconditionally without descending, so the whole-chain pass
-///      truncates any later mode. REACHABLE TODAY — measured on Clash of the
-///      Eikons with modes `[0,1]`: per-mode build 3 slots, whole-chain 2, and
-///      this assert fires. Deliberately out of scope for the paired-subject
-///      target-ownership change; `Fight` already has a `chain_has_target_sink`
-///      arm and descending assign blocks in BOTH assigners, so only the
-///      collect side is wrong. TRACKED: phase-rs/phase#8354.
 ///
-/// A `debug_assert_eq!` below catches divergence #2 or #3 loudly should a
-/// mode combination reach them.
+/// A `debug_assert_eq!` below catches that divergence should a mode
+/// combination reach it.
 ///
 /// Indices are sorted (printed order, CR 608.2c) to match
 /// `build_chained_resolved`; duplicate indices (CR 700.2d) repeat the mode.
@@ -826,16 +815,12 @@ pub fn build_target_slots_labelled(
 
     // CR 700.2c: The resolver consumes the COMBINED chain and maps selected
     // targets back by slot index, so this per-mode slot count MUST equal the
-    // whole-chain `build_target_slots(&build_chained_resolved(...))` count. The
-    // remaining documented divergences (deferred-effect head followed by a
-    // skip-stack mode; `Effect::Fight` head modes, TRACKED:
-    // phase-rs/phase#8354) are either unreachable today or already filed; this
-    // detection-only assert makes any future card that reaches them fail
-    // loudly in test/debug builds rather than surfacing an extra slot at
-    // runtime. Confined to debug_assertions so release builds don't pay the
-    // double-build cost, and any Err from the comparison build is swallowed so
-    // it can never change release-observable behavior (the returned
-    // slots/labels are unaffected).
+    // whole-chain `build_target_slots(&build_chained_resolved(...))` count.
+    // The remaining documented divergence (deferred-effect head followed by a
+    // skip-stack mode) is unreachable today; this detection-only assert makes
+    // a newly reachable combination fail loudly in test/debug builds.
+    // Release builds do not pay the double-build cost, and an Err from the
+    // comparison build cannot change the returned slots or labels.
     #[cfg(debug_assertions)]
     {
         if let Ok(mut combined) = build_chained_resolved(abilities, indices, source_id, controller)
@@ -848,7 +833,7 @@ pub fn build_target_slots_labelled(
                 debug_assert_eq!(
                     acc.slots.len(),
                     combined_slots.len(),
-                    "build_target_slots_labelled slot count diverged from whole-chain build — a modal mode combination (Effect::Fight head mode truncation, tracked phase-rs/phase#8354, or deferred-effect + skip-stack) is now reachable; see CR 700.2 slot-mapping invariant"
+                    "build_target_slots_labelled slot count diverged from whole-chain build — a deferred-effect + skip-stack modal combination is now reachable; see CR 700.2 slot-mapping invariant"
                 );
             }
         }
@@ -4829,8 +4814,8 @@ fn collect_target_slots_inner(
         // single-role manas (every printed card) fall through to the generic
         // branch below via `Effect::target_filter`, unchanged. Heads into the
         // existing else-if group so the shared sub-ability descent still runs
-        // (Jetfire: Mana → Convert) — do NOT early-return like the
-        // ExchangeLifeTotals/Fight arms. Keep in lockstep with
+        // (Jetfire: Mana → Convert), as it does for the paired/Fight arms.
+        // Keep in lockstep with
         // `collect_target_slot_specs`: NO assertion links the two, so divergence
         // fails silently as misaligned TargetInstanceIds at runtime.
         for (_slot, filter) in role.surfaced_filters() {
@@ -4957,18 +4942,7 @@ fn collect_target_slots_inner(
     } else {
         if is_per_opponent_target_fanout(ability) {
             collect_per_opponent_target_fanout_slots(state, ability, acc)?;
-            if let Some(sub_ability) = ability.sub_ability.as_deref() {
-                if defers_conditional_target_selection(sub_ability) {
-                    // Chosen at resolution; no slot now.
-                } else if rider_entries_are_inherited(ability, sub_ability) {
-                    // CR 601.2c: an inheriting rider announces no slot of its
-                    // own, but its sub-chain (a later chained mode) still does.
-                    collect_sub_chain_slots(state, sub_ability, acc)?;
-                } else {
-                    collect_target_slots(state, sub_ability, acc)?;
-                }
-            }
-            return Ok(());
+            return collect_sub_chain_slots(state, ability, acc);
         }
         // CR 109.4 + CR 115.1: If the effect contains a filter referencing
         // `ControllerRef::TargetPlayer` (e.g. "each creature target player controls"
@@ -7856,11 +7830,7 @@ fn collect_target_slot_specs(
     } else {
         if is_per_opponent_target_fanout(ability) {
             collect_per_opponent_target_fanout_specs(state, ability, specs, next_instance);
-            if let Some(sub_ability) = ability.sub_ability.as_deref() {
-                if !defers_conditional_target_selection(sub_ability) {
-                    collect_target_slot_specs(state, sub_ability, specs, next_instance);
-                }
-            }
+            collect_sub_chain_slot_specs(state, ability, specs, next_instance);
             return;
         }
         // CR 109.4 + CR 115.1: Companion TargetFilter::Player slot surfaced by
@@ -8760,6 +8730,8 @@ fn target_filter_has_another_target_marker(filter: &TargetFilter) -> bool {
 /// order). The two are zipped so we can tell which prior selections belong to
 /// `spec.instance`. Callers must pass a `prior_specs`/`selected_slots` pair that
 /// lines up one-for-one.
+/// Fanout constraints belong to the slot's declaring instruction, including
+/// instructions nested under a coin branch, rather than the targeting root.
 ///
 /// CR 601.2c + CR 115.3 NOTE: the parallel SLOT-ONLY lattice
 /// (`legal_targets_for_slot` / `has_legal_completion` /
@@ -8799,11 +8771,16 @@ fn legal_targets_for_selected_slot(
     // distinctness filter (CR 601.2c + CR 115.3) is then applied ONCE at the
     // single tail return. For single-target / separate-instance / early-return
     // cases `already_in_instance` is empty, so the tail filter is a no-op.
-    let per_opponent_fanout_targets = if is_per_opponent_target_fanout(ability) {
+    // CR 601.2c: recompute each fanout pair in its declaring instruction's
+    // context. An empty path resolves to the targeting root unchanged.
+    let Some(declaring_node) = node_at(ability, &spec.path) else {
+        return Vec::new();
+    };
+    let per_opponent_fanout_targets = if is_per_opponent_target_fanout(declaring_node) {
         if let TargetFilter::SpecificPlayer { id } = spec.filter {
             Some(per_opponent_fanout_constraint_targets(
                 state,
-                ability.controller,
+                declaring_node.controller,
                 id,
             ))
         } else {
@@ -8812,8 +8789,8 @@ fn legal_targets_for_selected_slot(
     } else {
         None
     };
-    let per_opponent_fanout_object_targets = if is_per_opponent_target_fanout(ability) {
-        match per_opponent_fanout_object_filter(ability) {
+    let per_opponent_fanout_object_targets = if is_per_opponent_target_fanout(declaring_node) {
+        match per_opponent_fanout_object_filter(declaring_node) {
             Some(object_filter) if spec.filter == object_filter => {
                 if let Some(TargetSlotSpec {
                     filter: TargetFilter::SpecificPlayer { id },
@@ -8824,7 +8801,7 @@ fn legal_targets_for_selected_slot(
                         if id == selected_id {
                             Some(per_opponent_fanout_legal_object_targets(
                                 state,
-                                ability,
+                                declaring_node,
                                 *selected_id,
                             ))
                         } else {
@@ -15858,14 +15835,13 @@ mod tests {
         assert_eq!(build_target_slots(&state, &soul_conduit).unwrap().len(), 2);
     }
 
-    /// §5.13 tracker row (round-6 plan Gap 9): `Effect::Fight` head modes
-    /// truncate later modes' target slots (Clash of the Eikons). NOT this
-    /// change's to fix — TRACKED: phase-rs/phase#8354. Pins the CORRECT
-    /// 3-slot count and is quarantined until that issue lands.
+    /// CR 700.2c + CR 601.2c: a Fight mode must not truncate a later mode's
+    /// target declarations (Clash of the Eikons, phase-rs/phase#8354).
     #[test]
-    #[ignore = "tracked: phase-rs/phase#8354 — Effect::Fight head-mode slot truncation"]
     fn fight_head_mode_truncates_later_modes_slots_clash_of_the_eikons() {
-        use crate::parser::oracle::parse_oracle_text;
+        use crate::game::scenario::{GameScenario, P0, P1};
+        use crate::types::counter::CounterType;
+        use crate::types::phase::Phase;
 
         const CLASH_OF_THE_EIKONS_TEXT: &str = "Choose one or more —\n\
             • Target creature you control fights target creature an opponent controls.\n\
@@ -15873,35 +15849,44 @@ mod tests {
             doesn't cause chapter abilities to trigger.)\n\
             • Put a lore counter on target Saga you control.";
 
-        let mut state = GameState::new_two_player(43);
-        let source = create_object(
-            &mut state,
-            CardId(1),
-            PlayerId(0),
-            "Clash of the Eikons".to_string(),
-            Zone::Battlefield,
-        );
-        let parsed = parse_oracle_text(
-            CLASH_OF_THE_EIKONS_TEXT,
-            "Clash of the Eikons",
-            &[],
-            &[],
-            &[],
-        );
-        let chained =
-            build_chained_resolved(&parsed.abilities, &[0, 1], source, PlayerId(0)).unwrap();
-        let whole_chain = build_target_slots(&state, &chained).unwrap();
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let own = scenario.add_creature(P0, "Own fighter", 4, 6).id();
+        let opponent = scenario.add_creature(P1, "Opposing fighter", 2, 7).id();
+        let saga = scenario
+            .add_enchantment_from_oracle(P0, "Synthetic Saga", "")
+            .with_subtypes(vec!["Saga"])
+            .id();
+        scenario.with_counter(saga, CounterType::Lore, 3);
+        let spell = scenario
+            .add_spell_to_hand_from_oracle(
+                P0,
+                "Clash of the Eikons",
+                false,
+                CLASH_OF_THE_EIKONS_TEXT,
+            )
+            .with_mana_cost(ManaCost::zero())
+            .id();
+        let mut runner = scenario.build();
+        let outcome = runner
+            .cast(spell)
+            .modes(&[0, 1])
+            .target_objects(&[own, opponent, saga])
+            .resolve();
+        assert!(matches!(
+            outcome.final_waiting_for(),
+            WaitingFor::Priority { .. }
+        ));
+        assert_eq!(runner.state().objects[&own].damage_marked, 2);
+        assert_eq!(runner.state().objects[&opponent].damage_marked, 4);
         assert_eq!(
-            whole_chain.len(),
-            3,
-            "the whole-chain build must surface all 3 slots — mode 0's fighter pair \
-             (subject + target, both declared \"target creature\") plus mode 1's Saga \
-             target — matching the per-mode `build_target_slots_labelled` count. \
-             CORRECT behaviour, pinned here and quarantined until \
-             phase-rs/phase#8354 lands (today's whole-chain build truncates to 2, \
-             because collect_target_slots_inner's Fight arm returns without \
-             descending into the sub-chain)"
+            runner.state().objects[&saga]
+                .counters
+                .get(&CounterType::Lore),
+            Some(&2)
         );
+        assert!(runner.state().stack.is_empty());
+        assert!(runner.state().resolution_stack.is_empty());
     }
 
     use crate::types::ability::{

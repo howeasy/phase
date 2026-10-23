@@ -138,32 +138,45 @@ pub struct FlipBranchContext {
 }
 
 impl FlipBranchContext {
-    /// Capture incoming occurrences, preferring their existing identity authority.
-    /// Resolution-time choices without an earlier pin are captured at this live
-    /// handoff, never during restore.
+    /// CR 400.7: capture every incoming occurrence, preserving existing pins.
+    /// Resolution-time choices fill only missing pins at this live handoff,
+    /// never during restore. A missing live object remains unpinned and the
+    /// parked-frame writer refuses it rather than emitting an unrestorable save.
     pub fn from_ability(ability: &ResolvedAbility, state: &GameState) -> Self {
         Self {
             chosen_players: ability.chosen_players.clone(),
             parent_occurrences: {
                 let mut occurrences = ParentTargetOccurrences::of(ability);
-                if occurrences.pins.is_empty() {
-                    let pins = ability
-                        .context
-                        .forwarded_result_context
-                        .as_deref()
-                        .map_or(ability.target_incarnations.as_slice(), |context| {
-                            context.object_incarnations.as_slice()
-                        });
-                    occurrences.pins = occurrences
-                        .targets
-                        .iter()
-                        .map(|target| match target {
-                            TargetRef::Object(id) => pins.iter()
-                                .find(|pin| pin.object_id == *id).copied()
-                                .or_else(|| state.objects.get(id).map(crate::types::identifiers::ObjectIncarnationRef::from_object)),
-                            TargetRef::Player(_) => None,
-                        })
-                        .collect();
+                occurrences.pins.resize(occurrences.targets.len(), None);
+                for (target, pin) in occurrences.targets.iter().zip(&mut occurrences.pins) {
+                    if pin.is_some() {
+                        continue;
+                    }
+                    if let TargetRef::Object(id) = target {
+                        *pin = ability
+                            .context
+                            .forwarded_result_context
+                            .as_deref()
+                            .and_then(|context| {
+                                context
+                                    .object_incarnations
+                                    .iter()
+                                    .find(|pin| pin.object_id == *id)
+                                    .copied()
+                            })
+                            .or_else(|| {
+                                ability
+                                    .target_incarnations
+                                    .iter()
+                                    .find(|pin| pin.object_id == *id)
+                                    .copied()
+                            })
+                            .or_else(|| {
+                                state.objects.get(id).map(
+                                    crate::types::identifiers::ObjectIncarnationRef::from_object,
+                                )
+                            });
+                    }
                 }
                 occurrences
             },
@@ -174,6 +187,38 @@ impl FlipBranchContext {
                 .cloned()
                 .map(Box::new),
         }
+    }
+
+    /// CR 400.7: both persistence directions require captured object identity.
+    /// Neither writing nor restoring can invent a pin from a later board.
+    fn validate_pins(&self) -> Result<(), String> {
+        let incoming = &self.parent_occurrences;
+        crate::game::target_occurrences::pins_align_with(&incoming.targets, &incoming.pins)
+            .map_err(|error| error.to_string())?;
+        if incoming.targets.iter().enumerate().any(|(index, target)| {
+            matches!(target, TargetRef::Object(_))
+                && incoming.pins.get(index).is_none_or(Option::is_none)
+        }) {
+            return Err(
+                "INVALID_COIN_BRANCH_BINDINGS: incoming object reference is missing its pin".into(),
+            );
+        }
+        if let Some(context) = self.forwarded_result_context.as_deref() {
+            let mut pins = context.object_incarnations.iter();
+            for target in &context.targets {
+                if let TargetRef::Object(id) = target {
+                    if pins.next().is_none_or(|pin| pin.object_id != *id) {
+                        return Err("INVALID_COIN_BRANCH_BINDINGS: forwarded object pins do not match references".into());
+                    }
+                }
+            }
+            if pins.next().is_some() {
+                return Err(
+                    "INVALID_COIN_BRANCH_BINDINGS: forwarded object pins exceed references".into(),
+                );
+            }
+        }
+        Ok(())
     }
 
     /// `true` when the branch inherits nothing (the serialized default).
@@ -249,6 +294,9 @@ pub struct PendingCoinFlip {
 // apparently valid empty current frame.
 impl Serialize for PendingCoinFlip {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        self.branch_context
+            .validate_pins()
+            .map_err(serde::ser::Error::custom)?;
         #[derive(Serialize)]
         struct Branches<'a> {
             #[serde(skip_serializing_if = "Option::is_none")]
@@ -305,36 +353,9 @@ impl<'de> Deserialize<'de> for PendingCoinFlip {
                 "INVALID_COIN_BRANCH_BINDINGS: parked coin flip is missing bound_branches",
             )
         })?;
-        // CR 400.7: current parked references must retain their captured pins;
-        // restoring never invents an incarnation from the current board.
-        let incoming = &wire.branch_context.parent_occurrences;
-        crate::game::target_occurrences::pins_align_with(&incoming.targets, &incoming.pins)
+        wire.branch_context
+            .validate_pins()
             .map_err(serde::de::Error::custom)?;
-        if incoming.targets.iter().enumerate().any(|(index, target)| {
-            matches!(target, TargetRef::Object(_))
-                && incoming.pins.get(index).is_none_or(Option::is_none)
-        }) {
-            return Err(serde::de::Error::custom(
-                "INVALID_COIN_BRANCH_BINDINGS: incoming object reference is missing its pin",
-            ));
-        }
-        if let Some(context) = wire.branch_context.forwarded_result_context.as_deref() {
-            let mut pins = context.object_incarnations.iter();
-            for target in &context.targets {
-                if let TargetRef::Object(id) = target {
-                    if pins.next().is_none_or(|pin| pin.object_id != *id) {
-                        return Err(serde::de::Error::custom(
-                            "INVALID_COIN_BRANCH_BINDINGS: forwarded object pins do not match references",
-                        ));
-                    }
-                }
-            }
-            if pins.next().is_some() {
-                return Err(serde::de::Error::custom(
-                    "INVALID_COIN_BRANCH_BINDINGS: forwarded object pins exceed references",
-                ));
-            }
-        }
         Ok(Self {
             source_id: wire.source_id,
             controller: wire.controller,
@@ -9858,7 +9879,18 @@ mod tests {
 
     #[test]
     fn resolution_wire_v9_non_coin_saves_still_load() {
-        let state = GameState::new_two_player(42);
+        let mut state = state_with_dealer_frame(true);
+        state.stack.push_back(StackEntry {
+            id: ObjectId(73),
+            source_id: ObjectId(73),
+            controller: PlayerId(0),
+            kind: StackEntryKind::Spell {
+                card_id: CardId(73),
+                ability: Some(Box::new(resolved_draw(73))),
+                casting_variant: CastingVariant::Normal,
+                actual_mana_spent: 0,
+            },
+        });
         let mut wire =
             serde_json::to_value(ResolutionStateWire::from_game_state(state.clone())).unwrap();
         wire["resolution_state_version"] = Value::from(9);
@@ -9866,6 +9898,58 @@ mod tests {
             .unwrap()
             .into_game_state();
         assert_eq!(restored, state);
+        assert!(restored
+            .active_draw_sequence()
+            .is_some_and(|frame| frame.dealer.is_some()));
+        assert!(matches!(
+            restored.stack[0].ability().unwrap().effect,
+            Effect::Draw { .. }
+        ));
+        assert!(restored.stack[0].ability().unwrap().coin_branches.is_none());
+    }
+
+    #[test]
+    fn resolution_wire_contract_pins_v10_and_the_legacy_readers() {
+        assert_eq!(RESOLUTION_STATE_WIRE_VERSION, 10);
+        assert_eq!(LEGACY_UNBOUND_COIN_BRANCH_RESOLUTION_STATE_WIRE_VERSION, 9);
+        assert_eq!(
+            LEGACY_UNINHERITED_FLIP_BRANCH_RESOLUTION_STATE_WIRE_VERSION,
+            8
+        );
+        assert_eq!(LEGACY_COIN_FLIP_KIND_RESOLUTION_STATE_WIRE_VERSION, 7);
+        assert_eq!(LEGACY_RESOLUTION_STATE_WIRE_VERSION, 1);
+        assert_eq!(LEGACY_TYPED_FRAME_RESOLUTION_STATE_WIRE_VERSION, 2);
+        assert_eq!(LEGACY_RESULT_OWNERSHIP_RESOLUTION_STATE_WIRE_VERSION, 3);
+        assert_eq!(LEGACY_DEALERLESS_RESOLUTION_STATE_WIRE_VERSION, 4);
+        assert_eq!(
+            LEGACY_UNRESOLVED_CHANGE_ZONE_MEMBER_RESOLUTION_STATE_WIRE_VERSION,
+            6
+        );
+        let mut v1 = serde_json::to_value(GameState::new_two_player(57)).unwrap();
+        v1["resolution_state_version"] = Value::from(1_u64);
+        serde_json::from_value::<ResolutionStateWire>(v1)
+            .expect("the v1 reader remains available for historical saves");
+    }
+
+    #[test]
+    fn parked_coin_writer_refuses_an_incoming_object_without_a_pin() {
+        let mut state = state_with_parked_coin_flip(FlipBranchContext::default());
+        serde_json::to_value(ResolutionStateWire::from_game_state(state.clone()))
+            .expect("reach: an empty incoming channel serializes");
+        state
+            .active_coin_flip_frame_mut()
+            .unwrap()
+            .branch_context
+            .parent_occurrences
+            .targets
+            .push(TargetRef::Object(ObjectId(999)));
+        let error = serde_json::to_value(ResolutionStateWire::from_game_state(state))
+            .expect_err("writer must not emit a save the current reader cannot restore")
+            .to_string();
+        assert!(
+            error.contains("incoming object reference is missing its pin"),
+            "{error}"
+        );
     }
 
     #[test]
