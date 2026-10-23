@@ -109,9 +109,10 @@ pub struct OptionalEffectFrame {
 /// CR 705.1 + CR 614.1a: where a coin-flip run paused for a Krark's Thumb keep choice.
 ///
 /// CR 608.2c: the position is everything the run needs to follow its remaining
-/// instructions in order once the kept flip settles. The frames written before
-/// resolution-wire version 8 (`Single`, `FlipN`, `UntilLose`) are read losslessly
-/// through [`PendingCoinFlipKindWire`].
+/// instructions in order once the kept flip settles. Legacy kind syntax
+/// (`Single`, `FlipN`, `UntilLose`) remains readable through
+/// [`PendingCoinFlipKindWire`]; pre-v10 parked frames are nevertheless refused
+/// because they did not preserve bound branches.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(from = "PendingCoinFlipKindWire")]
 pub enum PendingCoinFlipKind {
@@ -202,39 +203,104 @@ impl From<PendingCoinFlipKindWire> for PendingCoinFlipKind {
 
 /// CR 705.1 + CR 614.1a: Full resolution context and run position for a
 /// coin-flip run paused at a Krark's Thumb keep-one choice.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PendingCoinFlip {
     pub source_id: ObjectId,
     pub controller: PlayerId,
     /// CR 705.2: The player who flips (and therefore wins or loses) the coin.
-    /// Defaults to the controller for in-flight states serialized before this
-    /// field existed.
-    #[serde(default)]
+    /// Current frames preserve this independently of the controller.
     pub flipper: PlayerId,
     pub targets: Vec<TargetRef>,
     /// Pristine announced branches, including their local target occurrences
     /// and legality verdicts. Each execution works from an independent copy.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub win_effect: Option<Box<ResolvedAbility>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lose_effect: Option<Box<ResolvedAbility>>,
     pub kind: PendingCoinFlipKind,
     /// CR 608.2h: the creating ability's chain-root target list, carried
     /// across the Krark's Thumb keep-choice suspension so a counter-gated
     /// "that many" nested in `win_effect`/`lose_effect` still resolves
     /// against the live chain-root target once the flip's branch runs.
-    /// `#[serde(default)]` for in-flight states serialized before this field
-    /// existed.
-    #[serde(default)]
     pub chain_root_targets: Vec<TargetRef>,
-    /// CR 608.2c: what the flip's branches inherit from the flipping
-    /// resolution, carried across the Krark's Thumb keep-choice suspension so a
-    /// resumed branch reads the same chosen players and completed-empty result
-    /// as an inline one. `#[serde(default)]` decodes a frame written before this
-    /// field existed (wire version 8 or earlier) to the default, which is
-    /// exactly those versions' semantics: the branch inherited nothing.
-    #[serde(default, skip_serializing_if = "FlipBranchContext::is_empty")]
+    /// What the branches inherit across the keep-choice suspension.
     pub branch_context: FlipBranchContext,
+}
+
+// The runtime keeps its existing branch fields; the wire requires an explicit
+// payload even for a bare flip. Missing legacy bindings must never become an
+// apparently valid empty current frame.
+impl Serialize for PendingCoinFlip {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        #[derive(Serialize)]
+        struct Branches<'a> {
+            #[serde(skip_serializing_if = "Option::is_none")]
+            won: Option<&'a ResolvedAbility>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            lost: Option<&'a ResolvedAbility>,
+        }
+        #[derive(Serialize)]
+        struct Wire<'a> {
+            source_id: ObjectId,
+            controller: PlayerId,
+            flipper: PlayerId,
+            targets: &'a [TargetRef],
+            bound_branches: Branches<'a>,
+            kind: &'a PendingCoinFlipKind,
+            chain_root_targets: &'a [TargetRef],
+            #[serde(skip_serializing_if = "FlipBranchContext::is_empty")]
+            branch_context: &'a FlipBranchContext,
+        }
+        Wire {
+            source_id: self.source_id,
+            controller: self.controller,
+            flipper: self.flipper,
+            targets: &self.targets,
+            bound_branches: Branches {
+                won: self.win_effect.as_deref(),
+                lost: self.lose_effect.as_deref(),
+            },
+            kind: &self.kind,
+            chain_root_targets: &self.chain_root_targets,
+            branch_context: &self.branch_context,
+        }
+        .serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for PendingCoinFlip {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        struct Wire {
+            source_id: ObjectId,
+            controller: PlayerId,
+            #[serde(default)]
+            flipper: PlayerId,
+            targets: Vec<TargetRef>,
+            #[serde(default)]
+            bound_branches: Option<crate::types::ability::ResolvedCoinBranches>,
+            kind: PendingCoinFlipKind,
+            #[serde(default)]
+            chain_root_targets: Vec<TargetRef>,
+            #[serde(default)]
+            branch_context: FlipBranchContext,
+        }
+        let wire = Wire::deserialize(deserializer)?;
+        let branches = wire.bound_branches.ok_or_else(|| {
+            serde::de::Error::custom(
+                "INVALID_COIN_BRANCH_BINDINGS: parked coin flip is missing bound_branches",
+            )
+        })?;
+        Ok(Self {
+            source_id: wire.source_id,
+            controller: wire.controller,
+            flipper: wire.flipper,
+            targets: wire.targets,
+            win_effect: branches.won.map(Box::new),
+            lose_effect: branches.lost.map(Box::new),
+            kind: wire.kind,
+            chain_root_targets: wire.chain_root_targets,
+            branch_context: wire.branch_context,
+        })
+    }
 }
 
 /// CR 706.6 + CR 614.1a: Full resolution context for a die-roll resolver paused
@@ -3911,7 +3977,9 @@ impl ResolutionStack {
 /// Version 8 replaces the coin-flip frame's `Single`/`FlipN`/`UntilLose` kinds with `Exactly`/`UntilLoss`; the older kinds are still read losslessly.
 /// Version 9 carries the coin-flip branch's inherited resolution context
 /// (`PendingCoinFlip.branch_context`).
-pub const RESOLUTION_STATE_WIRE_VERSION: u64 = 9;
+/// Version 10 requires pristine bound coin branches on resolved instructions
+/// and parked frames. Earlier parked coin frames cannot be restored safely.
+pub const RESOLUTION_STATE_WIRE_VERSION: u64 = 10;
 
 /// Historical full-state resolution wire version accepted only for migration.
 ///
@@ -3941,11 +4009,16 @@ const LEGACY_UNRESOLVED_CHANGE_ZONE_MEMBER_RESOLUTION_STATE_WIRE_VERSION: u64 = 
 /// `UntilLose`; `PendingCoinFlipKindWire` reads them losslessly.
 const LEGACY_COIN_FLIP_KIND_RESOLUTION_STATE_WIRE_VERSION: u64 = 7;
 
-/// Last wire version written before a parked coin flip could carry its
-/// branch's inherited resolution context. Its frames decode to the default
-/// `FlipBranchContext`, which is exactly that version's semantics: the branch
-/// inherited nothing. No migration is needed.
+/// Last wire version without inherited branch context. Kept for version
+/// inference and non-coin migration; parked coin frames from it are refused.
 const LEGACY_UNINHERITED_FLIP_BRANCH_RESOLUTION_STATE_WIRE_VERSION: u64 = 8;
+
+/// Last wire version without announcement-time coin-branch bindings.
+const LEGACY_UNBOUND_COIN_BRANCH_RESOLUTION_STATE_WIRE_VERSION: u64 = 9;
+
+/// Stable refusal: old coin saves lack the independently announced bindings;
+/// neither today's board nor the old flat target vector can reconstruct them.
+pub const LEGACY_COIN_BRANCH_BINDINGS_RESTORE_ERROR: &str = "RESTORE_INCOMPATIBLE_COIN_BRANCH_BINDINGS: This saved game contains a coin-flip ability whose announced branch bindings were not preserved. Restore a current save or restart the game.";
 
 /// Stable, machine-recognizable restore refusal for a v1–v6 save paused inside
 /// a multi-object ChangeZone whose unprocessed members' entry modifications
@@ -4177,6 +4250,8 @@ struct CoinFlipBoundaryData {
     /// is inspected.
     #[serde(default)]
     branch_context: Option<Map<String, Value>>,
+    #[serde(default)]
+    bound_branches: Option<Map<String, Value>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -4554,6 +4629,20 @@ pub(crate) fn declare_raw_resolution_wire(value: &mut Value) -> Result<(), Strin
         .map(carries_coin_flip_branch_context)
         .transpose()?
         .unwrap_or(false);
+    let unversioned_stack_has_bound_coin_branches = object
+        .get("resolution_stack")
+        .map(|stack| {
+            serde_json::from_value::<CoinFlipBoundaryStack>(stack.clone())
+                .map(|stack| {
+                    stack.frames.iter().any(|frame| match frame {
+                        CoinFlipBoundaryFrame::CoinFlip { data } => data.bound_branches.is_some(),
+                        CoinFlipBoundaryFrame::Other => false,
+                    })
+                })
+                .map_err(|error| format!("typed resolution frame boundary is malformed: {error}"))
+        })
+        .transpose()?
+        .unwrap_or(false);
     // An undeclared payload carrying BOTH carriers is ambiguous, and inferring
     // from one would move `resolution_stack` onto the `resolution_frames` key
     // and discard the declared `resolution_frames` silently. Refuse instead.
@@ -4631,11 +4720,12 @@ pub(crate) fn declare_raw_resolution_wire(value: &mut Value) -> Result<(), Strin
             // A ChangeZone member record is written only by the v7 carrier, so
             // it dates the payload exactly as `delivery_owner` dates v4. A
             // stack written that late also carries `delivery_owner` on every
-            // draw frame, which v7 validation still requires. A coin-flip
-            // frame's `branch_context` is written only by v9, so it dates the
-            // payload as the current version.
-            let declared_version = if unversioned_stack_has_coin_flip_branch_context {
+            // draw frame, which v7 validation still requires. Explicit bound
+            // branches date to v10; branch_context alone only dates to v9.
+            let declared_version = if unversioned_stack_has_bound_coin_branches {
                 RESOLUTION_STATE_WIRE_VERSION
+            } else if unversioned_stack_has_coin_flip_branch_context {
+                LEGACY_UNBOUND_COIN_BRANCH_RESOLUTION_STATE_WIRE_VERSION
             } else if unversioned_stack_has_resolved_change_zone_members {
                 LEGACY_COIN_FLIP_KIND_RESOLUTION_STATE_WIRE_VERSION
             } else if unversioned_stack_has_delivery_owner {
@@ -4772,10 +4862,11 @@ impl ResolutionStateWire {
             | LEGACY_UNRESOLVED_CHANGE_ZONE_MEMBER_RESOLUTION_STATE_WIRE_VERSION
             | LEGACY_COIN_FLIP_KIND_RESOLUTION_STATE_WIRE_VERSION
             | LEGACY_UNINHERITED_FLIP_BRANCH_RESOLUTION_STATE_WIRE_VERSION
+            | LEGACY_UNBOUND_COIN_BRANCH_RESOLUTION_STATE_WIRE_VERSION
             | RESOLUTION_STATE_WIRE_VERSION => GameStateDecodeMode::ResolutionWireV4,
             _ => {
                 return Err(format!(
-                    "unsupported resolution_state_version {version}; expected 1, 2, {LEGACY_RESULT_OWNERSHIP_RESOLUTION_STATE_WIRE_VERSION}, {LEGACY_DEALERLESS_RESOLUTION_STATE_WIRE_VERSION}, 5, {LEGACY_UNRESOLVED_CHANGE_ZONE_MEMBER_RESOLUTION_STATE_WIRE_VERSION}, {LEGACY_COIN_FLIP_KIND_RESOLUTION_STATE_WIRE_VERSION}, {LEGACY_UNINHERITED_FLIP_BRANCH_RESOLUTION_STATE_WIRE_VERSION}, or {RESOLUTION_STATE_WIRE_VERSION}"
+                    "unsupported resolution_state_version {version}; expected 1, 2, {LEGACY_RESULT_OWNERSHIP_RESOLUTION_STATE_WIRE_VERSION}, {LEGACY_DEALERLESS_RESOLUTION_STATE_WIRE_VERSION}, 5, {LEGACY_UNRESOLVED_CHANGE_ZONE_MEMBER_RESOLUTION_STATE_WIRE_VERSION}, {LEGACY_COIN_FLIP_KIND_RESOLUTION_STATE_WIRE_VERSION}, {LEGACY_UNINHERITED_FLIP_BRANCH_RESOLUTION_STATE_WIRE_VERSION}, {LEGACY_UNBOUND_COIN_BRANCH_RESOLUTION_STATE_WIRE_VERSION}, or {RESOLUTION_STATE_WIRE_VERSION}"
                 ));
             }
         };
@@ -4791,6 +4882,25 @@ impl ResolutionStateWire {
         // events are recognized there only to produce the same incompatibility
         // diagnostic; this adapter does not add support for that event codec.
         GameStateDecode::prepare_resolution_wire(&mut value, decode_mode)?;
+        if version <= LEGACY_UNBOUND_COIN_BRANCH_RESOLUTION_STATE_WIRE_VERSION {
+            let legacy_frame = value
+                .get("pending_coin_flip")
+                .is_some_and(|frame| !frame.is_null());
+            let typed_frame = value
+                .get("resolution_frames")
+                .map(|frames| serde_json::from_value::<CoinFlipBoundaryStack>(frames.clone()))
+                .transpose()
+                .map_err(|error| error.to_string())?
+                .is_some_and(|stack| {
+                    stack
+                        .frames
+                        .iter()
+                        .any(|frame| matches!(frame, CoinFlipBoundaryFrame::CoinFlip { .. }))
+                });
+            if legacy_frame || typed_frame {
+                return Err(LEGACY_COIN_BRANCH_BINDINGS_RESTORE_ERROR.to_string());
+            }
+        }
         let additional_live_event_roots = match decode_mode {
             GameStateDecodeMode::ResolutionWireV1 => LEGACY_LIVE_ZONE_CHANGED_EVENT_ROOTS,
             GameStateDecodeMode::ResolutionWireV2
@@ -4807,7 +4917,7 @@ impl ResolutionStateWire {
             additional_live_event_roots,
         )?;
 
-        match decode_mode {
+        let decoded = (|| match decode_mode {
             // V1 reader compatibility path: historical keys are consumed here
             // and projected into typed frames before runtime state is restored.
             GameStateDecodeMode::ResolutionWireV1 => {
@@ -5079,7 +5189,16 @@ impl ResolutionStateWire {
             | GameStateDecodeMode::DirectCurrentRaw => {
                 Err("invalid resolution-state wire decode mode".to_string())
             }
-        }
+        })();
+        decoded.map_err(|error: String| {
+            if version <= LEGACY_UNBOUND_COIN_BRANCH_RESOLUTION_STATE_WIRE_VERSION
+                && error.contains("INVALID_COIN_BRANCH_BINDINGS:")
+            {
+                LEGACY_COIN_BRANCH_BINDINGS_RESTORE_ERROR.to_string()
+            } else {
+                error
+            }
+        })
     }
 }
 
@@ -6553,28 +6672,14 @@ mod tests {
             .into_game_state()
     }
 
-    fn restore_v1_coin_flip_fixture(state: GameState, pending: PendingCoinFlip) -> GameState {
+    fn restore_current_coin_flip_fixture(
+        mut state: GameState,
+        pending: PendingCoinFlip,
+    ) -> GameState {
         assert!(state.resolution_stack.is_empty());
-        let mut v1 = serde_json::to_value(state).expect("legacy fixture serializes");
-        v1["pending_coin_flip"] =
-            serde_json::to_value(pending).expect("legacy coin-flip serializes");
-        v1["resolution_state_version"] = Value::from(LEGACY_RESOLUTION_STATE_WIRE_VERSION);
-
-        let wire: ResolutionStateWire =
-            serde_json::from_value(v1).expect("v1 coin-flip fixture converts through the wire");
-        let current = serde_json::to_value(&wire).expect("converted fixture serializes");
-        assert_eq!(
-            current["resolution_state_version"],
-            Value::from(RESOLUTION_STATE_WIRE_VERSION)
-        );
-        assert!(current.get("resolution_frames").is_some());
-        for field in legacy_resolution_wire_fields() {
-            assert!(
-                current.get(*field).is_none(),
-                "current fixture must not write legacy field {field}"
-            );
-        }
-
+        state.push_coin_flip_frame(pending);
+        let current = serde_json::to_value(ResolutionStateWire::from_game_state(state))
+            .expect("current coin fixture serializes");
         serde_json::from_value::<ResolutionStateWire>(current)
             .expect("current coin-flip fixture restores for the runtime action path")
             .into_game_state()
@@ -7368,7 +7473,7 @@ mod tests {
     }
 
     #[test]
-    fn resolution_state_wire_converts_v1_to_current_without_legacy_projection() {
+    fn resolution_state_wire_refuses_v1_coin_without_legacy_projection() {
         let mut state = GameState::new_two_player(42);
         state.waiting_for = WaitingFor::CoinFlipKeepChoice {
             player: PlayerId(0),
@@ -7391,11 +7496,20 @@ mod tests {
         v1["pending_coin_flip"] =
             serde_json::to_value(&pending).expect("legacy coin flip serializes");
         v1["resolution_state_version"] = Value::from(LEGACY_RESOLUTION_STATE_WIRE_VERSION);
-        let wire: ResolutionStateWire =
-            serde_json::from_value(v1).expect("v1 legacy state converts through frames");
-        assert_eq!(wire.game_state().active_coin_flip_frame(), Some(&pending));
-
-        let current = serde_json::to_value(&wire).expect("current wire serializes");
+        v1["pending_coin_flip"]
+            .as_object_mut()
+            .unwrap()
+            .remove("bound_branches");
+        let error = serde_json::from_value::<ResolutionStateWire>(v1)
+            .expect_err("even an old bare coin frame is refused")
+            .to_string();
+        assert!(
+            error.contains(LEGACY_COIN_BRANCH_BINDINGS_RESTORE_ERROR),
+            "{error}"
+        );
+        state.push_coin_flip_frame(pending.clone());
+        let current = serde_json::to_value(ResolutionStateWire::from_game_state(state))
+            .expect("current wire serializes");
         assert_eq!(
             current["resolution_state_version"],
             Value::from(RESOLUTION_STATE_WIRE_VERSION)
@@ -7411,8 +7525,7 @@ mod tests {
         );
     }
 
-    /// CR 705.1 + CR 705.2: every pre-version-8 coin-flip kind is read onto the
-    /// current kind with the same meaning, so no persisted frame is refused.
+    /// Legacy kind syntax is recognized independently of frame restorability.
     #[test]
     fn coin_flip_kind_reader_maps_every_legacy_kind() {
         let read = |json: Value| {
@@ -7475,43 +7588,17 @@ mod tests {
         legacy_frame["kind"] = serde_json::json!("Single");
         v1["pending_coin_flip"] = legacy_frame;
         v1["resolution_state_version"] = Value::from(LEGACY_RESOLUTION_STATE_WIRE_VERSION);
-        let wire: ResolutionStateWire =
-            serde_json::from_value(v1).expect("a v1 frame with the legacy Single kind converts");
-        assert_eq!(wire.game_state().active_coin_flip_frame(), Some(&expected));
-
-        // A version-6 payload (the last version before the reshape) still decodes.
-        let mut v6 = serde_json::to_value(&wire).expect("current wire serializes");
-        v6["resolution_state_version"] = Value::from(6_u64);
-        let restored: ResolutionStateWire =
-            serde_json::from_value(v6).expect("a version-6 payload decodes");
-        assert_eq!(
-            restored.into_game_state().active_coin_flip_frame(),
-            Some(&expected)
+        v1["pending_coin_flip"]
+            .as_object_mut()
+            .unwrap()
+            .remove("bound_branches");
+        let error = serde_json::from_value::<ResolutionStateWire>(v1)
+            .expect_err("a legacy Single frame cannot recover bindings")
+            .to_string();
+        assert!(
+            error.contains(LEGACY_COIN_BRANCH_BINDINGS_RESTORE_ERROR),
+            "{error}"
         );
-    }
-
-    #[test]
-    fn resolution_wire_contract_pins_v5_and_the_legacy_readers() {
-        assert_eq!(RESOLUTION_STATE_WIRE_VERSION, 9);
-        assert_eq!(
-            LEGACY_UNINHERITED_FLIP_BRANCH_RESOLUTION_STATE_WIRE_VERSION,
-            8
-        );
-        assert_eq!(LEGACY_COIN_FLIP_KIND_RESOLUTION_STATE_WIRE_VERSION, 7);
-        assert_eq!(LEGACY_RESOLUTION_STATE_WIRE_VERSION, 1);
-        assert_eq!(LEGACY_TYPED_FRAME_RESOLUTION_STATE_WIRE_VERSION, 2);
-        assert_eq!(LEGACY_RESULT_OWNERSHIP_RESOLUTION_STATE_WIRE_VERSION, 3);
-        assert_eq!(LEGACY_DEALERLESS_RESOLUTION_STATE_WIRE_VERSION, 4);
-        assert_eq!(
-            LEGACY_UNRESOLVED_CHANGE_ZONE_MEMBER_RESOLUTION_STATE_WIRE_VERSION,
-            6
-        );
-
-        let mut v1 =
-            serde_json::to_value(GameState::new_two_player(57)).expect("legacy state serializes");
-        v1["resolution_state_version"] = Value::from(1_u64);
-        serde_json::from_value::<ResolutionStateWire>(v1)
-            .expect("the v1 reader remains available for historical saves");
     }
 
     #[test]
@@ -7882,7 +7969,7 @@ mod tests {
             results: vec![true, false],
             keep_count: 1,
         };
-        let mut coin = restore_v1_coin_flip_fixture(
+        let mut coin = restore_current_coin_flip_fixture(
             coin,
             PendingCoinFlip {
                 source_id: ObjectId(103),
@@ -9547,7 +9634,10 @@ mod tests {
         let error = serde_json::from_value::<ResolutionStateWire>(future)
             .expect_err("an unknown version is refused")
             .to_string();
-        assert!(error.contains("1, 2, 3, 4, 5, 6, 7, 8, or 9"), "{error}");
+        assert!(
+            error.contains("unsupported resolution_state_version"),
+            "{error}"
+        );
     }
 
     /// A Krark's-Thumb-parked coin flip over `branch_context`.
@@ -9619,11 +9709,9 @@ mod tests {
         );
     }
 
-    /// U-E2a: a version-8 payload carries no `branch_context` and restores with
-    /// the default context, which is exactly version 8's semantics: the branch
-    /// inherited nothing. The default is also never written.
+    /// Old parked frames are refused even when the flip has no branches.
     #[test]
-    fn a_version_8_coin_flip_frame_restores_with_an_empty_branch_context() {
+    fn legacy_coin_flip_frames_are_refused_but_current_empty_payload_restores() {
         let default_wire = serde_json::to_value(ResolutionStateWire::from_game_state(
             state_with_parked_coin_flip(FlipBranchContext::default()),
         ))
@@ -9633,44 +9721,49 @@ mod tests {
             "reach: the default context is skipped, so a v8 writer's frame has the same shape"
         );
 
-        let mut v7 = default_wire;
-        v7["resolution_state_version"] =
-            Value::from(LEGACY_UNINHERITED_FLIP_BRANCH_RESOLUTION_STATE_WIRE_VERSION);
-        let restored = serde_json::from_value::<ResolutionStateWire>(v7)
-            .expect("a version-8 payload decodes")
-            .into_game_state();
-        assert_eq!(
-            restored
-                .active_coin_flip_frame()
-                .map(|frame| &frame.branch_context),
-            Some(&FlipBranchContext::default())
-        );
+        serde_json::from_value::<ResolutionStateWire>(default_wire.clone())
+            .expect("positive control: current bare frame restores");
+        for version in 2..=9 {
+            let mut legacy = default_wire.clone();
+            legacy["resolution_state_version"] = Value::from(version);
+            legacy["resolution_frames"]["frames"][0]["data"]
+                .as_object_mut()
+                .unwrap()
+                .remove("bound_branches");
+            let error = serde_json::from_value::<ResolutionStateWire>(legacy)
+                .expect_err("old frame lacks required bindings")
+                .to_string();
+            assert!(
+                error.contains(LEGACY_COIN_BRANCH_BINDINGS_RESTORE_ERROR),
+                "{error}"
+            );
+        }
     }
 
     /// An unversioned raw payload is dated by what its frames carry: a coin-flip
     /// `branch_context` is written only by version 9.
     #[test]
-    fn an_unversioned_coin_flip_branch_context_dates_the_payload_to_the_current_version() {
-        let declared_version = |branch_context: FlipBranchContext| {
-            let mut raw =
-                serde_json::to_value(state_with_parked_coin_flip(branch_context)).expect("raw");
-            assert!(
-                raw.get("resolution_state_version").is_none()
-                    && raw.get("resolution_stack").is_some(),
-                "premise: an unversioned payload carrying the frame stack"
-            );
-            declare_raw_resolution_wire(&mut raw).expect("the payload declares a version");
-            raw["resolution_state_version"].clone()
-        };
-
-        assert_eq!(
-            declared_version(non_empty_branch_context(&GameState::new_two_player(42))),
-            Value::from(RESOLUTION_STATE_WIRE_VERSION)
-        );
-        assert_eq!(
-            declared_version(FlipBranchContext::default()),
-            Value::from(LEGACY_RESULT_OWNERSHIP_RESOLUTION_STATE_WIRE_VERSION),
-            "the same frame without the key is not dated to the current version"
+    fn unversioned_coin_binding_shape_distinguishes_v10_from_v9() {
+        let raw = serde_json::to_value(state_with_parked_coin_flip(non_empty_branch_context(
+            &GameState::new_two_player(42),
+        )))
+        .expect("raw");
+        let mut current = raw.clone();
+        declare_raw_resolution_wire(&mut current).expect("current version inferred");
+        assert_eq!(current["resolution_state_version"], Value::from(10));
+        let mut legacy = raw;
+        legacy["resolution_stack"]["frames"][0]["data"]
+            .as_object_mut()
+            .unwrap()
+            .remove("bound_branches");
+        declare_raw_resolution_wire(&mut legacy).expect("legacy version inferred");
+        assert_eq!(legacy["resolution_state_version"], Value::from(9));
+        let error = serde_json::from_value::<ResolutionStateWire>(legacy)
+            .expect_err("v9 context does not imply bindings")
+            .to_string();
+        assert!(
+            error.contains(LEGACY_COIN_BRANCH_BINDINGS_RESTORE_ERROR),
+            "{error}"
         );
     }
 
@@ -9709,5 +9802,96 @@ mod tests {
                 .is_none(),
             "a non-empty result is not captured"
         );
+    }
+
+    #[test]
+    fn resolution_wire_coin_decode_checks_nested_correspondence_and_pins() {
+        use crate::game::ability_utils::build_resolved_from_def;
+        use crate::types::ability::{AbilityKind, CoinFlipRun, Effect, TargetFilter};
+        let leaf = AbilityDefinition::new(AbilityKind::Spell, resolved_draw(1).effect);
+        let definition = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::FlipCoins {
+                flips: CoinFlipRun::single(),
+                win_effect: Some(Box::new(leaf.clone())),
+                lose_effect: Some(Box::new(leaf)),
+                flipper: TargetFilter::Controller,
+            },
+        );
+        let coin = build_resolved_from_def(&definition, ObjectId(1), PlayerId(0));
+        let root = resolved_draw(2).sub_ability(coin);
+        let current = serde_json::to_value(&root).unwrap();
+        assert_eq!(
+            serde_json::from_value::<ResolvedAbility>(current.clone()).unwrap(),
+            root
+        );
+        for absent in ["coin_branches", "won", "lost"] {
+            let mut malformed = current.clone();
+            let node = &mut malformed["sub_ability"];
+            if absent == "coin_branches" {
+                node.as_object_mut().unwrap().remove(absent);
+            } else {
+                node["coin_branches"]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove(absent);
+            }
+            let error = serde_json::from_value::<ResolvedAbility>(malformed)
+                .expect_err("nested correspondence is enforced")
+                .to_string();
+            assert!(error.contains("INVALID_COIN_BRANCH_BINDINGS:"), "{error}");
+        }
+        let mut malformed = current.clone();
+        malformed["coin_branches"] = current["sub_ability"]["coin_branches"].clone();
+        assert!(
+            serde_json::from_value::<ResolvedAbility>(malformed).is_err(),
+            "a non-coin root cannot carry branches"
+        );
+        let mut malformed = current;
+        malformed["sub_ability"]["coin_branches"]["won"]["target_pins"] = serde_json::json!([null]);
+        let error = serde_json::from_value::<ResolvedAbility>(malformed)
+            .expect_err("child positional pins must align")
+            .to_string();
+        assert!(!error.contains("INVALID_COIN_BRANCH_BINDINGS:"), "{error}");
+    }
+
+    #[test]
+    fn resolution_wire_v9_non_coin_saves_still_load() {
+        let state = GameState::new_two_player(42);
+        let mut wire =
+            serde_json::to_value(ResolutionStateWire::from_game_state(state.clone())).unwrap();
+        wire["resolution_state_version"] = Value::from(9);
+        let restored = serde_json::from_value::<ResolutionStateWire>(wire)
+            .unwrap()
+            .into_game_state();
+        assert_eq!(restored, state);
+    }
+
+    #[test]
+    fn resolution_wire_current_parked_coin_requires_explicit_payload() {
+        let wire = serde_json::to_value(ResolutionStateWire::from_game_state(
+            state_with_parked_coin_flip(FlipBranchContext::default()),
+        ))
+        .unwrap();
+        serde_json::from_value::<ResolutionStateWire>(wire.clone()).unwrap();
+        for payload in [None, Some(Value::Null)] {
+            let mut malformed = wire.clone();
+            let frame = malformed["resolution_frames"]["frames"][0]["data"]
+                .as_object_mut()
+                .unwrap();
+            match payload {
+                Some(payload) => {
+                    frame.insert("bound_branches".into(), payload);
+                }
+                None => {
+                    frame.remove("bound_branches");
+                }
+            }
+            let error = serde_json::from_value::<ResolutionStateWire>(malformed)
+                .expect_err("current parked payload is required")
+                .to_string();
+            assert!(error.contains("INVALID_COIN_BRANCH_BINDINGS:"), "{error}");
+            assert!(!error.contains("RESTORE_INCOMPATIBLE"), "{error}");
+        }
     }
 }

@@ -36899,8 +36899,9 @@ impl ResolvedCoinBranches {
 ///
 /// Serde goes through the derived implementation (`remote = "Self"`) plus the
 /// hand-written `Deserialize` below, which normalizes and validates the target
-/// occurrence pins of every decoded node — whatever owner holds it (stack,
-/// resolution frames, pending casts, prompts) — before any reader sees it.
+/// occurrence pins and coin-branch correspondence of every decoded node —
+/// whatever owner holds it (stack, resolution frames, pending casts, prompts) —
+/// before any reader sees it. Legacy unbound coin branches are never inferred.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(remote = "Self")]
 pub struct ResolvedAbility {
@@ -37414,9 +37415,24 @@ impl<'de> Deserialize<'de> for ResolvedAbility {
         ability
             .normalize_decoded_target_pins()
             .map_err(de::Error::custom)?;
-        if ability.coin_branches.is_some() && !matches!(ability.effect, Effect::FlipCoins { .. }) {
+        let valid_branches = match &ability.effect {
+            Effect::FlipCoins {
+                win_effect,
+                lose_effect,
+                ..
+            } => match ability.coin_branches.as_deref() {
+                Some(branches) => {
+                    (win_effect.is_some() || lose_effect.is_some())
+                        && win_effect.is_some() == branches.won.is_some()
+                        && lose_effect.is_some() == branches.lost.is_some()
+                }
+                None => win_effect.is_none() && lose_effect.is_none(),
+            },
+            _ => ability.coin_branches.is_none(),
+        };
+        if !valid_branches {
             return Err(de::Error::custom(
-                "resolved coin branches on a non-coin instruction",
+                "INVALID_COIN_BRANCH_BINDINGS: resolved coin branches do not match the instruction",
             ));
         }
         Ok(ability)

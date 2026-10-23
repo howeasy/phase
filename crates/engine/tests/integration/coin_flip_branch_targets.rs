@@ -632,3 +632,157 @@ fn two_branch_win_destroys_only_the_announced_opponents_creature() {
     assert!(runner.state().objects[&source].tapped);
     assert_finished(&runner);
 }
+
+#[test]
+fn coin_branch_stack_persistence_is_strict_and_current_bindings_execute() {
+    use engine::types::resolution::ResolutionStateWire;
+    let (mut runner, source, own, opposing) = two_branch_fixture(true, true);
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: source,
+            ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("activation reaches announcement");
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::TargetSelection { .. }
+    ));
+    for target in [opposing[0], own[0]] {
+        runner
+            .act(GameAction::ChooseTarget {
+                target: Some(TargetRef::Object(target)),
+            })
+            .expect("announce branch target");
+    }
+    if matches!(runner.state().waiting_for, WaitingFor::ManaPayment { .. }) {
+        runner
+            .act(GameAction::PassPriority)
+            .expect("pay activation");
+    }
+    assert_eq!(
+        runner.state().stack.len(),
+        1,
+        "reach: bound ability is on stack"
+    );
+    let current =
+        serde_json::to_value(ResolutionStateWire::from_game_state(runner.state().clone())).unwrap();
+    let before = runner.state().clone();
+    for version in 1..=10 {
+        let mut malformed = current.clone();
+        malformed["stack"][0]["kind"]["data"]["ability"]
+            .as_object_mut()
+            .expect("actual activated stack ability")
+            .remove("coin_branches")
+            .expect("reach: bound stack carrier");
+        malformed["resolution_state_version"] = serde_json::json!(version);
+        if version == 1 {
+            malformed
+                .as_object_mut()
+                .unwrap()
+                .remove("resolution_frames");
+        }
+        let error = serde_json::from_value::<ResolutionStateWire>(malformed)
+            .expect_err("missing stack binding is never reconstructed")
+            .to_string();
+        let expected = if version <= 9 {
+            "RESTORE_INCOMPATIBLE_COIN_BRANCH_BINDINGS:"
+        } else {
+            "INVALID_COIN_BRANCH_BINDINGS:"
+        };
+        assert!(error.contains(expected), "v{version}: {error}");
+        assert_eq!(
+            *runner.state(),
+            before,
+            "failed restore leaves live state unchanged"
+        );
+    }
+    *runner.state_mut() = serde_json::from_value::<ResolutionStateWire>(current)
+        .unwrap()
+        .into_game_state();
+    let mut events = Vec::new();
+    finish(&mut runner, &mut events);
+    assert_eq!(flips(&events), vec![true]);
+    assert_eq!(runner.state().objects[&opposing[0]].zone, Zone::Graveyard);
+    assert_eq!(runner.state().objects[&own[0]].zone, Zone::Battlefield);
+    assert_eq!(runner.state().objects[&opposing[1]].zone, Zone::Battlefield);
+    assert_finished(&runner);
+}
+
+#[test]
+fn text_substitution_reaches_both_live_coin_branch_filters() {
+    use engine::types::mana::ManaColor;
+    // Synthetic supported pump grammar; neither real pump card has a color restriction.
+    const COIN: &str = "Flip a coin. If you win the flip, target nonred creature gets +1/+1 until end of turn. If you lose the flip, target nonred creature gets +2/+2 until end of turn.";
+    const CHANGE: &str = "Change the text of target spell or permanent by replacing all instances of one color word with another. (For example, you may change \"nonblack creature\" to \"nongreen creature\" or \"black mana\" to \"green mana.\")";
+    for won in [true, false] {
+        for changed in [false, true] {
+            for chosen_color in [ManaColor::Blue, ManaColor::Green] {
+                let mut scenario = GameScenario::new();
+                scenario.at_phase(Phase::PreCombatMain);
+                let chosen = scenario
+                    .add_creature(P0, "Chosen", 2, 2)
+                    .with_color(vec![chosen_color])
+                    .id();
+                let distractor = scenario
+                    .add_creature(P1, "Distractor", 4, 4)
+                    .with_color(vec![ManaColor::Green])
+                    .id();
+                let spell = scenario
+                    .add_spell_to_hand_from_oracle(P0, "Synthetic Coin Pump", true, COIN)
+                    .id();
+                let change = scenario
+                    .add_spell_to_hand_from_oracle(P1, "Synthetic Word Change", true, CHANGE)
+                    .id();
+                scenario.with_mana_pool(
+                    P1,
+                    vec![ManaUnit::new(ManaType::Blue, ObjectId(0), false, vec![])],
+                );
+                let mut runner = scenario.build();
+                pin_outcomes(&mut runner, &[won]);
+                let mut committed = runner
+                    .cast(spell)
+                    .target_objects(&[chosen, chosen])
+                    .commit();
+                let outcome = if changed {
+                    committed
+                        .act(GameAction::PassPriority)
+                        .expect("P0 passes to responder");
+                    committed
+                        .cast(change)
+                        .target_object(spell)
+                        .choose_option("Red -> Blue")
+                        .commit()
+                        .resolve()
+                } else {
+                    committed.resolve()
+                };
+                let illegal = changed && chosen_color == ManaColor::Blue;
+                assert_eq!(
+                    flips(outcome.events()),
+                    if illegal { vec![] } else { vec![won] },
+                    "reach: legal branches flip exactly once; all-illegal branches do not flip"
+                );
+                let expected = if illegal {
+                    2
+                } else if won {
+                    3
+                } else {
+                    4
+                };
+                let chosen_object = &runner.state().objects[&chosen];
+                assert_eq!(
+                    (
+                        chosen_object.power.unwrap(),
+                        chosen_object.toughness.unwrap()
+                    ),
+                    (expected, expected),
+                    "won={won}, changed={changed}, color={chosen_color:?}"
+                );
+                let other = &runner.state().objects[&distractor];
+                assert_eq!((other.power.unwrap(), other.toughness.unwrap()), (4, 4));
+                assert_finished(&runner);
+            }
+        }
+    }
+}
