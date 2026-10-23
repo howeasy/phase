@@ -3786,6 +3786,15 @@ fn scan_target_filter(x: &TargetFilter, ctx: FilterReadContext, mode: ScanMode) 
             history: HistoryReads::NONE,
         },
         TargetFilter::DefendingPlayer => Axes::NONE,
+        // CR 506.3: reads the bound attack event (event) and live combat and
+        // battlefield state (a planeswalker's loyalty is changed by the damage it
+        // receives, so a sibling trigger can interact: sibling). Not DefendingPlayer's NONE.
+        TargetFilter::AttackedPlayerOrPlaneswalker => Axes {
+            event: true,
+            sibling: true,
+            projected: false,
+            history: HistoryReads::NONE,
+        },
         TargetFilter::HasChosenName => Axes::NONE,
         TargetFilter::ChosenDamageSource { filter } => {
             let mut acc = Axes {
@@ -6728,6 +6737,7 @@ fn replacement_definition_axes(
         origin: _,
         counter_replacement_subject: _,
         granting_object: _,
+        entry_payment_max,
         // The objects these create are scanned once they are live.
         additional_token_spec: _,
         ensure_token_specs: _,
@@ -6768,6 +6778,10 @@ fn replacement_definition_axes(
     }
     if let Some(controller) = enters_under {
         acc = acc.or(scan_controller_ref(controller));
+    }
+    // CR 614.12a: the entry-payment cap reads live game state (Nameless Race).
+    if let Some(max) = entry_payment_max {
+        acc = acc.or(scan_quantity_expr(max, mode));
     }
     match damage_modification {
         Some(DamageModification::Plus { value })
@@ -11500,5 +11514,27 @@ mod tests {
                 .or(HistoryReads::of(HistoryMember::ExileCastPermissionsUsed))
         );
         assert_eq!(history("Aang, Swift Savior", 0), HistoryReads::ALL);
+    }
+}
+
+#[cfg(test)]
+mod attacked_referent_scan_tests {
+    use super::*;
+
+    /// CR 506.3: reads the bound attack event and live battlefield state; a sibling
+    /// trigger's damage changes planeswalker loyalty. Not DefendingPlayer's NONE.
+    #[test]
+    fn attacked_referent_scan_axes() {
+        let f = TargetFilter::AttackedPlayerOrPlaneswalker;
+        for mode in [ScanMode::Conservative, ScanMode::LoopFirewall] {
+            let axes = scan_target_filter(&f, FilterReadContext::SnapshotOrEvent, mode);
+            assert!(axes.event && axes.sibling && !axes.projected, "{mode:?}");
+            let none = scan_target_filter(
+                &TargetFilter::DefendingPlayer,
+                FilterReadContext::SnapshotOrEvent,
+                mode,
+            );
+            assert!(!none.event && !none.sibling, "contrast: {mode:?}");
+        }
     }
 }

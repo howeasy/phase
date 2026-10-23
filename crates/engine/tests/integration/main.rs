@@ -1074,6 +1074,8 @@ mod issue_9662_enters_with_second_placement;
 mod issue_9775_non_controller_activation_offered;
 mod issue_9884_recipient_classifier;
 mod issue_9991_floating_entry_counter_authority;
+mod issue_9991_floating_entry_counter_timing;
+mod issue_9991_torgal_first_human_spell;
 mod issue_bound_by_moonsilver_sacrifice_attach;
 mod issue_circle_of_protection_source_choice;
 mod issue_desperate_gambit_choose_damage_source;
@@ -1321,6 +1323,7 @@ mod perrie_the_pulverizer_attack_trigger_6219;
 mod peter_parker_modal_back_face_cast;
 mod phantom_general_token_anthem;
 mod phyrexian_fleshgorger_ward;
+mod phyrexian_processor_entry_payment;
 mod physical_contest;
 mod pitfall_trap_attacking_count_alt_cost;
 mod plaguecrafter_etb_class;
@@ -2051,6 +2054,8 @@ mod welcome_the_dead;
 #[cfg(feature = "test-support")]
 mod owned_you_target_authority;
 
+mod attack_target_latch;
+mod attacked_player_referent;
 mod base_pt_designation_filter;
 mod controller_anaphor_binds_through_context;
 mod declared_group_identity;
@@ -2064,6 +2069,7 @@ mod issue_9886_dralnus_pet;
 mod keyword_activation_cancel;
 mod partner_family_keyword_remainder;
 mod rally_the_righteous_radiance_pump;
+mod resolution_tap_x_binding;
 mod starting_intensity_keyword;
 mod tidebinder_source_type_gate;
 

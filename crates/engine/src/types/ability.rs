@@ -8490,6 +8490,17 @@ pub enum TargetFilter {
     TriggeringPlayer,
     /// CR 603.7c: Resolves to the source object of the triggering event.
     TriggeringSource,
+    /// CR 506.3 + CR 115.10a: "the player or planeswalker it's attacking" /
+    /// "... that creature is attacking" — the player or planeswalker the
+    /// referred-to attacking creature is attacking, read at resolution by
+    /// `combat::resolve_attacked_player_or_planeswalker`. A context reference,
+    /// never a declared target. Kind-preserving: an attacked player is a player
+    /// recipient and an attacked planeswalker is that permanent, never collapsed
+    /// to its controller (the CR 508.5 collapse of [`TargetFilter::DefendingPlayer`]
+    /// is the contrast). An attacked battle, a creature that is no longer
+    /// attacking, and a planeswalker that is gone are no referent: the recipient
+    /// resolves to nothing.
+    AttackedPlayerOrPlaneswalker,
     /// CR 603.2: Resolves to the object targeted or receiving the current
     /// trigger event — the target counterpart to [`TargetFilter::TriggeringSource`]
     /// and the `TargetFilter`-side analogue of [`ObjectScope::EventTarget`].
@@ -23106,6 +23117,8 @@ impl TargetFilter {
                 | TargetFilter::TriggeringSource
                 | TargetFilter::EventTarget
                 | TargetFilter::DefendingPlayer
+                // CR 506.3 + CR 115.10a: read from combat at resolution, never declared.
+                | TargetFilter::AttackedPlayerOrPlaneswalker
                 // CR 608.2c + CR 115.1: "that token" / "those tokens"
                 // continuations bind to objects created earlier in the same
                 // resolution; they are never declared as player-chosen targets.
@@ -35243,6 +35256,12 @@ pub struct ReplacementDefinition {
     /// CR 201.5a: granter stamp; `stamp_granter` decides which nodes carry it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub granting_object: Option<ObjectIncarnationRef>,
+    /// CR 614.12a: optional upper bound on an as-enters life payment
+    /// (Nameless Race: "...can't be more than ..."). Read only by the
+    /// pre-entry payment prompt constructor, which clamps the prompt maximum
+    /// to the evaluated cap. `None` (every other card) means uncapped.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entry_payment_max: Option<QuantityExpr>,
 }
 
 impl ReplacementDefinition {
@@ -35357,12 +35376,20 @@ impl ReplacementDefinition {
             origin: ReplacementOrigin::Characteristic,
             counter_replacement_subject: CounterReplacementSubject::Recipient,
             granting_object: None,
+            entry_payment_max: None,
         }
     }
 
     /// CR 110.2a: Builder for the self-ETB controller override (see field docs).
     pub fn enters_under(mut self, controller: ControllerRef) -> Self {
         self.enters_under = Some(controller);
+        self
+    }
+
+    /// CR 614.12a: bound an as-enters life payment by a dynamic cap
+    /// (Nameless Race). Chainable, mirroring [`Self::enters_under`].
+    pub fn entry_payment_max(mut self, max: QuantityExpr) -> Self {
+        self.entry_payment_max = Some(max);
         self
     }
 
@@ -47669,6 +47696,32 @@ mod chain_description_backfill_tests {
                 .as_deref(),
             Some("tap"),
         );
+    }
+}
+
+#[cfg(test)]
+mod attacked_referent_variant_tests {
+    use super::*;
+
+    /// CR 506.3 + CR 115.10a: a context reference that is never declared, enumerated,
+    /// bound in advance, or placed in a zone; every catch-all accessor answers the
+    /// "not a population, not a fixed player, not a chosen player" default.
+    #[test]
+    fn attacked_referent_variant_defaults() {
+        let f = TargetFilter::AttackedPlayerOrPlaneswalker;
+        assert!(f.is_context_ref());
+        assert!(!f.names_one_player());
+        assert!(!f.names_bound_single_object());
+        assert!(!f.is_player_scope());
+        assert!(!f.names_enumerable_population());
+        assert!(!f.denotes_player_target());
+        assert!(!f.denotes_battlefield_objects());
+        assert_eq!(f.chosen_player_index(), None);
+        assert_eq!(f.extract_in_zone(), None);
+        assert!(f.extract_zones().is_empty());
+        assert!(f.population_zones().is_empty());
+        let json = serde_json::to_value(&f).unwrap();
+        assert_eq!(json["type"], "AttackedPlayerOrPlaneswalker");
     }
 }
 
