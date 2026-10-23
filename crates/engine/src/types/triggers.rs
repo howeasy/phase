@@ -272,7 +272,11 @@ pub enum AbilityLifecyclePoint {
 /// Decoded through a normalizing `Deserialize` (`remote = "Self"`): the legacy
 /// unit form `"ChangesController"` (written before the variant carried a
 /// `ControlChangeSide`; it always meant "when you lose control") still loads
-/// as `ChangesController { side: Loses }`.
+/// as `ChangesController { side: Loses }`. This is a deliberate, narrow
+/// departure from the strict card-data / transport decode policy in
+/// `game_state.rs` (obsolete tags stay rejected): the tag only ever had one
+/// meaning, so accepting it loses nothing. Precedent: the `WardCost` shim in
+/// `keywords.rs`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(remote = "Self")]
 pub enum TriggerMode {
@@ -688,6 +692,9 @@ impl Serialize for TriggerMode {
 /// Non-buffering visitor behind `TriggerMode`'s normalizing `Deserialize`.
 /// Routes every current-shape payload to the derived implementation and maps the
 /// one legacy unit tag (`"ChangesController"`) onto its only historical meaning.
+/// Uses `deserialize_any`, so it needs a self-describing format (serde_json,
+/// serde-wasm-bindgen — the only ones in use); bincode / postcard cannot decode
+/// a `TriggerMode`.
 struct TriggerModeVisitor;
 
 impl<'de> serde::de::Visitor<'de> for TriggerModeVisitor {
@@ -757,8 +764,10 @@ impl FromStr for TriggerMode {
             "BlocksOrBecomesBlocked" => TriggerMode::BlocksOrBecomesBlocked,
             "CaseSolved" => TriggerMode::CaseSolved,
             "Championed" => TriggerMode::Championed,
-            // Forge's mode string carries no direction; the engine's legacy unit
-            // form always meant "when you lose control" (see the `Deserialize` shim).
+            // Decodes the legacy source-level variant name (it always meant "when
+            // you lose control", see the `Deserialize` shim) so the enum stays
+            // enumerable. NOT a Forge direction mapping: Forge imports go through
+            // `translate_trigger_mode`, which fails closed on this string.
             "ChangesController" => TriggerMode::ChangesController {
                 side: ControlChangeSide::Loses,
             },

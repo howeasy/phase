@@ -291,7 +291,8 @@ impl Board {
         assert_eq!(cards.len(), 2);
     }
 
-    /// CR 102.3: the opponent choice offers the chooser's two opponents.
+    /// CR 806.1: in a free-for-all the opponent choice offers the chooser's two
+    /// opponents (every other player).
     fn expect_opponent_choice(&self, chooser: PlayerId) {
         let WaitingFor::NamedChoice {
             player,
@@ -539,7 +540,7 @@ fn r2_upkeep_gain_prompts_the_gainer_with_their_own_creatures() {
 }
 
 /// R3: the chosen opponent (P2, not the previous controller P0) receives the
-/// chosen creature on a lost flip, permanently (CR 102.3, CR 705.2, CR 611.2a);
+/// chosen creature on a lost flip, permanently (CR 705.2, CR 611.2a);
 /// the paired win keeps it.
 #[test]
 fn r3_lost_flip_hands_the_chosen_creature_to_the_chosen_opponent_permanently() {
@@ -598,6 +599,7 @@ fn r4_each_gain_triggers_separately_around_the_table() {
         board.pick_creature(chooser, pick);
         let [opponent, _] = opponents_of(chooser);
         board.answer_opponent(chooser, opponent, true, false);
+        board.assert_complete();
     }
     assert_eq!(actors, vec![P1, P2, P0]);
     assert!(
@@ -725,6 +727,7 @@ fn r8_trigger_resolves_after_risky_move_leaves_the_battlefield() {
     board.pick_creature(P1, chosen);
     board.answer_opponent(P1, P2, false, false);
     assert_eq!(board.controller_of(chosen), P2);
+    board.assert_complete();
 
     let turn = board.state().turn_number;
     board.drive_until("the next turn", |s| s.turn_number > turn);
