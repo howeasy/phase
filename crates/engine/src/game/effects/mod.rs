@@ -5116,11 +5116,11 @@ fn frame_may_apply_with_entry(frame: &ResolutionFrame) -> bool {
             pending
                 .win_effect
                 .as_deref()
-                .is_some_and(definition_chain_may_apply_with_entry)
+                .is_some_and(resolved_chain_may_apply_with_entry)
                 || pending
                     .lose_effect
                     .as_deref()
-                    .is_some_and(definition_chain_may_apply_with_entry)
+                    .is_some_and(resolved_chain_may_apply_with_entry)
         }
         ResolutionFrame::DieRoll(pending) => pending
             .results_table

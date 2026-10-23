@@ -5,9 +5,10 @@ use rand::Rng;
 
 use crate::game::quantity::resolve_quantity_with_targets;
 use crate::game::replacement::{self, ReplacementResult};
+#[cfg(test)]
+use crate::types::ability::AbilityDefinition;
 use crate::types::ability::{
-    AbilityDefinition, CoinFlipResult, CoinFlipRun, Effect, EffectError, EffectKind,
-    ResolvedAbility, TargetRef,
+    CoinFlipResult, CoinFlipRun, Effect, EffectError, EffectKind, ResolvedAbility, TargetRef,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::{GameState, ResolutionCoinFlip, WaitingFor};
@@ -116,50 +117,30 @@ fn flip_through_replacement(
     }
 }
 
-/// CR 705.2: Execute a flip's win/lose branch, preserving its
-/// `optional`/`sub_ability`/`condition`/`duration` via the canonical converter.
-///
-/// CR 608.2c: the branch is part of the same resolution as the flip, so it
-/// inherits what that resolution produced earlier (`branch_context`): the
-/// players it chose, and a completed-but-empty result for an object it was
-/// asked to choose when none existed (CR 609.3). This is the single place both
-/// the inline and the resumed (Krark's Thumb) paths build a branch.
-#[allow(clippy::too_many_arguments)]
+/// CR 705.2 + CR 601.2c: execute only the selected, already-bound outcome.
+/// CR 608.2b: its target occurrences retain the outer resolution's legality
+/// verdicts; entering a child is not a second whole-ability fizzle check.
 fn run_flip_branch(
     state: &mut GameState,
-    branch: Option<&AbilityDefinition>,
-    source_id: ObjectId,
-    controller: PlayerId,
+    branch: Option<&ResolvedAbility>,
     targets: &[TargetRef],
     chain_root_targets: &[TargetRef],
     branch_context: &FlipBranchContext,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    if let Some(def) = branch {
-        // CR 608.2h: propagate so a counter-gated "that many" nested in the
-        // branch still resolves against the live chain-root target (see
-        // `build_resolved_from_def_with_chain_root`'s doc).
-        let mut sub =
-            crate::game::ability_utils::build_resolved_from_def_with_targets_and_chain_root(
-                def,
-                source_id,
-                controller,
-                targets.to_vec(),
-                chain_root_targets.to_vec(),
-            );
-        // CR 608.2d + CR 115.10: the flip's targets reach the branch root, since
-        // they include the branch's OWN announced targets ("if you win the flip,
-        // ~ deals 2 damage to target opponent"). Only an untargeted
-        // resolution-time chooser at the branch root is denied them: it makes
-        // its own pick ("choose a creature you control and an opponent"), and
-        // handing it an object chosen before the flip would answer that choice
-        // with the wrong object.
-        if !targets.is_empty() {
-            let mut probe = sub.clone();
-            probe.clear_targets();
-            if super::awaits_resolution_object_choice(&probe) {
-                sub.clear_targets();
-            }
+    if let Some(bound) = branch {
+        // CR 705.2 + CR 608.2c: each settled flip starts from the pristine
+        // binding, so one execution's mutations cannot alter later rewards.
+        let mut sub = bound.clone();
+        sub.set_chain_root_targets_recursive(chain_root_targets.to_vec());
+        // CR 601.2c + CR 608.2d: declarations belong to this branch, not the
+        // parent's incoming referent. Resolution-time choosers make their own
+        // choice; context-reference instructions can retain the earlier object.
+        if !crate::game::ability_utils::node_has_stack_target_declaration(&sub)
+            && super::can_inherit_parent_targets(&sub)
+            && !super::awaits_resolution_object_choice(&sub)
+        {
+            sub.targets = targets.to_vec();
         }
         // CR 608.2c: "that opponent" in the branch names the player chosen
         // earlier in this resolution.
@@ -211,8 +192,8 @@ struct FlipRun<'a> {
     flipper: PlayerId,
     targets: &'a [TargetRef],
     chain_root_targets: &'a [TargetRef],
-    win_effect: Option<&'a AbilityDefinition>,
-    lose_effect: Option<&'a AbilityDefinition>,
+    win_effect: Option<&'a ResolvedAbility>,
+    lose_effect: Option<&'a ResolvedAbility>,
     /// CR 608.2c: what the branches inherit from the flipping resolution (chosen players,
     /// completed-empty result), carried across a Krark's Thumb suspension.
     branch_context: &'a FlipBranchContext,
@@ -252,8 +233,6 @@ impl FlipRun<'_> {
         run_flip_branch(
             state,
             branch,
-            self.source_id,
-            self.controller,
             self.targets,
             self.chain_root_targets,
             self.branch_context,
@@ -478,6 +457,15 @@ pub fn resolve(
         return Err(EffectError::MissingParam("FlipCoins".to_string()));
     };
 
+    let branches = ability.coin_branches.as_deref();
+    if win_effect.is_some() != branches.is_some_and(|branches| branches.won.is_some())
+        || lose_effect.is_some() != branches.is_some_and(|branches| branches.lost.is_some())
+    {
+        return Err(EffectError::MissingParam(
+            "resolved coin branches".to_string(),
+        ));
+    }
+
     // CR 705.2: "only the player who flips a coin wins or loses the flip." The
     // `flipper` names that player ("that player flips a coin" → the triggering
     // player, Mirrored Depths / Planar Chaos); the bare "flip a coin" defaults
@@ -522,8 +510,8 @@ pub fn resolve(
         flipper,
         targets: &ability.targets,
         chain_root_targets: &ability.context.chain_root_targets,
-        win_effect: win_effect.as_deref(),
-        lose_effect: lose_effect.as_deref(),
+        win_effect: branches.and_then(|branches| branches.won.as_ref()),
+        lose_effect: branches.and_then(|branches| branches.lost.as_ref()),
         branch_context: &branch_context,
     };
     drive_flip_run(state, &run, FlipRunStart::Fresh(kind), test, events)?;
@@ -606,6 +594,21 @@ pub fn resume_after_keep(
 }
 
 #[cfg(test)]
+fn bound_coin(
+    effect: Effect,
+    targets: Vec<TargetRef>,
+    source_id: ObjectId,
+    controller: PlayerId,
+) -> ResolvedAbility {
+    crate::game::ability_utils::build_resolved_from_def_with_targets(
+        &AbilityDefinition::new(crate::types::ability::AbilityKind::Spell, effect),
+        source_id,
+        controller,
+        targets,
+    )
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::types::ability::{AbilityDefinition, AbilityKind, QuantityExpr};
@@ -653,7 +656,7 @@ mod tests {
             },
         ));
 
-        let ability = ResolvedAbility::new(
+        let ability = bound_coin(
             Effect::FlipCoins {
                 flips: CoinFlipRun::single(),
                 win_effect: Some(win_effect),
@@ -693,7 +696,7 @@ mod tests {
             );
         }
 
-        let ability = ResolvedAbility::new(
+        let ability = bound_coin(
             Effect::FlipCoins {
                 flips: CoinFlipRun::UntilLoss,
                 win_effect: Some(Box::new(AbilityDefinition::new(
@@ -800,7 +803,7 @@ mod tests {
             },
         ));
 
-        let ability = ResolvedAbility::new(
+        let ability = bound_coin(
             Effect::FlipCoins {
                 flips: CoinFlipRun::Exactly {
                     count: QuantityExpr::Fixed { value: 4 },
@@ -845,7 +848,7 @@ mod tests {
                 enter_with_counters: vec![],
             },
         ));
-        let ability = ResolvedAbility::new(
+        let ability = bound_coin(
             Effect::FlipCoins {
                 flips: CoinFlipRun::Exactly {
                     count: QuantityExpr::Fixed { value: 8 },
@@ -1514,7 +1517,7 @@ mod tests {
         let p1_initial = state.players[1].life;
         let p0_initial = state.players[0].life;
 
-        let ability = ResolvedAbility::new(
+        let ability = bound_coin(
             triggering_player_flip(Some(lose)),
             vec![],
             source,
@@ -2058,8 +2061,7 @@ mod tests {
             let mut state = GameState::new_two_player(42);
             state.rng = crate::types::game_state::GameRng::seed_from_u64(seed);
             let start_life = state.players[0].life;
-            let ability =
-                ResolvedAbility::new(until_loss_gain_life(), vec![], ObjectId(1), PlayerId(0));
+            let ability = bound_coin(until_loss_gain_life(), vec![], ObjectId(1), PlayerId(0));
             let mut events = Vec::new();
             resolve(&mut state, &ability, &mut events).unwrap();
 
@@ -2113,7 +2115,7 @@ mod tests {
             let mut state = GameState::new_two_player(42);
             state.rng = crate::types::game_state::GameRng::seed_from_u64(seed);
             let start_life = state.players[0].life;
-            let ability = ResolvedAbility::new(
+            let ability = bound_coin(
                 Effect::FlipCoins {
                     flips: CoinFlipRun::UntilLoss,
                     win_effect: Some(Box::new(gain_life_definition(1))),
@@ -2209,7 +2211,7 @@ mod tests {
                 "the run starts with 2 cards"
             );
 
-            let ability = ResolvedAbility::new(
+            let ability = bound_coin(
                 Effect::FlipCoins {
                     flips: CoinFlipRun::Exactly {
                         count: QuantityExpr::Ref {
@@ -2266,7 +2268,13 @@ mod tests {
             controller: PlayerId(0),
             flipper: PlayerId(0),
             targets: vec![],
-            win_effect: Some(Box::new(gain_life_definition(1))),
+            win_effect: Some(Box::new(
+                crate::game::ability_utils::build_resolved_from_def(
+                    &gain_life_definition(1),
+                    ObjectId(1),
+                    PlayerId(0),
+                ),
+            )),
             lose_effect: None,
             kind: PendingCoinFlipKind::UntilLoss { wins_so_far },
             chain_root_targets: vec![],
@@ -2347,7 +2355,7 @@ mod tests {
             };
             state
         };
-        let ability = |effect: Effect| ResolvedAbility::new(effect, vec![], source, PlayerId(0));
+        let ability = |effect: Effect| bound_coin(effect, vec![], source, PlayerId(0));
 
         // Single flip, no branches.
         let mut state = fresh_state();
@@ -2494,7 +2502,7 @@ mod branch_context_tests {
         targets: Vec<TargetRef>,
         source: ObjectId,
     ) -> ResolvedAbility {
-        ResolvedAbility::new(
+        bound_coin(
             Effect::FlipCoins {
                 flips: CoinFlipRun::single(),
                 win_effect: None,
@@ -2510,16 +2518,17 @@ mod branch_context_tests {
     /// The Krark's-Thumb-parked image of `ability`'s flip, as `resolve` would
     /// push it.
     fn parked(ability: &ResolvedAbility) -> PendingCoinFlip {
-        let Effect::FlipCoins { lose_effect, .. } = &ability.effect else {
-            unreachable!("fixture is a FlipCoins");
-        };
+        let branches = ability
+            .coin_branches
+            .as_deref()
+            .expect("bound coin fixture");
         PendingCoinFlip {
             source_id: ability.source_id,
             controller: ability.controller,
             flipper: ability.controller,
             targets: ability.targets.clone(),
             win_effect: None,
-            lose_effect: lose_effect.clone(),
+            lose_effect: branches.lost.clone().map(Box::new),
             kind: PendingCoinFlipKind::Exactly { remaining: 0 },
             chain_root_targets: ability.context.chain_root_targets.clone(),
             branch_context: FlipBranchContext::from_ability(ability),
@@ -2972,11 +2981,8 @@ mod branch_context_tests {
         assert_eq!(runner.state().objects[&other_bear].controller, P0);
     }
 
-    /// A winning-branch instruction that declares its own player target (the
-    /// shape of Goblin Lyre's and Ral Zarek's branches): the flip's targets
-    /// include the announced player, so the branch root must receive them even
-    /// though it declares a chosen group. Only an untargeted resolution-time
-    /// chooser at the branch root is denied the flip's targets.
+    /// A winning-branch instruction with its own announced player occurrence,
+    /// independent of the coin parent's incoming context.
     fn declaring_branch(effect: Effect) -> AbilityDefinition {
         let mut branch = AbilityDefinition::new(AbilityKind::Spell, effect);
         branch.declares_chosen_group =
@@ -3000,17 +3006,23 @@ mod branch_context_tests {
             damage_source: None,
             excess: None,
         });
-        let ability = ResolvedAbility::new(
+        let mut ability = bound_coin(
             Effect::FlipCoins {
                 flips: CoinFlipRun::single(),
                 win_effect: Some(Box::new(win)),
                 lose_effect: None,
                 flipper: TargetFilter::Controller,
             },
-            vec![TargetRef::Player(P2)],
+            vec![],
             source,
             P0,
         );
+        crate::game::ability_utils::assign_targets_in_chain(
+            &state,
+            &mut ability,
+            &[TargetRef::Player(P2)],
+        )
+        .expect("announce the win branch's player");
         let before = state.players.iter().map(|p| p.life).collect::<Vec<_>>();
 
         let mut events = Vec::new();
@@ -3036,7 +3048,7 @@ mod branch_context_tests {
             target: opponent(),
             count: QuantityExpr::Fixed { value: 1 },
         });
-        let ability = ResolvedAbility::new(
+        let mut ability = bound_coin(
             Effect::FlipCoins {
                 flips: CoinFlipRun::Exactly {
                     count: QuantityExpr::Fixed { value: 5 },
@@ -3045,10 +3057,16 @@ mod branch_context_tests {
                 lose_effect: None,
                 flipper: TargetFilter::Controller,
             },
-            vec![TargetRef::Player(P2)],
+            vec![],
             source,
             P0,
         );
+        crate::game::ability_utils::assign_targets_in_chain(
+            &state,
+            &mut ability,
+            &[TargetRef::Player(P2)],
+        )
+        .expect("announce the win branch's player");
 
         let mut events = Vec::new();
         resolve(&mut state, &ability, &mut events).unwrap();

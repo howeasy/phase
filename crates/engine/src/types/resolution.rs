@@ -212,10 +212,12 @@ pub struct PendingCoinFlip {
     #[serde(default)]
     pub flipper: PlayerId,
     pub targets: Vec<TargetRef>,
+    /// Pristine announced branches, including their local target occurrences
+    /// and legality verdicts. Each execution works from an independent copy.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub win_effect: Option<Box<AbilityDefinition>>,
+    pub win_effect: Option<Box<ResolvedAbility>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub lose_effect: Option<Box<AbilityDefinition>>,
+    pub lose_effect: Option<Box<ResolvedAbility>>,
     pub kind: PendingCoinFlipKind,
     /// CR 608.2h: the creating ability's chain-root target list, carried
     /// across the Krark's Thumb keep-choice suspension so a counter-gated
