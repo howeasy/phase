@@ -21113,9 +21113,17 @@ mod tests {
             let trigger = parse_whenever_you_cast_enters_with_trigger(text, card)
                 .unwrap_or_else(|| panic!("{card}: elided-count conjunct list must parse"));
             let def = cast_enters_install(trigger.execute.as_deref().expect("execute"));
+            let rider_filter = def.valid_card.as_ref().expect("valid_card set");
             assert!(
-                matches!(&def.valid_card, Some(TargetFilter::And { .. })),
-                "{card}: bound to the triggering spell"
+                crate::game::filter::filter_contains(rider_filter, &|filter| matches!(
+                    filter,
+                    TargetFilter::SpecificObject { id }
+                        if *id == crate::types::identifiers::TRIGGERING_SPELL_PLACEHOLDER
+                )) && !crate::game::filter::filter_contains(rider_filter, &|filter| matches!(
+                    filter,
+                    TargetFilter::Typed(typed) if typed.controller == Some(ControllerRef::You)
+                )),
+                "{card}: entry rider identifies the triggering spell and carries no continued-control predicate"
             );
             let mut cursor = Some(def.execute.as_deref().expect("execute ability"));
             for (index, counter) in expected.iter().enumerate() {
