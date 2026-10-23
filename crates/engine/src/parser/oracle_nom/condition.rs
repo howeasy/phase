@@ -5004,8 +5004,10 @@ fn parse_control_count_ge_distinct_quality(input: &str) -> OracleResult<'_, Stat
 ///   * a non-`Typed` filter — an `Or`/`And` of counted populations is not one
 ///     bucketed count.
 ///
-/// In each case the caller's `alt` falls through to `parse_control_count_ge`
-/// and the row keeps exactly the shape it has today. A refusal cannot be raised
+/// For the count consumer, the caller's `alt` falls through to
+/// `parse_control_count_ge`; for the search consumer, the marker stays in the
+/// per-card filter and `selection_constraint` stays `None`. Either way the row
+/// keeps exactly the shape it has today. A refusal cannot be raised
 /// from here instead: three transitive callers disagree about what a refusal
 /// means, and two of them (`static_helpers::try_parse_cost_modification` and
 /// `oracle_trigger::try_extract_intervening`) turn one into an UNCONDITIONAL

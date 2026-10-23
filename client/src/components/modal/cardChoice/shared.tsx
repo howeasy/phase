@@ -86,6 +86,10 @@ export function searchChoiceSubtitle(data: SearchChoice["data"], t: TFunction<"g
         return allowsPartialFind
           ? t("cardChoice.search.subtitleUpTo", opts)
           : t("cardChoice.search.subtitleExact", opts);
+      default: {
+        const _exhaustive: never = constraint.relation;
+        return _exhaustive;
+      }
     }
   }
   if (constraint?.type === "TotalManaValue") {
