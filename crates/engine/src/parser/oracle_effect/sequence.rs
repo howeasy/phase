@@ -19,7 +19,7 @@ use super::super::oracle_target::{parse_target, parse_target_with_ctx, parse_typ
 use super::super::oracle_util::{
     contains_possessive, parse_count_expr, parse_ordinal, parse_subtype, TextPair,
 };
-use super::imperative::CHOOSER_DOMAIN_CONTROLLERS;
+use super::imperative::{try_parse_coin_flip_branch, CHOOSER_DOMAIN_CONTROLLERS};
 use super::{apply_where_x_to_filter, strip_trailing_where_x};
 use crate::parser::oracle_ir::ast::*;
 use crate::parser::oracle_ir::context::ParseContext;
@@ -1672,6 +1672,24 @@ pub(super) fn split_clause_sequence(text: &str) -> Vec<ClauseChunk> {
                             && starts_prefix_clause(
                                 trimmed_before.trim_end_matches(',').trim_end(),
                             );
+                        // CR 705.2 + CR 608.2c: "If you win/lose the flip, X and Y" is ONE
+                        // instruction whose outcome selects the whole consequent, so a bare
+                        // " and " inside it is internal to the branch, never a clause
+                        // boundary. Splitting it would make Y an unconditional sibling of the
+                        // flip (Sorcerer's Strongbox would draw on a loss) and orphan any
+                        // "it" Y shares with X from the branch that owns its antecedent.
+                        // This extends `inside_prefix_comma_and_continuation` to the
+                        // comma-less " and " of the same prefix clause. The "Chain cycle must
+                        // still split" caveat above survives for exactly the copy-retarget
+                        // grant ("copy that spell and may choose new targets for the copy"):
+                        // that conjunct keeps splitting so followup absorption sees it. Every
+                        // other conjunct stays in the branch, which the coin-branch fold
+                        // re-parses with `parse_effect_chain_ir` (splitting it again there).
+                        let inside_coin_branch_outcome =
+                            try_parse_coin_flip_branch(before_and.trim_start()).is_some()
+                                && !recognize_copy_retarget_clause(
+                                    &remainder_trimmed.to_ascii_lowercase(),
+                                );
                         // CR 205.1a + CR 613.1d: a bare "becomes <descriptor>" conjunct
                         // splits off as its OWN become clause only when the antecedent is
                         // ALSO a become predicate (a compound-become like Alacrian Armory's
@@ -1760,7 +1778,8 @@ pub(super) fn split_clause_sequence(text: &str) -> Vec<ClauseChunk> {
                         || mass_exile_union_continuation
                         || loses_all_other_card_types_continuation
                         || shared_equal_to_quantity_conjunct
-                        || inside_prefix_comma_and_continuation;
+                        || inside_prefix_comma_and_continuation
+                        || inside_coin_branch_outcome;
                         if !suppress && starts_bare_and_clause(remainder_trimmed) {
                             push_clause_chunk(&mut chunks, before_and, Some(ClauseBoundary::Comma));
                             current.clear();

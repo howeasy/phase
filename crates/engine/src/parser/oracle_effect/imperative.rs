@@ -15327,19 +15327,18 @@ fn parse_die_result_row<'a>(text: &'a str, separator: &'static str) -> Option<(u
 /// `try_parse_reflexive_coin_flip_branch` owns that "when" wording and lowers it
 /// to a `CreateDelayedTrigger`; this function is strictly the inline-fold path.
 pub(crate) fn try_parse_coin_flip_branch(text: &str) -> Option<(bool, &str)> {
-    const WIN: &str = "if you win the flip, ";
-    const LOSE: &str = "if you lose the flip, ";
-    if let Some(prefix) = text.get(..WIN.len()) {
-        if prefix.eq_ignore_ascii_case(WIN) {
-            return Some((true, &text[WIN.len()..]));
-        }
-    }
-    if let Some(prefix) = text.get(..LOSE.len()) {
-        if prefix.eq_ignore_ascii_case(LOSE) {
-            return Some((false, &text[LOSE.len()..]));
-        }
-    }
-    None
+    // ASCII lowercasing preserves byte offsets, so the nom remainder maps straight
+    // back onto the original-case `text` that the branch body is parsed from.
+    let lower = text.to_ascii_lowercase();
+    nom_on_lower(text, &lower, |input| {
+        let (rest, is_win) = preceded(
+            tag("if you "),
+            alt((value(true, tag("win")), value(false, tag("lose")))),
+        )
+        .parse(input)?;
+        let (rest, _) = tag(" the flip, ").parse(rest)?;
+        Ok((rest, is_win))
+    })
 }
 
 /// CR 603.12: Parse the reflexive coin-flip-result trigger wording

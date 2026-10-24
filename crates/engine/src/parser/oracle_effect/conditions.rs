@@ -6258,6 +6258,15 @@ pub(crate) fn static_condition_to_ability_condition(
                 filter: filter.clone(),
             })
         }
+        // CR 608.2c + CR 400.7: preserve a printed source-presence condition
+        // at resolution. The explicit zone predicate also rejects the captured
+        // source incarnation's exit LKI after it leaves or re-enters.
+        StaticCondition::SourceInZone { zone } => Some(AbilityCondition::SourceMatchesFilter {
+            filter: TargetFilter::Typed(TypedFilter {
+                properties: vec![FilterProp::InZone { zone: *zone }],
+                ..Default::default()
+            }),
+        }),
         StaticCondition::SourceIsTapped => Some(AbilityCondition::SourceIsTapped),
         // CR 702.171b + CR 601.2b: Bridge the source's saddled designation to the
         // effect-resolution seam. The static-layer predicate (`SourceIsSaddled`)
@@ -6388,7 +6397,6 @@ pub(crate) fn static_condition_to_ability_condition(
         // CR 509.1b: recipient-scoped block-evasion gate; no effect-resolution
         // (`AbilityCondition`) equivalent — lowering returns `None`.
         | StaticCondition::RecipientAttackingOwnerTarget { .. }
-        | StaticCondition::SourceInZone { .. }
         | StaticCondition::DefendingPlayerControls { .. }
         | StaticCondition::SourceIsBlocked
         | StaticCondition::SourceIsEquipped

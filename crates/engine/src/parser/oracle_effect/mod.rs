@@ -26057,6 +26057,55 @@ fn parsed_clause_targets_self_ref(clause: &ParsedEffectClause) -> bool {
             .is_some_and(ability_targets_self_ref)
 }
 
+/// CR 608.2c + CR 705.2: whether `previous` is the branch-only stub of a
+/// single flip for the OPPOSITE outcome of the branch being parsed (`is_win`),
+/// and that branch's payload ROOT effect acts on the source. Only the payload
+/// root is examined: `parsed_clause_targets_self_ref` does not descend into a
+/// `FlipCoins` branch, and a self-referential effect deeper in the payload is
+/// not the object the sibling branch's bare "it" refers back to.
+fn opposite_flip_branch_targets_source(previous: Option<&ClauseIr>, is_win: bool) -> bool {
+    let Some(ClauseIr {
+        parsed,
+        disposition: ClauseDisposition::Emit { .. },
+        ..
+    }) = previous
+    else {
+        return false;
+    };
+    let Effect::FlipCoins {
+        flips,
+        win_effect,
+        lose_effect,
+        ..
+    } = &parsed.effect
+    else {
+        return false;
+    };
+    let opposite = match (is_win, win_effect, lose_effect) {
+        (false, Some(win), None) => win,
+        (true, None, Some(lose)) => lose,
+        _ => return false,
+    };
+    flips.is_single_flip() && effect_targets_self_ref(&opposite.effect)
+}
+
+/// Run `parse` with a bare object pronoun pinned to the source (`SelfRef`),
+/// restoring the caller's pronoun antecedent pair on return. The paired
+/// `condition_object_antecedent` is cleared while pinned because it only
+/// describes the pin it travelled with. An antecedent established INSIDE
+/// `parse` (a typed referent in the nested chain) still outranks this pin.
+fn with_source_object_antecedent<R>(
+    ctx: &mut ParseContext,
+    parse: impl FnOnce(&mut ParseContext) -> R,
+) -> R {
+    let prior_pronoun = ctx.object_pronoun_ref.replace(TargetFilter::SelfRef);
+    let prior_antecedent = ctx.condition_object_antecedent.take();
+    let result = parse(ctx);
+    ctx.object_pronoun_ref = prior_pronoun;
+    ctx.condition_object_antecedent = prior_antecedent;
+    result
+}
+
 /// `reference` is consulted only when a player anaphor is actually rewritten.
 fn replace_player_anaphor(effect: &mut Effect, mut reference: impl FnMut() -> TargetFilter) {
     each_target_filter_mut(effect, &mut |filter| {
@@ -43873,7 +43922,8 @@ fn parse_effect_chain_ir_body(
                 // The count travels with the scope: a player chosen inside the
                 // branch is appended after the enclosing choices at runtime, so
                 // its `ChosenPlayer` index must start after them.
-                let ir = match chain_chosen_player_scope.as_ref() {
+                let parse_branch = |ctx: &mut ParseContext| match chain_chosen_player_scope.as_ref()
+                {
                     Some(scope) => ctx.with_player_scope(scope.clone(), |ctx| {
                         parse_effect_chain_ir_after_player_choices(
                             effect_text,
@@ -43888,6 +43938,16 @@ fn parse_effect_chain_ir_body(
                         ctx,
                         chain_chosen_player_count,
                     ),
+                };
+                // CR 608.2c + CR 705.2: a bare "it" in this branch names what the
+                // OPPOSITE branch of the same flip acts on, when that is the source
+                // ("If you win the flip, exile this permanent … If you lose the
+                // flip, sacrifice it"). Only the immediately preceding branch-only
+                // stub for the other outcome is evidence of that antecedent.
+                let ir = if opposite_flip_branch_targets_source(builder.clauses().last(), is_win) {
+                    with_source_object_antecedent(ctx, parse_branch)
+                } else {
+                    parse_branch(ctx)
                 };
                 lower_effect_chain_ir(&ir)
             };

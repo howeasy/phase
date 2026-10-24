@@ -4067,10 +4067,14 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
     // because the alternative (pass-through) can only ADD mis-attachments. Reopen with a card
     // whose installer carries an absorbed rider AND a following continuation; the fix is to
     // resolve the absorb target before the fold, not to widen the disposition gate.
-    // Deferred — coin/die consolidation is top-level only. Goblin Kites, Fickle
-    // Efreet, and Frenetic Sliver keep their flip and branch on opposite sides of
-    // the payload boundary. Reopen when they share a payload, a fourth row appears,
-    // or a double-flip report arrives; a payload-descending pass needs review.
+    // Deferred — coin/die consolidation is top-level only. Goblin Kites and Fickle
+    // Efreet already carry both of their flips inside one delayed payload, so they
+    // need payload-local consolidation, a different shape from a top-level pair.
+    // Reopen when a fourth such row appears or a double-flip report arrives; a
+    // payload-descending pass needs review. A compound coin OUTCOME ("If you win
+    // the flip, X and Y") is not part of this boundary: the sequence splitter keeps
+    // it whole, so the coin-branch fold lowers X and Y inside the one branch before
+    // this pass runs.
     // Deferred — payload-`sub_ability`-invisible anaphor rewrite: the effect-space
     // recursion below delayed-trigger payloads cannot rewrite a continuation's
     // LastCreated binding. Reopen on T-ROW5, a wider Elemental Appeal consumer
