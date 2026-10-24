@@ -55,6 +55,11 @@
 //! whose reversals differ only in display-only data are the same state, a descriptor saved
 //! before the comparison list existed compares by its restoration list and never equals a new
 //! one.
+//!
+//! Transition-counter completeness: every change of the delivered rules state advances
+//! `GameState::state_revision`, including the action boundary's repair on a rejected action
+//! and contest driver steps that change the contest but not its visible signature; a state
+//! installed in place of the live one continues the replaced counter.
 
 use engine::ai_support::legal_actions_full;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
@@ -1903,4 +1908,156 @@ fn real_saves_reconcile_as_before() {
             );
         }
     }
+}
+
+fn gunzip(gz: &[u8]) -> String {
+    let mut json = String::new();
+    flate2::read::GzDecoder::new(gz)
+        .read_to_string(&mut json)
+        .expect("fixture .json.gz must inflate to UTF-8 JSON");
+    json
+}
+
+fn projected_capture_snapshot(gz: &[u8]) -> Value {
+    let json = gunzip(gz);
+    let envelope: Value = serde_json::from_str(&json).expect("dump envelope parses as JSON");
+    let mut snapshot = envelope["gameState"].clone();
+    let object = snapshot
+        .as_object_mut()
+        .expect("a captured gameState is a JSON object");
+    assert!(
+        !object.contains_key("resolution_state_version"),
+        "the reporter's capture is an unversioned runtime debug snapshot"
+    );
+    let stack = object
+        .remove("resolution_stack")
+        .expect("the wedged capture carries a runtime resolution_stack");
+    object.insert("resolution_frames".to_string(), stack);
+    object.insert("resolution_state_version".to_string(), Value::from(2));
+    snapshot
+}
+
+fn load_capture(gz: &[u8]) -> GameState {
+    // Project only the runtime envelope onto the supported v2 wire. Do not run the
+    // restore finalizer: this witness must reach the live action-boundary repair.
+    serde_json::from_value::<engine::types::resolution::ResolutionStateWire>(
+        projected_capture_snapshot(gz),
+    )
+    .expect("the projected snapshot deserializes through the versioned resolution decoder")
+    .into_game_state()
+}
+
+#[test]
+fn rejected_action_repair_advances_revision_but_plain_rejection_does_not() {
+    use engine::game::engine::apply;
+
+    let mut state = load_capture(include_bytes!(
+        "fixtures/mycoloth_devour_wedge_turn20.json.gz"
+    ));
+    assert!(
+        !state.resolution_stack.is_empty(),
+        "reach: the wedge is present"
+    );
+    let before = state.state_revision;
+    assert!(apply(&mut state, P0, GameAction::PassPriority).is_err());
+    assert!(
+        state.resolution_stack.is_empty(),
+        "reach: the entry sweep repaired the wedge"
+    );
+    assert!(state.state_revision > before);
+
+    let mut healthy = GameState::new_two_player(0);
+    healthy.priority_player = P1;
+    healthy.waiting_for = WaitingFor::Priority { player: P1 };
+    let before = healthy.state_revision;
+    assert!(apply(&mut healthy, P0, GameAction::PassPriority).is_err());
+    assert_eq!(healthy.state_revision, before);
+}
+
+#[test]
+fn contest_prompt_mutations_advance_revision_without_publishing() {
+    use engine::game::contest::{advance_contest, contest_click, start_contest, ContestStep};
+    use engine::types::contest::{ClickDisposition, ClickRejection, ContestConfig};
+
+    const EYE_TO_EYE: &str =
+        "You and target creature's controller have a staring contest. If you win, destroy that creature.";
+    let config = ContestConfig {
+        countdown_ms: 1_000,
+        inactivity_timeout_ms: 1_000,
+        reconnect_grace_ms: 5_000,
+        settle_window_ms: 0,
+        max_active_ms: 600_000,
+    };
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let victim = scenario.add_vanilla(P1, 2, 2);
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(P0, "Eye to Eye", true, EYE_TO_EYE)
+        .id();
+    let mut runner = scenario.build();
+    runner.cast(spell).target_objects(&[victim]).resolve();
+    let mut state = runner.state().clone();
+    let mut events = Vec::new();
+    assert_eq!(
+        start_contest(&mut state, config, 0, &mut events),
+        ContestStep::Updated
+    );
+    assert_eq!(
+        advance_contest(&mut state, 1_000, &mut events),
+        ContestStep::Updated
+    );
+    let contest = |state: &GameState| match &state.waiting_for {
+        WaitingFor::PhysicalContest { contest, .. } => (**contest).clone(),
+        other => panic!("expected PhysicalContest, got {other:?}"),
+    };
+    let id = contest(&state).id;
+    let before = state.state_revision;
+    let (disposition, step) = contest_click(&mut state, id, P0, 1, 1_100, &mut events);
+    assert_eq!(disposition, ClickDisposition::Counted);
+    assert_eq!(step, ContestStep::Unchanged);
+    assert_eq!(contest(&state).contestants[0].clicks, 1);
+    assert!(state.state_revision > before);
+
+    let before = state.state_revision;
+    let prior_contest = contest(&state);
+    assert_eq!(
+        advance_contest(&mut state, 1_500, &mut events),
+        ContestStep::Unchanged
+    );
+    assert_eq!(contest(&state).phase, prior_contest.phase);
+    assert!(contest(&state).clock_ms > prior_contest.clock_ms);
+    assert!(state.state_revision > before);
+
+    let before = state.state_revision;
+    let (disposition, step) = contest_click(&mut state, id, P0, 1, 1_600, &mut events);
+    assert_eq!(
+        disposition,
+        ClickDisposition::Rejected(ClickRejection::StaleSequence)
+    );
+    assert_eq!(step, ContestStep::Unchanged);
+    assert_eq!(contest(&state).clock_ms, 1_600);
+    assert!(state.state_revision > before);
+
+    let before = state.state_revision;
+    let clock = contest(&state).clock_ms;
+    assert_eq!(
+        start_contest(&mut state, config, 1_700, &mut events),
+        ContestStep::Unchanged
+    );
+    assert_eq!(contest(&state).clock_ms, clock);
+    assert_eq!(state.state_revision, before);
+    let (disposition, step) =
+        contest_click(&mut state, id.wrapping_add(1), P0, 2, 1_800, &mut events);
+    assert_eq!(
+        disposition,
+        ClickDisposition::Rejected(ClickRejection::WrongContest)
+    );
+    assert_eq!(step, ContestStep::Unchanged);
+    assert_eq!(state.state_revision, before);
+    assert_eq!(contest(&state).clock_ms, clock);
+    assert_eq!(
+        advance_contest(&mut state, clock, &mut events),
+        ContestStep::Unchanged
+    );
+    assert_eq!(state.state_revision, before);
 }

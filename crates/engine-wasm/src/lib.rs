@@ -3239,6 +3239,16 @@ fn restore_game_state_inner(json_str: &str) -> Result<(), String> {
     // A contest's timestamps belong to the host clock that stamped them; this restore
     // may be an import from another page or worker (see the engine function).
     engine::game::contest::cancel_contest_after_restore(&mut state);
+    // A restore over a live game replaces it in place (undo, developer restore, recovery):
+    // continue the replaced state's revision and advance it, so the restored snapshot never
+    // repeats a revision already used with different rules state (the clients' staleness key).
+    if let Some(replaced_revision) = GAME_STATE.with(|cell| {
+        let replaced = cell.take();
+        replaced.as_ref().map(|replaced| replaced.state_revision)
+    }) {
+        state.state_revision = replaced_revision;
+        engine::game::public_state::bump_state_revision(&mut state);
+    }
     GAME_STATE.with(|cell| cell.set(Some(state)));
     // Restoring (undo, or resuming a save from a fresh worker that never saw
     // `initialize_game`) invalidates any in-progress recording — the restored
@@ -3395,6 +3405,77 @@ mod restored_card_db_requirements_tests {
         assert!(error.contains("card database"));
         assert!(GAME_STATE.with(|cell| cell.replace(None).is_none()));
         assert!(!is_multiplayer_mode());
+    }
+
+    #[test]
+    fn restore_continues_live_revision_and_preserves_fresh_decode_revision() {
+        clear_game_state();
+        set_multiplayer_mode(false);
+        load_minimal_test_card_database();
+        let json = serde_json::to_string(&GameState::new_two_player(17)).unwrap();
+        let decoded_revision = decode_and_rehydrate_restored_game_state(&json, |state| {
+            state.rehydrate_rng();
+            Ok(())
+        })
+        .expect("independent decode succeeds")
+        .state
+        .state_revision;
+        let mut live = GameState::new_two_player(17);
+        live.state_revision = 41;
+        GAME_STATE.with(|cell| cell.set(Some(live)));
+        for expected in [42, 43] {
+            restore_game_state_inner(&json).expect("live restore succeeds");
+            assert_eq!(with_state(|state| state.state_revision).unwrap(), expected);
+        }
+        for _ in 0..2 {
+            clear_game_state();
+            restore_game_state_inner(&json).expect("fresh restore succeeds");
+            assert_eq!(
+                with_state(|state| state.state_revision).unwrap(),
+                decoded_revision
+            );
+        }
+        clear_game_state();
+    }
+
+    #[test]
+    fn restore_revokes_proposals_independently_of_revision() {
+        clear_game_state();
+        set_multiplayer_mode(false);
+        load_minimal_test_card_database();
+        let json = serde_json::to_string(&GameState::new_two_player(17)).unwrap();
+        let decoded_revision = decode_and_rehydrate_restored_game_state(&json, |state| {
+            state.rehydrate_rng();
+            Ok(())
+        })
+        .expect("independent decode succeeds")
+        .state
+        .state_revision;
+        for live_revision in [None, Some(41)] {
+            clear_game_state();
+            if let Some(revision) = live_revision {
+                let mut live = GameState::new_two_player(17);
+                live.state_revision = revision;
+                GAME_STATE.with(|cell| cell.set(Some(live)));
+            }
+            let token = AI_PROPOSALS.with(|registry| {
+                registry.borrow_mut().insert(AiDecisionContract {
+                    semantic_owner: PlayerId(0),
+                    authorized_actor: PlayerId(0),
+                    state_revision: decoded_revision,
+                    candidates: Vec::new(),
+                })
+            });
+            assert!(AI_PROPOSALS.with(|registry| registry.borrow().proposal(&token).is_some()));
+            restore_game_state_inner(&json).expect("restore succeeds");
+            let expected_revision = live_revision.map_or(decoded_revision, |revision| revision + 1);
+            assert_eq!(
+                with_state(|state| state.state_revision).unwrap(),
+                expected_revision
+            );
+            assert!(AI_PROPOSALS.with(|registry| registry.borrow().proposal(&token).is_none()));
+        }
+        clear_game_state();
     }
 
     /// Pins the legacy-compatible generic restore boundary: rounds 4-6 tried,
@@ -5185,9 +5266,31 @@ mod tests {
             "stale"
         );
 
-        let token = install_issued_candidate(priority_state(player), player, &action);
-        let state_json = export_game_state_json().expect("live state exports");
-        restore_game_state(&state_json).expect("same-revision restore succeeds");
+        load_minimal_test_card_database();
+        set_multiplayer_mode(false);
+        let seed_json = serde_json::to_string(&priority_state(player)).unwrap();
+        let prepared = decode_and_rehydrate_restored_game_state(&seed_json, |state| {
+            state.rehydrate_rng();
+            Ok(())
+        })
+        .expect("prepared state decodes")
+        .state;
+        let token = install_issued_candidate(prepared, player, &action);
+        let issued_revision = AI_PROPOSALS.with(|registry| {
+            registry
+                .borrow()
+                .proposal(&token)
+                .expect("issued token exists")
+                .contract
+                .state_revision
+        });
+        let state_json = export_game_state_json().expect("prepared live state exports");
+        GAME_STATE.with(|cell| cell.take());
+        restore_game_state(&state_json).expect("same-revision fresh restore succeeds");
+        assert_eq!(
+            with_state(|state| state.state_revision).expect("restored state exists"),
+            issued_revision
+        );
         assert_eq!(proposal_outcome(&token, player, &action)["status"], "stale");
         clear_game_state();
     }

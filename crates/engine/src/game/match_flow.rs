@@ -325,6 +325,10 @@ pub fn apply_trusted_match_forfeit(
     // CR 104.1 + CR 723.1: a match forfeit does not go through
     // `elimination::end_game`, so it ends player control itself.
     crate::game::turn_control::end_all_player_control(state);
+    // A trusted match forfeit changes the delivered rules state outside the action boundary
+    // (no `apply` wraps it), and the revision is the clients' staleness key, so the forfeit
+    // advances it itself.
+    crate::game::public_state::bump_state_revision(state);
 
     Ok(vec![GameEvent::GameOver {
         winner: Some(winner),
@@ -484,6 +488,10 @@ fn restart_between_games_with_starting_player(
         state.players.len() as u8,
         state.rng_seed.wrapping_add(state.game_number as u64 + 1),
     );
+    // The next game replaces this one in place (same match, same client session): continue
+    // the replaced state's revision, so no later snapshot repeats one already used.
+    // `start_game_with_starting_player` and the outer action boundary then advance it.
+    next_state.state_revision = state.state_revision;
     // CR 732.2a: the between-games rebuild is a fresh `GameState::new` (loop_detection
     // defaults Off), so adopt the match config through the single authority — a raw
     // `next_state.match_config = …` would copy the struct but leave the runtime
@@ -709,11 +717,13 @@ mod tests {
         state.match_config.match_type = MatchType::Bo3;
         state.match_score.p0_wins = 1;
         state.sideboard_submitted = vec![PlayerId(0)];
+        let before = state.state_revision;
 
         let events =
             apply_trusted_match_forfeit(&mut state, PlayerId(0), MatchForfeitCause::MatchConcede)
                 .expect("two-seat Bo3 match concede is trusted");
 
+        assert!(state.state_revision > before);
         assert_eq!(state.match_phase, MatchPhase::Completed);
         assert_eq!(state.match_score.p0_wins, 1);
         assert_eq!(state.match_score.p1_wins, 2);
@@ -1534,10 +1544,13 @@ mod tests {
         let session = InteractionSessionId("match-authority-carry".to_string());
         bind_interaction_authority(&mut state, session.clone())
             .expect("game 1 binds authority the way its creator does");
+        state.state_revision = 41;
 
         let mut events = Vec::new();
         handle_choose_play_draw(&mut state, PlayerId(0), true, &mut events)
             .expect("game 2 of the Bo3 must start");
+        assert_eq!(state.match_phase, MatchPhase::InGame);
+        assert!(state.state_revision > 41);
 
         // The rebuild replaces `state` wholesale with a `GameState::new`, so if
         // that constructor ever started binding authority itself the assertion

@@ -4507,6 +4507,8 @@ mod tests {
         );
 
         let mut session = mgr.try_session(&code).unwrap();
+        let replaced_revision = session.state.state_revision;
+        assert!(state_before.state_revision < replaced_revision);
         let outcome = session
             .request_takeback(priority_player, RewindTarget::LastAction)
             .unwrap();
@@ -4519,6 +4521,7 @@ mod tests {
 
         let outcome = session.respond_takeback(other_player, true).unwrap();
         assert_eq!(outcome, TakebackOutcome::Approved);
+        assert!(session.state.state_revision > replaced_revision);
         assert_eq!(
             session.state.waiting_for, state_before.waiting_for,
             "approved takeback should restore the pre-action waiting_for"
@@ -4651,10 +4654,12 @@ mod tests {
         );
     }
 
-    /// A contest's identity must survive a takeback of a COMPLETED contest. Undoing the
-    /// cast and replaying it reaches the same state revision, so an identity derived from
-    /// the revision alone would repeat — and a click frame stamped for the discarded
-    /// branch's contest would count in the replayed one. The restore rotates the
+    /// A contest's identity must survive a takeback of a COMPLETED contest: a click frame
+    /// stamped for the discarded branch's contest must not count in the replayed one.
+    /// A takeback continues the state revision, so the replay already differs by revision;
+    /// the session term the identity also hashes is pinned on its own, at an equal revision,
+    /// by `contest_identity_separates_equal_revisions_by_interaction_session` (V13).
+    /// The restore rotates the
     /// interaction session, and the identity is bound to it.
     #[test]
     fn a_contest_replayed_after_a_takeback_has_a_new_identity_and_rejects_the_old_frame() {
@@ -4735,6 +4740,36 @@ mod tests {
         );
         let (current, _) = contest_click(&mut session.state, second, P0, 1, go + 20, &mut events);
         assert_eq!(current, ClickDisposition::Counted);
+    }
+
+    #[test]
+    fn contest_identity_separates_equal_revisions_by_interaction_session() {
+        const EYE_TO_EYE: &str = "You and target creature's controller have a staring contest. If you win, destroy that creature.";
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let victim = scenario.add_vanilla(P1, 2, 2);
+        let spell = scenario
+            .add_spell_to_hand_from_oracle(P0, "Eye to Eye", true, EYE_TO_EYE)
+            .id();
+        let base = scenario.build().state().clone();
+        let mut first = base.clone();
+        let mut second = base;
+        bind_fresh_interaction_session(&mut first, "equal-revision");
+        bind_fresh_interaction_session(&mut second, "equal-revision");
+        assert_ne!(first.interaction_session_id, second.interaction_session_id);
+        assert_eq!(first.state_revision, second.state_revision);
+        let same_session = first.clone();
+        let cast_into_contest = |state| {
+            let mut runner = GameRunner::from_state(state);
+            runner.cast(spell).target_objects(&[victim]).resolve();
+            match &runner.state().waiting_for {
+                WaitingFor::PhysicalContest { contest, .. } => contest.id,
+                other => panic!("the cast must park the game on the contest, got {other:?}"),
+            }
+        };
+        let first_id = cast_into_contest(first);
+        assert_ne!(first_id, cast_into_contest(second));
+        assert_eq!(first_id, cast_into_contest(same_session));
     }
 
     /// A takeback restores a live shortcut offer through the same rekeying
