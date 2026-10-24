@@ -505,6 +505,7 @@ interface FenceCase {
 const fenceCases: FenceCase[] = [
   { row: "T1 engine display-only notification", printing: "SBBB", notify: true, stale: false },
   { row: "T2 identity notification", next: { ...ENGINE_FENCE, waiting_for_identity: "prompt-y" }, notify: true, stale: true },
+  { row: "T2 identity completion without notification", next: { ...ENGINE_FENCE, waiting_for_identity: "prompt-y" }, stale: true },
   ...[6, 0].map((revision) => ({
     row: `T3 revision notification ${revision}`, next: { ...ENGINE_FENCE, state_revision: revision }, notify: true, stale: true,
   })),
@@ -513,6 +514,7 @@ const fenceCases: FenceCase[] = [
   { row: "T5 session notification", session: true, notify: true, stale: true },
   { row: "T6 authorized actor notification", actor: 2, notify: true, stale: true },
   { row: "T6 authorized actor completion", actor: 2, stale: true },
+  { row: "T6 authorized actor changes back", actor: 2, notify: true, back: true, stale: true },
   { row: "T7a display-only completion", printing: "SBBB", stale: false },
   ...[6, 0].map((revision) => ({
     row: `T7b revision completion ${revision}`, next: { ...ENGINE_FENCE, state_revision: revision }, stale: true,
@@ -569,13 +571,28 @@ describe("engine prompt fence and exact legacy fallback", () => {
       const next = paymentState(testCase.next ?? ENGINE_FENCE, testCase.printing ?? "SAAA", testCase.actor ?? 1);
       if (testCase.sameReference) next.waiting_for = first.waiting_for;
       commitPrompt(next, testCase.notify ?? false);
-      if (testCase.back) commitPrompt(paymentState(ENGINE_FENCE), true);
+      if (testCase.notify && testCase.stale) {
+        // Isolate the subscription: replacement work must start while the original
+        // proposal is still unresolved, before the completion guard can reject it.
+        await Promise.resolve();
+        await Promise.resolve();
+        expect(getAiActionProposal).toHaveBeenCalledTimes(2);
+        expect(getAiActionProposal).toHaveBeenLastCalledWith("Medium", testCase.actor ?? 1);
+        expect(dispatchAiActionProposal).not.toHaveBeenCalled();
+      }
+      if (testCase.back) {
+        commitPrompt(paymentState(ENGINE_FENCE), true);
+        await Promise.resolve();
+        await Promise.resolve();
+        expect(getAiActionProposal).toHaveBeenCalledTimes(3);
+        expect(getAiActionProposal).toHaveBeenLastCalledWith("Medium", 1);
+      }
       pendingProposal.resolve(issued);
       await runOnce();
       if (testCase.stale) {
         expect(dispatchAiActionProposal).not.toHaveBeenCalled();
         expect(getAiActionProposal.mock.calls.length).toBeGreaterThanOrEqual(2);
-        if (testCase.actor) expect(getAiActionProposal).toHaveBeenLastCalledWith("Medium", testCase.actor);
+        if (testCase.actor) expect(getAiActionProposal).toHaveBeenLastCalledWith("Medium", testCase.back ? 1 : testCase.actor);
       } else {
         expect(dispatchAiActionProposal).toHaveBeenCalledExactlyOnceWith(issued);
         expect(getAiActionProposal).toHaveBeenCalledTimes(1);

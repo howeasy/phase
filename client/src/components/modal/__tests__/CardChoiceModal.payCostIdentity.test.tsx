@@ -15,6 +15,7 @@ vi.mock("../../../hooks/useGameDispatch", () => ({ useGameDispatch: () => dispat
 // in the real Rust wire carrier that the structural client ability type omits.
 function setPrompt(options: {
   identity?: string;
+  revision?: number;
   printing?: string;
   choices?: number[];
   count?: number;
@@ -45,7 +46,7 @@ function setPrompt(options: {
     .withObjects(...objects).build({
       waiting_for: waitingFor,
       has_pending_cast: true,
-      derived: { waiting_for_identity: options.identity, unique_authorized_submitter: player },
+      derived: { waiting_for_identity: options.identity, state_revision: options.revision, unique_authorized_submitter: player },
     });
   useGameStore.setState({ gameMode: "online", gameState: state, waitingFor, viewerInteraction: null });
 }
@@ -71,6 +72,18 @@ describe("PayCost engine identity", () => {
     select(10);
     expect(screen.getByRole("button", { name: "Discard (1/2)" })).toBeDisabled();
     act(() => setPrompt({ identity: "same", printing: "SBBB" }));
+    expect(screen.getByRole("button", { name: "Discard (1/2)" })).toBeDisabled();
+    select(11);
+    fireEvent.click(screen.getByRole("button", { name: "Discard (2/2)" }));
+    expect(dispatchMock).toHaveBeenCalledExactlyOnceWith({ type: "SelectCards", data: { cards: [10, 11] } });
+  });
+
+  it("P1b retains a partial selection across a revision-only refreshed snapshot", () => {
+    setPrompt({ identity: "same", revision: 5 });
+    render(<CardChoiceModal />);
+    select(10);
+    expect(screen.getByRole("button", { name: "Discard (1/2)" })).toBeDisabled();
+    act(() => setPrompt({ identity: "same", revision: 6 }));
     expect(screen.getByRole("button", { name: "Discard (1/2)" })).toBeDisabled();
     select(11);
     fireEvent.click(screen.getByRole("button", { name: "Discard (2/2)" }));
