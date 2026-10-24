@@ -4980,9 +4980,6 @@ impl ResolutionStateWire {
         // diagnostic; this adapter does not add support for that event codec.
         GameStateDecode::prepare_resolution_wire(&mut value, decode_mode)?;
         if version <= LEGACY_UNBOUND_COIN_BRANCH_RESOLUTION_STATE_WIRE_VERSION {
-            let legacy_frame = value
-                .get("pending_coin_flip")
-                .is_some_and(|frame| !frame.is_null());
             let typed_frame = value
                 .get("resolution_frames")
                 .map(|frames| serde_json::from_value::<CoinFlipBoundaryStack>(frames.clone()))
@@ -4994,7 +4991,7 @@ impl ResolutionStateWire {
                         .iter()
                         .any(|frame| matches!(frame, CoinFlipBoundaryFrame::CoinFlip { .. }))
                 });
-            if legacy_frame || typed_frame {
+            if typed_frame {
                 return Err(LEGACY_COIN_BRANCH_BINDINGS_RESTORE_ERROR.to_string());
             }
         }
@@ -5018,6 +5015,12 @@ impl ResolutionStateWire {
             // V1 reader compatibility path: historical keys are consumed here
             // and projected into typed frames before runtime state is restored.
             GameStateDecodeMode::ResolutionWireV1 => {
+                if value
+                    .get("pending_coin_flip")
+                    .is_some_and(|frame| !frame.is_null())
+                {
+                    return Err(LEGACY_COIN_BRANCH_BINDINGS_RESTORE_ERROR.to_string());
+                }
                 // CR 603.6a + CR 614.12: a v1 save paused inside a multi-object
                 // ChangeZone wrote bare member ids with carrier-level entry
                 // modifications. Migrate (or refuse, when a gate decides the
