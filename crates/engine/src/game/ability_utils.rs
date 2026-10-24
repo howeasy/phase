@@ -537,7 +537,7 @@ struct SlotAccumulator {
     /// retain the established full-prefix lookup.
     coin_depth: usize,
     path: Vec<ChainStep>,
-    declarations: Vec<CoinDeclaration>,
+    declarations: Option<Vec<CoinDeclaration>>,
     multi_target_pools: Vec<(*const ResolvedAbility, CoinDeclarationRole, usize)>,
 }
 
@@ -560,13 +560,20 @@ impl Default for SlotAccumulator {
             groups: Vec::new(),
             coin_depth: 0,
             path: Vec::new(),
-            declarations: Vec::new(),
+            declarations: None,
             multi_target_pools: Vec::new(),
         }
     }
 }
 
 impl SlotAccumulator {
+    fn for_ability(ability: &ResolvedAbility) -> Self {
+        Self {
+            declarations: chain_has_coin_branches(ability).then(Vec::new),
+            ..Self::default()
+        }
+    }
+
     /// Push a slot and its mode label together. The label is `current_label` at
     /// push time, keeping `labels` and `slots` index-parallel by construction.
     /// The slot's `chooser` is stamped from `current_chooser` unless the slot
@@ -575,11 +582,13 @@ impl SlotAccumulator {
         if slot.chooser.is_none() {
             slot.chooser = self.current_chooser;
         }
-        self.declarations.push(CoinDeclaration {
-            path: self.path.clone(),
-            instance: TargetInstanceId(self.slots.len()),
-            binds_prior: target_filter_binds_prior_target(filter),
-        });
+        if let Some(declarations) = &mut self.declarations {
+            declarations.push(CoinDeclaration {
+                path: self.path.clone(),
+                instance: TargetInstanceId(self.slots.len()),
+                binds_prior: target_filter_binds_prior_target(filter),
+            });
+        }
         self.slots.push(slot);
         self.labels.push(self.current_label.clone());
         self.groups.push(self.current_group);
@@ -603,14 +612,14 @@ impl SlotAccumulator {
             groups: &self.groups,
             object_slots: (self.coin_depth > 0).then_some(CoinBuiltSlots {
                 slots: &self.slots,
-                declarations: &self.declarations,
+                declarations: self.declarations.as_deref().unwrap_or_default(),
                 path: &self.path,
             }),
             declared_slots: (self.coin_depth > 0).then(|| {
                 let scope = CoinAntecedentScope::new(
                     &self.path,
                     TargetInstanceId(self.slots.len()),
-                    self.declarations.as_slice(),
+                    self.declarations.as_deref().unwrap_or_default(),
                 );
                 &self.slots[scope.slot_base..]
             }),
@@ -715,7 +724,7 @@ pub(crate) fn build_target_slots_for_announcement(
     state: &GameState,
     ability: &ResolvedAbility,
 ) -> Result<TargetSlotBuildOutcome, EngineError> {
-    let mut acc = SlotAccumulator::default();
+    let mut acc = SlotAccumulator::for_ability(ability);
     match collect_target_slots(state, ability, &mut acc) {
         Ok(()) => Ok(TargetSlotBuildOutcome::Slots(acc.slots)),
         Err(TargetSlotBuildError::RequiresChosenX) => Ok(TargetSlotBuildOutcome::RequiresChosenX),
@@ -876,9 +885,29 @@ pub fn build_target_slots_labelled(
     // BEFORE X is chosen (the common non-deferred modal path).
     chosen_x: Option<u32>,
 ) -> Result<(Vec<TargetSelectionSlot>, Vec<Option<String>>), EngineError> {
+    fn mode_has_coin_branches(def: &AbilityDefinition) -> bool {
+        matches!(def.effect.as_ref(), Effect::FlipCoins { win_effect, lose_effect, .. }
+            if win_effect.is_some() || lose_effect.is_some())
+            || def
+                .sub_ability
+                .as_deref()
+                .is_some_and(mode_has_coin_branches)
+            || def
+                .else_ability
+                .as_deref()
+                .is_some_and(mode_has_coin_branches)
+    }
+
     let ordered = ordered_selected_mode_indices(indices);
 
-    let mut acc = SlotAccumulator::default();
+    let mut acc = SlotAccumulator {
+        declarations: ordered
+            .iter()
+            .filter_map(|&idx| abilities.get(idx))
+            .any(mode_has_coin_branches)
+            .then(Vec::new),
+        ..SlotAccumulator::default()
+    };
     for idx in ordered {
         let def = abilities
             .get(idx)
@@ -891,6 +920,16 @@ pub fn build_target_slots_labelled(
         acc.current_label = mode_descriptions.get(idx).cloned();
         collect_target_slots(state, &resolved, &mut acc)?;
         acc.current_label = None;
+        if acc.declarations.is_some() {
+            // CR 608.2c: match append_to_sub_chain's address for the next
+            // mode, including every sub-instruction of this mode.
+            let mut tail = &resolved;
+            acc.path.push(ChainStep::SubAbility);
+            while let Some(sub) = tail.sub_ability.as_deref() {
+                acc.path.push(ChainStep::SubAbility);
+                tail = sub;
+            }
+        }
     }
 
     // CR 700.2c: The resolver consumes the COMBINED chain and maps selected
@@ -1656,6 +1695,8 @@ impl<'a, P: CoinDeclarations + ?Sized> CoinAntecedentScope<'a, P> {
         }
     }
 
+    /// Required object elections hide older ancestors; optional or mixed
+    /// elections retain those ancestors until an object is actually elected.
     fn object_slots<F: Fn(usize) -> CoinObjectPresence>(
         &self,
         presence: F,
@@ -3344,22 +3385,36 @@ pub(crate) fn validate_targets_in_chain_with_view(
         false,
         DeclaredNumbering::of(ability),
         &[],
-        &mut CoinValidation::default(),
+        &mut CoinValidation {
+            declarations: chain_has_coin_branches(ability).then(Vec::new),
+            ..CoinValidation::default()
+        },
         &mut Vec::new(),
     );
     (validated, view)
 }
 
+fn chain_has_coin_branches(ability: &ResolvedAbility) -> bool {
+    ability.child_links().any(|(edge, child)| match edge {
+        ChainStep::CoinFlipBranch { .. } => true,
+        ChainStep::SubAbility | ChainStep::ElseAbility => chain_has_coin_branches(child),
+    })
+}
+
 #[derive(Default)]
 struct CoinValidation {
-    declarations: Vec<CoinDeclaration>,
+    declarations: Option<Vec<CoinDeclaration>>,
     occurrences: Vec<JudgedOccurrence>,
 }
 
 /// The filter of a stored occurrence, without rebuilding announcement counts
 /// from a battlefield that may have changed since the choices were made.
-fn occurrence_binds_prior(node: &ResolvedAbility, position: usize) -> bool {
-    match node_slot_filters(node) {
+fn occurrence_binds_prior(
+    node: &ResolvedAbility,
+    filters: &NodeSlotFilters,
+    position: usize,
+) -> bool {
+    match filters {
         NodeSlotFilters::PerSlot(filters) => filters
             .get(position)
             .is_some_and(target_filter_binds_prior_target),
@@ -3505,7 +3560,7 @@ fn validate_targets_in_chain_inner(
         CoinAntecedentScope::new(
             path,
             TargetInstanceId(usize::MAX),
-            coin.declarations.as_slice(),
+            coin.declarations.as_deref().unwrap_or_default(),
         )
     });
     let coin_referent = scope
@@ -4147,13 +4202,18 @@ fn validate_targets_in_chain_inner(
                     {
                         return None;
                     }
-                    let (referent, verdict) =
+                    let referent =
                         parent_block
                             .iter()
                             .find_map(|((target, _), verdict)| match target {
                                 TargetRef::Object(id) => Some((*id, *verdict)),
                                 TargetRef::Player(_) => None,
-                            })?;
+                            });
+                    let Some((referent, verdict)) = referent else {
+                        // CR 608.2b: a missing coin-path referent cannot be
+                        // replaced by the dependent node's own target.
+                        return in_coin.then(|| vec![OccurrenceVerdict::Dropped; occurrence_count]);
+                    };
                     if verdict != OccurrenceVerdict::Legal {
                         return Some(vec![OccurrenceVerdict::Dropped; occurrence_count]);
                     }
@@ -4284,19 +4344,22 @@ fn validate_targets_in_chain_inner(
     // CR 608.2b: this node's declared positions join the view BEFORE its
     // continuations are validated, so a later node's dependent filter reads them.
     append_validated_declared_positions(ability, &verdicts, &numbered, view_out);
-    for &position in &numbered {
-        coin.declarations.push(CoinDeclaration {
-            path: path.clone(),
-            instance: TargetInstanceId(coin.declarations.len()),
-            binds_prior: occurrence_binds_prior(ability, position),
-        });
-        coin.occurrences.push((
-            (
-                ability.targets[position].clone(),
-                ability.target_pin_at(position),
-            ),
-            verdicts[position],
-        ));
+    if let Some(declarations) = coin.declarations.as_mut().filter(|_| !numbered.is_empty()) {
+        let filters = node_slot_filters(ability);
+        for &position in &numbered {
+            declarations.push(CoinDeclaration {
+                path: path.clone(),
+                instance: TargetInstanceId(declarations.len()),
+                binds_prior: occurrence_binds_prior(ability, &filters, position),
+            });
+            coin.occurrences.push((
+                (
+                    ability.targets[position].clone(),
+                    ability.target_pin_at(position),
+                ),
+                verdicts[position],
+            ));
+        }
     }
     // CR 608.2b: the block this node hands its continuations — its own
     // declared occurrences with their verdicts when it declares any, else the
@@ -4354,7 +4417,9 @@ fn validate_targets_in_chain_inner(
                 .as_deref()
                 .is_some_and(|declared_sub| rider_entries_are_inherited(ability, declared_sub))
         };
-        path.push(ChainStep::SubAbility);
+        if coin.declarations.is_some() {
+            path.push(ChainStep::SubAbility);
+        }
         **sub_ability = validate_targets_in_chain_inner(
             state,
             sub_ability,
@@ -4366,7 +4431,9 @@ fn validate_targets_in_chain_inner(
             coin,
             path,
         );
-        path.pop();
+        if coin.declarations.is_some() {
+            path.pop();
+        }
     }
     // CR 608.2b: an inheriting rider's entry is a snapshot of its immediate
     // parent's object target, not a target it specified, so the context-ref keep
@@ -4376,7 +4443,9 @@ fn validate_targets_in_chain_inner(
     // determine any information instead of reading a stale object.
     restamp_inherited_rider_target(&mut validated);
     if let Some(else_ability) = validated.else_ability.as_mut() {
-        path.push(ChainStep::ElseAbility);
+        if coin.declarations.is_some() {
+            path.push(ChainStep::ElseAbility);
+        }
         **else_ability = validate_targets_in_chain_inner(
             state,
             else_ability,
@@ -4388,7 +4457,9 @@ fn validate_targets_in_chain_inner(
             coin,
             path,
         );
-        path.pop();
+        if coin.declarations.is_some() {
+            path.pop();
+        }
     }
     restamp_chosen_group_targets(&mut validated);
     validated
@@ -5532,7 +5603,9 @@ fn collect_sub_chain_slots(
 ) -> Result<(), TargetSlotBuildError> {
     for (edge, child, disposition) in announced_child_links(ability) {
         let enters_coin = matches!(edge, ChainStep::CoinFlipBranch { .. });
-        acc.path.push(edge);
+        if acc.declarations.is_some() {
+            acc.path.push(edge);
+        }
         acc.coin_depth += usize::from(enters_coin);
         let result = match disposition {
             AnnouncementDisposition::Declare => collect_target_slots(state, child, acc),
@@ -5542,7 +5615,9 @@ fn collect_sub_chain_slots(
             }
         };
         acc.coin_depth -= usize::from(enters_coin);
-        acc.path.pop();
+        if acc.declarations.is_some() {
+            acc.path.pop();
+        }
         result?;
     }
     Ok(())
@@ -8079,7 +8154,7 @@ impl TargetSpecPools<'_> {
         }
         self.slots
             .get_or_init(|| {
-                let mut acc = SlotAccumulator::default();
+                let mut acc = SlotAccumulator::for_ability(self.root);
                 collect_target_slots(state, self.root, &mut acc).map_err(EngineError::from)?;
                 Ok(acc)
             })
@@ -8703,9 +8778,7 @@ fn legal_targets_for_relative_filter(
         if target_filter_binds_prior_target(filter) {
             if let Some(coin_slots) = existing_slots.object_slots {
                 let mut legal_targets = Vec::new();
-                let mut antecedents = coin_slots.object_slots().peekable();
-                let has_antecedent = antecedents.peek().is_some();
-                for prior in antecedents {
+                for prior in coin_slots.object_slots() {
                     for target in union_over_prior_object_candidates(state, ability, filter, prior)
                     {
                         if !legal_targets.contains(&target) {
@@ -8713,9 +8786,9 @@ fn legal_targets_for_relative_filter(
                         }
                     }
                 }
-                if has_antecedent {
-                    return legal_targets;
-                }
+                // CR 601.2c: a dependent target needs its object referent;
+                // no antecedent is not an unbound (zero-valued) alternative.
+                return legal_targets;
             } else if let Some(prior) = first_prior_object_slot(existing_slots.slots) {
                 return union_over_prior_object_candidates(state, ability, filter, prior);
             }
@@ -9460,6 +9533,14 @@ fn legal_targets_for_selected_slot(
             } else {
                 None
             };
+            // CR 601.2c: declining every possible antecedent leaves no legal
+            // dependent target, just as when no antecedent was declared.
+            if coin_scope.is_some()
+                && target_filter_binds_prior_target(&enumeration_filter)
+                && bound.is_none()
+            {
+                return Vec::new();
+            }
             #[cfg(feature = "test-support")]
             if bound.is_some() {
                 crate::game::perf_counters::record_prior_target_binding_selection();
@@ -11735,7 +11816,7 @@ fn assign_selected_slots_recursive(
             // bounded above its legal pool, claim a later min-0 group's declared
             // slots (issue #321's class). CR 115.6 + CR 107.1c: that later group may
             // legally be empty, and it keeps its own empty window.
-            let mut later_slots = SlotAccumulator::default();
+            let mut later_slots = SlotAccumulator::for_ability(ability);
             collect_sub_chain_slots(state, ability, &mut later_slots)?;
             let bounds = resolve_multi_target_bounds(state, ability, spec, remaining_after_current)
                 .map_err(|err| EngineError::InvalidAction(format!("{err:?}")))?;

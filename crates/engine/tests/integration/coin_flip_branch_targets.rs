@@ -5442,53 +5442,166 @@ fn coin_dependent_source_and_attachment_counts_match_their_slots() {
 }
 
 #[test]
-fn coin_unbound_scalar_static_pool_contains_the_live_pool() {
+fn coin_unbound_scalar_refuses_cast_until_an_object_antecedent_is_declared() {
     use engine::types::ability::{
-        AbilityDefinition, AbilityKind, Comparator, FilterProp, ObjectScope, PtStat, PtValueScope,
-        QuantityExpr, QuantityRef, TypedFilter,
+        AbilityDefinition, AbilityKind, Comparator, ControllerRef, FilterProp, ObjectScope, PtStat,
+        PtValueScope, QuantityExpr, QuantityRef, TypedFilter,
     };
     for power in [false, true] {
-        let value = QuantityExpr::Ref {
-            qty: QuantityRef::ObjectManaValue {
-                scope: ObjectScope::Target,
-            },
-        };
-        let property = if power {
-            FilterProp::PtComparison {
-                stat: PtStat::Power,
-                scope: PtValueScope::Current,
-                comparator: Comparator::GE,
-                value,
+        for comparator in [Comparator::GE, Comparator::GT] {
+            for bound in [false, true] {
+                let value = QuantityExpr::Ref {
+                    qty: QuantityRef::ObjectManaValue {
+                        scope: ObjectScope::Target,
+                    },
+                };
+                let property = if power {
+                    FilterProp::PtComparison {
+                        stat: PtStat::Power,
+                        scope: PtValueScope::Current,
+                        comparator,
+                        value,
+                    }
+                } else {
+                    FilterProp::Cmc { comparator, value }
+                };
+                let branch = AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::Destroy {
+                        target: TargetFilter::Typed(
+                            TypedFilter::creature().properties(vec![property]),
+                        ),
+                        cant_regenerate: false,
+                    },
+                );
+                let coin = AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::FlipCoins {
+                        flips: CoinFlipRun::single(),
+                        win_effect: None,
+                        lose_effect: Some(Box::new(branch)),
+                        flipper: TargetFilter::Controller,
+                    },
+                );
+                let definition = if bound {
+                    AbilityDefinition::new(
+                        AbilityKind::Spell,
+                        Effect::TargetOnly {
+                            target: TargetFilter::Typed(
+                                TypedFilter::creature().controller(ControllerRef::You),
+                            ),
+                        },
+                    )
+                    .sub_ability(coin)
+                } else {
+                    coin
+                };
+                let mut scenario = GameScenario::new();
+                scenario.at_phase(Phase::PreCombatMain);
+                let antecedent = scenario
+                    .add_creature(P0, "Scalar antecedent", 1, 1)
+                    .with_mana_cost(ManaCost::generic(1))
+                    .id();
+                let victim = scenario
+                    .add_creature(P1, "Positive mana value victim", 2, 2)
+                    .with_mana_cost(ManaCost::generic(2))
+                    .id();
+                let spell = scenario
+                    .add_spell_to_hand(P0, "Synthetic scalar coin", true)
+                    .with_ability_definition(definition)
+                    .id();
+                let mut runner = scenario.build();
+                pin_outcomes(&mut runner, &[false]);
+                if bound {
+                    assert!(
+                        castable(&runner, spell),
+                        "reach: the bound scalar has a legal assignment"
+                    );
+                    let outcome = runner
+                        .cast(spell)
+                        .target_objects(&[antecedent, victim])
+                        .resolve();
+                    assert_eq!(flips(outcome.events()), vec![false]);
+                    outcome.assert_zone(&[victim], Zone::Graveyard);
+                } else {
+                    // CR 601.2c: no referent means no appropriate dependent target,
+                    // never an accepted MV-2 target that self-binds at resolution.
+                    assert!(!castable(&runner, spell));
+                    let card_id = runner.state().objects[&spell].card_id;
+                    assert!(runner
+                        .act(GameAction::CastSpell {
+                            object_id: spell,
+                            card_id,
+                            targets: vec![],
+                            payment_mode: CastPaymentMode::Auto,
+                        })
+                        .is_err());
+                    assert_eq!(runner.state().objects[&victim].zone, Zone::Battlefield);
+                    assert_eq!(runner.state().objects[&spell].zone, Zone::Hand);
+                }
+                assert_finished(&runner);
             }
-        } else {
-            FilterProp::Cmc {
-                comparator: Comparator::GE,
-                value,
-            }
-        };
-        let branch = AbilityDefinition::new(
+        }
+    }
+}
+
+#[test]
+fn coin_declining_the_only_possible_antecedent_offers_no_unbound_targets() {
+    use engine::types::ability::{
+        AbilityDefinition, AbilityKind, Comparator, FilterProp, ObjectScope, QuantityExpr,
+        QuantityRef, TypeFilter, TypedFilter,
+    };
+    for elect_antecedent in [false, true] {
+        let mut destroy = AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::Destroy {
-                target: TargetFilter::Typed(TypedFilter::creature().properties(vec![property])),
+                target: TargetFilter::Typed(TypedFilter::creature().properties(vec![
+                    FilterProp::Cmc {
+                        comparator: Comparator::GT,
+                        value: QuantityExpr::Ref {
+                            qty: QuantityRef::ObjectManaValue {
+                                scope: ObjectScope::Target,
+                            },
+                        },
+                    },
+                ])),
                 cant_regenerate: false,
             },
         );
-        let mut scenario = GameScenario::new();
-        scenario.at_phase(Phase::PreCombatMain);
-        let victim = scenario
-            .add_creature(P1, "Unbound scalar victim", 2, 2)
-            .id();
-        let distractor = scenario
-            .add_creature(P1, "Unchosen scalar candidate", 3, 3)
-            .id();
-        let spell = scenario
-            .add_spell_to_hand(P0, "Synthetic unbound scalar coin", true)
-            .with_ability(Effect::FlipCoins {
+        destroy.optional_targeting = true;
+        let mut definition = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::TargetOnly {
+                target: TargetFilter::Typed(TypedFilter::new(TypeFilter::Artifact)),
+            },
+        )
+        .sub_ability(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::FlipCoins {
                 flips: CoinFlipRun::single(),
                 win_effect: None,
-                lose_effect: Some(Box::new(branch)),
+                lose_effect: Some(Box::new(destroy)),
                 flipper: TargetFilter::Controller,
-            })
+            },
+        ));
+        definition.optional_targeting = true;
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let antecedent = scenario
+            .add_artifact_from_oracle(P0, "High mana value antecedent", "")
+            .with_mana_cost(ManaCost::generic(5))
+            .id();
+        let victim = scenario
+            .add_creature(P1, "Above antecedent threshold", 3, 3)
+            .with_mana_cost(ManaCost::generic(6))
+            .id();
+        let excluded = scenario
+            .add_creature(P1, "Below antecedent threshold", 2, 2)
+            .with_mana_cost(ManaCost::generic(2))
+            .id();
+        let spell = scenario
+            .add_spell_to_hand(P0, "Synthetic optional antecedent coin", true)
+            .with_ability_definition(definition)
             .id();
         let mut runner = scenario.build();
         pin_outcomes(&mut runner, &[false]);
@@ -5500,36 +5613,150 @@ fn coin_unbound_scalar_static_pool_contains_the_live_pool() {
                 targets: vec![],
                 payment_mode: CastPaymentMode::Auto,
             })
-            .expect("unbound scalar admits candidates")
+            .unwrap()
             .events;
-        let WaitingFor::TargetSelection {
-            target_slots,
-            selection,
-            ..
-        } = &runner.state().waiting_for
-        else {
-            panic!("required unbound scalar prompt");
+        let WaitingFor::TargetSelection { target_slots, .. } = &runner.state().waiting_for else {
+            panic!("required optional antecedent prompt");
         };
-        assert_eq!(target_slots.len(), 1);
-        assert!(selection
-            .current_legal_targets
-            .contains(&TargetRef::Object(victim)));
-        assert!(selection
-            .current_legal_targets
-            .iter()
-            .all(|target| target_slots[0].legal_targets.contains(target)));
+        let static_pool = target_slots[1].legal_targets.clone();
+        assert!(static_pool.contains(&TargetRef::Object(victim)));
+        assert!(!static_pool.contains(&TargetRef::Object(excluded)));
         events.extend(
             runner
                 .act(GameAction::ChooseTarget {
-                    target: Some(TargetRef::Object(victim)),
+                    target: elect_antecedent.then_some(TargetRef::Object(antecedent)),
                 })
-                .expect("elect the unbound candidate")
+                .unwrap()
                 .events,
         );
+        if elect_antecedent {
+            let WaitingFor::TargetSelection { selection, .. } = &runner.state().waiting_for else {
+                panic!("required bound dependent prompt");
+            };
+            assert!(selection
+                .current_legal_targets
+                .iter()
+                .all(|target| static_pool.contains(target)));
+            assert_eq!(
+                selection.current_legal_targets,
+                vec![TargetRef::Object(victim)]
+            );
+            events.extend(
+                runner
+                    .act(GameAction::ChooseTarget {
+                        target: Some(TargetRef::Object(victim)),
+                    })
+                    .unwrap()
+                    .events,
+            );
+        } else {
+            // An optional slot with no live candidates is skipped automatically.
+            // The old unbound fallback instead offered the MV-2 creature here.
+            assert!(matches!(
+                runner.state().waiting_for,
+                WaitingFor::Priority { .. }
+            ));
+            assert_eq!(runner.state().objects[&spell].zone, Zone::Stack);
+        }
         finish(&mut runner, &mut events);
-        assert_eq!(flips(&events), vec![false]);
-        assert_eq!(runner.state().objects[&victim].zone, Zone::Graveyard);
-        assert_eq!(runner.state().objects[&distractor].zone, Zone::Battlefield);
+        assert_eq!(
+            flips(&events),
+            vec![false],
+            "reach: both optional-election rows resolve the coin"
+        );
+        assert_eq!(
+            runner.state().objects[&victim].zone,
+            if elect_antecedent {
+                Zone::Graveyard
+            } else {
+                Zone::Battlefield
+            }
+        );
+        assert_eq!(runner.state().objects[&excluded].zone, Zone::Battlefield);
         assert_finished(&runner);
     }
+}
+
+#[test]
+fn modal_coin_static_scope_matches_the_combined_mode_chain() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let artifact = scenario
+        .add_artifact_from_oracle(P0, "First mode artifact", "")
+        .id();
+    let antecedent = scenario
+        .add_creature(P0, "Second mode antecedent", 2, 2)
+        .id();
+    let victim = scenario
+        .add_creature(P1, "Plain creature victim", 3, 3)
+        .id();
+    let spell = scenario.add_spell_to_hand_from_oracle(P0, "Synthetic modal coin antecedent", true,
+        "Choose two —\n• Tap target noncreature artifact.\n• Target creature gets +1/+1 until end of turn. Flip a coin. If you lose the flip, destroy target permanent that shares a card type with that creature.")
+        .with_mana_cost(ManaCost::zero()).id();
+    let mut runner = scenario.build();
+    pin_outcomes(&mut runner, &[false]);
+    let card_id = runner.state().objects[&spell].card_id;
+    let mut events = runner
+        .act(GameAction::CastSpell {
+            object_id: spell,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .unwrap()
+        .events;
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::ModeChoice { .. }
+    ));
+    events.extend(
+        runner
+            .act(GameAction::SelectModes {
+                indices: vec![0, 1],
+            })
+            .unwrap()
+            .events,
+    );
+    let WaitingFor::TargetSelection { target_slots, .. } = &runner.state().waiting_for else {
+        panic!("required combined mode target announcement");
+    };
+    let static_pool = target_slots.last().unwrap().legal_targets.clone();
+    assert!(
+        static_pool.contains(&TargetRef::Object(victim)),
+        "mode-one artifact must not shadow mode-two creature"
+    );
+    for target in [artifact, antecedent] {
+        events.extend(
+            runner
+                .act(GameAction::ChooseTarget {
+                    target: Some(TargetRef::Object(target)),
+                })
+                .unwrap()
+                .events,
+        );
+    }
+    let WaitingFor::TargetSelection { selection, .. } = &runner.state().waiting_for else {
+        panic!("required coin consumer prompt");
+    };
+    assert!(selection
+        .current_legal_targets
+        .contains(&TargetRef::Object(victim)));
+    assert!(selection
+        .current_legal_targets
+        .iter()
+        .all(|target| static_pool.contains(target)));
+    events.extend(
+        runner
+            .act(GameAction::ChooseTarget {
+                target: Some(TargetRef::Object(victim)),
+            })
+            .unwrap()
+            .events,
+    );
+    finish(&mut runner, &mut events);
+    assert_eq!(flips(&events), vec![false]);
+    assert!(runner.state().objects[&artifact].tapped);
+    assert_eq!(runner.state().objects[&victim].zone, Zone::Graveyard);
+    assert_eq!(runner.state().objects[&antecedent].zone, Zone::Battlefield);
+    assert_finished(&runner);
 }
