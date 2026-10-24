@@ -4,7 +4,8 @@
 //! game play. CR 104.4b: loop detection compares game states, so such data must never
 //! make two otherwise identical states differ. Three mechanisms keep a [`DisplayOnly`]
 //! value out of every rules and AI identity: typed equality (always equal), the rules
-//! projection ([`rules_projection`]), and constant `Debug`.
+//! projection ([`rules_projection`]), and constant `Debug`. The same pass reports whether it
+//! omitted a non-empty display-only value ([`reported_rules_projection`]).
 
 use std::fmt;
 use std::hash::{Hash, Hasher};
@@ -118,7 +119,72 @@ impl<'de, T: Deserialize<'de>> Deserialize<'de> for DisplayOnly<T> {
 /// impls keep the marker: a custom `Serialize` that re-serializes through
 /// `serde_json::Value` beneath a projected root erases it.
 pub fn rules_projection<T: Serialize + ?Sized>(value: &T) -> serde_json::Result<Value> {
-    project(value).map(Projected::or_null)
+    project(value, &mut IgnoreOmissions).map(Projected::or_null)
+}
+
+/// What a rules projection omitted. A [`DisplayOnly`] value is non-empty when its ordinary
+/// rules projection is not `null` (for the placement rule's `DisplayOnly<Option<T>>`, a
+/// `Some`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum OmittedDisplayData {
+    /// Nothing, or only empty display-only values, was omitted.
+    #[default]
+    Nothing,
+    /// At least one non-empty display-only value was omitted.
+    NonEmpty,
+}
+
+/// A rules projection together with what it omitted.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ReportedRulesProjection {
+    /// Equal to [`rules_projection`] of the same value.
+    pub value: Value,
+    pub omitted: OmittedDisplayData,
+}
+
+/// [`rules_projection`] plus a report of whether the same pass omitted a non-empty
+/// [`DisplayOnly`] value, so a caller can tell a display-bearing value from a display-free
+/// one without a second serialization.
+///
+/// CR 203.1 + CR 206.1: the reported mode may project an omitted payload solely to decide
+/// whether it was non-empty; the payload never reaches `value`. Unlike [`rules_projection`],
+/// which never serializes an omitted payload, this fails when an omitted payload's own
+/// `Serialize` fails.
+pub fn reported_rules_projection<T: Serialize + ?Sized>(
+    value: &T,
+) -> serde_json::Result<ReportedRulesProjection> {
+    let mut omitted = OmittedDisplayData::Nothing;
+    let value = project(value, &mut omitted)?.or_null();
+    Ok(ReportedRulesProjection { value, omitted })
+}
+
+/// What the projector does with a display-only value it omits.
+trait OmissionObserver {
+    fn observe<T: Serialize + ?Sized>(&mut self, inner: &T) -> serde_json::Result<()>;
+}
+
+/// The ordinary mode: omit immediately; the omitted payload is never serialized.
+struct IgnoreOmissions;
+
+impl OmissionObserver for IgnoreOmissions {
+    fn observe<T: Serialize + ?Sized>(&mut self, _inner: &T) -> serde_json::Result<()> {
+        Ok(())
+    }
+}
+
+/// The reported mode: becomes `NonEmpty` once an omitted value's own projection is not `null`.
+impl OmissionObserver for OmittedDisplayData {
+    fn observe<T: Serialize + ?Sized>(&mut self, inner: &T) -> serde_json::Result<()> {
+        if *self == Self::NonEmpty {
+            return Ok(());
+        }
+        if let Projected::Kept(projected) = project(inner, &mut IgnoreOmissions)? {
+            if !projected.is_null() {
+                *self = Self::NonEmpty;
+            }
+        }
+        Ok(())
+    }
 }
 
 /// The projection of one serialized position: omitted, or kept as a JSON value.
@@ -138,8 +204,11 @@ impl Projected {
     }
 }
 
-fn project<T: Serialize + ?Sized>(value: &T) -> serde_json::Result<Projected> {
-    value.serialize(RulesProjector)
+fn project<T: Serialize + ?Sized, O: OmissionObserver>(
+    value: &T,
+    observer: &mut O,
+) -> serde_json::Result<Projected> {
+    value.serialize(RulesProjector { observer })
 }
 
 /// serde_json's own spelling of a map key, obtained from its value serializer so integer,
@@ -174,18 +243,20 @@ macro_rules! forward_scalars {
 
 /// A `serde::Serializer` that builds the same `Value` as serde_json's own, except that a
 /// `DisplayOnly` newtype is omitted.
-struct RulesProjector;
+struct RulesProjector<'r, O> {
+    observer: &'r mut O,
+}
 
-impl Serializer for RulesProjector {
+impl<'r, O: OmissionObserver> Serializer for RulesProjector<'r, O> {
     type Ok = Projected;
     type Error = serde_json::Error;
-    type SerializeSeq = ProjectedSeq;
-    type SerializeTuple = ProjectedSeq;
-    type SerializeTupleStruct = ProjectedSeq;
-    type SerializeTupleVariant = ProjectedTupleVariant;
-    type SerializeMap = ProjectedMap;
-    type SerializeStruct = ProjectedMap;
-    type SerializeStructVariant = ProjectedStructVariant;
+    type SerializeSeq = ProjectedSeq<'r, O>;
+    type SerializeTuple = ProjectedSeq<'r, O>;
+    type SerializeTupleStruct = ProjectedSeq<'r, O>;
+    type SerializeTupleVariant = ProjectedTupleVariant<'r, O>;
+    type SerializeMap = ProjectedMap<'r, O>;
+    type SerializeStruct = ProjectedMap<'r, O>;
+    type SerializeStructVariant = ProjectedStructVariant<'r, O>;
 
     forward_scalars! {
         serialize_bool(bool),
@@ -236,6 +307,10 @@ impl Serializer for RulesProjector {
         value: &T,
     ) -> serde_json::Result<Projected> {
         if name == DISPLAY_ONLY_MARKER {
+            // CR 203.1 + CR 206.1: ordinary mode never projects the omitted payload;
+            // reported mode may project it solely to determine whether non-empty data
+            // was omitted.
+            self.observer.observe(value)?;
             return Ok(Projected::Omitted);
         }
         value.serialize(self)
@@ -249,15 +324,18 @@ impl Serializer for RulesProjector {
         value: &T,
     ) -> serde_json::Result<Projected> {
         let mut entries = Map::new();
-        entries.insert(variant.to_owned(), project(value)?.or_null());
+        entries.insert(variant.to_owned(), project(value, self.observer)?.or_null());
         Ok(Projected::Kept(Value::Object(entries)))
     }
 
-    fn serialize_seq(self, len: Option<usize>) -> serde_json::Result<ProjectedSeq> {
-        Ok(ProjectedSeq(Vec::with_capacity(len.unwrap_or(0))))
+    fn serialize_seq(self, len: Option<usize>) -> serde_json::Result<ProjectedSeq<'r, O>> {
+        Ok(ProjectedSeq {
+            observer: self.observer,
+            elements: Vec::with_capacity(len.unwrap_or(0)),
+        })
     }
 
-    fn serialize_tuple(self, len: usize) -> serde_json::Result<ProjectedSeq> {
+    fn serialize_tuple(self, len: usize) -> serde_json::Result<ProjectedSeq<'r, O>> {
         self.serialize_seq(Some(len))
     }
 
@@ -265,7 +343,7 @@ impl Serializer for RulesProjector {
         self,
         _name: &'static str,
         len: usize,
-    ) -> serde_json::Result<ProjectedSeq> {
+    ) -> serde_json::Result<ProjectedSeq<'r, O>> {
         self.serialize_seq(Some(len))
     }
 
@@ -275,23 +353,28 @@ impl Serializer for RulesProjector {
         _variant_index: u32,
         variant: &'static str,
         len: usize,
-    ) -> serde_json::Result<ProjectedTupleVariant> {
+    ) -> serde_json::Result<ProjectedTupleVariant<'r, O>> {
         Ok(ProjectedTupleVariant {
+            observer: self.observer,
             variant,
             elements: Vec::with_capacity(len),
         })
     }
 
-    fn serialize_map(self, _len: Option<usize>) -> serde_json::Result<ProjectedMap> {
-        Ok(ProjectedMap::default())
+    fn serialize_map(self, _len: Option<usize>) -> serde_json::Result<ProjectedMap<'r, O>> {
+        Ok(ProjectedMap {
+            observer: self.observer,
+            entries: Map::new(),
+            pending_key: None,
+        })
     }
 
     fn serialize_struct(
         self,
         _name: &'static str,
         _len: usize,
-    ) -> serde_json::Result<ProjectedMap> {
-        Ok(ProjectedMap::default())
+    ) -> serde_json::Result<ProjectedMap<'r, O>> {
+        self.serialize_map(None)
     }
 
     fn serialize_struct_variant(
@@ -300,8 +383,9 @@ impl Serializer for RulesProjector {
         _variant_index: u32,
         variant: &'static str,
         _len: usize,
-    ) -> serde_json::Result<ProjectedStructVariant> {
+    ) -> serde_json::Result<ProjectedStructVariant<'r, O>> {
         Ok(ProjectedStructVariant {
+            observer: self.observer,
             variant,
             fields: Map::new(),
         })
@@ -309,23 +393,27 @@ impl Serializer for RulesProjector {
 }
 
 /// Sequence, tuple and tuple-struct elements: positional, so an omitted element is `null`.
-struct ProjectedSeq(Vec<Value>);
+struct ProjectedSeq<'r, O> {
+    observer: &'r mut O,
+    elements: Vec<Value>,
+}
 
-impl SerializeSeq for ProjectedSeq {
+impl<O: OmissionObserver> SerializeSeq for ProjectedSeq<'_, O> {
     type Ok = Projected;
     type Error = serde_json::Error;
 
     fn serialize_element<T: Serialize + ?Sized>(&mut self, value: &T) -> serde_json::Result<()> {
-        self.0.push(project(value)?.or_null());
+        self.elements
+            .push(project(value, &mut *self.observer)?.or_null());
         Ok(())
     }
 
     fn end(self) -> serde_json::Result<Projected> {
-        Ok(Projected::Kept(Value::Array(self.0)))
+        Ok(Projected::Kept(Value::Array(self.elements)))
     }
 }
 
-impl SerializeTuple for ProjectedSeq {
+impl<O: OmissionObserver> SerializeTuple for ProjectedSeq<'_, O> {
     type Ok = Projected;
     type Error = serde_json::Error;
 
@@ -338,7 +426,7 @@ impl SerializeTuple for ProjectedSeq {
     }
 }
 
-impl SerializeTupleStruct for ProjectedSeq {
+impl<O: OmissionObserver> SerializeTupleStruct for ProjectedSeq<'_, O> {
     type Ok = Projected;
     type Error = serde_json::Error;
 
@@ -352,17 +440,19 @@ impl SerializeTupleStruct for ProjectedSeq {
 }
 
 /// Tuple-variant fields: positional, wrapped as `{variant: [..]}`.
-struct ProjectedTupleVariant {
+struct ProjectedTupleVariant<'r, O> {
+    observer: &'r mut O,
     variant: &'static str,
     elements: Vec<Value>,
 }
 
-impl SerializeTupleVariant for ProjectedTupleVariant {
+impl<O: OmissionObserver> SerializeTupleVariant for ProjectedTupleVariant<'_, O> {
     type Ok = Projected;
     type Error = serde_json::Error;
 
     fn serialize_field<T: Serialize + ?Sized>(&mut self, value: &T) -> serde_json::Result<()> {
-        self.elements.push(project(value)?.or_null());
+        self.elements
+            .push(project(value, &mut *self.observer)?.or_null());
         Ok(())
     }
 
@@ -376,13 +466,13 @@ impl SerializeTupleVariant for ProjectedTupleVariant {
 /// Map entries and struct fields: keyed, so an omitted value drops its entry. Map entries
 /// are keyed because serde delivers every field of a struct with a flattened field through
 /// `SerializeMap`.
-#[derive(Default)]
-struct ProjectedMap {
+struct ProjectedMap<'r, O> {
+    observer: &'r mut O,
     entries: Map<String, Value>,
     pending_key: Option<String>,
 }
 
-impl SerializeMap for ProjectedMap {
+impl<O: OmissionObserver> SerializeMap for ProjectedMap<'_, O> {
     type Ok = Projected;
     type Error = serde_json::Error;
 
@@ -396,7 +486,7 @@ impl SerializeMap for ProjectedMap {
             .pending_key
             .take()
             .ok_or_else(|| serde_json::Error::custom("map value serialized before its key"))?;
-        if let Projected::Kept(value) = project(value)? {
+        if let Projected::Kept(value) = project(value, &mut *self.observer)? {
             self.entries.insert(key, value);
         }
         Ok(())
@@ -407,7 +497,7 @@ impl SerializeMap for ProjectedMap {
     }
 }
 
-impl SerializeStruct for ProjectedMap {
+impl<O: OmissionObserver> SerializeStruct for ProjectedMap<'_, O> {
     type Ok = Projected;
     type Error = serde_json::Error;
 
@@ -416,7 +506,7 @@ impl SerializeStruct for ProjectedMap {
         key: &'static str,
         value: &T,
     ) -> serde_json::Result<()> {
-        if let Projected::Kept(value) = project(value)? {
+        if let Projected::Kept(value) = project(value, &mut *self.observer)? {
             self.entries.insert(key.to_owned(), value);
         }
         Ok(())
@@ -428,12 +518,13 @@ impl SerializeStruct for ProjectedMap {
 }
 
 /// Struct-variant fields: keyed, wrapped as `{variant: {..}}`.
-struct ProjectedStructVariant {
+struct ProjectedStructVariant<'r, O> {
+    observer: &'r mut O,
     variant: &'static str,
     fields: Map<String, Value>,
 }
 
-impl SerializeStructVariant for ProjectedStructVariant {
+impl<O: OmissionObserver> SerializeStructVariant for ProjectedStructVariant<'_, O> {
     type Ok = Projected;
     type Error = serde_json::Error;
 
@@ -442,7 +533,7 @@ impl SerializeStructVariant for ProjectedStructVariant {
         key: &'static str,
         value: &T,
     ) -> serde_json::Result<()> {
-        if let Projected::Kept(value) = project(value)? {
+        if let Projected::Kept(value) = project(value, &mut *self.observer)? {
             self.fields.insert(key.to_owned(), value);
         }
         Ok(())
@@ -884,6 +975,144 @@ mod tests {
         // Legacy shape: a JSON object without the key decodes to the empty carrier.
         let legacy: Probe = serde_json::from_str(r#"{"name":"Bear","power":2}"#).unwrap();
         assert!(legacy.shown.get().is_none());
+    }
+
+    /// A carrier field without `skip_serializing_if`: an empty carrier still reaches the
+    /// marker, with `null`.
+    #[derive(Serialize)]
+    struct NoSkip {
+        shown: DisplayOnly<Option<Mark>>,
+    }
+
+    #[derive(Serialize)]
+    struct Wrapper {
+        inner: DisplayOnly<Option<Mark>>,
+    }
+
+    /// A payload whose own `Serialize` always fails.
+    struct Failing;
+
+    impl Serialize for Failing {
+        fn serialize<S: Serializer>(&self, _serializer: S) -> Result<S::Ok, S::Error> {
+            Err(<S::Error as serde::ser::Error>::custom("failing payload"))
+        }
+    }
+
+    fn mark(position: usize) -> Mark {
+        Mark {
+            set_code: sentinel(position),
+            collector_number: "7".to_string(),
+        }
+    }
+
+    fn reported<T: Serialize + ?Sized>(value: &T) -> OmittedDisplayData {
+        reported_rules_projection(value)
+            .expect("a serializable value projects")
+            .omitted
+    }
+
+    #[test]
+    fn reported_rules_projection_reports_non_empty_display_data() {
+        // The 17-position tree: present -> NonEmpty, absent -> Nothing, and the value is the
+        // ordinary projection in both.
+        for (present, expected) in [
+            (true, OmittedDisplayData::NonEmpty),
+            (false, OmittedDisplayData::Nothing),
+        ] {
+            let tree = tree(present);
+            let report = reported_rules_projection(&tree).unwrap();
+            assert_eq!(report.omitted, expected, "tree({present})");
+            assert_eq!(report.value, rules_projection(&tree).unwrap());
+        }
+        // Reach: the present tree really carries its 17 printings on the wire.
+        let wire = serde_json::to_string(&tree(true)).unwrap();
+        assert_eq!(wire.matches("SENTINEL").count(), POSITIONS);
+
+        // An empty carrier without `skip_serializing_if` reaches the marker with `null`.
+        let empty = NoSkip {
+            shown: DisplayOnly::new(None),
+        };
+        let filled = NoSkip {
+            shown: DisplayOnly::new(Some(mark(0))),
+        };
+        assert_eq!(
+            serde_json::to_value(&empty).unwrap(),
+            json!({"shown": null}),
+            "reach: the marker is reached with null"
+        );
+        assert_eq!(reported(&empty), OmittedDisplayData::Nothing);
+        assert_eq!(reported(&filled), OmittedDisplayData::NonEmpty);
+
+        // Positional position and a nested carrier whose own projection is non-null.
+        assert_eq!(
+            reported(&vec![DisplayOnly::new(1u8)]),
+            OmittedDisplayData::NonEmpty
+        );
+        assert_eq!(
+            reported(&DisplayOnly::new(Some(Wrapper {
+                inner: DisplayOnly::new(None),
+            }))),
+            OmittedDisplayData::NonEmpty
+        );
+
+        // A value holding no `DisplayOnly` omits nothing, and the value is `to_value`.
+        let plain = PlainProbe {
+            name: "Bear".to_string(),
+            power: 2,
+            shown: Some(mark(0)),
+        };
+        let report = reported_rules_projection(&plain).unwrap();
+        assert_eq!(report.omitted, OmittedDisplayData::Nothing);
+        assert_eq!(report.value, serde_json::to_value(&plain).unwrap());
+    }
+
+    #[test]
+    fn reported_rules_projection_value_is_the_ordinary_projection() {
+        let scalars = Scalars {
+            boolean: true,
+            small: -8,
+            medium: -3,
+            large: i64::MIN,
+            huge: i128::from(i64::MIN),
+            unsigned: u64::MAX,
+            unsigned_huge: u128::from(u64::MAX),
+            single: 0.1,
+            double: 0.1,
+            exponent: 1e21,
+            character: 'z',
+            text: "text".to_string(),
+            bytes: Bytes,
+            absent: None,
+            present: Some(5),
+            unit: (),
+            unit_struct: UnitStruct,
+            tuple_struct: TupleStruct(1, "a".to_string()),
+            tuple: (2, "b".to_string()),
+            bool_keys: BTreeMap::from([(true, 1), (false, 0)]),
+            char_keys: BTreeMap::from([('a', 1)]),
+            int_keys: BTreeMap::from([(-3, 1), (40, 2)]),
+            unsigned_keys: HashMap::from([(7, 1), (9_000, 2)]),
+            string_keys: BTreeMap::from([("k".to_string(), 1)]),
+            tree: tree(false),
+        };
+        let report = reported_rules_projection(&scalars).unwrap();
+        assert_eq!(report.value, rules_projection(&scalars).unwrap());
+        assert_eq!(report.omitted, OmittedDisplayData::Nothing);
+    }
+
+    #[test]
+    fn only_the_reported_mode_serializes_an_omitted_payload() {
+        // Reach: the payload's error is real.
+        assert!(serde_json::to_value(Failing).is_err());
+
+        let carrier = DisplayOnly::new(Some(Failing));
+        assert_eq!(
+            rules_projection(&carrier).unwrap(),
+            Value::Null,
+            "the ordinary mode never serializes the omitted payload"
+        );
+        let error = reported_rules_projection(&carrier).unwrap_err();
+        assert!(error.to_string().contains("failing payload"), "{error}");
     }
 
     fn digest<T: Hash>(value: &T) -> u64 {

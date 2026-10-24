@@ -27,10 +27,23 @@
 //! when serialization and typed equality agree; the claims are exact for the whole buffer.
 //!
 //! Persistence and replay. The ledger is serialized with the game state. Persisted
-//! reconciliation visits it as a live event carrier but compares raw-JSON zone-change
-//! fingerprints, which is a separate authority and not a second ordinal allocator. Action
-//! replay clones checkpoints and calls the reducer, so it never renumbers a claim, and
-//! applying a `ConsumeBeforePriority` collection extends the claims unchanged.
+//! reconciliation visits it as a live event carrier and binds records to ledger occurrences
+//! by their typed fingerprint (below), which is a separate authority and not a second ordinal
+//! allocator. Action replay clones checkpoints and calls the reducer, so it never renumbers a
+//! claim, and applying a `ConsumeBeforePriority` collection extends the claims unchanged.
+//!
+//! Persisted zone-change reconciliation (CR 400.7 + CR 603.2c + CR 203.1 + CR 206.1). A
+//! persisted `ZoneChanged` record is bound to its ledger occurrence by the rules projection of
+//! the typed record (decoded through `ZoneChangeRecord`'s own compatibility decoding, without
+//! its two occurrence stamps), so a printing neither splits one occurrence into two nor selects
+//! between two rules-identical ones; the loaded state keeps every original value, printing
+//! included. A record that needs a new binding follows the two-source rule: (a) the candidates
+//! are the ledger rows with the same rules projection; (b) exactly one candidate binds; (c) two
+//! or more fall back to today's raw-JSON comparison, but only when the record and every
+//! candidate carry no display data, so a printing never chooses; (d) no candidate is an error.
+//! The stamped fast path, the unstamped pass-through and the check that every record naming one
+//! occurrence key agrees compare two printing-free records raw, as before, and any pair with
+//! display data by the rules projection. An undecodable record is a load error.
 //!
 //! Cost. On the measured native fixtures, equality numbering cost approximately 0.5% or less
 //! of the measured resolver time. The measured single-token runs produced four events per
@@ -53,9 +66,10 @@ use engine::types::card_printing::CardPrinting;
 use engine::types::display_only::{rules_projection, DisplayOnly};
 use engine::types::events::GameEvent;
 use engine::types::game_state::{
-    AutoPassRequest, CastPaymentMode, GameState, PersistedGameState,
+    AutoPassRequest, CastPaymentMode, GameState, PersistedGameState, StackEntryKind,
     StackResolutionAutoPassOverlay, StackResolutionBudget, StackResolutionEntryFence,
     StackResolutionPolicy, StackResolutionSession, TrustedGameStateEnvelope, WaitingFor,
+    ZoneChangeRecord,
 };
 use engine::types::identifiers::{CardId, ObjectId};
 use engine::types::keywords::Keyword;
@@ -976,4 +990,917 @@ fn whole_game_state_projection_omits_every_printing_on_a_real_board() {
         0,
         "the projection holds none"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Persisted zone-change reconciliation: the typed fingerprint and the two-source rule
+// ---------------------------------------------------------------------------
+
+/// Printed card text of Murder (Scryfall, checked 2026-10-24): the board's removal spell.
+const MURDER_ORACLE: &str = "Destroy target creature.";
+
+/// Synthetic observer (no printed card is claimed): it only yields a real battlefield-to-
+/// graveyard record and a dies trigger that waits on the stack carrying that record.
+const DIES_DRAW: &str = "When this creature dies, you draw a card.";
+
+type Fields = serde_json::Map<String, Value>;
+
+/// Board B (stamped) or B0 (`None`): P0's "Doomed Bear" dies to Murder through the production
+/// reducer, and the game is left at priority with the bear's dies trigger as the only stack
+/// entry, the trigger carrying the bear's ledger record as its `trigger_event`.
+fn dies_trigger_board(stamp_code: Option<&str>) -> (GameState, ObjectId) {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_library_top(P0, &["Forest"]);
+    let bear = scenario
+        .add_creature(P0, "Doomed Bear", 2, 2)
+        .from_oracle_text(DIES_DRAW)
+        .id();
+    let murder = scenario
+        .add_spell_to_hand_from_oracle(P0, "Murder", true, MURDER_ORACLE)
+        .with_mana_cost(ManaCost::zero())
+        .id();
+    let mut runner = scenario.build();
+    if let Some(code) = stamp_code {
+        stamp(runner.state_mut(), bear, code);
+    }
+    drop(runner.cast(murder).target_object(bear).commit());
+    for _ in 0..8 {
+        let names = runner.stack_names();
+        if !names.is_empty() && !names.iter().any(|name| name == "Murder") {
+            break;
+        }
+        runner
+            .act(GameAction::PassPriority)
+            .expect("pass priority toward Murder's resolution");
+    }
+    assert_eq!(
+        runner.stack_names(),
+        ["Doomed Bear"],
+        "reach: only the dies trigger waits"
+    );
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+    assert_eq!(runner.state().objects[&bear].zone, Zone::Graveyard);
+    let state = runner.state().clone();
+    let record = trigger_record(&state);
+    assert_eq!(
+        record.object_id, bear,
+        "reach: the trigger carries the bear"
+    );
+    assert_eq!(
+        lki_set_code(record).as_deref(),
+        stamp_code,
+        "reach: the look-back snapshot holds the stamped printing"
+    );
+    (state, bear)
+}
+
+/// The dies trigger's `trigger_event` record, through the typed stack entry.
+fn trigger_record(state: &GameState) -> &ZoneChangeRecord {
+    state
+        .stack
+        .iter()
+        .find_map(|entry| match &entry.kind {
+            StackEntryKind::TriggeredAbility {
+                trigger_event: Some(GameEvent::ZoneChanged { record, .. }),
+                ..
+            } => Some(&**record),
+            _ => None,
+        })
+        .expect("a triggered ability carries a zone-change event")
+}
+
+/// The printing inside a record's look-back snapshot (the inner value).
+fn lki_set_code(record: &ZoneChangeRecord) -> Option<String> {
+    record.trigger_source_context.as_ref().and_then(|context| {
+        context
+            .lki
+            .printing
+            .get()
+            .as_ref()
+            .map(|printing| printing.set_code.clone())
+    })
+}
+
+fn stamps(record: &ZoneChangeRecord) -> (u32, usize) {
+    (record.recorded_turn_number, record.turn_zone_change_index)
+}
+
+/// The state as the raw (versioned) and the trusted persisted forms.
+fn persisted_forms(state: &GameState) -> [(&'static str, Value); 2] {
+    [
+        (
+            "raw",
+            serde_json::to_value(PersistedGameState::Raw(Box::new(state.clone())))
+                .expect("raw form serializes"),
+        ),
+        (
+            "trusted",
+            serde_json::to_value(PersistedGameState::capture(state.clone()))
+                .expect("trusted form serializes"),
+        ),
+    ]
+}
+
+/// The state object of a persisted form: the `state` member of a trusted one, else the value.
+fn state_payload(form: &Value) -> &Value {
+    form.get("state").unwrap_or(form)
+}
+
+fn state_payload_mut(form: &mut Value) -> &mut Value {
+    if form.get("state").is_some() {
+        form.get_mut("state").expect("trusted form has a state")
+    } else {
+        form
+    }
+}
+
+/// Production load: `PersistedGameState` deserialization, then the checked restore.
+fn reload(form: Value) -> Result<GameState, String> {
+    serde_json::from_value::<PersistedGameState>(form)
+        .map_err(|error| error.to_string())?
+        .into_game_state()
+        .map_err(|error| error.to_string())
+}
+
+/// Reload a copy of `form` after `edit` rewrote its state object.
+fn reload_edited(form: &Value, edit: impl FnOnce(&mut Value)) -> Result<GameState, String> {
+    let mut form = form.clone();
+    edit(state_payload_mut(&mut form));
+    reload(form)
+}
+
+fn at<'a>(root: &'a Value, path: &[String]) -> &'a Value {
+    path.iter().fold(root, |node, part| match node {
+        Value::Array(items) => &items[part.parse::<usize>().expect("array index")],
+        other => &other[part.as_str()],
+    })
+}
+
+fn at_mut<'a>(root: &'a mut Value, path: &[String]) -> &'a mut Value {
+    path.iter().fold(root, |node, part| match node {
+        Value::Array(items) => &mut items[part.parse::<usize>().expect("array index")],
+        other => other.get_mut(part.as_str()).expect("path key exists"),
+    })
+}
+
+fn record_at_mut<'a>(payload: &'a mut Value, path: &[String]) -> &'a mut Fields {
+    at_mut(payload, path)
+        .as_object_mut()
+        .expect("a record is an object")
+}
+
+/// Every serialized `GameEvent::ZoneChanged` record outside the ledger and the append-only
+/// journal, as the path of the record, optionally only those of `object`.
+fn live_record_paths(payload: &Value, object: Option<ObjectId>) -> Vec<Vec<String>> {
+    fn walk(
+        value: &Value,
+        path: &mut Vec<String>,
+        object: Option<ObjectId>,
+        found: &mut Vec<Vec<String>>,
+    ) {
+        match value {
+            Value::Object(map) => {
+                let suffix: Option<[&str; 2]> =
+                    if map.get("type").and_then(Value::as_str) == Some("ZoneChanged") {
+                        Some(["data", "record"])
+                    } else if map.contains_key("ZoneChanged") {
+                        Some(["ZoneChanged", "record"])
+                    } else {
+                        None
+                    };
+                if let Some(suffix) = suffix {
+                    let record = &map[suffix[0]][suffix[1]];
+                    if object.is_none_or(|object| record["object_id"].as_u64() == Some(object.0)) {
+                        let mut record_path = path.clone();
+                        record_path.extend(suffix.iter().map(|part| (*part).to_string()));
+                        found.push(record_path);
+                    }
+                    return;
+                }
+                for (key, child) in map {
+                    path.push(key.clone());
+                    walk(child, path, object, found);
+                    path.pop();
+                }
+            }
+            Value::Array(items) => {
+                for (index, child) in items.iter().enumerate() {
+                    path.push(index.to_string());
+                    walk(child, path, object, found);
+                    path.pop();
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut found = Vec::new();
+    for (key, child) in payload.as_object().expect("a state is an object") {
+        if key == "zone_changes_this_turn" || key == "resolved_rules_journal" {
+            continue;
+        }
+        walk(child, &mut vec![key.clone()], object, &mut found);
+    }
+    found
+}
+
+/// The bear's one live record (the helper asserts the count).
+fn bear_live_record_path(payload: &Value, bear: ObjectId) -> Vec<String> {
+    let mut paths = live_record_paths(payload, Some(bear));
+    assert_eq!(paths.len(), 1, "reach: the bear has one live record");
+    paths.remove(0)
+}
+
+fn edit_live(payload: &mut Value, bear: ObjectId, edit: impl FnOnce(&mut Fields)) {
+    let path = bear_live_record_path(payload, bear);
+    edit(record_at_mut(payload, &path));
+}
+
+fn bear_row_index(payload: &Value, bear: ObjectId) -> usize {
+    payload["zone_changes_this_turn"]
+        .as_array()
+        .expect("the ledger is an array")
+        .iter()
+        .position(|row| row["object_id"].as_u64() == Some(bear.0))
+        .expect("the ledger holds the bear's row")
+}
+
+fn row_path(row: usize) -> Vec<String> {
+    vec!["zone_changes_this_turn".to_string(), row.to_string()]
+}
+
+fn erase_stamps(record: &mut Fields) {
+    record.remove("recorded_turn_number");
+    record.remove("turn_zone_change_index");
+}
+
+fn set_stamps(record: &mut Fields, turn: u32, index: usize) {
+    record.insert("recorded_turn_number".to_string(), Value::from(turn));
+    record.insert("turn_zone_change_index".to_string(), Value::from(index));
+}
+
+/// Fixture construction only: write or remove the printing in a record's look-back snapshot.
+fn set_lki_printing(record: &mut Fields, code: Option<&str>) {
+    let lki = record
+        .get_mut("trigger_source_context")
+        .and_then(|context| context.get_mut("lki"))
+        .and_then(Value::as_object_mut)
+        .expect("the record carries a look-back snapshot");
+    match code {
+        Some(code) => {
+            lki.insert(
+                "printing".to_string(),
+                serde_json::json!({"set_code": code, "collector_number": "1"}),
+            );
+        }
+        None => {
+            lki.remove("printing");
+        }
+    }
+}
+
+/// Append a copy of ledger row `row`, changed by `edit`, and return its index.
+fn append_ledger_twin(payload: &mut Value, row: usize, edit: impl FnOnce(&mut Fields)) -> usize {
+    let ledger = payload["zone_changes_this_turn"]
+        .as_array_mut()
+        .expect("the ledger is an array");
+    let mut twin = ledger[row].clone();
+    edit(twin.as_object_mut().expect("a row is an object"));
+    ledger.push(twin);
+    ledger.len() - 1
+}
+
+/// Copy the bear's one live event into `deferred_entry_events` (a second live carrier) and
+/// return the paths of the original record and of the copy's record.
+fn duplicate_live_record_into_deferred_entry_events(
+    payload: &mut Value,
+    bear: ObjectId,
+) -> (Vec<String>, Vec<String>) {
+    let original = bear_live_record_path(payload, bear);
+    let event_path = &original[..original.len() - 2];
+    let event = at(payload, event_path).clone();
+    let carrier = payload
+        .as_object_mut()
+        .expect("a state is an object")
+        .entry("deferred_entry_events")
+        .or_insert_with(|| Value::Array(Vec::new()))
+        .as_array_mut()
+        .expect("the carrier is an array");
+    carrier.push(event);
+    let mut copy = vec![
+        "deferred_entry_events".to_string(),
+        (carrier.len() - 1).to_string(),
+    ];
+    copy.extend_from_slice(&original[original.len() - 2..]);
+    (original, copy)
+}
+
+/// A board and its two persisted forms, with the bear's ledger row.
+fn bear_board(
+    stamp_code: Option<&str>,
+) -> (GameState, ObjectId, usize, [(&'static str, Value); 2]) {
+    let (state, bear) = dies_trigger_board(stamp_code);
+    let forms = persisted_forms(&state);
+    let row = bear_row_index(state_payload(&forms[0].1), bear);
+    assert_eq!(
+        sentinels(
+            &state_payload(&forms[0].1)["zone_changes_this_turn"][row],
+            "SPAA"
+        ),
+        usize::from(stamp_code.is_some()),
+        "reach: the ledger row holds the stamped printing"
+    );
+    (state, bear, row, forms)
+}
+
+fn assert_bound(reloaded: &GameState, turn: u32, row: usize, context: &str) {
+    assert_eq!(
+        stamps(trigger_record(reloaded)),
+        (turn, row),
+        "{context}: the trigger's record names the bear's ledger occurrence"
+    );
+}
+
+fn assert_load_error(result: Result<GameState, String>, expected: &str, context: &str) {
+    let error = match result {
+        Ok(_) => panic!("{context}: the load must fail with '{expected}'"),
+        Err(error) => error,
+    };
+    assert!(
+        error.contains(expected),
+        "{context}: expected '{expected}', got '{error}'"
+    );
+}
+
+/// CR 400.7 + CR 603.2c + CR 203.1 + CR 206.1: a record that differs from its ledger row only
+/// in a printing is still that row's occurrence, however the printing differs and whether or
+/// not it carries its stamps; the loaded state keeps every original value.
+#[test]
+fn a_printing_only_difference_keeps_the_record_on_its_occurrence() {
+    // (board's printing, the live record's printing after the edit, erase the stamps)
+    let cases: [(Option<&str>, Option<&str>, bool); 4] = [
+        (Some("SPAA"), Some("SQQQ"), true),
+        (Some("SPAA"), Some("SQQQ"), false),
+        (Some("SPAA"), None, true),
+        (None, Some("SQQQ"), true),
+    ];
+    for (board_stamp, live_printing, erase) in cases {
+        let (state, bear, row, forms) = bear_board(board_stamp);
+        let turn = state.turn_number;
+        for (label, form) in forms {
+            let context =
+                format!("{label}: board {board_stamp:?}, live {live_printing:?}, erase {erase}");
+            // Reach: the unedited record binds the same occurrence once its stamps are gone,
+            // so the printing edit is what the rows below test.
+            let control = reload_edited(&form, |payload| {
+                edit_live(payload, bear, erase_stamps);
+            })
+            .expect("the unedited board loads");
+            assert_bound(&control, turn, row, &context);
+
+            let mut edited = form.clone();
+            edit_live(state_payload_mut(&mut edited), bear, |record| {
+                set_lki_printing(record, live_printing);
+                if erase {
+                    erase_stamps(record);
+                }
+            });
+            let payload = state_payload(&edited);
+            let live = at(payload, &bear_live_record_path(payload, bear));
+            assert_eq!(
+                sentinels(live, "SQQQ"),
+                usize::from(live_printing.is_some()),
+                "{context}: the live record holds the edited printing before the reload"
+            );
+
+            let reloaded = reload(edited)
+                .unwrap_or_else(|error| panic!("{context}: the load must succeed: {error}"));
+            assert_bound(&reloaded, turn, row, &context);
+            assert_eq!(
+                lki_set_code(trigger_record(&reloaded)).as_deref(),
+                live_printing,
+                "{context}: the loaded record keeps its own printing"
+            );
+            assert_eq!(
+                lki_set_code(&reloaded.zone_changes_this_turn[row]).as_deref(),
+                board_stamp,
+                "{context}: the ledger row keeps its own printing"
+            );
+        }
+    }
+}
+
+/// CR 400.7: a difference in a rules value still separates a record from its occurrence, with a
+/// display-bearing ledger (board B) and a display-free one (board B0): an empty candidate set is
+/// the same error whatever the ledger holds.
+#[test]
+fn a_rules_difference_still_separates_occurrences() {
+    for board_stamp in [Some("SPAA"), None] {
+        let (state, bear, row, forms) = bear_board(board_stamp);
+        let turn = state.turn_number;
+        for (label, form) in forms {
+            let context = format!("{label}: board {board_stamp:?}");
+            // Reach: a printing-only edit on the same board binds.
+            let printing_only = reload_edited(&form, |payload| {
+                edit_live(payload, bear, |record| {
+                    set_lki_printing(record, Some("SQQQ"));
+                    erase_stamps(record);
+                });
+            })
+            .expect("a printing-only edit loads");
+            assert_bound(&printing_only, turn, row, &context);
+
+            let stronger = |record: &mut Fields| {
+                record.insert("power".to_string(), serde_json::json!(9));
+            };
+            assert_load_error(
+                reload_edited(&form, |payload| edit_live(payload, bear, stronger)),
+                "no ledger occurrence",
+                &format!("{context}: stamped"),
+            );
+            let unstamped = reload_edited(&form, |payload| {
+                edit_live(payload, bear, |record| {
+                    stronger(record);
+                    erase_stamps(record);
+                });
+            })
+            .expect("an unstamped record without an occurrence passes through");
+            assert_eq!(
+                stamps(trigger_record(&unstamped)),
+                (0, 0),
+                "{context}: the unbound record keeps serde's compatibility form"
+            );
+        }
+    }
+}
+
+/// CR 603.2c + CR 203.1 + CR 206.1: a printing never selects among rules-identical ledger rows
+/// (an unstamped record is ambiguous), a stamped record keeps its own row, and two carriers of
+/// the same occurrence stay on the keys they hold.
+#[test]
+fn a_printing_never_chooses_between_rules_identical_occurrences() {
+    let (state, bear, row, forms) = bear_board(Some("SPAA"));
+    let turn = state.turn_number;
+    let twin_index = state.zone_changes_this_turn.len();
+    for (label, form) in forms {
+        let with_printing_twin = |payload: &mut Value| {
+            let twin = append_ledger_twin(payload, row, |record| {
+                set_lki_printing(record, Some("SQQQ"));
+            });
+            assert_eq!(twin, twin_index, "reach: the twin is appended last");
+        };
+
+        // (i) An unstamped record matches both rows by its rules: ambiguous, never chosen.
+        assert_load_error(
+            reload_edited(&form, |payload| {
+                with_printing_twin(payload);
+                edit_live(payload, bear, erase_stamps);
+            }),
+            "ambiguously matches",
+            &format!("{label} (i)"),
+        );
+        // Control: a twin that differs in a rules value is no candidate, so the record binds.
+        let rules_twin = reload_edited(&form, |payload| {
+            let twin = append_ledger_twin(payload, row, |record| {
+                record.insert("power".to_string(), serde_json::json!(9));
+            });
+            assert_eq!(twin, twin_index);
+            edit_live(payload, bear, erase_stamps);
+        })
+        .expect("a rules-different twin is not a candidate");
+        assert_bound(&rules_twin, turn, row, &format!("{label} control"));
+
+        // (ii) A stamped record that carries the other printing stays on its own row.
+        let kept = reload_edited(&form, |payload| {
+            with_printing_twin(payload);
+            edit_live(payload, bear, |record| {
+                set_lki_printing(record, Some("SQQQ"));
+            });
+        })
+        .expect("a coherent stamped record loads");
+        assert_bound(&kept, turn, row, &format!("{label} (ii)"));
+        assert_eq!(
+            lki_set_code(trigger_record(&kept)).as_deref(),
+            Some("SQQQ"),
+            "{label} (ii): the record keeps its printing"
+        );
+        assert_eq!(
+            lki_set_code(&kept.zone_changes_this_turn[twin_index]).as_deref(),
+            Some("SQQQ"),
+            "{label} (ii): the twin is present with its printing"
+        );
+
+        // (iii) Two carriers of the bear's record, each stamped to a different row of the
+        // printing-only pair, keep their own stamps.
+        let both = reload_edited(&form, |payload| {
+            with_printing_twin(payload);
+            let (original, copy) = duplicate_live_record_into_deferred_entry_events(payload, bear);
+            set_stamps(record_at_mut(payload, &original), turn, twin_index);
+            let copy = record_at_mut(payload, &copy);
+            set_lki_printing(copy, Some("SQQQ"));
+            set_stamps(copy, turn, row);
+        })
+        .expect("two coherent stamped carriers load");
+        assert_eq!(
+            stamps(trigger_record(&both)),
+            (turn, twin_index),
+            "{label} (iii): the stack carrier keeps its stamp"
+        );
+        let GameEvent::ZoneChanged { record, .. } = &both.deferred_entry_events[0] else {
+            panic!("{label} (iii): the copy is a zone-change event");
+        };
+        assert_eq!(stamps(record), (turn, row), "{label} (iii): the copy too");
+    }
+}
+
+/// CR 603.2c + CR 203.1 + CR 206.1: a display-bearing candidate disables the raw fallback, so a
+/// display-free record is ambiguous between a printing-bearing twin and its raw-identical row;
+/// two raw-identical candidates are ambiguous too.
+#[test]
+fn a_display_bearing_candidate_disables_the_raw_fallback() {
+    let (state, bear, row, forms) = bear_board(None);
+    let turn = state.turn_number;
+    for (label, form) in forms {
+        let alone = reload_edited(&form, |payload| edit_live(payload, bear, erase_stamps))
+            .expect("the unedited display-free board loads");
+        assert_bound(&alone, turn, row, &format!("{label} control"));
+
+        assert_load_error(
+            reload_edited(&form, |payload| {
+                append_ledger_twin(payload, row, |record| {
+                    set_lki_printing(record, Some("SQQQ"));
+                });
+                edit_live(payload, bear, erase_stamps);
+            }),
+            "ambiguously matches",
+            &format!("{label}: display-bearing twin"),
+        );
+        assert_load_error(
+            reload_edited(&form, |payload| {
+                append_ledger_twin(payload, row, |_| {});
+                edit_live(payload, bear, erase_stamps);
+            }),
+            "ambiguously matches",
+            &format!("{label}: raw-identical twin"),
+        );
+    }
+}
+
+/// How a legacy alias differs from the original row without differing in any rules value.
+type AliasEdit = fn(&mut Fields);
+
+fn alias_base_power_null(record: &mut Fields) {
+    record.insert("base_power".to_string(), Value::Null);
+}
+
+fn alias_base_power_omitted(record: &mut Fields) {
+    record.remove("base_power");
+}
+
+fn alias_unknown_field(record: &mut Fields) {
+    record.insert("zz_probe_unknown".to_string(), serde_json::json!(1));
+}
+
+fn alias_arrival_omitted(record: &mut Fields) {
+    record.remove("arrival");
+}
+
+fn without_stamps(record: &Value) -> Value {
+    let mut record = record.clone();
+    erase_stamps(record.as_object_mut().expect("a record is an object"));
+    record
+}
+
+/// CR 400.7 + CR 603.2c: display-free legacy aliases keep today's unique binding through the raw
+/// fallback: of two rules-identical rows, the one that is raw-equal to the record binds.
+#[test]
+fn legacy_aliases_keep_todays_unique_binding() {
+    // (label, the original row's edit, the twin's and the record's edit)
+    let aliases: [(&str, AliasEdit, AliasEdit); 3] = [
+        (
+            "base_power null vs omitted",
+            alias_base_power_null,
+            alias_base_power_omitted,
+        ),
+        ("ignored unknown field", |_| {}, alias_unknown_field),
+        ("arrival omitted", |_| {}, alias_arrival_omitted),
+    ];
+    let (state, bear, row, forms) = bear_board(None);
+    let turn = state.turn_number;
+    let twin_index = state.zone_changes_this_turn.len();
+    for (label, form) in &forms {
+        for (alias, row_edit, variant_edit) in aliases {
+            let context = format!("{label}: {alias}");
+            let mut edited = form.clone();
+            let payload = state_payload_mut(&mut edited);
+            row_edit(record_at_mut(payload, &row_path(row)));
+            let twin = append_ledger_twin(payload, row, variant_edit);
+            assert_eq!(twin, twin_index);
+            edit_live(payload, bear, |record| {
+                variant_edit(record);
+                erase_stamps(record);
+            });
+            // Reach: the two rows are distinct in raw JSON, and the record matches only the twin.
+            let payload = state_payload(&edited);
+            let live = at(payload, &bear_live_record_path(payload, bear));
+            let rows = &payload["zone_changes_this_turn"];
+            assert_ne!(without_stamps(&rows[row]), without_stamps(&rows[twin]));
+            assert_ne!(without_stamps(&rows[row]), without_stamps(live));
+            assert_eq!(without_stamps(&rows[twin]), without_stamps(live));
+
+            let reloaded =
+                reload(edited).unwrap_or_else(|error| panic!("{context}: must load: {error}"));
+            assert_bound(&reloaded, turn, twin, &context);
+        }
+
+        // Two raw-identical rows cannot be told apart.
+        assert_load_error(
+            reload_edited(form, |payload| {
+                append_ledger_twin(payload, row, |_| {});
+                edit_live(payload, bear, erase_stamps);
+            }),
+            "ambiguously matches",
+            &format!("{label}: raw-identical rows"),
+        );
+    }
+
+    // On a stamped board the record carries a printing, which disables the fallback.
+    let (_, bear, row, forms) = bear_board(Some("SPAA"));
+    for (label, form) in forms {
+        assert_load_error(
+            reload_edited(&form, |payload| {
+                alias_base_power_null(record_at_mut(payload, &row_path(row)));
+                append_ledger_twin(payload, row, alias_base_power_omitted);
+                edit_live(payload, bear, |record| {
+                    alias_base_power_omitted(record);
+                    erase_stamps(record);
+                });
+            }),
+            "ambiguously matches",
+            &format!("{label}: stamped board"),
+        );
+    }
+}
+
+/// CR 400.7 + CR 603.2c: a display-free record with exactly one typed candidate binds (rule
+/// (b)), even when it is not raw-equal to it; the unstamped pass-through still compares
+/// display-free records raw and leaves such a record unbound.
+#[test]
+fn a_single_typed_candidate_binds_a_legacy_alias_record() {
+    let (state, bear, row, forms) = bear_board(None);
+    let turn = state.turn_number;
+    for (label, form) in forms {
+        let with_alias_record = |stamping: Option<(u32, usize)>| {
+            move |payload: &mut Value| {
+                alias_base_power_null(record_at_mut(payload, &row_path(row)));
+                edit_live(payload, bear, |record| {
+                    alias_base_power_omitted(record);
+                    match stamping {
+                        Some((turn, index)) => set_stamps(record, turn, index),
+                        None => erase_stamps(record),
+                    }
+                });
+            }
+        };
+
+        // Reach: with the key restored the stamped record is the row's own and binds by the
+        // fast path.
+        let own = reload_edited(&form, |payload| {
+            alias_base_power_null(record_at_mut(payload, &row_path(row)));
+            edit_live(payload, bear, |record| {
+                alias_base_power_null(record);
+                set_stamps(record, turn, row);
+            });
+        })
+        .expect("the unedited stamped record loads");
+        assert_bound(&own, turn, row, &format!("{label} control"));
+
+        for (what, stamping) in [("stamped", (turn, row)), ("zero-stamped", (0, 0))] {
+            let reloaded = reload_edited(&form, with_alias_record(Some(stamping)))
+                .unwrap_or_else(|error| panic!("{label}: {what} alias must load: {error}"));
+            assert_bound(&reloaded, turn, row, &format!("{label}: {what}"));
+        }
+        let unstamped = reload_edited(&form, with_alias_record(None))
+            .expect("an unstamped alias passes through");
+        assert_eq!(
+            stamps(trigger_record(&unstamped)),
+            (0, 0),
+            "{label}: the pass-through leaves the alias record unbound"
+        );
+    }
+}
+
+/// CR 603.2c: the fast paths keep their structure. A prior-turn stamp is trusted whatever the
+/// printing; records that name one occurrence key agree by the pairwise relation (rules always,
+/// raw form among display-free records), whatever the visiting order.
+#[test]
+fn fast_paths_keep_their_structure() {
+    // A prior-turn record with a different printing keeps its stamp.
+    let (state, bear, row, forms) = bear_board(Some("SPAA"));
+    let turn = state.turn_number;
+    for (label, form) in forms {
+        let prior = reload_edited(&form, |payload| {
+            edit_live(payload, bear, |record| {
+                set_lki_printing(record, Some("SQQQ"));
+                set_stamps(record, turn - 1, 7);
+            });
+        })
+        .expect("a prior-turn record loads");
+        assert_eq!(
+            stamps(trigger_record(&prior)),
+            (turn - 1, 7),
+            "{label}: prior turn"
+        );
+        assert_eq!(
+            lki_set_code(trigger_record(&prior)).as_deref(),
+            Some("SQQQ")
+        );
+
+        // Two carriers of one key that differ only in a printing agree.
+        let pair = reload_edited(&form, |payload| {
+            let (original, copy) = duplicate_live_record_into_deferred_entry_events(payload, bear);
+            set_stamps(record_at_mut(payload, &original), turn, row);
+            let copy = record_at_mut(payload, &copy);
+            set_lki_printing(copy, Some("SQQQ"));
+            set_stamps(copy, turn, row);
+        })
+        .expect("printing-only carriers of one key agree");
+        assert_bound(&pair, turn, row, &format!("{label}: printing-only pair"));
+        let GameEvent::ZoneChanged { record, .. } = &pair.deferred_entry_events[0] else {
+            panic!("{label}: the copy is a zone-change event");
+        };
+        assert_eq!(stamps(record), (turn, row));
+        assert_eq!(lki_set_code(record).as_deref(), Some("SQQQ"));
+    }
+
+    // Two display-free carriers of one key that differ in a legacy alias conflict.
+    let (state, bear, row, forms) = bear_board(None);
+    let turn = state.turn_number;
+    for (label, form) in forms {
+        assert_load_error(
+            reload_edited(&form, |payload| {
+                alias_base_power_null(record_at_mut(payload, &row_path(row)));
+                edit_live(payload, bear, alias_base_power_null);
+                let (original, copy) =
+                    duplicate_live_record_into_deferred_entry_events(payload, bear);
+                set_stamps(record_at_mut(payload, &original), turn, row);
+                let copy = record_at_mut(payload, &copy);
+                alias_base_power_omitted(copy);
+                set_stamps(copy, turn, row);
+            }),
+            "shared by conflicting records",
+            &format!("{label}: display-free alias pair"),
+        );
+    }
+}
+
+/// An undecodable record is a load error in the existing style, and the shape guard keeps its
+/// message.
+#[test]
+fn an_undecodable_zone_change_record_fails_the_load() {
+    for board_stamp in [Some("SPAA"), None] {
+        let (_, bear, _, forms) = bear_board(board_stamp);
+        for (label, form) in forms {
+            let context = format!("{label}: board {board_stamp:?}");
+            reload_edited(&form, |_| {}).expect("the unedited board loads");
+            assert_load_error(
+                reload_edited(&form, |payload| {
+                    edit_live(payload, bear, |record| {
+                        record.insert("mana_value".to_string(), serde_json::json!("x"));
+                    });
+                }),
+                "does not decode as a zone-change record",
+                &context,
+            );
+            assert_load_error(
+                reload_edited(&form, |payload| {
+                    edit_live(payload, bear, |record| {
+                        record.remove("to_zone");
+                    });
+                }),
+                "missing its zone-change shape",
+                &context,
+            );
+        }
+    }
+}
+
+/// An invalid occurrence stamp reads as absent, as it always has: the record is re-bound to its
+/// occurrence, and only a record that does not decode is rejected.
+#[test]
+fn an_invalid_occurrence_stamp_is_repaired_as_today() {
+    // (label, the invalid stamp edits)
+    let invalid: [(&str, Vec<(&str, Value)>); 3] = [
+        ("null index", vec![("turn_zone_change_index", Value::Null)]),
+        (
+            "string turn and negative index",
+            vec![
+                ("recorded_turn_number", serde_json::json!("x")),
+                ("turn_zone_change_index", serde_json::json!(-1)),
+            ],
+        ),
+        ("null turn", vec![("recorded_turn_number", Value::Null)]),
+    ];
+    for board_stamp in [Some("SPAA"), None] {
+        let (state, bear, row, forms) = bear_board(board_stamp);
+        let turn = state.turn_number;
+        for (label, form) in forms {
+            for (what, edits) in &invalid {
+                let context = format!("{label}: board {board_stamp:?}, {what}");
+                let apply = |record: &mut Fields| {
+                    for (key, value) in edits {
+                        record.insert((*key).to_string(), value.clone());
+                    }
+                };
+                let mut edited = form.clone();
+                edit_live(state_payload_mut(&mut edited), bear, apply);
+                let payload = state_payload(&edited);
+                let live = at(payload, &bear_live_record_path(payload, bear));
+                for (key, value) in edits {
+                    assert_eq!(
+                        &live[*key], value,
+                        "{context}: the invalid stamp is in place"
+                    );
+                }
+                let reloaded =
+                    reload(edited).unwrap_or_else(|error| panic!("{context}: must load: {error}"));
+                assert_bound(&reloaded, turn, row, &context);
+            }
+            // Rejection control: an invalid stamp does not excuse an undecodable record.
+            assert_load_error(
+                reload_edited(&form, |payload| {
+                    edit_live(payload, bear, |record| {
+                        record.insert("turn_zone_change_index".to_string(), Value::Null);
+                        record.insert("mana_value".to_string(), serde_json::json!("x"));
+                    });
+                }),
+                "does not decode as a zone-change record",
+                &format!("{label}: board {board_stamp:?}, rejection control"),
+            );
+        }
+    }
+}
+
+fn committed_dump(name: &str) -> &'static [u8] {
+    match name {
+        "dellian_emblem_conqueror_4p" => {
+            include_bytes!("../fixtures/dellian_emblem_conqueror_4p.json.gz").as_slice()
+        }
+        "tenacity_exquisite_blood_4p" => {
+            include_bytes!("../fixtures/tenacity_exquisite_blood_4p.json.gz").as_slice()
+        }
+        other => panic!("no committed dump named {other}"),
+    }
+}
+
+/// Every live record's path with its stamps, in a serialized state.
+fn live_record_stamps(state: &GameState) -> Vec<(Vec<String>, Value, Value)> {
+    let json = serde_json::to_value(state).expect("state serializes");
+    live_record_paths(&json, None)
+        .into_iter()
+        .map(|path| {
+            let record = at(&json, &path);
+            (
+                path.clone(),
+                record["recorded_turn_number"].clone(),
+                record["turn_zone_change_index"].clone(),
+            )
+        })
+        .collect()
+}
+
+/// Real boards reconcile as before: a committed dump loads through the production decoder, and
+/// the loaded state, saved on both persisted paths and loaded again, keeps every live record's
+/// stamps.
+#[test]
+fn real_saves_reconcile_as_before() {
+    for name in ["dellian_emblem_conqueror_4p", "tenacity_exquisite_blood_4p"] {
+        let mut json = String::new();
+        flate2::read::GzDecoder::new(committed_dump(name))
+            .read_to_string(&mut json)
+            .expect("fixture .json.gz inflates to UTF-8 JSON");
+        let envelope: Value = serde_json::from_str(&json).expect("dump envelope parses as JSON");
+        let loaded = serde_json::from_value::<PersistedGameState>(envelope["gameState"].clone())
+            .expect("gameState deserializes through the production decoder")
+            .into_game_state()
+            .expect("persisted snapshot satisfies the checked restore contract");
+
+        let expected = live_record_stamps(&loaded);
+        assert!(
+            !expected.is_empty(),
+            "{name}: reach: the dump holds live zone-change records"
+        );
+        for (label, form) in persisted_forms(&loaded) {
+            let reloaded =
+                reload(form).unwrap_or_else(|error| panic!("{name} {label}: reload: {error}"));
+            assert_eq!(
+                live_record_stamps(&reloaded),
+                expected,
+                "{name} {label}: every live record keeps its stamps"
+            );
+        }
+    }
 }
