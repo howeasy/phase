@@ -147,6 +147,7 @@ fn run_flip_branch(
                 targets.to_vec(),
                 chain_root_targets.to_vec(),
             );
+        crate::game::ability_utils::inherit_result_branch_source_identity(state, &mut sub);
         // CR 608.2d + CR 115.10: the flip's targets reach the branch root, since
         // they include the branch's OWN announced targets ("if you win the flip,
         // ~ deals 2 damage to target opponent"). Only an untargeted

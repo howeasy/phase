@@ -38323,6 +38323,37 @@ impl ResolvedAbility {
         }
     }
 
+    /// CR 400.7 + CR 113.7a: carry a random-result branch's source identity
+    /// without changing its actor, targets, pins, or other resolution context.
+    /// Different-source nodes bound the traversal, including their descendants;
+    /// nested definition payloads inherit only when they are materialized.
+    pub(crate) fn set_result_branch_source_identity_recursive(
+        &mut self,
+        source_id: ObjectId,
+        trigger_source: Option<&TriggerSourceContext>,
+        source_incarnation: u64,
+    ) {
+        if self.source_id != source_id {
+            return;
+        }
+        self.trigger_source = trigger_source.cloned();
+        self.source_incarnation = Some(source_incarnation);
+        if let Some(sub) = self.sub_ability.as_mut() {
+            sub.set_result_branch_source_identity_recursive(
+                source_id,
+                trigger_source,
+                source_incarnation,
+            );
+        }
+        if let Some(else_branch) = self.else_ability.as_mut() {
+            else_branch.set_result_branch_source_identity_recursive(
+                source_id,
+                trigger_source,
+                source_incarnation,
+            );
+        }
+    }
+
     /// Digital-only Alchemy (no CR entry): stamp source-less gameplay identity
     /// over this entire ability chain. Writes `source_id` ONLY — controller,
     /// `original_controller`, `trigger_source`, incarnation pins untouched, so

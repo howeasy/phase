@@ -8,7 +8,7 @@ use crate::types::ability::{
     DieRollIgnoreRule, DieRollModifier, Effect, EffectError, EffectKind, ResolvedAbility,
 };
 use crate::types::events::GameEvent;
-use crate::types::game_state::{GameState, StackEntryKind, WaitingFor};
+use crate::types::game_state::{GameState, WaitingFor};
 use crate::types::identifiers::ObjectId;
 use crate::types::player::PlayerId;
 use crate::types::proposed_event::ProposedEvent;
@@ -17,7 +17,9 @@ use crate::types::resolution::{
 };
 
 use super::{resolve_ability_chain_step, ResolutionProgress};
-use crate::game::ability_utils::build_resolved_from_def_with_targets_and_chain_root;
+use crate::game::ability_utils::{
+    build_resolved_from_def_with_targets_and_chain_root, inherit_result_branch_source_identity,
+};
 
 /// CR 706.2: Draw one natural result from the game's seeded RNG — "the number
 /// indicated on the top face of the die before any modifiers."
@@ -505,28 +507,6 @@ pub(crate) fn drain_active_die_roll(state: &mut GameState, events: &mut Vec<Game
     }
 }
 
-/// CR 706.3b + CR 113.7a + CR 400.7: a results branch is part of the ability that
-/// rolled, so a branch of an ACTIVATED ability acts for the object that activation
-/// captured. Triggered carriers keep their identity in `trigger_source` provenance,
-/// which the CR 400.7j relatch read prefers over the bare stamp, and spells capture
-/// no incarnation, so both stay unstamped (fail-open).
-fn inherit_activation_incarnation(state: &GameState, branch: &mut ResolvedAbility) {
-    let carried = state
-        .resolving_stack_entry
-        .as_ref()
-        .filter(|entry| entry.source_id == branch.source_id)
-        .and_then(|entry| match &entry.kind {
-            StackEntryKind::ActivatedAbility { ability, .. } => ability.source_incarnation,
-            StackEntryKind::Spell { .. }
-            | StackEntryKind::TriggeredAbility { .. }
-            | StackEntryKind::KeywordAction { .. }
-            | StackEntryKind::CombatDamage { .. } => None,
-        });
-    if let Some(incarnation) = carried {
-        branch.set_source_incarnation_recursive(Some(incarnation));
-    }
-}
-
 /// CR 706.6 + CR 614.1a: Finish a die-roll instruction once the ignored rolls
 /// are known.
 ///
@@ -544,12 +524,10 @@ fn inherit_activation_incarnation(state: &GameState, branch: &mut ResolvedAbilit
 /// and Complete when all survivors and their branches have settled; the
 /// caller then drains the continuation back to Priority.
 ///
-/// CR 706.3b + CR 400.7 + CR 113.7a: a results-table row is part of the ability that
-/// rolled, so the branch frame of an ACTIVATED ability acts for the source object
-/// that activation captured when it went on the stack (see
-/// `inherit_activation_incarnation`; a triggered ability's rows stay unstamped). A
-/// source that left and re-entered the zone meanwhile is a new object and does not
-/// receive its old activation's rows.
+/// CR 706.3b + CR 400.7 + CR 113.7a: a results-table row is part of the ability
+/// that rolled. The shared dice/coin policy transfers an activated carrier's
+/// post-cost stamp or a matching triggered carrier's full source provenance;
+/// missing or foreign authority leaves the branch unchanged.
 pub(crate) fn resume_after_ignore(
     state: &mut GameState,
     pending: PendingDieRoll,
@@ -654,7 +632,7 @@ pub(crate) fn resume_after_ignore(
             );
             // CR 706.3b + CR 400.7: the row is part of the ability that rolled, so
             // it acts for the object that ability captured.
-            inherit_activation_incarnation(state, &mut sub);
+            inherit_result_branch_source_identity(state, &mut sub);
             let child_boundary = state.resolution_stack.capture_child_boundary();
             let progress = resolve_ability_chain_step(state, &sub, events, 0)?;
 
@@ -743,7 +721,7 @@ mod tests {
         AbilityDefinition, AbilityKind, BounceSelection, DieResultBranch, QuantityExpr,
         TargetFilter,
     };
-    use crate::types::game_state::StackEntry;
+    use crate::types::game_state::{StackEntry, StackEntryKind};
     use crate::types::identifiers::ObjectId;
     use crate::types::player::PlayerId;
 
@@ -1795,115 +1773,5 @@ mod tests {
             Zone::Hand,
             "paired control: a carrier stamped with the current incarnation returns the card"
         );
-    }
-
-    /// CR 706.3b + CR 400.7 + CR 113.7a: the die branch inherits the captured
-    /// incarnation from an ACTIVATED ability carrier of its own source, recursively
-    /// through the whole chain it builds, and from nothing else. A triggered carrier
-    /// keeps its identity in its `trigger_source` provenance, a spell captures no
-    /// incarnation, another object's activation is not this source's, and an
-    /// unstamped activation has nothing to inherit: each of those stays unstamped
-    /// (fail-open). The first assertion is the positive reach-guard.
-    #[test]
-    fn die_branch_inherits_only_an_activated_carriers_incarnation() {
-        use crate::types::game_state::CastingVariant;
-        use crate::types::identifiers::CardId;
-
-        let source = ObjectId(1);
-        let draw = |object: ObjectId| {
-            ResolvedAbility::new(
-                Effect::Draw {
-                    count: QuantityExpr::Fixed { value: 1 },
-                    target: TargetFilter::Controller,
-                },
-                vec![],
-                object,
-                PlayerId(0),
-            )
-        };
-        // The nested shape a results row builds: a root, its sub-ability and its
-        // else-branch, none of them stamped.
-        let branch = || {
-            let mut root = draw(source);
-            root.sub_ability = Some(Box::new(draw(source)));
-            root.else_ability = Some(Box::new(draw(source)));
-            root
-        };
-        let stamps = |frame: &ResolvedAbility| {
-            [
-                frame.source_incarnation,
-                frame.sub_ability.as_ref().unwrap().source_incarnation,
-                frame.else_ability.as_ref().unwrap().source_incarnation,
-            ]
-        };
-        let stamped = |object: ObjectId, incarnation: Option<u64>| {
-            let mut ability = draw(object);
-            ability.set_source_incarnation_recursive(incarnation);
-            Box::new(ability)
-        };
-        let entry = |object: ObjectId, kind: StackEntryKind| StackEntry {
-            id: ObjectId(900),
-            source_id: object,
-            controller: PlayerId(0),
-            kind,
-        };
-        let inherited = |carrier: Option<StackEntry>| {
-            let mut state = GameState::new_two_player(42);
-            state.resolving_stack_entry = carrier;
-            let mut frame = branch();
-            inherit_activation_incarnation(&state, &mut frame);
-            stamps(&frame)
-        };
-
-        assert_eq!(
-            inherited(Some(entry(
-                source,
-                StackEntryKind::ActivatedAbility {
-                    source_id: source,
-                    ability: stamped(source, Some(7)),
-                }
-            ))),
-            [Some(7); 3],
-            "reach-guard: an activated carrier of this source stamps the whole chain"
-        );
-
-        let triggered = StackEntryKind::TriggeredAbility {
-            source_id: source,
-            ability: stamped(source, Some(9)),
-            condition: None,
-            trigger_event: None,
-            description: None,
-            source_name: String::new(),
-            subject_match_count: None,
-            die_result: None,
-            provenance: None,
-        };
-        let spell = StackEntryKind::Spell {
-            card_id: CardId(1),
-            ability: Some(stamped(source, Some(9))),
-            casting_variant: CastingVariant::default(),
-            actual_mana_spent: 0,
-        };
-        let other = ObjectId(2);
-        let activated_other = StackEntryKind::ActivatedAbility {
-            source_id: other,
-            ability: stamped(other, Some(7)),
-        };
-        let unstamped = StackEntryKind::ActivatedAbility {
-            source_id: source,
-            ability: stamped(source, None),
-        };
-        for (what, carrier) in [
-            ("a triggered carrier", Some(entry(source, triggered))),
-            ("a spell carrier", Some(entry(source, spell))),
-            (
-                "another object's activation",
-                Some(entry(other, activated_other)),
-            ),
-            ("no carrier", None),
-            ("an unstamped activation", Some(entry(source, unstamped))),
-        ] {
-            assert_eq!(inherited(carrier), [None; 3], "{what} stays unstamped");
-        }
     }
 }

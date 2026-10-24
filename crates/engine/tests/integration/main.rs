@@ -1371,6 +1371,7 @@ mod queen_velocity_upkeep;
 mod quirion_ranger_activation;
 mod rage_reflection_double_strike_grant;
 mod random_discard_cost_replacement_resume;
+mod random_result_source_identity;
 mod raubahn_bull_of_ala_mhigo;
 mod raw_resolution_stack_restore;
 mod reapers_scythe;
