@@ -523,7 +523,7 @@ fn rig_old_damage_loss_does_not_sacrifice_returned_source() {
     rig_damage_flip(true);
 }
 
-fn rig_dies_flip(won: bool) {
+fn rig_dies_flip(won: bool, token: bool) {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     fund(&mut scenario);
@@ -544,13 +544,39 @@ fn rig_dies_flip(won: bool) {
         cost(0, &[ManaCostShard::Black]),
     );
     let mut run = Run::new(scenario);
+    if token {
+        // Fixture a token copy with the printed abilities, as in other token
+        // integration scenarios; Murder still produces the actual death.
+        run.runner
+            .state_mut()
+            .objects
+            .get_mut(&rig)
+            .expect("the Rig token exists before Murder")
+            .is_token = true;
+        assert!(run.runner.state().objects[&rig].is_token);
+    }
     run.commit_at(kill, rig);
     run.spell_only(kill);
-    assert_eq!(run.runner.state().objects[&rig].zone, Zone::Graveyard);
+    assert_eq!(
+        moves(&run.events, rig),
+        vec![(Some(Zone::Battlefield), Zone::Graveyard)],
+        "Murder must actually kill the Rig before its dies trigger resolves"
+    );
+    // CR 603.10a: the dies trigger looks back at the departed permanent.
     assert_trigger(&run, rig, P0);
-    run.commit_at(cremate, rig);
-    run.spell_only(cremate);
-    assert_eq!(run.runner.state().objects[&rig].zone, Zone::Exile);
+    if token {
+        // CR 111.7: the token ceases to exist outside the battlefield, but its
+        // death has already triggered the ability now waiting on the stack.
+        assert!(
+            !run.runner.state().objects.contains_key(&rig),
+            "the trigger must resolve without any source object in state.objects"
+        );
+    } else {
+        assert_eq!(run.runner.state().objects[&rig].zone, Zone::Graveyard);
+        run.commit_at(cremate, rig);
+        run.spell_only(cremate);
+        assert_eq!(run.runner.state().objects[&rig].zone, Zone::Exile);
+    }
     pin(&mut run.runner, coin_seed(&[won]));
     run.finish();
     run.assert_flips(&[(P0, won)]);
@@ -573,9 +599,9 @@ fn rig_dies_flip(won: bool) {
             GameEvent::DamageDealt {
                 source_id,
                 target,
-                amount: 4,
+                amount,
                 ..
-            } if *source_id == rig => Some(target.clone()),
+            } if *source_id == rig => Some((target.clone(), *amount)),
             _ => None,
         })
         .collect();
@@ -589,19 +615,29 @@ fn rig_dies_flip(won: bool) {
             TargetRef::Object(own),
             TargetRef::Object(opposing),
         ] {
-            assert!(targets.contains(&target));
+            assert!(targets.contains(&(target, 4)));
         }
     }
 }
 
 #[test]
 fn departed_rig_dies_loss_damages_each_creature_and_player() {
-    rig_dies_flip(false);
+    rig_dies_flip(false, false);
 }
 
 #[test]
 fn departed_rig_dies_win_deals_no_damage() {
-    rig_dies_flip(true);
+    rig_dies_flip(true, false);
+}
+
+#[test]
+fn departed_token_rig_dies_loss_damages_each_creature_and_player() {
+    rig_dies_flip(false, true);
+}
+
+#[test]
+fn departed_token_rig_dies_win_deals_no_damage() {
+    rig_dies_flip(true, true);
 }
 
 fn ral_flip(won: bool, accept: bool, blink: bool) {
