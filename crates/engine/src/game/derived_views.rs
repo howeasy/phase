@@ -2794,13 +2794,14 @@ fn stack_source_token_image_ref(state: &GameState, entry: &StackEntry) -> Option
 }
 
 /// The identity a stack row displays for its source and that identity's printing, read from one
-/// authority so the row never shows a printing its name does not disclose (CR 400.2).
+/// authority so the row never shows a printing its name does not disclose.
 struct StackRowSource {
     name: String,
     printing: DisplayOnly<Option<CardPrinting>>,
 }
 
-/// CR 400.2: a row shows the live source's printing only beside a name that discloses it.
+/// A row shows the live source's printing only beside a name that discloses it (a face-down or
+/// merged source, or an uncast Room, displays no name).
 fn live_source_printing(object: &GameObject) -> DisplayOnly<Option<CardPrinting>> {
     if object.name.is_empty() {
         DisplayOnly::default()
@@ -2829,19 +2830,30 @@ fn stack_row_source(state: &GameState, entry: &StackEntry) -> StackRowSource {
             ..
         } if !source_name.is_empty() => StackRowSource {
             name: source_name.clone(),
-            // The context latched as the trigger went on the stack; a context-free
-            // (delayed, CR 603.7d) entry latched its name from the live object.
+            // The latched name came from the context's own read of its source (the exact
+            // live object while it still agrees with the context, else the context's
+            // snapshot), so the printing comes from that same read and only while that
+            // read still discloses the latched name: a source that changed or was merged
+            // since the context was stored shows no printing, never the context's older one.
+            // A context-free (delayed, CR 603.7d) entry latched its name from the live object.
             printing: ability
                 .trigger_source
                 .as_ref()
-                .map_or_else(latched_printing, |context| context.lki.printing.clone()),
+                .map_or_else(latched_printing, |context| {
+                    let read = context.source_read(state).lki();
+                    if read.name == *source_name {
+                        read.printing
+                    } else {
+                        DisplayOnly::default()
+                    }
+                }),
         },
         _ => match live {
             Some(object) => StackRowSource {
                 name: object.name.clone(),
                 printing: live_source_printing(object),
             },
-            // CR 400.2: the source no longer exists and the row names no card, so it
+            // The source no longer exists and the row names no card, so it
             // discloses no printing either, whatever its last-known information holds.
             None => StackRowSource {
                 name: "Unknown".to_string(),

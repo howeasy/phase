@@ -1153,11 +1153,14 @@ pub struct GameObject {
     /// `base_name`/`name` pair so a temporary copy's art reverts on expiry.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base_printed_ref: Option<PrintedCardRef>,
-    /// The physical card's submitted printing; transform, flip, face-down status, control
-    /// change and zone changes leave it unchanged. Paired with `printing` as `base_printed_ref`
-    /// is with `printed_ref`, but card-level: no face install, copy or face-down write changes
-    /// it. Tokens never carry one. Display-only: CR 203.1 + CR 206.1, a printing has no effect
-    /// on game play, so no rules or AI path reads it. Absent from the wire when empty.
+    /// The physical card's submitted printing; transform, flip, control change and zone changes
+    /// leave it unchanged. Paired with `printing` as `base_printed_ref` is with `printed_ref`,
+    /// but card-level: no face install or copy changes it. Both printings are cleared by
+    /// `conceal_printing` when the object becomes able to hide its name (turned face down, or
+    /// merged) and no later face write returns them; the one authority that replays recorded
+    /// values, the cast reversal (CR 733.1), can return the printing held before a cast. Tokens
+    /// never carry one. Display-only: CR 203.1 + CR 206.1, a printing has no effect on game
+    /// play, so no rules or AI path reads it. Absent from the wire when empty.
     #[serde(default, skip_serializing_if = "DisplayOnly::is_none")]
     pub base_printing: DisplayOnly<Option<CardPrinting>>,
     #[serde(default, skip_serializing_if = "is_false")]

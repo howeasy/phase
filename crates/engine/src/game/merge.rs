@@ -161,7 +161,8 @@ pub fn merge_object_onto(
         }
     }
     // CR 730.2e: a merged permanent's face-down status follows its topmost
-    // component. Read it BEFORE any mutation so the survivor adopts the topmost
+    // component. Read it before anything below changes any object's face-down status or merge
+    // structure (the loop above touches printings only), so the survivor adopts the topmost
     // component's face-down status while merged.
     let topmost_is_face_down = state.objects.get(&topmost_id).is_some_and(|o| o.face_down);
 

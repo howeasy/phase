@@ -42,8 +42,8 @@ use engine::game::visibility::{
 use engine::game::zone_pipeline::{move_object_for_test, ZoneMoveRequest};
 use engine::game::zones::create_object;
 use engine::types::ability::{
-    AbilityDefinition, AbilityKind, CopyRecipient, CopyRetargetPermission, Duration, Effect,
-    ExileConcealment, FaceDownProfile, FilterProp, QuantityExpr, ResolvedAbility,
+    AbilityCost, AbilityDefinition, AbilityKind, CopyRecipient, CopyRetargetPermission, Duration,
+    Effect, ExileConcealment, FaceDownProfile, FilterProp, QuantityExpr, ResolvedAbility,
     SearchSelectionConstraint, StaticDefinition, TargetFilter, TargetRef, TypeFilter, TypedFilter,
 };
 use engine::types::actions::{AlternativeCastDecision, GameAction};
@@ -61,7 +61,7 @@ use engine::types::keywords::Keyword;
 use engine::types::mana::{ManaColor, ManaCost, ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
-use engine::types::statics::StaticMode;
+use engine::types::statics::{AdditionalCostTaxAction, StaticMode};
 use engine::types::zones::Zone;
 use serde_json::Value;
 
@@ -978,6 +978,7 @@ fn stack_row_of_a_face_down_cast_has_no_printing_and_ignores_cached_lki() {
 /// A triggered ability whose name is latched: with a trigger-source context the row
 /// carries the context's printing; a context-free (delayed) entry reads the live, filtered
 /// source object, so the opponent loses the printing once that object is hidden.
+/// (Hand-built stack entries: the context and the context-free shapes are pushed directly.)
 #[test]
 fn triggered_stack_rows_follow_their_latched_authority() {
     let mut s = scenario();
@@ -1070,6 +1071,102 @@ fn triggered_stack_rows_follow_their_latched_authority() {
         );
     }
     board.assert_exposure_rule("triggered rows");
+}
+
+/// A stamped battlefield source creates a delayed ability through the production resolver
+/// (the ability stores the source's context as it is now), the source is optionally merged
+/// under a mutating card, and the delayed ability then fires through the production check.
+/// Returns the board and the fired stack entry.
+fn fire_delayed_ability_of_host(merge_first: bool) -> (Board, ObjectId) {
+    let mut s = scenario();
+    let host = s.add_creature(P0, "Delayed Host", 2, 2).id();
+    let gem = add_mutator(&mut s, "Gemrazer");
+    let mut board = Board::new(s);
+    board.stamp(host, "HOST");
+    board.stamp(gem, "GEMZ");
+    fund(&mut board, P0, 12);
+    let creator = ResolvedAbility::new(
+        Effect::CreateDelayedTrigger {
+            condition: engine::types::ability::DelayedTriggerCondition::AtNextPhase {
+                phase: Phase::End,
+            },
+            effect: Box::new(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::GainLife {
+                    amount: QuantityExpr::Fixed { value: 1 },
+                    player: TargetFilter::Controller,
+                },
+            )),
+            uses_tracked_set: false,
+        },
+        vec![],
+        host,
+        P0,
+    );
+    board.primitive(|state, events| {
+        engine::game::effects::delayed_trigger::resolve(state, &creator, events)
+            .expect("the delayed trigger is created")
+    });
+    assert_eq!(
+        board.state().delayed_triggers.len(),
+        1,
+        "reach: the delayed ability is waiting"
+    );
+    let stored_context = board.state().delayed_triggers[0]
+        .ability
+        .trigger_source
+        .as_ref()
+        .expect("the delayed ability carries its creation-time source context");
+    assert_eq!(stored_context.lki.name, "Delayed Host");
+    assert_eq!(
+        stored_context.lki.printing.get(),
+        &Some(sentinel("HOST")),
+        "reach: the stored context holds the source's printing"
+    );
+    if merge_first {
+        mutate_onto(&mut board, gem, MergeSide::Top);
+        assert_eq!(
+            board.state().objects[&host].name,
+            "Gemrazer",
+            "reach: the merged source now carries the top card's name"
+        );
+    }
+    let produced = engine::game::triggers::check_delayed_triggers(
+        board.state_mut(),
+        &[GameEvent::PhaseChanged { phase: Phase::End }],
+    );
+    board.log.extend(produced);
+    assert_eq!(
+        board.state().stack.len(),
+        1,
+        "reach: the delayed ability fired onto the stack"
+    );
+    let entry = board.state().stack[0].id;
+    (board, entry)
+}
+
+/// A delayed ability keeps the source context stored when it was created (CR 603.7d), while
+/// its row's name is latched when it fires. After the source is merged under a mutating card
+/// the row names the merged permanent, so it must not carry the printing the older context
+/// holds beside the name of the card that was there before.
+#[test]
+fn delayed_row_pairs_its_name_and_printing_from_one_authority() {
+    // Control: unmerged, the row names the source and carries the source's printing.
+    let (board, entry) = fire_delayed_ability_of_host(false);
+    for viewer in VIEWERS {
+        let row = stack_row(&board, viewer, entry);
+        assert_eq!(row["source_name"], "Delayed Host", "{viewer:?}");
+        assert_eq!(row_set_code(&row).as_deref(), Some("SHOST"), "{viewer:?}");
+    }
+
+    // After the merge the latched name is the top card's, and no viewer's row pairs it with
+    // the survivor's earlier printing (nor with any other printing: the merge cleared both).
+    let (board, entry) = fire_delayed_ability_of_host(true);
+    for viewer in VIEWERS {
+        let row = stack_row(&board, viewer, entry);
+        assert_eq!(row["source_name"], "Gemrazer", "{viewer:?}");
+        assert_eq!(row_set_code(&row), None, "{viewer:?}: {row}");
+    }
 }
 
 /// An activated ability of a public permanent carries the live printing, put on the stack
@@ -1777,10 +1874,8 @@ fn face_down_cast_conceals_the_printing_through_turn_up_and_departure() {
 /// Restoration authorities. A face-down cast cancelled during mana payment, before any cost is
 /// paid, takes the plain face-down rollback: the card returns to hand face up with its real
 /// name, and that rollback assigns no printing, so the cancelled cast's card stays without one.
-/// (A cancel after a cost was paid restores through the recorded cast undo edits instead; those
-/// edits are a diff of the states around the action that paid, which comes after the action that
-/// turned the card face down, so by reading they hold the already-cleared printing. No fixture
-/// here pays a cost in the same action that turns the card face down, so that is not witnessed.)
+/// (A cancel after a cost was paid restores through the recorded cast undo edits instead; see
+/// `cancelled_face_down_cast_that_paid_a_cost_with_the_turn_down_restores_the_recorded_printing`.)
 #[test]
 fn cancelled_face_down_cast_returns_the_card_to_hand_without_resurrecting_a_printing() {
     let mut s = scenario();
@@ -1821,11 +1916,191 @@ fn cancelled_face_down_cast_returns_the_card_to_hand_without_resurrecting_a_prin
     board.assert_nowhere("CNCL", "after the cancel");
 }
 
+/// The printing `tag` is held by the owner's forms (the authoritative state and the owner's
+/// state and wire) and by no other viewer's state or wire, as for any card in a hand.
+fn assert_printing_in_owner_forms_only(board: &Board, tag: &str, step: &str) {
+    let census = board.census(tag);
+    for label in [
+        "authoritative state",
+        "Seat(PlayerId(0)) state",
+        "Seat(PlayerId(0)) wire",
+    ] {
+        assert!(census[label] > 0, "{step}: {label} lost {tag}: {census:?}");
+    }
+    for label in [
+        "Seat(PlayerId(1)) state",
+        "Seat(PlayerId(1)) wire",
+        "Spectator state",
+        "Spectator wire",
+        "Unseated state",
+        "Unseated wire",
+    ] {
+        assert_eq!(census[label], 0, "{step}: {label} shows {tag}: {census:?}");
+    }
+}
+
+/// A morph card in P0's hand and an opposing source of an unconditional "cast a spell: pay 2
+/// life" tax, whose payment is made by the very action that turns the card face down.
+fn face_down_cast_under_a_life_tax(tag: &str, life: i32) -> (Board, ObjectId) {
+    let mut s = scenario();
+    let morph = add_morph(&mut s, P0, "Secret Beast");
+    let tax = s.add_creature(P1, "Tax Source", 1, 1).id();
+    let mut board = Board::new(s);
+    board.stamp(morph, tag);
+    {
+        let object = board
+            .state_mut()
+            .objects
+            .get_mut(&tax)
+            .expect("the tax source exists");
+        let definition = StaticDefinition::new(StaticMode::ImposeAdditionalCost {
+            cost: AbilityCost::PayLife {
+                amount: QuantityExpr::Fixed { value: 2 },
+            },
+            spell_filter: None,
+            action: AdditionalCostTaxAction::Cast,
+        });
+        object.static_definitions.push(definition.clone());
+        std::sync::Arc::make_mut(&mut object.base_static_definitions).push(definition);
+    }
+    engine::game::layers::flush_layers(board.state_mut());
+    fund(&mut board, P0, 5);
+    board.state_mut().players[0].life = life;
+    cast(&mut board, morph, CastPaymentMode::Manual);
+    assert!(
+        matches!(
+            board.state().waiting_for,
+            WaitingFor::AlternativeCastChoice { .. }
+        ),
+        "reach: the face-down choice is pending, got {:?}",
+        board.state().waiting_for
+    );
+    (board, morph)
+}
+
+/// Restoration authorities: a cast cancelled after a cost was paid is reversed through the
+/// recorded cast undo edits, which replay a diff of the states around the action that paid. Here
+/// the tax's life payment is made by the same action that turns the card face down, so that
+/// diff holds the card's printing from before the action and the cancel writes it back: the
+/// card is in hand face up with its real name and the printing it held before the cast. (When
+/// the paying action comes after the turn-down, the diff holds the cleared printing instead.)
+#[test]
+fn cancelled_face_down_cast_that_paid_a_cost_with_the_turn_down_restores_the_recorded_printing() {
+    let (mut board, morph) = face_down_cast_under_a_life_tax("PAID", 20);
+    board.act(GameAction::ChooseAlternativeCast {
+        choice: AlternativeCastDecision::Alternative,
+    });
+    // Reach: the cost was paid, the reversal is populated with the printing, the card is blank.
+    assert!(
+        matches!(board.state().waiting_for, WaitingFor::ManaPayment { .. }),
+        "reach: the cast waits at mana payment, got {:?}",
+        board.state().waiting_for
+    );
+    assert_eq!(board.state().players[0].life, 18, "reach: the tax was paid");
+    let reversal = serde_json::to_value(board.state()).expect("state serializes")
+        ["spell_cast_reversal"]
+        .clone();
+    assert_eq!(
+        reversal["cost_mutations"], true,
+        "reach: a cost mutation was recorded: {reversal}"
+    );
+    let edited_paths: Vec<&Vec<Value>> = reversal["undo"]
+        .as_array()
+        .expect("the reversal holds its undo edits")
+        .iter()
+        .filter_map(|edit| edit.get("Value"))
+        .filter_map(|edit| edit["path"].as_array())
+        .collect();
+    let morph_key = Value::String(morph.0.to_string());
+    for field in ["printing", "base_printing"] {
+        assert!(
+            edited_paths.iter().any(|path| {
+                path.len() == 3 && path[0] == "objects" && path[1] == morph_key && path[2] == field
+            }),
+            "reach: the undo edits restore {field}: {edited_paths:?}"
+        );
+    }
+    assert!(board.state().objects[&morph].face_down, "reach: blanked");
+    assert_eq!(live_set_code(board.state(), morph), None);
+    assert_eq!(base_set_code(board.state(), morph), None);
+    // The recorded printing lives only inside the reversal of the authoritative state; no
+    // viewer's state, wire or event form carries it while the card is blank.
+    assert_eq!(count_set_code(&reversal, "SPAID"), 2, "{reversal}");
+    for (label, count) in board.census("PAID") {
+        let expected = if label == "authoritative state" { 2 } else { 0 };
+        assert_eq!(count, expected, "while the cast is face down: {label}");
+    }
+
+    board.act(GameAction::CancelCast);
+    let object = &board.state().objects[&morph];
+    assert_eq!(object.zone, Zone::Hand, "reach: back in hand");
+    assert!(!object.face_down, "reach: face up again");
+    assert_eq!(object.name, "Secret Beast");
+    assert_eq!(
+        board.state().players[0].life,
+        20,
+        "reach: the payment was reversed"
+    );
+    // Recorded outcome: the undo edits wrote the pre-cast printing back, beside the real name.
+    assert_eq!(
+        live_set_code(board.state(), morph).as_deref(),
+        Some("SPAID")
+    );
+    assert_eq!(
+        base_set_code(board.state(), morph).as_deref(),
+        Some("SPAID")
+    );
+    assert_printing_in_owner_forms_only(&board, "PAID", "after the paid cancel");
+    board.assert_follows_name("after the paid cancel");
+}
+
+/// Restoration authorities: an action the engine rejects restores the state it began from, so
+/// the snapshot taken before the action returns whatever it held. Rejection after the face-down
+/// writer ran is reachable: choosing the face-down cost builds the blanked card, takes it as the
+/// live state, and only then declares the tax, which a player at 1 life cannot pay, so the
+/// choice is refused (`continue_with_prepared_casting_variant`, then
+/// `Cannot pay imposed additional cost`). The card is back as it was before the choice, face up
+/// in hand, still holding its printing, and the cast still waits for the choice.
+#[test]
+fn rejected_face_down_choice_after_the_writer_ran_restores_the_card_as_it_was() {
+    let (mut board, morph) = face_down_cast_under_a_life_tax("LATE", 1);
+    let rejected = board.runner.act(GameAction::ChooseAlternativeCast {
+        choice: AlternativeCastDecision::Alternative,
+    });
+    let error = rejected.expect_err("reach: 1 life cannot pay the 2 life tax");
+    assert!(
+        format!("{error:?}").contains("Cannot pay imposed additional cost"),
+        "reach: refused by the declaration that follows the writer, got {error:?}"
+    );
+    assert!(
+        matches!(
+            board.state().waiting_for,
+            WaitingFor::AlternativeCastChoice { .. }
+        ),
+        "the choice is still pending, got {:?}",
+        board.state().waiting_for
+    );
+    let object = &board.state().objects[&morph];
+    assert_eq!(object.zone, Zone::Hand);
+    assert!(!object.face_down);
+    assert_eq!(object.name, "Secret Beast");
+    assert_eq!(
+        live_set_code(board.state(), morph).as_deref(),
+        Some("SLATE"),
+        "the snapshot taken before the action returned the printing"
+    );
+    assert_eq!(
+        base_set_code(board.state(), morph).as_deref(),
+        Some("SLATE")
+    );
+    assert_printing_in_owner_forms_only(&board, "LATE", "after the refused choice");
+    board.assert_follows_name("after the refused choice");
+}
+
 /// Restoration authorities: an action the engine rejects restores the state it began from. A
-/// cast of a morph card the player cannot pay for at all is rejected before any face-down
-/// writer runs, so the card keeps the printing it held. (A rejection after a face-down writer
-/// ran would restore the snapshot taken before the action; no production ordering reaching one
-/// was found, so only the pre-writer rejection is witnessed here.)
+/// cast of a morph card the player cannot pay for at all is rejected by the cast action itself,
+/// before any face-down writer runs, so the card keeps the printing it held and every viewer's
+/// carriers still follow the name. (The rejection after the writer is the previous test's.)
 #[test]
 fn rejected_face_down_cast_leaves_the_card_as_it_was() {
     let mut s = scenario();
@@ -1857,9 +2132,11 @@ fn rejected_face_down_cast_leaves_the_card_as_it_was() {
         base_set_code(board.state(), morph).as_deref(),
         Some("SRJCT")
     );
+    assert_printing_in_owner_forms_only(&board, "RJCT", "after the rejected cast");
+    board.assert_follows_name("after the rejected cast");
 }
 
-/// A face-down entry the zone-change pipeline refuses (CR 614.1d, Grafdigger's Cage class)
+/// A face-down entry the zone-change pipeline refuses (CR 101.2: the "can't" effect wins; Grafdigger's Cage class)
 /// rolls back the flag only; the card stays in its zone and has already forgotten its printing.
 #[test]
 fn prevented_face_down_entry_leaves_the_card_without_a_printing() {
