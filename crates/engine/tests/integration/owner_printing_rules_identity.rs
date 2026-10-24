@@ -579,6 +579,21 @@ fn a_later_payment_folds_both_lists_and_cancel_restores_the_printing() {
     );
     assert_eq!(sentinels(&ra["comparison_undo"], "SAAA"), 0);
     assert_eq!(ra["comparison_undo"], rb["comparison_undo"]);
+    // The fold witness: the folded comparison list is the folded restoration list minus
+    // exactly its two printing edits.
+    assert_eq!(
+        edits(&ra["undo"])
+            .iter()
+            .filter(|edit| is_printing_edit_of(edit, morph))
+            .count(),
+        2,
+        "the face-down printing is the only one: {ra}"
+    );
+    assert_eq!(
+        edits(&ra["comparison_undo"]),
+        &without_printing_edits_of(&ra["undo"], morph),
+        "the comparison list was folded with the restoration list"
+    );
     assert!(
         a.state() == b.state(),
         "CR 104.4b: printing-only reversals stay one state after a fold"
