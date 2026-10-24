@@ -8055,7 +8055,19 @@ impl ActivationPhyrexianIntent {
 }
 
 /// CR 601.2 + CR 733.1: an incomplete spell's durable reversal boundary.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+///
+/// Two inverse-edit lists are recorded at the same capture points from the same typed
+/// states. `undo` (the restoration list) inverts the exact serialization, display-only
+/// data included; it is the only list cancellation applies, so a cancelled cast returns
+/// every value, printing included. `comparison_undo` inverts the rules projection
+/// (`display_only::rules_projection`) of the same states and is the descriptor's identity:
+/// CR 104.4b: loop detection compares whole game states, and CR 203.1 + CR 206.1 give a
+/// printing no effect on game play, so two reversals that differ only in display-only data
+/// are equal.
+/// The fragments are already-serialized JSON: a rules projection of a state that still
+/// holds this descriptor cannot see a printing inside them, so every whole-state capture
+/// removes the descriptor first.
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub(crate) struct SpellCastReversal {
     pub object_id: ObjectId,
     pub player: PlayerId,
@@ -8065,11 +8077,62 @@ pub(crate) struct SpellCastReversal {
     /// the descriptor stores inverse edits for changed members.
     #[serde(default)]
     pub undo: Vec<SpellCastUndo>,
+    /// The comparison list. `None` only for a descriptor saved before the list
+    /// existed; such a descriptor keeps none until its reversal ends.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub comparison_undo: Option<Vec<SpellCastUndo>>,
     #[serde(default)]
     pub cost_mutations: bool,
     #[serde(default)]
     pub library_undo_forbidden: bool,
 }
+
+impl SpellCastReversal {
+    /// CR 601.2a + CR 733.1: the descriptor of a newly announced spell, with no
+    /// edits yet and a comparison list from the start.
+    pub(crate) fn announced(object_id: ObjectId, player: PlayerId, journal_start: usize) -> Self {
+        Self {
+            object_id,
+            player,
+            journal_start,
+            undo: Vec::new(),
+            comparison_undo: Some(Vec::new()),
+            cost_mutations: false,
+            library_undo_forbidden: false,
+        }
+    }
+}
+
+/// CR 104.4b + CR 203.1 + CR 206.1: every field but the two lists, then the comparison
+/// lists when both descriptors have one and the restoration lists when neither has one.
+/// A descriptor with a comparison list never equals one without, so the relation is an
+/// equivalence: no pair crosses the two classes, and inside each class it is equality of
+/// a tuple of `Eq` values.
+impl PartialEq for SpellCastReversal {
+    fn eq(&self, other: &Self) -> bool {
+        let Self {
+            object_id,
+            player,
+            journal_start,
+            undo,
+            comparison_undo,
+            cost_mutations,
+            library_undo_forbidden,
+        } = self;
+        *object_id == other.object_id
+            && *player == other.player
+            && *journal_start == other.journal_start
+            && *cost_mutations == other.cost_mutations
+            && *library_undo_forbidden == other.library_undo_forbidden
+            && match (comparison_undo, &other.comparison_undo) {
+                (Some(mine), Some(theirs)) => mine == theirs,
+                (None, None) => *undo == other.undo,
+                (Some(_), None) | (None, Some(_)) => false,
+            }
+    }
+}
+
+impl Eq for SpellCastReversal {}
 
 /// CR 733.1: inverse edits captured at the existing action boundary. Paths
 /// address serialized state fields; applying them restores values, never
@@ -51009,5 +51072,117 @@ mod replacement_subtree_boundary_tests {
             boundary.is_retired(&state.resolution_stack),
             "the subtree retires with the nested child"
         );
+    }
+}
+
+/// CR 104.4b + CR 203.1 + CR 206.1: the casting reversal's identity is its
+/// comparison list; a descriptor saved without one compares by its restoration
+/// list and never equals one that has a comparison list.
+#[cfg(test)]
+mod spell_cast_reversal_equality {
+    use super::{SpellCastReversal, SpellCastUndo};
+    use crate::types::identifiers::ObjectId;
+    use crate::types::player::PlayerId;
+    use std::sync::Arc;
+
+    fn edits(tag: &str) -> Vec<SpellCastUndo> {
+        vec![SpellCastUndo::Value {
+            path: vec!["players".into(), "0".into(), tag.into()],
+            before: Some(serde_json::json!(tag)),
+        }]
+    }
+
+    fn descriptor(
+        comparison_undo: Option<Vec<SpellCastUndo>>,
+        undo: Vec<SpellCastUndo>,
+        journal_start: usize,
+    ) -> SpellCastReversal {
+        SpellCastReversal {
+            comparison_undo,
+            undo,
+            ..SpellCastReversal::announced(ObjectId(1), PlayerId(0), journal_start)
+        }
+    }
+
+    /// Seven separately constructed descriptors in five equality classes:
+    /// {W1, W2}, {W3}, {L1, L2}, {L3}, {S}.
+    fn descriptors() -> [(&'static str, SpellCastReversal); 7] {
+        [
+            ("W1", descriptor(Some(edits("x")), edits("u"), 3)),
+            ("W2", descriptor(Some(edits("x")), edits("v"), 3)),
+            ("W3", descriptor(Some(edits("y")), edits("u"), 3)),
+            ("L1", descriptor(None, edits("u"), 3)),
+            ("L2", descriptor(None, edits("u"), 3)),
+            ("L3", descriptor(None, edits("v"), 3)),
+            ("S", descriptor(Some(edits("x")), edits("u"), 4)),
+        ]
+    }
+
+    fn class(name: &str) -> u8 {
+        match name {
+            "W1" | "W2" => 0,
+            "W3" => 1,
+            "L1" | "L2" => 2,
+            "L3" => 3,
+            "S" => 4,
+            other => panic!("unknown descriptor {other}"),
+        }
+    }
+
+    #[test]
+    fn spell_cast_reversal_equality_is_an_equivalence() {
+        let set = descriptors();
+        // Reach: both the with-list and the without-list class are populated.
+        assert!(set.iter().any(|(_, d)| d.comparison_undo.is_some()));
+        assert!(set.iter().any(|(_, d)| d.comparison_undo.is_none()));
+
+        for (name_a, a) in &set {
+            assert!(a == a, "{name_a} is reflexive");
+            for (name_b, b) in &set {
+                let expected = class(name_a) == class(name_b);
+                assert_eq!(a == b, expected, "{name_a} == {name_b}");
+                assert_eq!(a == b, b == a, "{name_a}, {name_b} is symmetric");
+                for (name_c, c) in &set {
+                    if a == b && b == c {
+                        assert!(a == c, "{name_a} == {name_b} == {name_c} is transitive");
+                    }
+                }
+            }
+        }
+
+        let by_name = |name: &str| {
+            set.iter()
+                .find(|(candidate, _)| *candidate == name)
+                .map(|(_, d)| d.clone())
+                .expect("fixture exists")
+        };
+        // Differing restoration lists are ignored while a comparison list decides.
+        assert!(by_name("W1") == by_name("W2"));
+        assert!(by_name("W1") != by_name("W3"));
+        // Without comparison lists the restoration lists decide, as before.
+        assert!(by_name("L1") == by_name("L2"));
+        assert!(by_name("L1") != by_name("L3"));
+        // A descriptor with a comparison list never equals one without, whatever
+        // their restoration lists.
+        assert!(by_name("W1") != by_name("L1"));
+        assert!(by_name("L1") != by_name("W1"));
+        // Every other field still separates descriptors.
+        assert!(by_name("S") != by_name("W1"));
+    }
+
+    #[test]
+    fn the_same_verdicts_hold_through_optional_arcs() {
+        let set = descriptors();
+        for (name_a, a) in &set {
+            for (name_b, b) in &set {
+                let left = Some(Arc::new(a.clone()));
+                let right = Some(Arc::new(b.clone()));
+                assert_eq!(
+                    left == right,
+                    class(name_a) == class(name_b),
+                    "Some(Arc({name_a})) == Some(Arc({name_b}))"
+                );
+            }
+        }
     }
 }
