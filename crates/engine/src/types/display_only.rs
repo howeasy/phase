@@ -6,6 +6,8 @@
 //! value out of every rules and AI identity: typed equality (always equal), the rules
 //! projection ([`rules_projection`]), and constant `Debug`. The same pass reports whether it
 //! omitted a non-empty display-only value ([`reported_rules_projection`]).
+//! Canonical prompt identities use [`canonical_digest`] on the delivered rules projection:
+//! recursively sorted JSON object keys, preserved array order, and serde_json scalar bytes.
 
 use std::fmt;
 use std::hash::{Hash, Hasher};
@@ -17,6 +19,63 @@ use serde::ser::{
 use serde::{Deserialize, Deserializer};
 use serde_json::value::Serializer as ValueSerializer;
 use serde_json::{Map, Value};
+use sha2::{Digest, Sha256};
+
+/// Opaque SHA-256 identity of canonical JSON bytes, serialized as lowercase hex.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct CanonicalDigest(String);
+
+impl CanonicalDigest {
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// Encode JSON independently of map iteration order, preserving array order.
+pub fn canonical_json_bytes(value: &Value) -> Vec<u8> {
+    fn write(value: &Value, bytes: &mut Vec<u8>) {
+        match value {
+            Value::Object(entries) => {
+                bytes.push(b'{');
+                let mut keys: Vec<_> = entries.keys().collect();
+                keys.sort_unstable();
+                for (index, key) in keys.into_iter().enumerate() {
+                    if index != 0 {
+                        bytes.push(b',');
+                    }
+                    serde_json::to_writer(&mut *bytes, key)
+                        .expect("serializing a JSON string into Vec<u8> cannot fail");
+                    bytes.push(b':');
+                    write(&entries[key], bytes);
+                }
+                bytes.push(b'}');
+            }
+            Value::Array(entries) => {
+                bytes.push(b'[');
+                for (index, entry) in entries.iter().enumerate() {
+                    if index != 0 {
+                        bytes.push(b',');
+                    }
+                    write(entry, bytes);
+                }
+                bytes.push(b']');
+            }
+            Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => {
+                serde_json::to_writer(bytes, value)
+                    .expect("serializing a JSON scalar into Vec<u8> cannot fail");
+            }
+        }
+    }
+    let mut bytes = Vec::new();
+    write(value, &mut bytes);
+    bytes
+}
+
+/// Hash exactly the UTF-8 bytes returned by [`canonical_json_bytes`].
+pub fn canonical_digest(value: &Value) -> CanonicalDigest {
+    CanonicalDigest(format!("{:x}", Sha256::digest(canonical_json_bytes(value))))
+}
 
 /// The serde newtype name the rules projection recognizes: a reserved serialization name,
 /// not a Rust identifier, so no type should be given it (a `#[serde(rename)]` could, and a
@@ -1209,5 +1268,43 @@ mod tests {
         renamed.name = "Elf".to_string();
         assert_ne!(with, renamed);
         assert_ne!(format!("{with:?}"), format!("{renamed:?}"));
+    }
+
+    #[test]
+    fn canonical_digest_pins_portable_bytes_and_transparent_codec() {
+        let text = r#"{"a":"é😀\"\\","b":[1,{"a":null,"z":true}],"big":18446744073709551615,"f":0.1,"n":-3.5,"neg":-9223372036854775808}"#;
+        let value: Value = serde_json::from_str(text).unwrap();
+        assert_eq!(canonical_json_bytes(&value), text.as_bytes());
+        let digest = canonical_digest(&value);
+        assert_eq!(
+            digest.as_str(),
+            "c6fcc1dcc1daff0582958515408661d88592ab06d1c59b3123b75dc8a7594355"
+        );
+        fn reverse_objects(value: &Value) -> Value {
+            match value {
+                Value::Object(entries) => Value::Object(
+                    entries
+                        .iter()
+                        .rev()
+                        .map(|(key, value)| (key.clone(), reverse_objects(value)))
+                        .collect(),
+                ),
+                Value::Array(entries) => {
+                    Value::Array(entries.iter().map(reverse_objects).collect())
+                }
+                value => value.clone(),
+            }
+        }
+        assert_eq!(canonical_digest(&reverse_objects(&value)), digest);
+        assert_ne!(
+            canonical_digest(&serde_json::json!([1, 2])),
+            canonical_digest(&serde_json::json!([2, 1]))
+        );
+        let encoded = serde_json::to_value(&digest).unwrap();
+        assert_eq!(encoded, serde_json::json!(digest.as_str()));
+        assert_eq!(
+            serde_json::from_value::<CanonicalDigest>(encoded).unwrap(),
+            digest
+        );
     }
 }

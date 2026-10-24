@@ -60,6 +60,10 @@
 //! `GameState::state_revision`, including the action boundary's repair on a rejected action
 //! and contest driver steps that change the contest but not its visible signature; a state
 //! installed in place of the live one continues the replaced counter.
+//!
+//! Viewer prompt identities bind the delivered, filtered typed prompt after shared private
+//! redactions and removal of display-only data. The published revision is equality-only;
+//! it intentionally discloses internal repair occurrence/count, never repair contents.
 
 use engine::ai_support::legal_actions_full;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
@@ -1990,6 +1994,7 @@ fn contest_prompt_mutations_advance_revision_without_publishing() {
     };
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_library_top(P0, &["Island", "Forest"]);
     let victim = scenario.add_vanilla(P1, 2, 2);
     let spell = scenario
         .add_spell_to_hand_from_oracle(P0, "Eye to Eye", true, EYE_TO_EYE)
@@ -1997,26 +2002,76 @@ fn contest_prompt_mutations_advance_revision_without_publishing() {
     let mut runner = scenario.build();
     runner.cast(spell).target_objects(&[victim]).resolve();
     let mut state = runner.state().clone();
+    let mut hidden_order = state.clone();
+    hidden_order.players[0].library.swap(0, 1);
+    let mut hidden_events = Vec::new();
+    let assert_delivery = |a: &GameState, b: &GameState| {
+        assert_eq!(a.state_revision, b.state_revision);
+        for viewer in [Some(P0), Some(P1), None] {
+            let aw = client_envelope(a, viewer);
+            let bw = client_envelope(b, viewer);
+            assert_eq!(
+                aw["state"]["waiting_for"],
+                serde_json::to_value(&a.waiting_for).unwrap()
+            );
+            assert_eq!(aw["state"]["waiting_for"], bw["state"]["waiting_for"]);
+            assert_eq!(
+                aw["derived"]["waiting_for_identity"],
+                bw["derived"]["waiting_for_identity"]
+            );
+            assert_eq!(
+                aw["derived"]["state_revision"],
+                bw["derived"]["state_revision"]
+            );
+        }
+    };
     let mut events = Vec::new();
     assert_eq!(
         start_contest(&mut state, config, 0, &mut events),
         ContestStep::Updated
     );
     assert_eq!(
+        start_contest(&mut hidden_order, config, 0, &mut hidden_events),
+        ContestStep::Updated
+    );
+    assert_delivery(&state, &hidden_order);
+    assert_eq!(
         advance_contest(&mut state, 1_000, &mut events),
         ContestStep::Updated
     );
+    assert_eq!(
+        advance_contest(&mut hidden_order, 1_000, &mut hidden_events),
+        ContestStep::Updated
+    );
+    assert_delivery(&state, &hidden_order);
     let contest = |state: &GameState| match &state.waiting_for {
         WaitingFor::PhysicalContest { contest, .. } => (**contest).clone(),
         other => panic!("expected PhysicalContest, got {other:?}"),
     };
     let id = contest(&state).id;
     let before = state.state_revision;
+    let before_wires = [Some(P0), Some(P1), None].map(|viewer| client_envelope(&state, viewer));
     let (disposition, step) = contest_click(&mut state, id, P0, 1, 1_100, &mut events);
     assert_eq!(disposition, ClickDisposition::Counted);
     assert_eq!(step, ContestStep::Unchanged);
     assert_eq!(contest(&state).contestants[0].clicks, 1);
     assert!(state.state_revision > before);
+    assert_eq!(
+        contest_click(&mut hidden_order, id, P0, 1, 1_100, &mut hidden_events),
+        (disposition, step)
+    );
+    assert_delivery(&state, &hidden_order);
+    for (index, viewer) in [Some(P0), Some(P1), None].into_iter().enumerate() {
+        let after = client_envelope(&state, viewer);
+        assert_eq!(
+            after["state"]["waiting_for"]["data"]["contest"]["contestants"][0]["clicks"],
+            1
+        );
+        assert_ne!(
+            before_wires[index]["derived"]["waiting_for_identity"],
+            after["derived"]["waiting_for_identity"]
+        );
+    }
 
     let before = state.state_revision;
     let prior_contest = contest(&state);
@@ -2027,6 +2082,11 @@ fn contest_prompt_mutations_advance_revision_without_publishing() {
     assert_eq!(contest(&state).phase, prior_contest.phase);
     assert!(contest(&state).clock_ms > prior_contest.clock_ms);
     assert!(state.state_revision > before);
+    assert_eq!(
+        advance_contest(&mut hidden_order, 1_500, &mut hidden_events),
+        ContestStep::Unchanged
+    );
+    assert_delivery(&state, &hidden_order);
 
     let before = state.state_revision;
     let (disposition, step) = contest_click(&mut state, id, P0, 1, 1_600, &mut events);
@@ -2037,6 +2097,11 @@ fn contest_prompt_mutations_advance_revision_without_publishing() {
     assert_eq!(step, ContestStep::Unchanged);
     assert_eq!(contest(&state).clock_ms, 1_600);
     assert!(state.state_revision > before);
+    assert_eq!(
+        contest_click(&mut hidden_order, id, P0, 1, 1_600, &mut hidden_events),
+        (disposition, step)
+    );
+    assert_delivery(&state, &hidden_order);
 
     let before = state.state_revision;
     let clock = contest(&state).clock_ms;
@@ -2046,6 +2111,11 @@ fn contest_prompt_mutations_advance_revision_without_publishing() {
     );
     assert_eq!(contest(&state).clock_ms, clock);
     assert_eq!(state.state_revision, before);
+    assert_eq!(
+        start_contest(&mut hidden_order, config, 1_700, &mut hidden_events),
+        ContestStep::Unchanged
+    );
+    assert_delivery(&state, &hidden_order);
     let (disposition, step) =
         contest_click(&mut state, id.wrapping_add(1), P0, 2, 1_800, &mut events);
     assert_eq!(
@@ -2056,8 +2126,386 @@ fn contest_prompt_mutations_advance_revision_without_publishing() {
     assert_eq!(state.state_revision, before);
     assert_eq!(contest(&state).clock_ms, clock);
     assert_eq!(
+        contest_click(
+            &mut hidden_order,
+            id.wrapping_add(1),
+            P0,
+            2,
+            1_800,
+            &mut hidden_events
+        ),
+        (disposition, step)
+    );
+    assert_delivery(&state, &hidden_order);
+    assert_eq!(
         advance_contest(&mut state, clock, &mut events),
         ContestStep::Unchanged
     );
     assert_eq!(state.state_revision, before);
+    assert_eq!(
+        advance_contest(&mut hidden_order, clock, &mut hidden_events),
+        ContestStep::Unchanged
+    );
+    assert_delivery(&state, &hidden_order);
+}
+
+fn client_envelope(state: &GameState, viewer: Option<PlayerId>) -> Value {
+    serde_json::to_value(engine::game::derived_views::ClientGameStateRef::wrap(
+        state, viewer,
+    ))
+    .expect("client envelope serializes")
+}
+
+#[test]
+fn prompt_identity_priority_native_vector() {
+    let state = GameState::new_two_player(0);
+    assert_eq!(state.waiting_for, WaitingFor::Priority { player: P0 });
+    for viewer in [Some(P0), Some(P1), None] {
+        let wire = client_envelope(&state, viewer);
+        assert_eq!(
+            engine::types::display_only::canonical_json_bytes(&wire["state"]["waiting_for"]),
+            br#"{"data":{"player":0},"type":"Priority"}"#
+        );
+        assert_eq!(
+            wire["derived"]["waiting_for_identity"],
+            "ae290362dc64d95b65ecb96ab3bd73cb33c820ddf926c06d687a9631c217bd1d"
+        );
+        assert_eq!(wire["derived"]["state_revision"], state.state_revision);
+    }
+}
+
+#[test]
+fn prompt_identity_matches_real_delivered_trigger_for_every_viewer() {
+    let envelope: Value =
+        serde_json::from_str(&gunzip(committed_dump("dellian_emblem_conqueror_4p"))).unwrap();
+    let state = serde_json::from_value::<PersistedGameState>(envelope["gameState"].clone())
+        .unwrap()
+        .into_game_state()
+        .unwrap();
+    assert!(matches!(
+        state.waiting_for,
+        WaitingFor::TriggerTargetSelection { .. }
+    ));
+    let mut wires = Vec::new();
+    for viewer in [
+        Some(P0),
+        Some(P1),
+        Some(PlayerId(2)),
+        Some(PlayerId(3)),
+        None,
+    ] {
+        let wire = client_envelope(&state, viewer);
+        assert_eq!(
+            wire["derived"]["waiting_for_identity"],
+            serde_json::to_value(engine::types::display_only::canonical_digest(
+                &wire["state"]["waiting_for"]
+            ))
+            .unwrap(),
+            "printing-free delivered bytes define identity for {viewer:?}"
+        );
+        wires.push(wire);
+    }
+    assert_ne!(
+        wires[0]["state"]["waiting_for"],
+        wires[1]["state"]["waiting_for"]
+    );
+    assert_ne!(
+        wires[0]["derived"]["waiting_for_identity"],
+        wires[1]["derived"]["waiting_for_identity"]
+    );
+}
+
+#[test]
+fn prompt_identity_ignores_nested_printing_but_not_lki_power() {
+    let mut scenario = GameScenario::new();
+    let bear = scenario.add_vanilla(P0, 2, 2);
+    let original = scenario.build().state().clone();
+    let make = |code: Option<&str>, power| {
+        let mut state = original.clone();
+        if let Some(code) = code {
+            stamp(&mut state, bear, code);
+        }
+        state.objects.get_mut(&bear).unwrap().power = Some(power);
+        let record = state.objects[&bear].snapshot_for_zone_change(
+            bear,
+            Some(Zone::Battlefield),
+            Zone::Graveyard,
+        );
+        state.waiting_for = WaitingFor::TriggerTargetSelection {
+            player: P0,
+            // Legacy/shared event context has no private controller. A known controller
+            // would correctly remove the event for the other two viewer scopes.
+            trigger_controller: None,
+            trigger_event: Some(GameEvent::ZoneChanged {
+                object_id: bear,
+                from: Some(Zone::Battlefield),
+                to: Zone::Graveyard,
+                record: Box::new(record),
+            }),
+            trigger_events: Vec::new(),
+            target_slots: Vec::new(),
+            mode_labels: Vec::new(),
+            target_constraints: Vec::new(),
+            selection: Default::default(),
+            source_id: Some(bear),
+            description: None,
+        };
+        state
+    };
+    for viewer in [Some(P0), Some(P1), None] {
+        let absent = client_envelope(&make(None, 2), viewer);
+        let a = client_envelope(&make(Some("SAAA"), 2), viewer);
+        let b = client_envelope(&make(Some("SBBB"), 2), viewer);
+        let changed = client_envelope(&make(Some("SAAA"), 3), viewer);
+        assert!(sentinels(&a["state"]["waiting_for"], "SAAA") > 0);
+        assert_ne!(a["state"]["waiting_for"], b["state"]["waiting_for"]);
+        assert_eq!(
+            absent["derived"]["waiting_for_identity"],
+            a["derived"]["waiting_for_identity"]
+        );
+        assert_eq!(
+            a["derived"]["waiting_for_identity"],
+            b["derived"]["waiting_for_identity"]
+        );
+        assert_ne!(
+            a["derived"]["waiting_for_identity"],
+            changed["derived"]["waiting_for_identity"]
+        );
+    }
+}
+
+#[test]
+fn prompt_identity_canonicalizes_both_combat_maps_and_keeps_requirement_sources() {
+    use engine::game::combat::{AttackTarget, CombatRequirement};
+    use std::collections::HashMap;
+    let make = |reverse: bool, source| {
+        let mut state = GameState::new_two_player(0);
+        let mut targets = vec![
+            (ObjectId(1), vec![AttackTarget::Player(P1)]),
+            (
+                ObjectId(2),
+                vec![
+                    AttackTarget::Player(P1),
+                    AttackTarget::Planeswalker(ObjectId(9)),
+                ],
+            ),
+        ];
+        let mut constraints = vec![
+            (
+                ObjectId(1),
+                CombatRequirement::CantAttack {
+                    sources: vec![ObjectId(11)],
+                },
+            ),
+            (
+                ObjectId(2),
+                CombatRequirement::MustAttack {
+                    defenders: vec![AttackTarget::Player(P1)],
+                    sources: vec![ObjectId(source)],
+                },
+            ),
+        ];
+        if reverse {
+            targets.reverse();
+            constraints.reverse();
+        }
+        state.waiting_for = WaitingFor::DeclareAttackers {
+            player: P0,
+            valid_attacker_ids: vec![ObjectId(1), ObjectId(2)],
+            valid_attack_targets: vec![AttackTarget::Player(P1)],
+            valid_attack_targets_by_attacker: Some(targets.into_iter().collect::<HashMap<_, _>>()),
+            attacker_constraints: constraints.into_iter().collect(),
+        };
+        client_envelope(&state, Some(P0))
+    };
+    let a = make(false, 22);
+    let b = make(true, 22);
+    for field in ["valid_attack_targets_by_attacker", "attacker_constraints"] {
+        assert_eq!(
+            a["state"]["waiting_for"]["data"][field]
+                .as_object()
+                .unwrap()
+                .len(),
+            2
+        );
+    }
+    assert_eq!(
+        a["derived"]["waiting_for_identity"],
+        b["derived"]["waiting_for_identity"]
+    );
+    assert_ne!(
+        a["derived"]["waiting_for_identity"],
+        make(false, 23)["derived"]["waiting_for_identity"]
+    );
+}
+
+/// CR 400.2 + CR 401.2 + CR 701.22a: only the scrying player sees library order.
+#[test]
+fn prompt_identity_scry_hides_order_from_other_viewers() {
+    // Opt, verbatim Oracle text checked by the phase plan.
+    const OPT: &str = "Scry 1. (Look at the top card of your library. You may put that card on the bottom.)\nDraw a card.";
+    let make = |swap: bool| {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        scenario.with_library_top(P0, &["Island", "Forest"]);
+        let spell = scenario
+            .add_spell_to_hand_from_oracle(P0, "Opt", true, OPT)
+            .with_mana_cost(ManaCost::zero())
+            .id();
+        let mut runner = scenario.build();
+        if swap {
+            runner.state_mut().players[0].library.swap(0, 1);
+        }
+        drop(runner.cast(spell).commit());
+        for _ in 0..8 {
+            if matches!(runner.state().waiting_for, WaitingFor::ScryChoice { .. }) {
+                break;
+            }
+            runner.act(GameAction::PassPriority).unwrap();
+        }
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::ScryChoice { player: P0, .. }
+        ));
+        runner.state().clone()
+    };
+    let a = make(false);
+    let b = make(true);
+    let mut ids_a = a.players[0].library.clone();
+    let mut ids_b = b.players[0].library.clone();
+    ids_a.sort();
+    ids_b.sort();
+    assert_eq!(ids_a, ids_b);
+    assert_eq!(a.state_revision, b.state_revision);
+    for viewer in [Some(P0), Some(P1), None] {
+        let aw = client_envelope(&a, viewer);
+        let bw = client_envelope(&b, viewer);
+        if viewer == Some(P0) {
+            assert_ne!(
+                aw["state"]["waiting_for"]["data"]["cards"],
+                bw["state"]["waiting_for"]["data"]["cards"]
+            );
+            assert_ne!(
+                aw["derived"]["waiting_for_identity"],
+                bw["derived"]["waiting_for_identity"]
+            );
+        } else {
+            assert_eq!(
+                aw["state"]["waiting_for"]["data"]["cards"],
+                serde_json::json!([0])
+            );
+            assert_eq!(aw["state"]["waiting_for"], bw["state"]["waiting_for"]);
+            assert_eq!(
+                aw["derived"]["waiting_for_identity"],
+                bw["derived"]["waiting_for_identity"]
+            );
+        }
+        assert_eq!(
+            aw["state"]["players"][0]["library"]
+                .as_array()
+                .unwrap()
+                .len(),
+            bw["state"]["players"][0]["library"]
+                .as_array()
+                .unwrap()
+                .len()
+        );
+    }
+}
+
+/// CR 305.1 + CR 117.3c: playing a land retains priority but changes rules state.
+#[test]
+fn prompt_identity_priority_stays_but_delivered_revision_changes_after_land() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let land = scenario.add_land_to_hand(P0, "Forest").id();
+    let mut runner = scenario.build();
+    let before = client_envelope(runner.state(), Some(P0));
+    let card_id = runner.state().objects[&land].card_id;
+    runner
+        .act(GameAction::PlayLand {
+            object_id: land,
+            card_id,
+        })
+        .unwrap();
+    assert_eq!(runner.state().objects[&land].zone, Zone::Battlefield);
+    let after = client_envelope(runner.state(), Some(P0));
+    assert_eq!(
+        before["state"]["waiting_for"],
+        serde_json::json!({"type":"Priority","data":{"player":0}})
+    );
+    assert_eq!(
+        before["state"]["waiting_for"],
+        after["state"]["waiting_for"]
+    );
+    assert_eq!(
+        before["derived"]["waiting_for_identity"],
+        after["derived"]["waiting_for_identity"]
+    );
+    assert_ne!(
+        before["derived"]["state_revision"],
+        after["derived"]["state_revision"]
+    );
+}
+
+#[test]
+fn prompt_revision_documents_count_only_disclosure_of_private_repair() {
+    use engine::game::engine::apply;
+    use engine::types::game_state::PostReplacementDrainStack;
+    let mut a = GameState::new_two_player(0);
+    a.priority_player = P1;
+    a.waiting_for = WaitingFor::Priority { player: P1 };
+    let mut b = a.clone();
+    b.resolution_stack
+        .push_post_replacement(PostReplacementDrainStack::default());
+    assert!(a.resolution_stack.is_empty());
+    assert!(!b.resolution_stack.is_empty());
+    assert!(a.resolving_stack_entry.is_none() && b.resolving_stack_entry.is_none());
+    assert!(a.pending_cast.is_none() && b.pending_cast.is_none());
+    let viewers = [Some(P0), Some(P1), None];
+    let before_a = viewers.map(|v| client_envelope(&a, v));
+    let before_b = viewers.map(|v| client_envelope(&b, v));
+    assert_eq!(before_a, before_b);
+    assert!(apply(&mut a, P0, GameAction::PassPriority).is_err());
+    assert!(apply(&mut b, P0, GameAction::PassPriority).is_err());
+    assert!(a.resolution_stack.is_empty() && b.resolution_stack.is_empty());
+    assert!(a.resolving_stack_entry.is_none() && b.resolving_stack_entry.is_none());
+    assert!(a.pending_cast.is_none() && b.pending_cast.is_none());
+    for (index, viewer) in viewers.into_iter().enumerate() {
+        let mut aw = client_envelope(&a, viewer);
+        let mut bw = client_envelope(&b, viewer);
+        assert_eq!(aw["state"], bw["state"]);
+        assert_eq!(
+            aw["state"]["waiting_for"],
+            before_a[index]["state"]["waiting_for"]
+        );
+        assert_eq!(
+            aw["derived"]["waiting_for_identity"],
+            bw["derived"]["waiting_for_identity"]
+        );
+        assert_eq!(
+            aw["derived"]["state_revision"],
+            before_a[index]["derived"]["state_revision"]
+        );
+        assert_eq!(
+            bw["derived"]["state_revision"].as_u64().unwrap(),
+            before_b[index]["derived"]["state_revision"]
+                .as_u64()
+                .unwrap()
+                + 1
+        );
+        aw["derived"]
+            .as_object_mut()
+            .unwrap()
+            .remove("state_revision");
+        bw["derived"]
+            .as_object_mut()
+            .unwrap()
+            .remove("state_revision");
+        assert_eq!(aw, bw);
+        assert!(
+            aw["state"].get("resolution_stack").is_none(),
+            "empty private frames are omitted"
+        );
+    }
 }

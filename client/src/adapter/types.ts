@@ -4161,6 +4161,10 @@ export interface DerivedViews {
   unique_authorized_submitter?: PlayerId;
   /** Engine-owned Scry prompt identity for this viewer, independent of opportunities. */
   scry_prompt_id?: InteractionId;
+  /** Opaque engine-issued identity of this viewer's prompt, excluding display-only data. */
+  waiting_for_identity?: string;
+  /** Authoritative transition count; compare only for equality, including decreases. */
+  state_revision?: number;
   /** Viewer-visible object ids in each player's exile pile, keyed by PlayerId. */
   visible_exile_object_ids?: Record<string, ObjectId[]>;
   /**

@@ -34,7 +34,7 @@ use crate::types::card::TokenImageRef;
 use crate::types::card_printing::CardPrinting;
 use crate::types::card_type::CoreType;
 use crate::types::counter::{positive_counter_entries, CounterType};
-use crate::types::display_only::DisplayOnly;
+use crate::types::display_only::{CanonicalDigest, DisplayOnly};
 use crate::types::events::GameEvent;
 use crate::types::format::GameFormat;
 use crate::types::game_state::{
@@ -633,6 +633,16 @@ pub struct DerivedViews {
     /// interaction projection omits its opportunities.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scry_prompt_id: Option<InteractionId>,
+    /// Opaque canonical digest of this viewer's delivered prompt minus typed display data.
+    /// CR 400.2 + CR 203.1 + CR 206.1: hidden information and printing cannot identify it.
+    /// Serialization failure omits this field, selecting the client's legacy fallback.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub waiting_for_identity: Option<CanonicalDigest>,
+    /// Existing authoritative transition count, for equality comparisons only.
+    /// Includes accepted state-changing actions and internal repairs, disclosing their
+    /// occurrence/count, never contents. Fresh-engine restores may lower the value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state_revision: Option<u64>,
     /// Viewer-visible object ids in each player's shared exile pile. This is
     /// projected after face-down visibility filtering so the client can anchor
     /// rejection feedback without reimplementing private-information rules.
@@ -1029,6 +1039,9 @@ impl Serialize for ClientGameStateRef<'_> {
 /// persistence schema of [`GameState`]. Delayed-trigger receipts and their
 /// allocators authorize replay/transition handling; clients receive neither
 /// those private capabilities nor the resolved journal that contains them.
+/// The prompt identity shares both the typed paid-cast cleanup redaction and recursive
+/// trigger-firing redaction below. Future private removals reaching `waiting_for` must
+/// remain shared with [`delivered_prompt_identity`].
 fn client_state_wire_value(state: &GameState) -> serde_json::Result<serde_json::Value> {
     let projected_state = crate::game::visibility::project_paid_cast_cleanup_authority(state);
     let mut value = serde_json::to_value(&projected_state)?;
@@ -2116,6 +2129,13 @@ fn counter_display_views(state: &GameState) -> HashMap<ObjectId, ObjectCounterDi
     display
 }
 
+fn delivered_prompt_identity(filtered_state: &GameState) -> serde_json::Result<CanonicalDigest> {
+    let projected = crate::game::visibility::project_paid_cast_cleanup_authority(filtered_state);
+    let mut prompt = crate::types::display_only::rules_projection(&projected.waiting_for)?;
+    redact_private_trigger_firing(&mut prompt);
+    Ok(crate::types::display_only::canonical_digest(&prompt))
+}
+
 /// Derive a viewer-safe presentation from `filtered_state`, retaining only the
 /// decision-authority projection from the pre-filter rules state. This keeps
 /// rules state pure and makes repeated filtering idempotent.
@@ -2129,6 +2149,8 @@ pub fn derive_filtered_views(
     views.scry_prompt_id = viewer.and_then(|viewer| {
         crate::game::interaction::scry_prompt_id_for_viewer(authoritative_state, viewer)
     });
+    views.waiting_for_identity = delivered_prompt_identity(filtered_state).ok();
+    views.state_revision = Some(authoritative_state.state_revision);
     views.debug_library_cards = debug_library_cards(authoritative_state, viewer);
     views.visible_exile_object_ids = visible_exile_object_ids(filtered_state);
     // CR 509.1g: blocking relationships are public information. Preserve this
@@ -3166,6 +3188,31 @@ mod tests {
     use crate::types::statics::ActivationExemption;
     use crate::types::zones::Zone;
     use std::collections::HashMap;
+
+    #[test]
+    fn prompt_fence_is_optional_in_base_and_authoritative_on_filtered_delivery() {
+        let mut state = GameState::new_two_player(0);
+        state.state_revision = 17;
+        for base in [
+            DerivedViews::default(),
+            derive_views(&state, Some(PlayerId(0))),
+        ] {
+            let wire = serde_json::to_value(base).unwrap();
+            assert!(wire.get("waiting_for_identity").is_none());
+            assert!(wire.get("state_revision").is_none());
+        }
+        let legacy: DerivedViews = serde_json::from_str("{}").unwrap();
+        assert!(legacy.waiting_for_identity.is_none());
+        assert!(legacy.state_revision.is_none());
+        for viewer in [Some(PlayerId(0)), None] {
+            let wire = serde_json::to_value(ClientGameStateRef::wrap(&state, viewer)).unwrap();
+            assert_eq!(wire["derived"]["state_revision"], 17);
+            assert_eq!(
+                wire["derived"]["waiting_for_identity"],
+                "ae290362dc64d95b65ecb96ab3bd73cb33c820ddf926c06d687a9631c217bd1d"
+            );
+        }
+    }
 
     /// CR 108.3 + CR 400.7: the player a zone-change trigger shows is the
     /// identity the move installed, not the one the card had when it left.
