@@ -1,5 +1,4 @@
-//! Rules and AI identity rows for display-only data (charter A14). Phase 6: the
-//! consumed trigger-event occurrence relation.
+//! Rules identity of display-only data: the consumed trigger-event occurrence relation.
 //!
 //! CR 603.2c: an ability triggers once each time its trigger event occurs, and the
 //! consumed-occurrence journal is how a second collector is kept from triggering it again
