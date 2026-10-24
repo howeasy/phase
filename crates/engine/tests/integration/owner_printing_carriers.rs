@@ -65,7 +65,7 @@ fn base_state() -> (GameState, ObjectId) {
     (state, id)
 }
 
-fn object_in<'a>(state: &'a GameState, id: ObjectId) -> &'a GameObject {
+fn object_in(state: &GameState, id: ObjectId) -> &GameObject {
     state.objects.get(&id).expect("the fixture object exists")
 }
 
