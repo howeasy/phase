@@ -5546,6 +5546,145 @@ fn coin_unbound_scalar_refuses_cast_until_an_object_antecedent_is_declared() {
 }
 
 #[test]
+fn coin_dependent_value_read_does_not_happen_when_the_announced_antecedent_becomes_illegal() {
+    use engine::types::ability::{
+        AbilityDefinition, AbilityKind, Comparator, ControllerRef, FilterProp, ObjectScope,
+        QuantityExpr, QuantityRef, TypeFilter, TypedFilter,
+    };
+    for antecedent_stays_legal in [true, false] {
+        let won = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::TargetOnly {
+                target: TargetFilter::Typed(TypedFilter::new(TypeFilter::Artifact)),
+            },
+        );
+        let lost = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Destroy {
+                target: TargetFilter::Typed(TypedFilter::permanent().properties(vec![
+                    FilterProp::Cmc {
+                        comparator: Comparator::GE,
+                        value: QuantityExpr::Ref {
+                            qty: QuantityRef::ObjectManaValue {
+                                scope: ObjectScope::Target,
+                            },
+                        },
+                    },
+                ])),
+                cant_regenerate: false,
+            },
+        );
+        let definition = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::TargetOnly {
+                target: TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
+            },
+        )
+        .sub_ability(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::FlipCoins {
+                flips: CoinFlipRun::single(),
+                win_effect: Some(Box::new(won)),
+                lose_effect: Some(Box::new(lost)),
+                flipper: TargetFilter::Controller,
+            },
+        ));
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let antecedent = scenario
+            .add_creature(P0, "Scalar antecedent", 1, 1)
+            .with_mana_cost(ManaCost::generic(1))
+            .id();
+        let artifact = scenario
+            .add_artifact_from_oracle(P0, "Independent won artifact", "")
+            .id();
+        let victim = scenario
+            .add_creature(P1, "Dependent mana value victim", 2, 2)
+            .with_mana_cost(ManaCost::generic(2))
+            .id();
+        let spell = scenario
+            .add_spell_to_hand(P0, "Synthetic illegal scalar antecedent coin", true)
+            .with_ability_definition(definition)
+            .id();
+        let mut runner = scenario.build();
+        pin_outcomes(&mut runner, &[false]);
+        let card_id = runner.state().objects[&spell].card_id;
+        let mut events = runner
+            .act(GameAction::CastSpell {
+                object_id: spell,
+                card_id,
+                targets: vec![],
+                payment_mode: CastPaymentMode::Auto,
+            })
+            .expect("bound scalar and independent artifact admit the cast")
+            .events;
+        // CR 601.2c: announce every target before the spell commits, including
+        // the dependent victim while the root antecedent is still legal.
+        for (slot, target) in [antecedent, artifact, victim].into_iter().enumerate() {
+            let WaitingFor::TargetSelection {
+                target_slots,
+                selection,
+                ..
+            } = &runner.state().waiting_for
+            else {
+                panic!("required announcement prompt for slot {slot}");
+            };
+            assert_eq!(target_slots.len(), 3);
+            assert_eq!(selection.current_slot, slot);
+            assert!(
+                selection
+                    .current_legal_targets
+                    .contains(&TargetRef::Object(target)),
+                "reach: target {target:?} is legal for announcement slot {slot}"
+            );
+            events.extend(
+                runner
+                    .act(GameAction::ChooseTarget {
+                        target: Some(TargetRef::Object(target)),
+                    })
+                    .expect("announce the offered target")
+                    .events,
+            );
+        }
+        assert_eq!(runner.state().stack.len(), 1);
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { .. }
+        ));
+        assert!(flips(&events).is_empty(), "announcement must not flip");
+        if !antecedent_stays_legal {
+            // CR 608.2b: changing only the controller invalidates "you control".
+            runner
+                .state_mut()
+                .objects
+                .get_mut(&antecedent)
+                .unwrap()
+                .controller = P1;
+        }
+        finish(&mut runner, &mut events);
+        assert_eq!(
+            flips(&events),
+            vec![false],
+            "reach: resolve the lost branch; antecedent_stays_legal={antecedent_stays_legal}"
+        );
+        // CR 608.2b: the independent legal artifact keeps the spell resolving,
+        // but a part requiring information about an illegal target cannot happen.
+        assert_eq!(
+            runner.state().objects[&victim].zone,
+            if antecedent_stays_legal {
+                Zone::Graveyard
+            } else {
+                Zone::Battlefield
+            },
+            "dependent destroy; antecedent_stays_legal={antecedent_stays_legal}"
+        );
+        assert_eq!(runner.state().objects[&artifact].zone, Zone::Battlefield);
+        assert_eq!(runner.state().objects[&antecedent].zone, Zone::Battlefield);
+        assert_finished(&runner);
+    }
+}
+
+#[test]
 fn coin_declining_the_only_possible_antecedent_offers_no_unbound_targets() {
     use engine::types::ability::{
         AbilityDefinition, AbilityKind, Comparator, FilterProp, ObjectScope, QuantityExpr,
