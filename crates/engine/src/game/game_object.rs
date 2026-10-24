@@ -3373,11 +3373,21 @@ impl GameObject {
         }
     }
 
+    /// CR 708.2 + CR 708.5: forget the physical card's printing on the authoritative object at the
+    /// moment the object becomes able to hide its name (turned face down, or merged). Nothing writes a
+    /// printing after an object is created except a clone of an existing object, so a concealed
+    /// printing stays concealed through every later face rewrite (turn up, flip, specialize,
+    /// transform, reload) and every capture of the object carries none.
+    pub(crate) fn conceal_printing(&mut self) {
+        self.printing = DisplayOnly::default();
+        self.base_printing = DisplayOnly::default();
+    }
+
     /// Capture public object characteristics for event-time look-back queries.
     pub fn snapshot_public_characteristics(&self) -> LKISnapshot {
         LKISnapshot {
             name: self.name.clone(),
-            printing: DisplayOnly::default(),
+            printing: self.printing.clone(),
             token_image_ref: self.token_image_ref.clone(),
             power: self.power,
             toughness: self.toughness,

@@ -270,7 +270,7 @@ pub(crate) fn apply_zone_exit_cleanup(
             let incarnation = obj.incarnation;
             let lki = crate::types::game_state::LKISnapshot {
                 name: obj.name.clone(),
-                printing: crate::types::display_only::DisplayOnly::default(),
+                printing: obj.printing.clone(),
                 token_image_ref: obj.token_image_ref.clone(),
                 power: obj.power,
                 toughness: obj.toughness,

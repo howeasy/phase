@@ -20,7 +20,7 @@ use std::num::NonZeroUsize;
 use crate::analysis::resource::ResourceAxis;
 use crate::game::ability_utils::{declared_targets_in_chain, flatten_targets_in_chain};
 use crate::game::filter::{matches_target_filter, FilterContext};
-use crate::game::game_object::{AttachTarget, DisplaySource};
+use crate::game::game_object::{AttachTarget, DisplaySource, GameObject};
 use crate::game::stack::{
     effective_stack_ability, stack_display_groups, stack_display_groups_revealing,
     stack_revealed_card_names, StackDisplayGroup,
@@ -2231,7 +2231,9 @@ fn debug_library_cards(state: &GameState, viewer: Option<PlayerId>) -> Vec<Debug
                 .map(|object| DebugLibraryCardView {
                     object_id: *object_id,
                     name: object.name.clone(),
-                    printing: DisplayOnly::default(),
+                    // Beside the name this authorized row already exposes, from the
+                    // authoritative object.
+                    printing: object.printing.clone(),
                 })
         })
         .collect::<Vec<_>>();
@@ -2691,7 +2693,7 @@ fn stack_entry_details(state: &GameState) -> HashMap<ObjectId, StackEntryDisplay
 }
 
 fn stack_entry_detail(state: &GameState, entry: &StackEntry) -> StackEntryDisplay {
-    let source_name = stack_source_name(state, entry);
+    let source = stack_row_source(state, entry);
     let effective_ability = effective_stack_ability(state, entry);
     let (kind_label, ability_kind, ability_description) = match &entry.kind {
         StackEntryKind::Spell { ability, .. } => (
@@ -2732,9 +2734,9 @@ fn stack_entry_detail(state: &GameState, entry: &StackEntry) -> StackEntryDispla
     };
 
     StackEntryDisplay {
-        source_name,
+        source_name: source.name,
         token_image_ref: stack_source_token_image_ref(state, entry),
-        printing: DisplayOnly::default(),
+        printing: source.printing,
         kind_label,
         ability_kind,
         ability_description,
@@ -2791,16 +2793,61 @@ fn stack_source_token_image_ref(state: &GameState, entry: &StackEntry) -> Option
         })
 }
 
-fn stack_source_name(state: &GameState, entry: &StackEntry) -> String {
-    match &entry.kind {
-        StackEntryKind::TriggeredAbility { source_name, .. } if !source_name.is_empty() => {
-            source_name.clone()
-        }
-        _ => state
-            .objects
+/// The identity a stack row displays for its source and that identity's printing, read from one
+/// authority so the row never shows a printing its name does not disclose (CR 400.2).
+struct StackRowSource {
+    name: String,
+    printing: DisplayOnly<Option<CardPrinting>>,
+}
+
+/// CR 400.2: a row shows the live source's printing only beside a name that discloses it.
+fn live_source_printing(object: &GameObject) -> DisplayOnly<Option<CardPrinting>> {
+    if object.name.is_empty() {
+        DisplayOnly::default()
+    } else {
+        object.printing.clone()
+    }
+}
+
+fn stack_row_source(state: &GameState, entry: &StackEntry) -> StackRowSource {
+    let live = state.objects.get(&entry.source_id);
+    // A row that displays a known latched name reads the live, already viewer-filtered object
+    // whenever it is present (a present but redacted object never falls back), and its
+    // filtered last-known information only once it no longer exists.
+    let latched_printing = || match live {
+        Some(object) => live_source_printing(object),
+        None => state
+            .lki_cache
             .get(&entry.source_id)
-            .map(|obj| obj.name.clone())
-            .unwrap_or_else(|| "Unknown".to_string()),
+            .map(|lki| lki.printing.clone())
+            .unwrap_or_default(),
+    };
+    match &entry.kind {
+        StackEntryKind::TriggeredAbility {
+            source_name,
+            ability,
+            ..
+        } if !source_name.is_empty() => StackRowSource {
+            name: source_name.clone(),
+            // The context latched as the trigger went on the stack; a context-free
+            // (delayed, CR 603.7d) entry latched its name from the live object.
+            printing: ability
+                .trigger_source
+                .as_ref()
+                .map_or_else(latched_printing, |context| context.lki.printing.clone()),
+        },
+        _ => match live {
+            Some(object) => StackRowSource {
+                name: object.name.clone(),
+                printing: live_source_printing(object),
+            },
+            // CR 400.2: the source no longer exists and the row names no card, so it
+            // discloses no printing either, whatever its last-known information holds.
+            None => StackRowSource {
+                name: "Unknown".to_string(),
+                printing: DisplayOnly::default(),
+            },
+        },
     }
 }
 
