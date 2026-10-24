@@ -14610,11 +14610,17 @@ impl From<NinjutsuVariant> for CastVariantPaid {
     }
 }
 
-/// CR 702.49: Identifies which dedicated engine path handles a RuntimeHandled ability.
+/// CR 702.49 / CR 608.2c: Identifies how a RuntimeHandled node is handled: by a dedicated engine path (ninjutsu) or by the chain driver itself (the repeat directive).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RuntimeHandler {
     /// Handled by GameAction::ActivateNinjutsu path.
     NinjutsuFamily,
+    /// CR 608.2c: the "repeat this process" directive of "If C, do A and
+    /// repeat this process". Parsed as the tail child of A's gated clause, so
+    /// it is reached only when A's gate held; reaching it sets
+    /// `GameState::repeat_process_requested`, which the chain root's
+    /// `EffectOutcomeSignal::RepeatDirectiveReached` loop predicate reads.
+    RepeatProcess,
 }
 
 /// Which object a Host/Augment combine effect should merge onto a Host.
@@ -15226,7 +15232,12 @@ pub enum AbilityCost {
         count: u32,
     },
     Reveal {
-        count: u32,
+        /// CR 701.20a + CR 107.3a: how many cards are revealed. A `Variable("X")`
+        /// count is the X announced while casting or activating ("Reveal X red
+        /// cards from your hand" — Martyr cycle); legacy bare-integer data
+        /// deserializes as `Fixed`.
+        #[serde(default = "default_quantity_one")]
+        count: QuantityExpr,
         /// Filter on what must be revealed (e.g., "a Dragon card from your hand").
         /// None means reveal any card (self-reveal).
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -15390,7 +15401,7 @@ macro_rules! define_ability_cost_quantity_walk {
             AbilityCost::PayLife { amount }
             | AbilityCost::PayEnergy { amount }
             | AbilityCost::PaySpeed { amount } => f(amount),
-            AbilityCost::Discard { count, .. } => f(count),
+            AbilityCost::Discard { count, .. } | AbilityCost::Reveal { count, .. } => f(count),
             // --- Recursive forms: every nested cost's quantities are part of
             // --- paying THIS cost, so recurse.
             AbilityCost::Composite { costs } | AbilityCost::OneOf { costs } => {
@@ -15422,7 +15433,6 @@ macro_rules! define_ability_cost_quantity_walk {
             | AbilityCost::Mill { .. }
             | AbilityCost::Exert
             | AbilityCost::Blight { .. }
-            | AbilityCost::Reveal { .. }
             | AbilityCost::Behold { .. }
             | AbilityCost::Waterbend { .. }
             | AbilityCost::NinjutsuFamily { .. }
@@ -17046,13 +17056,8 @@ impl StepSkipTarget {
             Self::Step(Phase::PostCombatMain) => &[Phase::PostCombatMain],
             Self::Step(Phase::End) => &[Phase::End],
             Self::Step(Phase::Cleanup) => &[Phase::Cleanup],
-            Self::CombatPhase => &[
-                Phase::BeginCombat,
-                Phase::DeclareAttackers,
-                Phase::DeclareBlockers,
-                Phase::CombatDamage,
-                Phase::EndCombat,
-            ],
+            // CR 506.1: the combat phase's five steps.
+            Self::CombatPhase => PhaseGroup::Combat.steps(),
         }
     }
 }
@@ -23520,6 +23525,17 @@ enum CreatedReferentPublisher {
 }
 
 impl Effect {
+    /// CR 608.2c: true for the structural "repeat this process" directive
+    /// node (`RuntimeHandled { RepeatProcess }`).
+    pub fn is_repeat_directive(&self) -> bool {
+        matches!(
+            self,
+            Effect::RuntimeHandled {
+                handler: RuntimeHandler::RepeatProcess
+            }
+        )
+    }
+
     /// Single authority for constructing the "parser couldn't handle this"
     /// effect. Parser code must use this instead of a literal
     /// `Effect::Unimplemented { .. }` (enforced for new code by
@@ -28023,6 +28039,7 @@ pub fn effect_variant_name(effect: &Effect) -> &str {
         Effect::ModifyAnnouncedX { .. } => "ModifyAnnouncedX",
         Effect::RuntimeHandled { handler } => match handler {
             RuntimeHandler::NinjutsuFamily => "RuntimeHandled:NinjutsuFamily",
+            RuntimeHandler::RepeatProcess => "RuntimeHandled:RepeatProcess",
         },
         Effect::Learn => "Learn",
         Effect::Forage => "Forage",
@@ -30217,6 +30234,12 @@ pub enum EffectOutcomeSignal {
     /// trigger takes the slot at materialization). A generic "When you do"
     /// after a reveal-until carries no such guard.
     RevealUntilMatched,
+    /// CR 608.2c: the "repeat this process" directive was reached during the
+    /// current pass of a looped chain (`RuntimeHandler::RepeatProcess`). Read
+    /// from the transient `GameState::repeat_process_requested` slot, which
+    /// the loop head clears every pass; it is a loop predicate, never a
+    /// reflexive or optional-decline gate.
+    RepeatDirectiveReached,
 }
 
 /// CR 602.2a + CR 608.2c: which per-turn tally of a single printed ability
@@ -31117,7 +31140,8 @@ impl AbilityCondition {
                 signal:
                     EffectOutcomeSignal::CurrentScopeSucceeded
                     | EffectOutcomeSignal::Guessed { .. }
-                    | EffectOutcomeSignal::RevealUntilMatched,
+                    | EffectOutcomeSignal::RevealUntilMatched
+                    | EffectOutcomeSignal::RepeatDirectiveReached,
             } => false,
             AbilityCondition::TriggerEventTargetDamagedBySourceThisTurn
             | AbilityCondition::TriggerEventTargetExploitedBySource
@@ -32265,6 +32289,12 @@ pub enum TriggerCondition {
     /// `phases` is parameterized so grouped phrases like "main phase" can map to
     /// both concrete main phases without proliferating condition variants.
     CastDuringPhase { phases: Vec<Phase> },
+    /// CR 500.1 + CR 506.1 + CR 603.2: True when the game is currently in one
+    /// of `phases`. Mirror of `ParsedCondition::CurrentPhaseIs` /
+    /// `AbilityCondition::CurrentPhaseIs`; turn-owner scope composes via `And`
+    /// with `DuringPlayersTurn`. Produced inside `EventTime` for the trailing
+    /// "during combat" / "during the <step>" qualifier of an event trigger.
+    CurrentPhaseIs { phases: Vec<Phase> },
     /// CR 601.3b + CR 702.8a: The source permanent came from a spell cast using
     /// a specific timing permission this turn.
     CastTimingPermission { permission: CastTimingPermission },
@@ -32474,6 +32504,9 @@ pub enum TriggerCondition {
     /// its trigger event, read when the game state matches it and not rechecked
     /// on resolution — Plague Boiler's ruling: removing a counter in response
     /// won't stop the effect. An intervening "if" beside it is still rechecked.
+    /// CR 603.2: a trailing "during <window>" qualifier on an event-trigger head
+    /// ("dies during combat", "enters during your turn") is part of the trigger
+    /// event and is likewise read at the event only.
     EventTime { condition: Box<TriggerCondition> },
 }
 
@@ -32572,6 +32605,7 @@ impl TriggerCondition {
             | TriggerCondition::DefendingPlayerControlsNone { .. }
             | TriggerCondition::TributeNotPaid
             | TriggerCondition::CastDuringPhase { .. }
+            | TriggerCondition::CurrentPhaseIs { .. }
             | TriggerCondition::CastTimingPermission { .. }
             | TriggerCondition::ManaColorSpent { .. }
             | TriggerCondition::ManaSpentCondition { .. }
@@ -44564,6 +44598,95 @@ mod tests {
         assert_eq!(visited, vec![QuantityExpr::Fixed { value: 2 }]);
     }
 
+    fn red_card_filter() -> TargetFilter {
+        TargetFilter::Typed(TypedFilter::card().properties(vec![FilterProp::HasColor {
+            color: ManaColor::Red,
+        }]))
+    }
+
+    fn variable_x() -> QuantityExpr {
+        QuantityExpr::Ref {
+            qty: QuantityRef::Variable { name: "X".into() },
+        }
+    }
+
+    /// Legacy card data serialized `AbilityCost::Reveal.count` as a bare
+    /// integer; it still loads as `Fixed`, and a symbolic X count round-trips.
+    #[test]
+    fn reveal_cost_count_accepts_legacy_bare_integer() {
+        let legacy: AbilityCost = serde_json::from_str(r#"{"type":"Reveal","count":1}"#).unwrap();
+        assert_eq!(
+            legacy,
+            AbilityCost::Reveal {
+                count: QuantityExpr::Fixed { value: 1 },
+                filter: None,
+            }
+        );
+        let missing: AbilityCost = serde_json::from_str(r#"{"type":"Reveal"}"#).unwrap();
+        assert_eq!(missing, legacy, "a missing count defaults to one card");
+
+        let symbolic = AbilityCost::Reveal {
+            count: variable_x(),
+            filter: Some(red_card_filter()),
+        };
+        let json = serde_json::to_string(&symbolic).unwrap();
+        assert_eq!(
+            serde_json::from_str::<AbilityCost>(&json).unwrap(),
+            symbolic
+        );
+    }
+
+    /// CR 107.3a: a reveal count is a cost quantity, so the cost-quantity walk
+    /// visits (and can rewrite) it like a discard count.
+    #[test]
+    fn reveal_cost_count_is_visited_by_quantity_walk() {
+        let reveal = AbilityCost::Reveal {
+            count: variable_x(),
+            filter: Some(red_card_filter()),
+        };
+        let mut visited = Vec::new();
+        reveal.for_each_quantity_expr(&mut |quantity| visited.push(quantity.clone()));
+        assert_eq!(visited, vec![variable_x()]);
+
+        let mut composite = AbilityCost::Composite {
+            costs: vec![
+                AbilityCost::Mana {
+                    cost: ManaCost::generic(1),
+                },
+                reveal.clone(),
+                AbilityCost::Sacrifice(SacrificeCost::count(TargetFilter::SelfRef, 1)),
+            ],
+        };
+        visited.clear();
+        composite.for_each_quantity_expr(&mut |quantity| visited.push(quantity.clone()));
+        assert_eq!(visited, vec![variable_x()]);
+
+        composite.for_each_quantity_expr_mut(&mut |quantity| {
+            *quantity = QuantityExpr::Fixed { value: 3 };
+        });
+        let AbilityCost::Composite { costs } = &composite else {
+            unreachable!("the composite keeps its shape");
+        };
+        assert_eq!(
+            costs[1],
+            AbilityCost::Reveal {
+                count: QuantityExpr::Fixed { value: 3 },
+                filter: Some(red_card_filter()),
+            }
+        );
+
+        // Positive control: the sibling discard count is visited too.
+        let discard = AbilityCost::Discard {
+            count: variable_x(),
+            filter: None,
+            selection: CardSelectionMode::Chosen,
+            self_scope: DiscardSelfScope::FromHand,
+        };
+        visited.clear();
+        discard.for_each_quantity_expr(&mut |quantity| visited.push(quantity.clone()));
+        assert_eq!(visited, vec![variable_x()]);
+    }
+
     #[test]
     fn reveal_hand_private_look_serializes_false_and_roundtrips() {
         let effect = Effect::RevealHand {
@@ -44818,7 +44941,7 @@ mod tests {
                 (
                     "reveal",
                     AbilityCost::Reveal {
-                        count: 1,
+                        count: QuantityExpr::Fixed { value: 1 },
                         filter: None,
                     },
                     vec![CostCategory::Reveals],
