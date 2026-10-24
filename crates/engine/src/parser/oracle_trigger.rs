@@ -3,13 +3,16 @@ use nom::branch::alt;
 use nom::bytes::complete::{tag, take_until};
 use nom::character::complete::{alpha1, digit1, multispace0, one_of, space1};
 use nom::combinator::{
-    all_consuming, consumed, eof, fail, map, not, opt, peek, recognize, rest, value, verify,
+    all_consuming, consumed, eof, fail, map, map_opt, not, opt, peek, recognize, rest, value,
+    verify,
 };
 use nom::multi::{many0, many1, separated_list1};
 use nom::sequence::{delimited, pair, preceded, terminated};
 use nom::Parser;
 
-use super::oracle_effect::conditions::{source_saddled_filter, split_leading_conditional};
+use super::oracle_effect::conditions::{
+    parse_phase_name_set, source_saddled_filter, split_leading_conditional,
+};
 use super::oracle_effect::gap_diagnosis::clause_gap_unimplemented;
 use super::oracle_effect::{
     attach_terminal_die_result_branches_before_finalization, condition_text_is_rehomeable,
@@ -70,12 +73,12 @@ use crate::types::ability::ManaProduction;
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AbilityTag,
     AdditionalCostOrigin, AdditionalCostPaymentSource, AggregateFunction, AttachmentKind,
-    AttackersDeclaredCountSubject, CardSelectionMode, CardTypeSetSource, CastManaObjectScope,
-    CastManaSpentMetric, CastVariantPaid, CoinFlipResult, CombatRelation, CombatRelationSubject,
-    Comparator, ControllerRef, CountScope, CounterTriggerFilter, DamageAmountScope,
-    DamageAmountThreshold, DamageChannel, DamageKindFilter, DelayedTriggerCondition,
-    DestinationConstraint, DieResultFilter, Effect, EffectScope, FilterProp,
-    IllegalTargetsDisposition, ManaAbilityProducedFilter, NameStickerSet, ObjectScope,
+    AttachmentReferent, AttackersDeclaredCountSubject, CardSelectionMode, CardTypeSetSource,
+    CastManaObjectScope, CastManaSpentMetric, CastVariantPaid, CoinFlipResult, CombatRelation,
+    CombatRelationSubject, Comparator, ControllerRef, CountScope, CounterTriggerFilter,
+    DamageAmountScope, DamageAmountThreshold, DamageChannel, DamageKindFilter,
+    DelayedTriggerCondition, DestinationConstraint, DieResultFilter, Effect, EffectScope,
+    FilterProp, IllegalTargetsDisposition, ManaAbilityProducedFilter, NameStickerSet, ObjectScope,
     OriginConstraint, ParsedCondition, PlayerFilter, PlayerRelation, PlayerScope,
     PropertyAggregate, PtStat, PtValueScope, QuantityExpr, QuantityRef, RenownSubject,
     SacrificeAggregateStat, SacrificeCost, SacrificeRequirement, SharedQuality, SpentColor,
@@ -88,7 +91,7 @@ use crate::types::counter::CounterType;
 use crate::types::events::{ClashResult, PlayerActionKind};
 use crate::types::keywords::{Keyword, KeywordKind};
 use crate::types::mana::{ManaColor, ManaType};
-use crate::types::phase::Phase;
+use crate::types::phase::{Phase, PhaseGroup};
 use crate::types::triggers::{
     AbilityLifecyclePoint, AttackTargetFilter, PlaneswalkRole, TriggerMode,
 };
@@ -2203,6 +2206,35 @@ pub(crate) fn lower_trigger_node_ir(ir: &TriggerNodeIr) -> TriggerDefinition {
     }
 }
 
+/// CR 603.10a + CR 704.5n: whether this trigger reads the attachment relation of
+/// an object that has already left the battlefield ("equipped/enchanted creature
+/// dies"). The CR 704.5m/n SBAs detach those permanents before the look-back, and
+/// the departure path does not yet queue such triggers — so the clause is
+/// reported as an engine gap instead of a silent no-op.
+fn trigger_depends_on_departure_attachment_relation(def: &TriggerDefinition) -> bool {
+    matches!(def.mode, TriggerMode::ChangesZone)
+        && def.origin == Some(Zone::Battlefield)
+        && def
+            .valid_card
+            .as_ref()
+            .is_some_and(filter_uses_departure_attachment_prop)
+}
+
+fn filter_uses_departure_attachment_prop(filter: &TargetFilter) -> bool {
+    match filter {
+        TargetFilter::Typed(typed) => typed.properties.iter().any(|prop| match prop {
+            FilterProp::EquippedBy | FilterProp::EnchantedBy => true,
+            FilterProp::AttachedTo { .. } | FilterProp::Not { .. } => false,
+            _ => false,
+        }),
+        TargetFilter::Or { filters } | TargetFilter::And { filters } => {
+            filters.iter().any(filter_uses_departure_attachment_prop)
+        }
+        TargetFilter::Not { filter } => filter_uses_departure_attachment_prop(filter),
+        _ => false,
+    }
+}
+
 pub(crate) fn lower_trigger_ir(ir: &TriggerIr) -> TriggerDefinition {
     let mut def = ir.partial_def.clone();
     let modifiers = &ir.modifiers;
@@ -2427,6 +2459,21 @@ pub(crate) fn lower_trigger_ir(ir: &TriggerIr) -> TriggerDefinition {
     // CR 101.1 + CR 608.2b: root only — resolve_top reads the stack entry's root.
     if let Some(ability) = execute.as_deref_mut() {
         ability.illegal_targets_disposition = modifiers.illegal_targets_disposition;
+    }
+    // CR 603.10a: a leaves-the-battlefield trigger whose subject filter needs the
+    // departure attachment relation ("whenever an equipped/enchanted creature
+    // dies") is not supported end to end — the record captures the relation, but
+    // the death trigger does not queue it, so the instruction would silently do
+    // nothing. Mark the clause with the generic unsupported effect (never a
+    // card-name special case) so coverage reports the honest gap.
+    if trigger_depends_on_departure_attachment_relation(&def) {
+        execute = Some(Box::new(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::unimplemented(
+                "departure_attachment_relation",
+                def.description.clone().unwrap_or_default(),
+            ),
+        )));
     }
     def.execute = execute;
     def.optional = modifiers.optional;
@@ -3579,6 +3626,12 @@ fn rebind_parent_target_to_event_target_in_prop(prop: &mut FilterProp) {
         | FilterProp::Targets { filter: target } => {
             rebind_parent_target_to_event_target_in_filter(target);
         }
+        // CR 701.3a: a mass object set defined by attachment to the parent
+        // referent ("destroy all Auras attached to that creature") names the
+        // parent inside the host filter, so a BecomesTarget rebind must reach it.
+        FilterProp::AttachedTo {
+            to: AttachmentReferent::Host { filter: target },
+        } => rebind_parent_target_to_event_target_in_filter(target),
         FilterProp::SharesQuality {
             reference: Some(reference),
             ..
@@ -3619,6 +3672,12 @@ fn filter_prop_contains_event_target(prop: &FilterProp) -> bool {
         | FilterProp::DistinctFrom { reference: target }
         | FilterProp::TargetsOnly { filter: target }
         | FilterProp::Targets { filter: target } => target_filter_contains_event_target(target),
+        // CR 701.3a: the filter-matched host axis nests its own `TargetFilter`, so
+        // a host referent that names the triggering event is found by the same
+        // recursion (the rebind above must agree with this detector).
+        FilterProp::AttachedTo {
+            to: AttachmentReferent::Host { filter: target },
+        } => target_filter_contains_event_target(target),
         FilterProp::SharesQuality {
             reference: Some(reference),
             ..
@@ -15114,6 +15173,15 @@ fn try_parse_event(
 
     // "enters [the battlefield]" / "enter [the battlefield]" (plural for "one or more" subjects)
     if let Ok((after_enter, ())) = value((), tag::<_, _, OracleError<'_>>("enter")).parse(rest) {
+        // CR 603.2: a trailing "during <window>" qualifier ("enters during
+        // combat", "enters during your turn", "enters during the declare
+        // attackers step") is part of the trigger event. Peel it first so the
+        // origin / control / tapped / this-way riders below scan only the
+        // remaining tail; an unrecognized window stays coverage-red.
+        let (after_enter, window) = peel_trailing_event_window(after_enter);
+        if has_untyped_event_window(after_enter) {
+            return None;
+        }
         let mut def = make_base();
         def.mode = TriggerMode::ChangesZone;
         def.destination = Some(Zone::Battlefield);
@@ -15232,6 +15300,7 @@ fn try_parse_event(
             ));
         }
 
+        attach_event_window(&mut def, window);
         return Some((TriggerMode::ChangesZone, def));
     }
 
@@ -15244,12 +15313,20 @@ fn try_parse_event(
         ))
         .parse(input)
     }
-    if parse_dies_verb.parse(rest).is_ok() {
+    if let Ok((dies_tail, ())) = parse_dies_verb.parse(rest) {
+        // CR 603.2: "dies during combat" / "dies during your turn" — the
+        // window is part of the trigger event. An unrecognized window stays
+        // coverage-red rather than firing ungated.
+        let (dies_tail, window) = peel_trailing_event_window(dies_tail);
+        if has_untyped_event_window(dies_tail) {
+            return None;
+        }
         let mut def = make_base();
         def.mode = TriggerMode::ChangesZone;
         def.origin = Some(Zone::Battlefield);
         def.destination = Some(Zone::Graveyard);
         def.valid_card = Some(subject.clone());
+        attach_event_window(&mut def, window);
         return Some((TriggerMode::ChangesZone, def));
     }
 
@@ -15724,19 +15801,7 @@ fn try_parse_event(
         // Courageous Rescuer ("another permanent you control leaves the
         // battlefield during your turn").
         let (tail, turn_constraint) = peel_trailing_turn_constraint(tail);
-        let turn_condition = match turn_constraint {
-            Some(TriggerConstraint::OnlyDuringYourTurn) => {
-                Some(TriggerCondition::DuringPlayersTurn {
-                    player: PlayerFilter::Controller,
-                })
-            }
-            Some(TriggerConstraint::OnlyDuringOpponentsTurn) => {
-                Some(TriggerCondition::DuringPlayersTurn {
-                    player: PlayerFilter::Opponent,
-                })
-            }
-            _ => None,
-        };
+        let turn_condition = turn_constraint.and_then(turn_window_condition);
         let without_dying = all_consuming(tag::<_, _, OracleError<'_>>("without dying"))
             .parse(tail)
             .is_ok();
@@ -23603,6 +23668,88 @@ fn peel_trailing_turn_constraint(input: &str) -> (&str, Option<TriggerConstraint
     }
 }
 
+/// CR 102.1 + CR 603.2: the turn owner a [`parse_during_turn_spec`] token
+/// names, as a trigger-condition leaf ("your turn" → the trigger's
+/// controller is the active player; "an opponent's turn" → an opponent of the
+/// controller is). Only the two turn tokens `parse_during_turn_spec` emits map
+/// to a player; every other constraint is not a turn window.
+fn turn_window_condition(constraint: TriggerConstraint) -> Option<TriggerCondition> {
+    let player = match constraint {
+        TriggerConstraint::OnlyDuringYourTurn => PlayerFilter::Controller,
+        TriggerConstraint::OnlyDuringOpponentsTurn => PlayerFilter::Opponent,
+        TriggerConstraint::OncePerTurn
+        | TriggerConstraint::OncePerGame
+        | TriggerConstraint::NthSpellThisTurn { .. }
+        | TriggerConstraint::NthDrawThisTurn { .. }
+        | TriggerConstraint::OnlyDuringYourMainPhase
+        | TriggerConstraint::AtClassLevel { .. }
+        | TriggerConstraint::MaxTimesPerTurn { .. }
+        | TriggerConstraint::OncePerOpponentPerTurn
+        | TriggerConstraint::EventSourceControlledBy { .. } => return None,
+    };
+    Some(TriggerCondition::DuringPlayersTurn { player })
+}
+
+/// CR 603.2 + CR 500.1 + CR 506.1: the "during <window>" qualifier of an
+/// event-trigger head — "during your turn" / "during an opponent's turn"
+/// (turn windows, via [`parse_during_turn_spec`]), "during combat" (the whole
+/// combat phase, CR 506.1), or "during the <step/phase>" (via
+/// `parse_phase_name_set`). The arms are leaf alternatives after the shared
+/// "during " prefix. NON-`all_consuming`: callers own any trailing text.
+pub(crate) fn parse_event_window(input: &str) -> OracleResult<'_, TriggerCondition> {
+    preceded(
+        tag("during "),
+        alt((
+            map_opt(parse_during_turn_spec, turn_window_condition),
+            map(parse_event_word("combat"), |()| {
+                TriggerCondition::CurrentPhaseIs {
+                    phases: PhaseGroup::Combat.steps().to_vec(),
+                }
+            }),
+            map(preceded(tag("the "), parse_phase_name_set), |phases| {
+                TriggerCondition::CurrentPhaseIs { phases }
+            }),
+        )),
+    )
+    .parse(input)
+}
+
+/// CR 603.2: peel a "during <window>" qualifier that ends an event-trigger
+/// head's tail ("s during combat" → ("s", Some(window))). Found at a word
+/// boundary; the window must consume the rest of the tail.
+fn peel_trailing_event_window(input: &str) -> (&str, Option<TriggerCondition>) {
+    match scan_preceded(input, |i| all_consuming(parse_event_window).parse(i)) {
+        Some((before, window, _)) => (before.trim_end(), Some(window)),
+        None => (input, None),
+    }
+}
+
+/// CR 603.2: true when an event-trigger tail still carries a word-bounded
+/// "during " after [`peel_trailing_event_window`] — a window the combinator
+/// cannot type ("dies during your upkeep"). Callers decline the head so the
+/// line stays coverage-red instead of firing ungated.
+fn has_untyped_event_window(residual: &str) -> bool {
+    scan_preceded(residual, |i| {
+        tag::<_, _, OracleError<'_>>("during ").parse(i)
+    })
+    .is_some()
+}
+
+/// CR 603.2 + CR 603.4: AND the event window onto the trigger's condition as
+/// `EventTime` — read when the trigger event occurs and never rechecked on
+/// resolution, since the window is part of the trigger event rather than an
+/// intervening "if" (`stack_condition_for_trigger` drops `EventTime`).
+fn attach_event_window(def: &mut TriggerDefinition, window: Option<TriggerCondition>) {
+    if let Some(window) = window {
+        def.condition = Some(append_trigger_condition(
+            def.condition.take(),
+            TriggerCondition::EventTime {
+                condition: Box::new(window),
+            },
+        ));
+    }
+}
+
 /// CR 305.1 + CR 603.2: Parse the subject and land-play verb from
 /// "whenever/when [subject] plays/play a land".
 fn parse_land_play_trigger_subject(
@@ -25039,5 +25186,50 @@ mod number_quality_bridge_tests {
                 condition: Box::new(expected),
             })
         );
+    }
+}
+
+/// CR 701.3a + CR 115.1: P16 — the trigger rebind walkers reach a
+/// `Host { ParentTarget }` filter, so a `BecomesTarget` trigger rebinds the host
+/// anaphor too.
+#[cfg(test)]
+mod attached_set_trigger_tests {
+    use super::*;
+    use crate::types::ability::{AttachmentReferent, TypedFilter};
+
+    fn host_prop(filter: TargetFilter) -> FilterProp {
+        FilterProp::AttachedTo {
+            to: AttachmentReferent::Host {
+                filter: Box::new(filter),
+            },
+        }
+    }
+
+    #[test]
+    fn p16_event_target_walkers_recurse_into_the_host_filter() {
+        let mut prop = host_prop(TargetFilter::ParentTarget);
+        assert!(filter_prop_contains_event_target(&prop));
+        rebind_parent_target_to_event_target_in_prop(&mut prop);
+        assert!(
+            matches!(
+                &prop,
+                FilterProp::AttachedTo {
+                    to: AttachmentReferent::Host { filter }
+                } if **filter == TargetFilter::EventTarget
+            ),
+            "the host leaf is rebound to EventTarget, got {prop:?}"
+        );
+
+        // Hostile control: a Host over an explicit typed filter names no event
+        // target, so neither walker fires.
+        let mut typed = host_prop(TargetFilter::Typed(TypedFilter::creature()));
+        assert!(!filter_prop_contains_event_target(&typed));
+        rebind_parent_target_to_event_target_in_prop(&mut typed);
+        assert!(matches!(
+            &typed,
+            FilterProp::AttachedTo {
+                to: AttachmentReferent::Host { filter }
+            } if **filter == TargetFilter::Typed(TypedFilter::creature())
+        ));
     }
 }

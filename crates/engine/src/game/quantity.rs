@@ -3544,6 +3544,7 @@ fn filter_recipient_read(filter: &TargetFilter) -> RecipientRead {
         | TargetFilter::PostReplacementDamageTarget
         | TargetFilter::PostReplacementDamageTargetOwner
         | TargetFilter::DefendingPlayer
+        | TargetFilter::AttackedPlayerOrPlaneswalker
         | TargetFilter::HasChosenName
         | TargetFilter::Named { .. }
         | TargetFilter::Owner
@@ -3586,6 +3587,13 @@ fn filter_prop_recipient_read(prop: &FilterProp) -> RecipientRead {
         | FilterProp::DistinctFrom { .. }
         | FilterProp::Targets { .. }
         | FilterProp::TargetsOnly { .. }
+        // CR 701.3a: the filter-matched host axis resolves its host set from the
+        // resolving ability's parent targets, the creation snapshot, or the
+        // trigger event — never the per-object recipient of the enclosing
+        // quantity, so its payload is not walked here either.
+        | FilterProp::AttachedTo {
+            to: AttachmentReferent::Host { .. },
+        }
         | FilterProp::ControllerMatches { .. }
         | FilterProp::DealtDamageThisTurn { .. }
         | FilterProp::Counters { .. }
