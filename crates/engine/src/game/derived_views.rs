@@ -2800,8 +2800,8 @@ struct StackRowSource {
     printing: DisplayOnly<Option<CardPrinting>>,
 }
 
-/// A row shows the live source's printing only beside a name that discloses it (a face-down or
-/// merged source, or an uncast Room, displays no name).
+/// A row shows the live source's printing only beside a name that discloses it (a face-down
+/// source or an uncast Room displays no name).
 fn live_source_printing(object: &GameObject) -> DisplayOnly<Option<CardPrinting>> {
     if object.name.is_empty() {
         DisplayOnly::default()
@@ -2833,8 +2833,9 @@ fn stack_row_source(state: &GameState, entry: &StackEntry) -> StackRowSource {
             // The latched name came from the context's own read of its source (the exact
             // live object while it still agrees with the context, else the context's
             // snapshot), so the printing comes from that same read and only while that
-            // read still discloses the latched name: a source that changed or was merged
-            // since the context was stored shows no printing, never the context's older one.
+            // read still discloses the latched name: a source whose name changed after the row
+            // latched it shows no printing, and the context's older printing is never shown beside
+            // a newer name.
             // A context-free (delayed, CR 603.7d) entry latched its name from the live object.
             printing: ability
                 .trigger_source

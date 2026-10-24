@@ -9,8 +9,10 @@
 //!
 //! Concealment: a card that can hide its name (turned face down before it enters, CR 708.3 and
 //! CR 708.4, or merged into a mutate pile, CR 702.140c, CR 730.2a, CR 730.2e, CR 730.2f)
-//! forgets its printing on the authoritative object, and nothing writes a printing back, so a
-//! concealed printing is gone for the rest of the game.
+//! forgets its printing on the authoritative object, and no later face write puts one back, so a
+//! concealed printing is gone for the rest of the game. The one exception is a reversal: the
+//! cast reversal (CR 733.1) and the action-rejection snapshot restore replay the exact recorded
+//! values, which returns the pre-cast printing to a card that is back in hand face up.
 //!
 //! Sentinels: no producer stamps a printing yet, so each card here is stamped by hand with its
 //! own sentinel (set code `S<TAG>`), and a census walks the authoritative state, the
