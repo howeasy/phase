@@ -5186,3 +5186,350 @@ fn coin_optional_same_node_election_keeps_the_ancestor_in_static_scope() {
     assert_eq!(runner.state().objects[&artifact].zone, Zone::Battlefield);
     assert_finished(&runner);
 }
+
+#[test]
+fn coin_binds_prior_intermediate_never_becomes_the_antecedent() {
+    use engine::types::ability::{AbilityDefinition, AbilityKind, TypedFilter};
+    for all_inside in [false, true] {
+        let dependent = shared_type_destroy()
+            .effect
+            .target_filter()
+            .unwrap()
+            .clone();
+        let tail =
+            AbilityDefinition::new(AbilityKind::Spell, Effect::TargetOnly { target: dependent });
+        let root = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::TargetOnly {
+                target: TargetFilter::Typed(TypedFilter::creature()),
+            },
+        );
+        let definition = if all_inside {
+            AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::FlipCoins {
+                    flips: CoinFlipRun::single(),
+                    win_effect: None,
+                    lose_effect: Some(Box::new(
+                        root.sub_ability(tail.sub_ability(shared_type_destroy())),
+                    )),
+                    flipper: TargetFilter::Controller,
+                },
+            )
+        } else {
+            root.sub_ability(tail.sub_ability(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::FlipCoins {
+                    flips: CoinFlipRun::single(),
+                    win_effect: None,
+                    lose_effect: Some(Box::new(shared_type_destroy())),
+                    flipper: TargetFilter::Controller,
+                },
+            )))
+        };
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let x = scenario
+            .add_creature(P0, "Artifact creature antecedent", 2, 2)
+            .as_artifact_creature()
+            .id();
+        let y = scenario
+            .add_creature(P0, "Dependent plain creature", 3, 3)
+            .id();
+        let victim = scenario
+            .add_artifact_from_oracle(P1, "Noncreature artifact victim", "")
+            .id();
+        let spell = scenario
+            .add_spell_to_hand(P0, "Synthetic dependent ancestor", true)
+            .with_ability_definition(definition)
+            .id();
+        let mut runner = scenario.build();
+        pin_outcomes(&mut runner, &[false]);
+        let card_id = runner.state().objects[&spell].card_id;
+        let mut events = runner
+            .act(GameAction::CastSpell {
+                object_id: spell,
+                card_id,
+                targets: vec![],
+                payment_mode: CastPaymentMode::Auto,
+            })
+            .expect("cast reaches target announcement")
+            .events;
+        let WaitingFor::TargetSelection { target_slots, .. } = &runner.state().waiting_for else {
+            panic!("required root prompt");
+        };
+        assert_eq!(target_slots.len(), 3);
+        let static_pool = target_slots[2].legal_targets.clone();
+        assert!(static_pool.contains(&TargetRef::Object(victim)));
+        for id in [x, y] {
+            events.extend(
+                runner
+                    .act(GameAction::ChooseTarget {
+                        target: Some(TargetRef::Object(id)),
+                    })
+                    .expect("choose ancestor declaration")
+                    .events,
+            );
+        }
+        let WaitingFor::TargetSelection { selection, .. } = &runner.state().waiting_for else {
+            panic!("required dependent destruction prompt");
+        };
+        assert!(selection
+            .current_legal_targets
+            .contains(&TargetRef::Object(victim)));
+        assert!(selection
+            .current_legal_targets
+            .iter()
+            .all(|target| static_pool.contains(target)));
+        events.extend(
+            runner
+                .act(GameAction::ChooseTarget {
+                    target: Some(TargetRef::Object(victim)),
+                })
+                .expect("artifact shares a type with X, not Y")
+                .events,
+        );
+        finish(&mut runner, &mut events);
+        assert_eq!(flips(&events), vec![false]);
+        assert_eq!(runner.state().objects[&victim].zone, Zone::Graveyard);
+        assert_eq!(runner.state().objects[&x].zone, Zone::Battlefield);
+        assert_eq!(runner.state().objects[&y].zone, Zone::Battlefield);
+        assert_finished(&runner);
+    }
+}
+
+#[test]
+fn coin_zero_slot_declaration_does_not_borrow_the_following_player_pool() {
+    use engine::types::ability::{AbilityDefinition, AbilityKind, MultiTargetSpec};
+    let mut empty = shared_type_destroy();
+    empty.multi_target = Some(MultiTargetSpec::fixed(0, 2));
+    let branch = empty.sub_ability(AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::TargetOnly {
+            target: TargetFilter::Player,
+        },
+    ));
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let spell = scenario
+        .add_spell_to_hand(P0, "Synthetic zero-slot coin", true)
+        .with_ability(Effect::FlipCoins {
+            flips: CoinFlipRun::single(),
+            win_effect: None,
+            lose_effect: Some(Box::new(branch)),
+            flipper: TargetFilter::Controller,
+        })
+        .id();
+    let mut runner = scenario.build();
+    pin_outcomes(&mut runner, &[false]);
+    let outcome = runner.cast(spell).target_player(P1).resolve();
+    assert_eq!(flips(outcome.events()), vec![false]);
+    assert_eq!(outcome.zone_of(spell), Zone::Graveyard);
+    assert_finished(&runner);
+}
+
+#[test]
+fn coin_dependent_source_and_attachment_counts_match_their_slots() {
+    use engine::types::ability::{
+        AbilityDefinition, AbilityKind, AttachSelection, MultiTargetSpec, TypedFilter,
+    };
+    for attachment in [false, true] {
+        let sources = shared_type_destroy()
+            .effect
+            .target_filter()
+            .unwrap()
+            .clone();
+        let effect = if attachment {
+            Effect::Attach {
+                attachment: sources,
+                target: TargetFilter::Typed(TypedFilter::creature()),
+                selection: AttachSelection::Targeted,
+            }
+        } else {
+            Effect::EachDealsDamageEqualToPower {
+                sources,
+                recipient: TargetFilter::Typed(TypedFilter::creature()),
+                extra_source: None,
+            }
+        };
+        let mut branch = AbilityDefinition::new(AbilityKind::Spell, effect);
+        branch.multi_target = Some(MultiTargetSpec::fixed(2, 2));
+        let root = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::TargetOnly {
+                target: TargetFilter::Typed(TypedFilter::creature()),
+            },
+        )
+        .sub_ability(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::FlipCoins {
+                flips: CoinFlipRun::single(),
+                win_effect: None,
+                lose_effect: Some(Box::new(branch)),
+                flipper: TargetFilter::Controller,
+            },
+        ));
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let ancestor = scenario
+            .add_creature(P0, "Artifact creature reference", 1, 1)
+            .as_artifact_creature()
+            .id();
+        let first = if attachment {
+            scenario
+                .add_artifact_from_oracle(P0, "First Equipment", "")
+                .with_subtypes(vec!["Equipment"])
+                .id()
+        } else {
+            scenario.add_creature(P0, "First damage source", 2, 3).id()
+        };
+        let second = if attachment {
+            scenario
+                .add_artifact_from_oracle(P0, "Second Equipment", "")
+                .with_subtypes(vec!["Equipment"])
+                .id()
+        } else {
+            scenario.add_creature(P0, "Second damage source", 3, 3).id()
+        };
+        let recipient = scenario.add_creature(P1, "Recipient", 1, 4).id();
+        let spell = scenario
+            .add_spell_to_hand(P0, "Synthetic counted coin operand", true)
+            .with_ability_definition(root)
+            .id();
+        let mut runner = scenario.build();
+        pin_outcomes(&mut runner, &[false]);
+        let card_id = runner.state().objects[&spell].card_id;
+        let mut events = runner
+            .act(GameAction::CastSpell {
+                object_id: spell,
+                card_id,
+                targets: vec![],
+                payment_mode: CastPaymentMode::Auto,
+            })
+            .expect("ancestor-aware counts admit the cast")
+            .events;
+        let WaitingFor::TargetSelection { target_slots, .. } = &runner.state().waiting_for else {
+            panic!("required four-slot announcement");
+        };
+        assert_eq!(target_slots.len(), 4);
+        for id in [ancestor, first, second] {
+            events.extend(
+                runner
+                    .act(GameAction::ChooseTarget {
+                        target: Some(TargetRef::Object(id)),
+                    })
+                    .expect("specs and emitted slots stay in lockstep")
+                    .events,
+            );
+        }
+        let WaitingFor::TargetSelection { selection, .. } = &runner.state().waiting_for else {
+            panic!("required fourth, recipient/host slot");
+        };
+        assert_eq!(selection.current_slot, 3);
+        assert!(selection
+            .current_legal_targets
+            .contains(&TargetRef::Object(recipient)));
+        // This row tests announcement counts, not the separately implemented
+        // multi-operand assignment/resolution paths. Cancel while the final
+        // declaration remains pending, through the production rollback path.
+        runner
+            .act(GameAction::CancelCast)
+            .expect("cancel the count probe");
+        assert!(flips(&events).is_empty(), "announcement must not flip");
+        assert_eq!(runner.state().objects[&spell].zone, Zone::Hand);
+        assert_finished(&runner);
+    }
+}
+
+#[test]
+fn coin_unbound_scalar_static_pool_contains_the_live_pool() {
+    use engine::types::ability::{
+        AbilityDefinition, AbilityKind, Comparator, FilterProp, ObjectScope, PtStat, PtValueScope,
+        QuantityExpr, QuantityRef, TypedFilter,
+    };
+    for power in [false, true] {
+        let value = QuantityExpr::Ref {
+            qty: QuantityRef::ObjectManaValue {
+                scope: ObjectScope::Target,
+            },
+        };
+        let property = if power {
+            FilterProp::PtComparison {
+                stat: PtStat::Power,
+                scope: PtValueScope::Current,
+                comparator: Comparator::GE,
+                value,
+            }
+        } else {
+            FilterProp::Cmc {
+                comparator: Comparator::GE,
+                value,
+            }
+        };
+        let branch = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Destroy {
+                target: TargetFilter::Typed(TypedFilter::creature().properties(vec![property])),
+                cant_regenerate: false,
+            },
+        );
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let victim = scenario
+            .add_creature(P1, "Unbound scalar victim", 2, 2)
+            .id();
+        let distractor = scenario
+            .add_creature(P1, "Unchosen scalar candidate", 3, 3)
+            .id();
+        let spell = scenario
+            .add_spell_to_hand(P0, "Synthetic unbound scalar coin", true)
+            .with_ability(Effect::FlipCoins {
+                flips: CoinFlipRun::single(),
+                win_effect: None,
+                lose_effect: Some(Box::new(branch)),
+                flipper: TargetFilter::Controller,
+            })
+            .id();
+        let mut runner = scenario.build();
+        pin_outcomes(&mut runner, &[false]);
+        let card_id = runner.state().objects[&spell].card_id;
+        let mut events = runner
+            .act(GameAction::CastSpell {
+                object_id: spell,
+                card_id,
+                targets: vec![],
+                payment_mode: CastPaymentMode::Auto,
+            })
+            .expect("unbound scalar admits candidates")
+            .events;
+        let WaitingFor::TargetSelection {
+            target_slots,
+            selection,
+            ..
+        } = &runner.state().waiting_for
+        else {
+            panic!("required unbound scalar prompt");
+        };
+        assert_eq!(target_slots.len(), 1);
+        assert!(selection
+            .current_legal_targets
+            .contains(&TargetRef::Object(victim)));
+        assert!(selection
+            .current_legal_targets
+            .iter()
+            .all(|target| target_slots[0].legal_targets.contains(target)));
+        events.extend(
+            runner
+                .act(GameAction::ChooseTarget {
+                    target: Some(TargetRef::Object(victim)),
+                })
+                .expect("elect the unbound candidate")
+                .events,
+        );
+        finish(&mut runner, &mut events);
+        assert_eq!(flips(&events), vec![false]);
+        assert_eq!(runner.state().objects[&victim].zone, Zone::Graveyard);
+        assert_eq!(runner.state().objects[&distractor].zone, Zone::Battlefield);
+        assert_finished(&runner);
+    }
+}
