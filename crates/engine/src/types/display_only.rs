@@ -149,7 +149,10 @@ pub struct ReportedRulesProjection {
 /// CR 203.1 + CR 206.1: the reported mode may project an omitted payload solely to decide
 /// whether it was non-empty; the payload never reaches `value`. Unlike [`rules_projection`],
 /// which never serializes an omitted payload, this fails when an omitted payload's own
-/// `Serialize` fails.
+/// `Serialize` fails, but only for payloads inspected before the report becomes
+/// `NonEmpty`: the observer stops inspecting once it has reported non-empty data, so a
+/// tuple holding a non-empty `DisplayOnly` followed by a failing one succeeds, and the
+/// reverse order fails.
 pub fn reported_rules_projection<T: Serialize + ?Sized>(
     value: &T,
 ) -> serde_json::Result<ReportedRulesProjection> {
@@ -1098,6 +1101,57 @@ mod tests {
         let report = reported_rules_projection(&scalars).unwrap();
         assert_eq!(report.value, rules_projection(&scalars).unwrap());
         assert_eq!(report.omitted, OmittedDisplayData::Nothing);
+    }
+
+    /// One carrier at each serializer branch that threads the observer.
+    #[derive(Serialize)]
+    enum Branch {
+        Payload(DisplayOnly<Option<Mark>>),
+        Pair(DisplayOnly<Option<Mark>>, u8),
+        Fields { shown: DisplayOnly<Option<Mark>> },
+    }
+
+    #[derive(Serialize)]
+    struct TupleStructBranch(DisplayOnly<Option<Mark>>, u8);
+
+    fn carrier(filled: bool) -> DisplayOnly<Option<Mark>> {
+        DisplayOnly::new(filled.then(|| mark(0)))
+    }
+
+    /// Exactly one non-empty carrier reports `NonEmpty` with the ordinary projection's value;
+    /// the same shape with only empty carriers reports `Nothing`.
+    fn assert_branch_reports<T: Serialize>(label: &str, build: impl Fn(bool) -> T) {
+        let (filled, empty) = (build(true), build(false));
+        let report = reported_rules_projection(&filled).unwrap();
+        assert_eq!(report.omitted, OmittedDisplayData::NonEmpty, "{label}");
+        assert_eq!(report.value, rules_projection(&filled).unwrap(), "{label}");
+        assert!(
+            !report.value.to_string().contains("SENTINEL"),
+            "{label}: the printing is omitted"
+        );
+        let report = reported_rules_projection(&empty).unwrap();
+        assert_eq!(
+            report.omitted,
+            OmittedDisplayData::Nothing,
+            "{label} control"
+        );
+        assert_eq!(report.value, rules_projection(&empty).unwrap(), "{label}");
+    }
+
+    #[test]
+    fn every_observer_threading_branch_reports_a_lone_non_empty_carrier() {
+        assert_branch_reports("newtype variant payload", |f| Branch::Payload(carrier(f)));
+        assert_branch_reports("tuple variant field", |f| Branch::Pair(carrier(f), 1));
+        assert_branch_reports("struct variant field", |f| Branch::Fields {
+            shown: carrier(f),
+        });
+        assert_branch_reports("struct field", |f| NoSkip { shown: carrier(f) });
+        assert_branch_reports("map value", |f| {
+            BTreeMap::from([("k".to_string(), carrier(f))])
+        });
+        assert_branch_reports("sequence element", |f| vec![carrier(f)]);
+        assert_branch_reports("tuple element", |f| (carrier(f), 1u8));
+        assert_branch_reports("tuple struct field", |f| TupleStructBranch(carrier(f), 1));
     }
 
     #[test]

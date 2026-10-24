@@ -12411,8 +12411,10 @@ fn visit_persisted_journal_zone_change_trigger_records(
 /// difference neither splits one occurrence into two nor selects between two
 /// rules-identical occurrences, while the loaded state keeps every original
 /// value because reconciliation only inserts the two stamps. Display-free
-/// records keep today's raw-JSON comparison wherever the typed one would
-/// differ, so every binding that is unique today stays unique.
+/// records keep today's raw-JSON comparison at the fast paths and among two or
+/// more rules-identical candidates, so every binding that is unique today stays
+/// unique; a display-free record whose only rules-identical row differs from it
+/// in raw form now binds to that row.
 ///
 /// This runs against serialized `ResolutionStateWire` input before either v1
 /// legacy fields or v2/v3 typed frames materialize into runtime state. The
