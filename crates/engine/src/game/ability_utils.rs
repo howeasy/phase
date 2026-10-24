@@ -3418,7 +3418,7 @@ fn occurrence_binds_prior(
         NodeSlotFilters::PerSlot(filters) => filters
             .get(position)
             .is_some_and(target_filter_binds_prior_target),
-        NodeSlotFilters::UniformRun(filter) => target_filter_binds_prior_target(&filter),
+        NodeSlotFilters::UniformRun(filter) => target_filter_binds_prior_target(filter),
         NodeSlotFilters::None => false,
         NodeSlotFilters::NotDerivable => match &node.effect {
             Effect::Fight { subject, target } => fight_declared_slot_filters(subject, target)
