@@ -537,7 +537,8 @@ struct SlotAccumulator {
     /// retain the established full-prefix lookup.
     coin_depth: usize,
     current_node_start: usize,
-    prior_object_range: Option<std::ops::Range<usize>>,
+    ancestor_slot_ranges: Vec<std::ops::Range<usize>>,
+    antecedent_eligible: Vec<bool>,
     coin_branch_slot_base: usize,
 }
 
@@ -560,7 +561,8 @@ impl Default for SlotAccumulator {
             groups: Vec::new(),
             coin_depth: 0,
             current_node_start: 0,
-            prior_object_range: None,
+            ancestor_slot_ranges: Vec::new(),
+            antecedent_eligible: Vec::new(),
             coin_branch_slot_base: 0,
         }
     }
@@ -571,52 +573,29 @@ impl SlotAccumulator {
     /// push time, keeping `labels` and `slots` index-parallel by construction.
     /// The slot's `chooser` is stamped from `current_chooser` unless the slot
     /// already carries one (no producer sets it today, so the default path wins).
-    fn push(&mut self, mut slot: TargetSelectionSlot) {
+    fn push(&mut self, filter: &TargetFilter, mut slot: TargetSelectionSlot) {
         if slot.chooser.is_none() {
             slot.chooser = self.current_chooser;
         }
+        self.antecedent_eligible
+            .push(!target_filter_binds_prior_target(filter));
         self.slots.push(slot);
         self.labels.push(self.current_label.clone());
         self.groups.push(self.current_group);
     }
 
-    fn coin_scope(&self) -> CoinPathSlotScope {
-        coin_path_slot_scope(
-            self.slots.len(),
-            (0..self.slots.len()).map(|index| {
-                let depth = if index >= self.current_node_start {
-                    Some(1)
-                } else if self
-                    .prior_object_range
-                    .as_ref()
-                    .is_some_and(|range| range.contains(&index))
-                {
-                    Some(0)
-                } else {
-                    None
-                };
-                (index, depth, index >= self.coin_branch_slot_base)
-            }),
-            |index| {
-                self.slots[index]
-                    .legal_targets
-                    .iter()
-                    .any(|target| matches!(target, TargetRef::Object(_)))
-            },
-        )
-    }
-
     fn built(&self) -> BuiltSlots<'_> {
-        let scope = (self.coin_depth > 0).then(|| self.coin_scope());
         BuiltSlots {
             slots: &self.slots,
             groups: &self.groups,
-            object_slots: scope.map(|scope| {
-                scope
-                    .object_slot
-                    .map_or(&[][..], |index| &self.slots[index..=index])
+            object_slots: (self.coin_depth > 0).then_some(CoinBuiltSlots {
+                slots: &self.slots,
+                eligible: &self.antecedent_eligible,
+                ancestors: &self.ancestor_slot_ranges,
+                node_start: self.current_node_start,
             }),
-            declared_slots: scope.map(|scope| &self.slots[scope.slot_base..]),
+            declared_slots: (self.coin_depth > 0)
+                .then_some(&self.slots[self.coin_branch_slot_base..]),
         }
     }
 }
@@ -626,7 +605,7 @@ impl SlotAccumulator {
 struct BuiltSlots<'a> {
     slots: &'a [TargetSelectionSlot],
     groups: &'a [Option<crate::types::ability::ChosenGroupId>],
-    object_slots: Option<&'a [TargetSelectionSlot]>,
+    object_slots: Option<CoinBuiltSlots<'a>>,
     declared_slots: Option<&'a [TargetSelectionSlot]>,
 }
 
@@ -637,6 +616,46 @@ impl BuiltSlots<'static> {
         object_slots: None,
         declared_slots: None,
     };
+}
+
+/// CR 601.2c: before elections, retain every lexical object antecedent an
+/// optional or mixed object/player declaration can leave available.
+#[derive(Clone, Copy)]
+struct CoinBuiltSlots<'a> {
+    slots: &'a [TargetSelectionSlot],
+    eligible: &'a [bool],
+    ancestors: &'a [std::ops::Range<usize>],
+    node_start: usize,
+}
+
+impl CoinBuiltSlots<'_> {
+    fn object_slots(&self) -> impl Iterator<Item = &TargetSelectionSlot> {
+        let origins = self
+            .ancestors
+            .iter()
+            .enumerate()
+            .flat_map(|(depth, range)| range.clone().map(move |index| (index, depth)))
+            .chain((self.node_start..self.slots.len()).map(|index| (index, self.ancestors.len())))
+            .filter(|(index, _)| self.eligible[*index]);
+        coin_path_slot_scope(origins, |index| {
+            let slot = &self.slots[index];
+            let has_object = slot
+                .legal_targets
+                .iter()
+                .any(|target| matches!(target, TargetRef::Object(_)));
+            let can_skip = slot.optional
+                || slot
+                    .legal_targets
+                    .iter()
+                    .any(|target| matches!(target, TargetRef::Player(_)));
+            match (has_object, can_skip) {
+                (false, _) => CoinObjectPresence::Absent,
+                (true, true) => CoinObjectPresence::Possible,
+                (true, false) => CoinObjectPresence::Certain,
+            }
+        })
+        .map(|index| &self.slots[index])
+    }
 }
 
 /// Result of target construction while an ability is being announced.
@@ -1542,38 +1561,42 @@ impl TargetSlotSpec {
     }
 }
 
-/// CR 601.2c: coin-path lookups share one lexical scope at pool construction
-/// and selection. A node's earlier slots precede its ancestors; player-only
-/// declarations do not shadow an object. Numbered slots start at the latest
-/// coin edge, independently of which ancestor supplies the object anaphor.
+/// CR 601.2c: live coin-path elections bind one lexical object antecedent.
+/// Numbered slots independently start at the latest coin edge.
 #[derive(Clone, Copy)]
 struct CoinPathSlotScope {
     object_slot: Option<usize>,
     slot_base: usize,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CoinObjectPresence {
+    Absent,
+    Possible,
+    Certain,
+}
+
+/// CR 601.2c: enumerate every possible first object at the nearest declaring
+/// depth. A required object-only election hides older ancestors and later
+/// slots at its depth; optional and mixed elections retain those alternatives.
+/// Live elections mark their selected object certain, yielding exactly one.
 fn coin_path_slot_scope(
-    prefix_len: usize,
-    origins: impl Iterator<Item = (usize, Option<usize>, bool)>,
-    has_object: impl Fn(usize) -> bool,
-) -> CoinPathSlotScope {
-    let mut scope = CoinPathSlotScope {
-        object_slot: None,
-        slot_base: prefix_len,
-    };
-    let mut object_depth = None;
-    for (index, ancestor_depth, in_branch) in origins {
-        if in_branch {
-            scope.slot_base = scope.slot_base.min(index);
-        }
-        if let Some(depth) = ancestor_depth {
-            if has_object(index) && object_depth.is_none_or(|nearest| depth > nearest) {
-                scope.object_slot = Some(index);
-                object_depth = Some(depth);
-            }
-        }
-    }
-    scope
+    origins: impl Iterator<Item = (usize, usize)> + Clone,
+    object_presence: impl Fn(usize) -> CoinObjectPresence,
+) -> impl Iterator<Item = usize> {
+    let certain = origins
+        .clone()
+        .filter(|&(index, _)| object_presence(index) == CoinObjectPresence::Certain)
+        .fold(None, |nearest, (index, depth)| match nearest {
+            Some((_, nearest_depth)) if nearest_depth >= depth => nearest,
+            Some(_) | None => Some((index, depth)),
+        });
+    origins.filter_map(move |(index, depth)| {
+        let visible = certain.is_none_or(|(first, nearest_depth)| {
+            depth > nearest_depth || (depth == nearest_depth && index <= first)
+        });
+        (visible && object_presence(index) != CoinObjectPresence::Absent).then_some(index)
+    })
 }
 
 impl TargetSlotSpec {
@@ -1589,19 +1612,26 @@ impl TargetSlotSpec {
                 .rposition(|step| matches!(step, ChainStep::CoinFlipBranch { .. }))
                 .expect("coin-path spec has a coin edge");
             let branch = &self.path[..=last_coin];
-            coin_path_slot_scope(
-                prior_specs.len(),
-                prior_specs.iter().enumerate().map(|(index, prior)| {
-                    (
-                        index,
-                        self.path
-                            .starts_with(&prior.path)
-                            .then_some(prior.path.len()),
-                        prior.path.starts_with(branch),
-                    )
-                }),
-                |index| matches!(selected_slots.get(index), Some(Some(TargetRef::Object(_)))),
-            )
+            let origins = prior_specs.iter().enumerate().filter_map(|(index, prior)| {
+                (self.path.starts_with(&prior.path)
+                    && self.instance != prior.instance
+                    && !target_filter_binds_prior_target(&prior.filter))
+                .then_some((index, prior.path.len()))
+            });
+            CoinPathSlotScope {
+                object_slot: coin_path_slot_scope(origins, |index| {
+                    if matches!(selected_slots.get(index), Some(Some(TargetRef::Object(_)))) {
+                        CoinObjectPresence::Certain
+                    } else {
+                        CoinObjectPresence::Absent
+                    }
+                })
+                .next(),
+                slot_base: prior_specs
+                    .iter()
+                    .position(|prior| prior.path.starts_with(branch))
+                    .unwrap_or(prior_specs.len()),
+            }
         })
     }
 }
@@ -4827,13 +4857,16 @@ fn collect_target_slots_inner(
                 if legal_targets.is_empty() && !ability.optional_targeting {
                     return Err(no_legal_target_slots());
                 }
-                acc.push(TargetSelectionSlot {
-                    legal_targets,
-                    optional: ability.optional_targeting,
-                    chooser: None,
-                    effect_kind: acc.current_effect_kind,
-                    effect_detail: acc.current_effect_detail,
-                });
+                acc.push(
+                    role.filter(),
+                    TargetSelectionSlot {
+                        legal_targets,
+                        optional: ability.optional_targeting,
+                        chooser: None,
+                        effect_kind: acc.current_effect_kind,
+                        effect_detail: acc.current_effect_detail,
+                    },
+                );
             }
         } else if let Some(src_leaf) = damage_replacement_source_slot_filter(&ability.effect) {
             let legal_targets =
@@ -4841,13 +4874,16 @@ fn collect_target_slots_inner(
             if legal_targets.is_empty() && !ability.optional_targeting {
                 return Err(no_legal_target_slots());
             }
-            acc.push(TargetSelectionSlot {
-                legal_targets,
-                optional: ability.optional_targeting,
-                chooser: None,
-                effect_kind: acc.current_effect_kind,
-                effect_detail: acc.current_effect_detail,
-            });
+            acc.push(
+                src_leaf,
+                TargetSelectionSlot {
+                    legal_targets,
+                    optional: ability.optional_targeting,
+                    chooser: None,
+                    effect_kind: acc.current_effect_kind,
+                    effect_detail: acc.current_effect_detail,
+                },
+            );
         }
     }
 
@@ -4910,13 +4946,16 @@ fn collect_target_slots_inner(
             if legal_targets.is_empty() && !ability.targeting_is_optional() {
                 return Err(no_legal_target_slots());
             }
-            acc.push(TargetSelectionSlot {
-                legal_targets,
-                optional: ability.targeting_is_optional(),
-                chooser: None,
-                effect_kind: acc.current_effect_kind,
-                effect_detail: acc.current_effect_detail,
-            });
+            acc.push(
+                filter,
+                TargetSelectionSlot {
+                    legal_targets,
+                    optional: ability.targeting_is_optional(),
+                    chooser: None,
+                    effect_kind: acc.current_effect_kind,
+                    effect_detail: acc.current_effect_detail,
+                },
+            );
         }
         return collect_sub_chain_slots(state, ability, acc);
     }
@@ -4940,13 +4979,16 @@ fn collect_target_slots_inner(
             if legal_targets.is_empty() && !ability.optional_targeting {
                 return Err(no_legal_target_slots());
             }
-            acc.push(TargetSelectionSlot {
-                legal_targets,
-                optional: ability.optional_targeting,
-                chooser: None,
-                effect_kind: acc.current_effect_kind,
-                effect_detail: acc.current_effect_detail,
-            });
+            acc.push(
+                filter,
+                TargetSelectionSlot {
+                    legal_targets,
+                    optional: ability.optional_targeting,
+                    chooser: None,
+                    effect_kind: acc.current_effect_kind,
+                    effect_detail: acc.current_effect_detail,
+                },
+            );
         }
         return collect_sub_chain_slots(state, ability, acc);
     }
@@ -4967,13 +5009,16 @@ fn collect_target_slots_inner(
             if legal_targets.is_empty() && !ability.optional_targeting {
                 return Err(no_legal_target_slots());
             }
-            acc.push(TargetSelectionSlot {
-                legal_targets,
-                optional: ability.optional_targeting,
-                chooser: None,
-                effect_kind: acc.current_effect_kind,
-                effect_detail: acc.current_effect_detail,
-            });
+            acc.push(
+                filter,
+                TargetSelectionSlot {
+                    legal_targets,
+                    optional: ability.optional_targeting,
+                    chooser: None,
+                    effect_kind: acc.current_effect_kind,
+                    effect_detail: acc.current_effect_detail,
+                },
+            );
         }
     } else if let Some(role) = mana_multi_role(&ability.effect) {
         // CR 601.2c + CR 115.1: A mana sentence may name a recipient AND a count
@@ -4993,13 +5038,16 @@ fn collect_target_slots_inner(
             if legal_targets.is_empty() && !ability.optional_targeting {
                 return Err(no_legal_target_slots());
             }
-            acc.push(TargetSelectionSlot {
-                legal_targets,
-                optional: ability.optional_targeting,
-                chooser: None,
-                effect_kind: acc.current_effect_kind,
-                effect_detail: acc.current_effect_detail,
-            });
+            acc.push(
+                filter,
+                TargetSelectionSlot {
+                    legal_targets,
+                    optional: ability.optional_targeting,
+                    chooser: None,
+                    effect_kind: acc.current_effect_kind,
+                    effect_detail: acc.current_effect_detail,
+                },
+            );
         }
     } else if let Effect::Attach {
         attachment,
@@ -5018,13 +5066,16 @@ fn collect_target_slots_inner(
                 if legal_targets.is_empty() && !ability.optional_targeting {
                     return Err(no_legal_target_slots());
                 }
-                acc.push(TargetSelectionSlot {
-                    legal_targets,
-                    optional: ability.optional_targeting,
-                    chooser: None,
-                    effect_kind: acc.current_effect_kind,
-                    effect_detail: acc.current_effect_detail,
-                });
+                acc.push(
+                    target,
+                    TargetSelectionSlot {
+                        legal_targets,
+                        optional: ability.optional_targeting,
+                        chooser: None,
+                        effect_kind: acc.current_effect_kind,
+                        effect_detail: acc.current_effect_detail,
+                    },
+                );
             }
         }
     } else if damage_replacement_target_roles(&ability.effect).is_some() {
@@ -5053,13 +5104,16 @@ fn collect_target_slots_inner(
             if let Some(spec) = ability.multi_target.as_ref() {
                 let bounds = resolve_multi_target_bounds(state, ability, spec, source_legal.len())?;
                 for slot_index in 0..bounds.max {
-                    acc.push(TargetSelectionSlot {
-                        legal_targets: source_legal.clone(),
-                        optional: slot_index >= bounds.min,
-                        chooser: None,
-                        effect_kind: acc.current_effect_kind,
-                        effect_detail: acc.current_effect_detail,
-                    });
+                    acc.push(
+                        sources,
+                        TargetSelectionSlot {
+                            legal_targets: source_legal.clone(),
+                            optional: slot_index >= bounds.min,
+                            chooser: None,
+                            effect_kind: acc.current_effect_kind,
+                            effect_detail: acc.current_effect_detail,
+                        },
+                    );
                 }
             } else {
                 // No spec means a single mandatory source (defensive — the parser
@@ -5067,13 +5121,16 @@ fn collect_target_slots_inner(
                 if source_legal.is_empty() {
                     return Err(no_legal_target_slots());
                 }
-                acc.push(TargetSelectionSlot {
-                    legal_targets: source_legal,
-                    optional: false,
-                    chooser: None,
-                    effect_kind: acc.current_effect_kind,
-                    effect_detail: acc.current_effect_detail,
-                });
+                acc.push(
+                    sources,
+                    TargetSelectionSlot {
+                        legal_targets: source_legal,
+                        optional: false,
+                        chooser: None,
+                        effect_kind: acc.current_effect_kind,
+                        effect_detail: acc.current_effect_detail,
+                    },
+                );
             }
 
             // CR 115.4 + CR 601.2c: group B — one optional slot, AFTER the
@@ -5085,13 +5142,16 @@ fn collect_target_slots_inner(
             if let Some(extra) = extra_source {
                 let extra_legal =
                     legal_targets_for_ability_filter(state, ability, extra, acc.built());
-                acc.push(TargetSelectionSlot {
-                    legal_targets: extra_legal,
-                    optional: true,
-                    chooser: None,
-                    effect_kind: acc.current_effect_kind,
-                    effect_detail: acc.current_effect_detail,
-                });
+                acc.push(
+                    extra,
+                    TargetSelectionSlot {
+                        legal_targets: extra_legal,
+                        optional: true,
+                        chooser: None,
+                        effect_kind: acc.current_effect_kind,
+                        effect_detail: acc.current_effect_detail,
+                    },
+                );
             }
 
             // CR 115.1: the recipient is exactly one mandatory target.
@@ -5100,13 +5160,16 @@ fn collect_target_slots_inner(
             if recipient_legal.is_empty() {
                 return Err(no_legal_target_slots());
             }
-            acc.push(TargetSelectionSlot {
-                legal_targets: recipient_legal,
-                optional: false,
-                chooser: None,
-                effect_kind: acc.current_effect_kind,
-                effect_detail: acc.current_effect_detail,
-            });
+            acc.push(
+                recipient,
+                TargetSelectionSlot {
+                    legal_targets: recipient_legal,
+                    optional: false,
+                    chooser: None,
+                    effect_kind: acc.current_effect_kind,
+                    effect_detail: acc.current_effect_detail,
+                },
+            );
         }
     } else {
         if is_per_opponent_target_fanout(ability) {
@@ -5143,13 +5206,16 @@ fn collect_target_slots_inner(
             if player_targets.is_empty() && !ability.optional_targeting {
                 return Err(no_legal_target_slots());
             }
-            acc.push(TargetSelectionSlot {
-                legal_targets: player_targets,
-                optional: ability.optional_targeting,
-                chooser: None,
-                effect_kind: acc.current_effect_kind,
-                effect_detail: acc.current_effect_detail,
-            });
+            acc.push(
+                &TargetFilter::Player,
+                TargetSelectionSlot {
+                    legal_targets: player_targets,
+                    optional: ability.optional_targeting,
+                    chooser: None,
+                    effect_kind: acc.current_effect_kind,
+                    effect_detail: acc.current_effect_detail,
+                },
+            );
         }
         if ability.target_choice_timing == TargetChoiceTiming::Stack
             && effect_needs_target_creature_quantity_slot(&ability.effect)
@@ -5163,13 +5229,16 @@ fn collect_target_slots_inner(
             if legal_targets.is_empty() && !ability.optional_targeting {
                 return Err(no_legal_target_slots());
             }
-            acc.push(TargetSelectionSlot {
-                legal_targets,
-                optional: ability.optional_targeting,
-                chooser: None,
-                effect_kind: acc.current_effect_kind,
-                effect_detail: acc.current_effect_detail,
-            });
+            acc.push(
+                &filter,
+                TargetSelectionSlot {
+                    legal_targets,
+                    optional: ability.optional_targeting,
+                    chooser: None,
+                    effect_kind: acc.current_effect_kind,
+                    effect_detail: acc.current_effect_detail,
+                },
+            );
         }
         if ability.target_choice_timing == TargetChoiceTiming::Stack
             && effect_needs_parent_target_combat_relation_slot(&ability.effect)
@@ -5180,13 +5249,16 @@ fn collect_target_slots_inner(
             if legal_targets.is_empty() && !ability.optional_targeting {
                 return Err(no_legal_target_slots());
             }
-            acc.push(TargetSelectionSlot {
-                legal_targets,
-                optional: ability.optional_targeting,
-                chooser: None,
-                effect_kind: acc.current_effect_kind,
-                effect_detail: acc.current_effect_detail,
-            });
+            acc.push(
+                &filter,
+                TargetSelectionSlot {
+                    legal_targets,
+                    optional: ability.optional_targeting,
+                    chooser: None,
+                    effect_kind: acc.current_effect_kind,
+                    effect_detail: acc.current_effect_detail,
+                },
+            );
         }
         // CR 115.1 + CR 601.2c: a `BecomeCopy` whose RECIPIENT is itself an
         // announced target ("Target artifact you control becomes a copy of a
@@ -5204,13 +5276,16 @@ fn collect_target_slots_inner(
                 if legal_targets.is_empty() && !ability.optional_targeting {
                     return Err(no_legal_target_slots());
                 }
-                acc.push(TargetSelectionSlot {
-                    legal_targets,
-                    optional: ability.optional_targeting,
-                    chooser: None,
-                    effect_kind: acc.current_effect_kind,
-                    effect_detail: acc.current_effect_detail,
-                });
+                acc.push(
+                    filter,
+                    TargetSelectionSlot {
+                        legal_targets,
+                        optional: ability.optional_targeting,
+                        chooser: None,
+                        effect_kind: acc.current_effect_kind,
+                        effect_detail: acc.current_effect_detail,
+                    },
+                );
             }
         }
         if ability.target_choice_timing == TargetChoiceTiming::Stack
@@ -5227,25 +5302,31 @@ fn collect_target_slots_inner(
                     let bounds =
                         resolve_multi_target_bounds(state, ability, spec, legal_targets.len())?;
                     for slot_index in 0..bounds.max {
-                        acc.push(TargetSelectionSlot {
-                            legal_targets: legal_targets.clone(),
-                            optional: slot_index >= bounds.min,
-                            chooser: None,
-                            effect_kind: acc.current_effect_kind,
-                            effect_detail: acc.current_effect_detail,
-                        });
+                        acc.push(
+                            filter,
+                            TargetSelectionSlot {
+                                legal_targets: legal_targets.clone(),
+                                optional: slot_index >= bounds.min,
+                                chooser: None,
+                                effect_kind: acc.current_effect_kind,
+                                effect_detail: acc.current_effect_detail,
+                            },
+                        );
                     }
                 } else {
                     if legal_targets.is_empty() && !ability.optional_targeting {
                         return Err(no_legal_target_slots());
                     }
-                    acc.push(TargetSelectionSlot {
-                        legal_targets,
-                        optional: ability.optional_targeting,
-                        chooser: None,
-                        effect_kind: acc.current_effect_kind,
-                        effect_detail: acc.current_effect_detail,
-                    });
+                    acc.push(
+                        filter,
+                        TargetSelectionSlot {
+                            legal_targets,
+                            optional: ability.optional_targeting,
+                            chooser: None,
+                            effect_kind: acc.current_effect_kind,
+                            effect_detail: acc.current_effect_detail,
+                        },
+                    );
                 }
             }
         }
@@ -5279,12 +5360,10 @@ fn collect_sub_chain_slots(
     ability: &ResolvedAbility,
     acc: &mut SlotAccumulator,
 ) -> Result<(), TargetSlotBuildError> {
-    let previous_range = acc.prior_object_range.clone();
-    // Track object-bearing ancestors before a coin edge too: a later coin
-    // descendant may need them across player-only declarations. `built()` gates
-    // both lexical views on `coin_depth`; non-coin slots still read the full
-    // prefix, regardless of this bookkeeping.
-    acc.prior_object_range = acc.coin_scope().object_slot.map(|index| index..index + 1);
+    // Preserve sparse ancestor ranges, not one prematurely elected slot:
+    // optional and mixed declarations can leave an older object in scope.
+    acc.ancestor_slot_ranges
+        .push(acc.current_node_start..acc.slots.len());
     let result = (|| {
         for (edge, child, disposition) in announced_child_links(ability) {
             let enters_coin = matches!(edge, ChainStep::CoinFlipBranch { .. });
@@ -5312,7 +5391,7 @@ fn collect_sub_chain_slots(
         }
         Ok(())
     })();
-    acc.prior_object_range = previous_range;
+    acc.ancestor_slot_ranges.pop();
     result
 }
 
@@ -6674,22 +6753,28 @@ fn collect_attach_attachment_target_slots(
     if let Some(spec) = ability.multi_target.as_ref() {
         let bounds = resolve_multi_target_bounds(state, ability, spec, legal_targets.len())?;
         for slot_index in 0..bounds.max {
-            acc.push(TargetSelectionSlot {
-                legal_targets: legal_targets.clone(),
-                optional: slot_index >= bounds.min,
+            acc.push(
+                attachment,
+                TargetSelectionSlot {
+                    legal_targets: legal_targets.clone(),
+                    optional: slot_index >= bounds.min,
+                    chooser: None,
+                    effect_kind: acc.current_effect_kind,
+                    effect_detail: acc.current_effect_detail,
+                },
+            );
+        }
+    } else {
+        acc.push(
+            attachment,
+            TargetSelectionSlot {
+                legal_targets,
+                optional: attachment_optional,
                 chooser: None,
                 effect_kind: acc.current_effect_kind,
                 effect_detail: acc.current_effect_detail,
-            });
-        }
-    } else {
-        acc.push(TargetSelectionSlot {
-            legal_targets,
-            optional: attachment_optional,
-            chooser: None,
-            effect_kind: acc.current_effect_kind,
-            effect_detail: acc.current_effect_detail,
-        });
+            },
+        );
     }
     Ok(())
 }
@@ -7803,15 +7888,25 @@ fn filter_references_target_creature_quantity(filter: &TargetFilter) -> bool {
     filter_target_slot_filter(filter).is_some()
 }
 
+/// CR 601.2c: dependent coin declarations resolve their count from the same
+/// ancestor-aware static pools as announcement, not an unbound leaf filter.
+#[derive(Clone, Copy)]
+struct TargetSpecPools<'a> {
+    root: &'a ResolvedAbility,
+    slots: &'a std::cell::OnceCell<Result<Vec<TargetSelectionSlot>, EngineError>>,
+    coin_depth: usize,
+}
+
 fn collect_target_slot_specs(
     state: &GameState,
     ability: &ResolvedAbility,
     specs: &mut Vec<TargetSlotSpec>,
     next_instance: &mut usize,
+    pools: TargetSpecPools<'_>,
 ) {
     if let Some(sub_ability) = paid_instead_delegate(ability) {
         let start = specs.len();
-        collect_target_slot_specs(state, sub_ability, specs, next_instance);
+        collect_target_slot_specs(state, sub_ability, specs, next_instance, pools);
         for spec in &mut specs[start..] {
             spec.path.insert(0, ChainStep::SubAbility);
         }
@@ -7866,7 +7961,7 @@ fn collect_target_slot_specs(
                 path: Vec::new(),
             });
         }
-        collect_sub_chain_slot_specs(state, ability, specs, next_instance);
+        collect_sub_chain_slot_specs(state, ability, specs, next_instance, pools);
         return;
     }
 
@@ -7885,7 +7980,7 @@ fn collect_target_slot_specs(
                 path: Vec::new(),
             });
         }
-        collect_sub_chain_slot_specs(state, ability, specs, next_instance);
+        collect_sub_chain_slot_specs(state, ability, specs, next_instance, pools);
         return;
     }
 
@@ -8024,7 +8119,7 @@ fn collect_target_slot_specs(
     } else {
         if is_per_opponent_target_fanout(ability) {
             collect_per_opponent_target_fanout_specs(state, ability, specs, next_instance);
-            collect_sub_chain_slot_specs(state, ability, specs, next_instance);
+            collect_sub_chain_slot_specs(state, ability, specs, next_instance, pools);
             return;
         }
         // CR 109.4 + CR 115.1: Companion TargetFilter::Player slot surfaced by
@@ -8102,11 +8197,29 @@ fn collect_target_slot_specs(
         if ability.target_choice_timing == TargetChoiceTiming::Stack {
             if let Some(filter) = triggers::extract_target_filter_from_effect(&ability.effect) {
                 if let Some(spec) = ability.multi_target.as_ref() {
-                    let legal_targets =
-                        legal_targets_for_ability_filter(state, ability, filter, BuiltSlots::NONE);
-                    if let Ok(bounds) =
-                        resolve_multi_target_bounds(state, ability, spec, legal_targets.len())
-                    {
+                    let legal_target_count =
+                        if pools.coin_depth > 0 && target_filter_binds_prior_target(filter) {
+                            pools
+                                .slots
+                                .get_or_init(|| build_target_slots(state, pools.root))
+                                .as_ref()
+                                .ok()
+                                .and_then(|slots| slots.get(specs.len()))
+                                .map(|slot| slot.legal_targets.len())
+                        } else {
+                            Some(
+                                legal_targets_for_ability_filter(
+                                    state,
+                                    ability,
+                                    filter,
+                                    BuiltSlots::NONE,
+                                )
+                                .len(),
+                            )
+                        };
+                    if let Some(bounds) = legal_target_count.and_then(|count| {
+                        resolve_multi_target_bounds(state, ability, spec, count).ok()
+                    }) {
                         // CR 601.2c + CR 115.3: all slots of one "up to N target
                         // creatures" run are ONE instance of "target" -> one shared
                         // TargetInstanceId. Allocate it once before the loop and
@@ -8138,7 +8251,7 @@ fn collect_target_slot_specs(
             }
         }
     }
-    collect_sub_chain_slot_specs(state, ability, specs, next_instance);
+    collect_sub_chain_slot_specs(state, ability, specs, next_instance, pools);
 }
 
 /// Mirror of `collect_sub_chain_slots`, for per-slot specs. Extracted for the
@@ -8150,15 +8263,21 @@ fn collect_sub_chain_slot_specs(
     ability: &ResolvedAbility,
     specs: &mut Vec<TargetSlotSpec>,
     next_instance: &mut usize,
+    pools: TargetSpecPools<'_>,
 ) {
     for (edge, child, disposition) in announced_child_links(ability) {
         let start = specs.len();
+        let pools = TargetSpecPools {
+            coin_depth: pools.coin_depth
+                + usize::from(matches!(edge, ChainStep::CoinFlipBranch { .. })),
+            ..pools
+        };
         match disposition {
             AnnouncementDisposition::Declare => {
-                collect_target_slot_specs(state, child, specs, next_instance)
+                collect_target_slot_specs(state, child, specs, next_instance, pools)
             }
             AnnouncementDisposition::Inherited => {
-                collect_sub_chain_slot_specs(state, child, specs, next_instance)
+                collect_sub_chain_slot_specs(state, child, specs, next_instance, pools)
             }
             AnnouncementDisposition::AfterDeferred => {
                 collect_target_slot_specs_after_deferred_effect(
@@ -8166,6 +8285,7 @@ fn collect_sub_chain_slot_specs(
                     Some(child),
                     specs,
                     next_instance,
+                    pools,
                 )
             }
         }
@@ -8404,9 +8524,19 @@ fn legal_targets_for_relative_filter(
         // See `union_over_prior_object_candidates`'s doc for why a union (not
         // exact narrowing) is correct here.
         if target_filter_binds_prior_target(filter) {
-            if let Some(prior) =
-                first_prior_object_slot(existing_slots.object_slots.unwrap_or(existing_slots.slots))
-            {
+            if let Some(coin_slots) = existing_slots.object_slots {
+                let mut legal_targets = Vec::new();
+                for prior in coin_slots.object_slots() {
+                    for target in union_over_prior_object_candidates(state, ability, filter, prior)
+                    {
+                        if !legal_targets.contains(&target) {
+                            legal_targets.push(target);
+                        }
+                    }
+                }
+                return legal_targets;
+            }
+            if let Some(prior) = first_prior_object_slot(existing_slots.slots) {
                 return union_over_prior_object_candidates(state, ability, filter, prior);
             }
         }
@@ -8709,20 +8839,26 @@ fn collect_per_opponent_target_fanout_slots(
         }
         let player_targets =
             per_opponent_fanout_constraint_targets(state, ability.controller, opponent);
-        acc.push(TargetSelectionSlot {
-            legal_targets: player_targets,
-            optional: false,
-            chooser: None,
-            effect_kind: acc.current_effect_kind,
-            effect_detail: acc.current_effect_detail,
-        });
-        acc.push(TargetSelectionSlot {
-            legal_targets,
-            optional: ability.targeting_is_optional(),
-            chooser: None,
-            effect_kind: acc.current_effect_kind,
-            effect_detail: acc.current_effect_detail,
-        });
+        acc.push(
+            &TargetFilter::Player,
+            TargetSelectionSlot {
+                legal_targets: player_targets,
+                optional: false,
+                chooser: None,
+                effect_kind: acc.current_effect_kind,
+                effect_detail: acc.current_effect_detail,
+            },
+        );
+        acc.push(
+            &per_opponent_fanout_object_filter(ability).expect("object filter checked above"),
+            TargetSelectionSlot {
+                legal_targets,
+                optional: ability.targeting_is_optional(),
+                chooser: None,
+                effect_kind: acc.current_effect_kind,
+                effect_detail: acc.current_effect_detail,
+            },
+        );
     }
 
     Ok(())
@@ -8879,7 +9015,13 @@ fn target_slot_specs(state: &GameState, ability: &ResolvedAbility) -> Vec<Target
     // CR 601.2c + CR 115.3: instance ids are allocated densely from 0 as specs
     // are collected; each fresh-id push site bumps the seed.
     let mut next_instance = 0usize;
-    collect_target_slot_specs(state, ability, &mut specs, &mut next_instance);
+    let slots = std::cell::OnceCell::new();
+    let pools = TargetSpecPools {
+        root: ability,
+        slots: &slots,
+        coin_depth: 0,
+    };
+    collect_target_slot_specs(state, ability, &mut specs, &mut next_instance, pools);
     specs
 }
 
@@ -9530,6 +9672,7 @@ fn collect_target_slot_specs_after_deferred_effect(
     sub_ability: Option<&ResolvedAbility>,
     specs: &mut Vec<TargetSlotSpec>,
     next_instance: &mut usize,
+    pools: TargetSpecPools<'_>,
 ) {
     let Some(sub_ability) = sub_ability else {
         return;
@@ -9544,13 +9687,14 @@ fn collect_target_slot_specs_after_deferred_effect(
             sub_ability.sub_ability.as_deref(),
             specs,
             next_instance,
+            pools,
         );
         for spec in &mut specs[start..] {
             spec.path.insert(0, ChainStep::SubAbility);
         }
         return;
     }
-    collect_target_slot_specs(state, sub_ability, specs, next_instance);
+    collect_target_slot_specs(state, sub_ability, specs, next_instance, pools);
 }
 
 fn build_target_assignments(

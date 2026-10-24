@@ -4682,65 +4682,86 @@ fn coin_scope_player_declaration_does_not_shadow_object_antecedent() {
         AbilityDefinition, AbilityKind, FilterProp, SharedQuality, SharedQualityRelation,
         TypedFilter,
     };
-    let branch = AbilityDefinition::new(
-        AbilityKind::Spell,
-        Effect::TargetOnly {
-            target: TargetFilter::Typed(TypedFilter::creature()),
-        },
-    )
-    .sub_ability(
-        AbilityDefinition::new(
+    for changed in [false, true] {
+        let branch = AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::TargetOnly {
-                target: TargetFilter::Player,
+                target: TargetFilter::Typed(TypedFilter::creature()),
             },
         )
-        .sub_ability(AbilityDefinition::new(
-            AbilityKind::Spell,
-            Effect::Destroy {
-                target: TargetFilter::Typed(TypedFilter::permanent().properties(vec![
-                    FilterProp::SharesQuality {
-                        quality: SharedQuality::CardType,
-                        reference: Some(Box::new(TargetFilter::ParentTarget)),
-                        relation: SharedQualityRelation::Shares,
-                    },
-                ])),
-                cant_regenerate: false,
-            },
-        )),
-    );
-    let mut scenario = GameScenario::new();
-    scenario.at_phase(Phase::PreCombatMain);
-    let antecedent = scenario.add_creature(P0, "Object antecedent", 2, 2).id();
-    let victim = scenario.add_creature(P1, "Dependent victim", 3, 3).id();
-    let artifact = scenario
-        .add_artifact_from_oracle(P0, "Unrelated artifact", "")
-        .id();
-    let spell = scenario
-        .add_spell_to_hand(P0, "Synthetic player-interposed coin", true)
-        .with_ability(Effect::FlipCoins {
-            flips: CoinFlipRun::single(),
-            win_effect: None,
-            lose_effect: Some(Box::new(branch)),
-            flipper: TargetFilter::Controller,
-        })
-        .id();
-    let mut runner = scenario.build();
-    pin_outcomes(&mut runner, &[false]);
-    let outcome = runner
-        .cast(spell)
-        .target_objects(&[antecedent, victim])
-        .target_player(P1)
-        .resolve();
-    assert_eq!(
-        flips(outcome.events()),
-        vec![false],
-        "reach: lost branch executes"
-    );
-    assert_eq!(outcome.zone_of(victim), Zone::Graveyard);
-    assert_eq!(outcome.zone_of(antecedent), Zone::Battlefield);
-    assert_eq!(outcome.zone_of(artifact), Zone::Battlefield);
-    assert_finished(&runner);
+        .sub_ability(
+            AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::TargetOnly {
+                    target: TargetFilter::Player,
+                },
+            )
+            .sub_ability(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Destroy {
+                    target: TargetFilter::Typed(TypedFilter::permanent().properties(vec![
+                        FilterProp::SharesQuality {
+                            quality: SharedQuality::CardType,
+                            reference: Some(Box::new(TargetFilter::ParentTarget)),
+                            relation: SharedQualityRelation::Shares,
+                        },
+                    ])),
+                    cant_regenerate: false,
+                },
+            )),
+        );
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let antecedent = scenario.add_creature(P0, "Object antecedent", 2, 2).id();
+        let victim = scenario.add_creature(P1, "Dependent victim", 3, 3).id();
+        let artifact = scenario
+            .add_artifact_from_oracle(P0, "Unrelated artifact", "")
+            .id();
+        let spell = scenario
+            .add_spell_to_hand(P0, "Synthetic player-interposed coin", true)
+            .with_ability(Effect::FlipCoins {
+                flips: CoinFlipRun::single(),
+                win_effect: None,
+                lose_effect: Some(Box::new(branch)),
+                flipper: TargetFilter::Controller,
+            })
+            .id();
+        let mut runner = scenario.build();
+        pin_outcomes(&mut runner, &[false]);
+        runner
+            .cast(spell)
+            .target_objects(&[antecedent, victim])
+            .target_player(P1)
+            .commit();
+        if changed {
+            // CR 608.2b: a now-illegal antecedent cannot supply information.
+            runner
+                .state_mut()
+                .objects
+                .get_mut(&antecedent)
+                .unwrap()
+                .card_types
+                .core_types = vec![engine::types::card_type::CoreType::Artifact];
+        }
+        let mut events = Vec::new();
+        finish(&mut runner, &mut events);
+        assert_eq!(
+            flips(&events),
+            vec![false],
+            "reach: player target keeps the coin resolving"
+        );
+        assert_eq!(
+            runner.state().objects[&victim].zone,
+            if changed {
+                Zone::Battlefield
+            } else {
+                Zone::Graveyard
+            }
+        );
+        assert_eq!(runner.state().objects[&antecedent].zone, Zone::Battlefield);
+        assert_eq!(runner.state().objects[&artifact].zone, Zone::Battlefield);
+        assert_finished(&runner);
+    }
 }
 
 #[test]
@@ -4833,5 +4854,335 @@ fn non_coin_scope_keeps_first_prefix_object_across_later_declarations() {
     assert_eq!(runner.state().objects[&first].zone, Zone::Battlefield);
     assert_eq!(runner.state().objects[&later].zone, Zone::Battlefield);
     assert!(flips(&events).is_empty());
+    assert_finished(&runner);
+}
+
+fn shared_type_destroy() -> engine::types::ability::AbilityDefinition {
+    use engine::types::ability::{
+        AbilityDefinition, AbilityKind, FilterProp, SharedQuality, SharedQualityRelation,
+        TypedFilter,
+    };
+    AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::Destroy {
+            target: TargetFilter::Typed(TypedFilter::permanent().properties(vec![
+                FilterProp::SharesQuality {
+                    quality: SharedQuality::CardType,
+                    reference: Some(Box::new(TargetFilter::ParentTarget)),
+                    relation: SharedQualityRelation::Shares,
+                },
+            ])),
+            cant_regenerate: false,
+        },
+    )
+}
+
+#[test]
+fn coin_dependent_multitarget_instances_keep_the_ancestor_referent() {
+    use engine::types::ability::{
+        AbilityDefinition, AbilityKind, ControllerRef, MultiTargetSpec, TypedFilter,
+    };
+    let mut destroy = shared_type_destroy();
+    destroy.multi_target = Some(MultiTargetSpec::fixed(2, 2));
+    let definition = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::TargetOnly {
+            target: TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
+        },
+    )
+    .sub_ability(AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::FlipCoins {
+            flips: CoinFlipRun::single(),
+            win_effect: None,
+            lose_effect: Some(Box::new(destroy)),
+            flipper: TargetFilter::Controller,
+        },
+    ));
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let ancestor = scenario.add_creature(P0, "Creature antecedent", 2, 2).id();
+    let machine = scenario
+        .add_creature(P1, "First dependent artifact creature", 3, 3)
+        .as_artifact_creature()
+        .id();
+    let victim = scenario
+        .add_creature(P1, "Second dependent creature", 4, 4)
+        .id();
+    let artifact = scenario
+        .add_artifact_from_oracle(P0, "Artifact distractor", "")
+        .id();
+    let spell = scenario
+        .add_spell_to_hand(P0, "Synthetic dependent multi-target coin", true)
+        .with_ability_definition(definition)
+        .id();
+    let mut runner = scenario.build();
+    pin_outcomes(&mut runner, &[false]);
+    let card_id = runner.state().objects[&spell].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: spell,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("required announcement");
+    let WaitingFor::TargetSelection { target_slots, .. } = &runner.state().waiting_for else {
+        panic!("required ancestor prompt");
+    };
+    let static_pool = target_slots[2].legal_targets.clone();
+    assert_eq!(static_pool, target_slots[1].legal_targets);
+    assert!(static_pool.contains(&TargetRef::Object(victim)));
+    assert!(!static_pool.contains(&TargetRef::Object(artifact)));
+    for target in [ancestor, machine] {
+        runner
+            .act(GameAction::ChooseTarget {
+                target: Some(TargetRef::Object(target)),
+            })
+            .unwrap();
+    }
+    let WaitingFor::TargetSelection { selection, .. } = &runner.state().waiting_for else {
+        panic!("required second instance prompt");
+    };
+    let live_pool = &selection.current_legal_targets;
+    let expected: Vec<_> = static_pool
+        .iter()
+        .filter(|target| **target != TargetRef::Object(machine))
+        .cloned()
+        .collect();
+    assert_eq!(
+        *live_pool, expected,
+        "static and live pools agree except same-declaration distinctness"
+    );
+    assert!(live_pool.contains(&TargetRef::Object(victim)));
+    assert!(live_pool.contains(&TargetRef::Object(ancestor)));
+    assert!(
+        !live_pool.contains(&TargetRef::Object(artifact)),
+        "dependent instance one must not become instance two's antecedent"
+    );
+    // CR 115.3: same-declaration uniqueness is enforced on submission.
+    let before = runner.state().clone();
+    assert!(runner
+        .act(GameAction::ChooseTarget {
+            target: Some(TargetRef::Object(machine)),
+        })
+        .is_err());
+    assert_eq!(*runner.state(), before);
+    runner
+        .act(GameAction::ChooseTarget {
+            target: Some(TargetRef::Object(victim)),
+        })
+        .unwrap();
+    let mut events = Vec::new();
+    finish(&mut runner, &mut events);
+    assert_eq!(flips(&events), vec![false]);
+    assert_eq!(runner.state().objects[&machine].zone, Zone::Graveyard);
+    assert_eq!(
+        runner.state().objects[&victim].zone,
+        Zone::Graveyard,
+        "resolution retains both announced dependent instances"
+    );
+    assert_eq!(runner.state().objects[&ancestor].zone, Zone::Battlefield);
+    assert_eq!(runner.state().objects[&artifact].zone, Zone::Battlefield);
+    assert_finished(&runner);
+}
+
+#[test]
+fn coin_mixed_slot_static_pool_covers_player_and_object_elections() {
+    use engine::types::ability::{AbilityDefinition, AbilityKind, TypedFilter};
+    for elect_object in [false, true] {
+        let branch = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Fight {
+                subject: TargetFilter::Any,
+                target: TargetFilter::Typed(TypedFilter::creature()),
+            },
+        )
+        .sub_ability(shared_type_destroy());
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let creature = scenario.add_creature(P0, "Object-only election", 2, 2).id();
+        let creature_victim = scenario.add_creature(P1, "Creature victim", 4, 4).id();
+        let artifact = scenario
+            .add_artifact_from_oracle(P0, "Mixed-slot artifact", "")
+            .id();
+        let artifact_victim = scenario
+            .add_artifact_from_oracle(P1, "Artifact victim", "")
+            .id();
+        let spell = scenario
+            .add_spell_to_hand(P0, "Synthetic mixed-slot coin", true)
+            .with_ability(Effect::FlipCoins {
+                flips: CoinFlipRun::single(),
+                win_effect: None,
+                lose_effect: Some(Box::new(branch)),
+                flipper: TargetFilter::Controller,
+            })
+            .id();
+        let mut runner = scenario.build();
+        pin_outcomes(&mut runner, &[false]);
+        assert!(
+            castable(&runner, spell),
+            "mixed candidates must not hide the object-only slot"
+        );
+        let card_id = runner.state().objects[&spell].card_id;
+        runner
+            .act(GameAction::CastSpell {
+                object_id: spell,
+                card_id,
+                targets: vec![],
+                payment_mode: CastPaymentMode::Auto,
+            })
+            .unwrap();
+        let WaitingFor::TargetSelection { target_slots, .. } = &runner.state().waiting_for else {
+            panic!("required mixed-slot announcement");
+        };
+        let static_pool = target_slots[2].legal_targets.clone();
+        assert!(static_pool.contains(&TargetRef::Object(creature_victim)));
+        assert!(static_pool.contains(&TargetRef::Object(artifact_victim)));
+        let first = if elect_object {
+            TargetRef::Object(artifact)
+        } else {
+            TargetRef::Player(P1)
+        };
+        runner
+            .act(GameAction::ChooseTarget {
+                target: Some(first),
+            })
+            .unwrap();
+        runner
+            .act(GameAction::ChooseTarget {
+                target: Some(TargetRef::Object(creature)),
+            })
+            .unwrap();
+        let WaitingFor::TargetSelection { selection, .. } = &runner.state().waiting_for else {
+            panic!("required dependent announcement");
+        };
+        let live_pool = &selection.current_legal_targets;
+        let (victim, distractor) = if elect_object {
+            (artifact_victim, creature_victim)
+        } else {
+            (creature_victim, artifact_victim)
+        };
+        assert!(live_pool.contains(&TargetRef::Object(victim)));
+        assert!(!live_pool.contains(&TargetRef::Object(distractor)));
+        assert!(live_pool.iter().all(|target| static_pool.contains(target)));
+        runner
+            .act(GameAction::ChooseTarget {
+                target: Some(TargetRef::Object(victim)),
+            })
+            .unwrap();
+        let mut events = Vec::new();
+        finish(&mut runner, &mut events);
+        assert_eq!(flips(&events), vec![false]);
+        assert_eq!(runner.state().objects[&victim].zone, Zone::Graveyard);
+        assert_eq!(runner.state().objects[&distractor].zone, Zone::Battlefield);
+        assert_finished(&runner);
+    }
+}
+
+#[test]
+fn coin_optional_same_node_election_keeps_the_ancestor_in_static_scope() {
+    use engine::types::ability::{AbilityDefinition, AbilityKind, TypedFilter};
+    let mut branch = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::Fight {
+            subject: TargetFilter::Typed(TypedFilter::new(
+                engine::types::ability::TypeFilter::Artifact,
+            )),
+            target: shared_type_destroy()
+                .effect
+                .target_filter()
+                .unwrap()
+                .clone(),
+        },
+    );
+    branch.optional_targeting = true;
+    let definition = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::TargetOnly {
+            target: TargetFilter::Typed(TypedFilter::creature()),
+        },
+    )
+    .sub_ability(AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::FlipCoins {
+            flips: CoinFlipRun::single(),
+            win_effect: None,
+            lose_effect: Some(Box::new(branch)),
+            flipper: TargetFilter::Controller,
+        },
+    ));
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let ancestor = scenario
+        .add_creature(P0, "Optional fallback ancestor", 2, 2)
+        .id();
+    let victim = scenario
+        .add_creature(P1, "Fallback creature candidate", 3, 3)
+        .id();
+    let artifact = scenario
+        .add_artifact_from_oracle(P0, "Skipped artifact candidate", "")
+        .id();
+    let spell = scenario
+        .add_spell_to_hand(P0, "Synthetic optional same-node coin", true)
+        .with_ability_definition(definition)
+        .id();
+    let mut runner = scenario.build();
+    pin_outcomes(&mut runner, &[false]);
+    let card_id = runner.state().objects[&spell].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: spell,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .unwrap();
+    let WaitingFor::TargetSelection { target_slots, .. } = &runner.state().waiting_for else {
+        panic!("required ancestor announcement");
+    };
+    let static_pool = target_slots[2].legal_targets.clone();
+    assert!(
+        static_pool.contains(&TargetRef::Object(victim)),
+        "optional slot cannot hide ancestor"
+    );
+    assert!(
+        static_pool.contains(&TargetRef::Object(artifact)),
+        "electing the optional object remains possible"
+    );
+    runner
+        .act(GameAction::ChooseTarget {
+            target: Some(TargetRef::Object(ancestor)),
+        })
+        .unwrap();
+    runner
+        .act(GameAction::ChooseTarget { target: None })
+        .unwrap();
+    let WaitingFor::TargetSelection { selection, .. } = &runner.state().waiting_for else {
+        panic!("required optional dependent announcement");
+    };
+    assert!(selection
+        .current_legal_targets
+        .contains(&TargetRef::Object(victim)));
+    assert!(!selection
+        .current_legal_targets
+        .contains(&TargetRef::Object(artifact)));
+    assert!(selection
+        .current_legal_targets
+        .iter()
+        .all(|target| static_pool.contains(target)));
+    runner
+        .act(GameAction::ChooseTarget { target: None })
+        .unwrap();
+    let mut events = Vec::new();
+    finish(&mut runner, &mut events);
+    assert_eq!(
+        flips(&events),
+        vec![false],
+        "reach: optional branch resolves after elections"
+    );
+    assert_eq!(runner.state().objects[&ancestor].zone, Zone::Battlefield);
+    assert_eq!(runner.state().objects[&victim].zone, Zone::Battlefield);
+    assert_eq!(runner.state().objects[&artifact].zone, Zone::Battlefield);
     assert_finished(&runner);
 }
