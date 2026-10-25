@@ -89,19 +89,22 @@ interface StackFixture {
   grouped?: boolean;
   departed?: boolean;
   holdCatalog?: boolean;
+  sourceKind?: "spell" | "emblem";
 }
 
 function seed({
   printings = [printingA, { ...printingA }, printingB],
   livePrintings = [printingB, printingA, printingA],
   missingRows = [], legalIds = [], grouped = true, departed = false, holdCatalog = false,
+  sourceKind = "spell",
 }: StackFixture = {}): GameState {
   if (!holdCatalog) admitCatalog();
   const ids = printings.map((_, index) => 10 + index);
   const details: Record<string, StackEntryDisplay> = {};
   for (const [index, id] of ids.entries()) {
     if (!missingRows.includes(id)) {
-      details[String(id)] = { source_name: "Alpha", kind_label: "Spell", printing: printings[index] };
+      details[String(id)] = { source_name: sourceKind === "emblem" ? "Emblem" : "Alpha",
+        kind_label: sourceKind === "emblem" ? "Triggered Ability" : "Spell", printing: printings[index] };
     }
   }
   const waitingFor = legalIds.length > 0
@@ -110,11 +113,17 @@ function seed({
     }).build()
     : undefined;
   const state = buildGameState({
-    stack: ids.map((id) => buildStackEntry({ id, source_id: id + 1000, controller: 0 })),
+    stack: ids.map((id) => buildStackEntry({ id, source_id: id + 1000, controller: 0,
+      ...(sourceKind === "emblem" ? { kind: { type: "TriggeredAbility" as const,
+        data: { source_id: id + 1000, source_name: "Emblem", ability: { targets: [] } } } } : {}),
+    })),
     objects: departed ? {} : buildObjectMap(...ids.map((id, index) => buildGameObject({
       id: id + 1000, owner: 1, controller: 0, name: "Alpha", zone: "Stack",
       printed_ref: { oracle_id: ORACLE, face_name: "Alpha" }, printing: livePrintings[index],
       display_visible_to_viewer: true,
+      ...(sourceKind === "emblem" ? { name: "Emblem", zone: "Command" as const, is_emblem: true,
+        printed_ref: null, emblem_source: { name: "Alpha",
+          printed_ref: { oracle_id: ORACLE, face_name: "Alpha" }, printing: printings[index] } } : {}),
     }))),
     derived: {
       stack_display_groups: grouped ? [{ representative: 10, count: ids.length, member_ids: ids }] : undefined,
@@ -194,6 +203,45 @@ describe("StackDisplay real grouped surfaces", () => {
     expect(renderedIds()).toEqual([10, 11, 12]);
     await waitFor(() => expect(row(12).querySelector("img")).toHaveAttribute("src", `/${B}.jpg`));
     expect(useGameStore.getState().gameState).toBe(state);
+  });
+
+  it("C2 splits emblem triggers by captured A/A/B and cycles the unchanged engine group", async () => {
+    const state = seed({ sourceKind: "emblem" });
+    render(<StackDisplay effectiveMultiplayerBoardLayout="focused" />);
+    expect(renderedIds()).toEqual([10, 11, 12]);
+    await waitFor(() => {
+      expect(row(10).querySelector("img")).toHaveAttribute("src", `/${A}.jpg`);
+      expect(row(11).querySelector("img")).toHaveAttribute("src", `/${A}.jpg`);
+      expect(row(12).querySelector("img")).toHaveAttribute("src", `/${B}.jpg`);
+    });
+    act(() => usePreferencesStore.getState().setShowOwnerPrintings(false));
+    expect(renderedIds()).toEqual([10]);
+    expect(screen.getByText("×3")).toBeInTheDocument();
+    expect(row(10)).toHaveAttribute("data-grouped-ids", "10 11 12");
+    await waitFor(() => expect(row(10).querySelector("img")).toHaveAttribute("src", `/${V}.jpg`));
+    act(() => usePreferencesStore.getState().setShowOwnerPrintings(true));
+    expect(renderedIds()).toEqual([10, 11, 12]);
+    await waitFor(() => {
+      expect(row(10).querySelector("img")).toHaveAttribute("src", `/${A}.jpg`);
+      expect(row(11).querySelector("img")).toHaveAttribute("src", `/${A}.jpg`);
+      expect(row(12).querySelector("img")).toHaveAttribute("src", `/${B}.jpg`);
+    });
+    expect(useGameStore.getState().gameState).toBe(state);
+  });
+
+  it.each([
+    ["equal captured pairs", [printingA, { ...printingA }], [10]],
+    ["absent captured pairs", [null, undefined], [10]],
+    ["captured versus absent", [printingA, undefined], [10, 11]],
+  ] as const)("C2 preserves emblem grouping for %s", async (_name, pairs, expected) => {
+    seed({ sourceKind: "emblem", printings: [...pairs] });
+    render(<StackDisplay effectiveMultiplayerBoardLayout="focused" />);
+    expect(renderedIds()).toEqual(expected);
+    await waitFor(() => expect(row(10).querySelector("img")).toHaveAttribute("src",
+      pairs[0] ? `/${A}.jpg` : `/${V}.jpg`));
+    act(() => usePreferencesStore.getState().setShowOwnerPrintings(false));
+    expect(renderedIds()).toEqual([10]);
+    await waitFor(() => expect(row(10).querySelector("img")).toHaveAttribute("src", `/${V}.jpg`));
   });
 
   it.each([

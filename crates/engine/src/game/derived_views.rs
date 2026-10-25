@@ -39,7 +39,7 @@ use crate::types::events::GameEvent;
 use crate::types::format::GameFormat;
 use crate::types::game_state::{
     CastingVariant, CombatDamageSubStep, GameState, StackEntry, StackEntryKind, StackPaidSnapshot,
-    SyntheticTriggerProvenance, WaitingFor,
+    SyntheticTriggerProvenance, TriggerSourceRead, WaitingFor,
 };
 use crate::types::identifiers::ObjectId;
 use crate::types::interaction::InteractionId;
@@ -2815,18 +2815,26 @@ fn stack_source_token_image_ref(state: &GameState, entry: &StackEntry) -> Option
         })
 }
 
-/// The identity a stack row displays for its source and that identity's printing, read from one
-/// authority so the row never shows a printing its name does not disclose.
+/// A stack row's source label and printing from its selected, viewer-filtered authority.
+/// Ordinary printing follows the disclosed name. An emblem keeps its label but uses only
+/// the creator provenance already delivered in that emblem's `emblem_source`.
 struct StackRowSource {
     name: String,
     printing: DisplayOnly<Option<CardPrinting>>,
 }
 
-/// A row shows the live source's printing only beside a name that discloses it (a face-down
-/// source or an uncast Room displays no name).
+/// Mirrors image identity precedence without looking up the creator. Emblems without their
+/// own printed identity use captured provenance, including authoritative absence. Ordinary
+/// nameless sources (face-down objects and uncast Rooms) disclose no printing.
 fn live_source_printing(object: &GameObject) -> DisplayOnly<Option<CardPrinting>> {
     if object.name.is_empty() {
         DisplayOnly::default()
+    } else if object.printed_ref.is_none() && object.is_emblem {
+        object
+            .emblem_source
+            .as_ref()
+            .map(|source| source.printing.clone())
+            .unwrap_or_default()
     } else {
         object.printing.clone()
     }
@@ -2858,20 +2866,36 @@ fn stack_row_source(state: &GameState, entry: &StackEntry) -> StackRowSource {
             // read still discloses the latched name: a source whose name changed after the row
             // latched it shows no printing, and the context's older printing is never shown beside
             // a newer name.
-            // A context-free (delayed, CR 603.7d) entry latched its name from the live object.
+            // Context-free legacy/synthetic rows retain the existing live-or-absent-LKI route.
             printing: ability
                 .trigger_source
                 .as_ref()
                 .map_or_else(latched_printing, |context| {
-                    let read = context.source_read(state).lki();
-                    if read.name == *source_name {
-                        read.printing
-                    } else {
-                        DisplayOnly::default()
+                    match context.source_read(state) {
+                        TriggerSourceRead::ExactLive(object) => {
+                            if object.name == *source_name {
+                                live_source_printing(object)
+                            } else {
+                                DisplayOnly::default()
+                            }
+                        }
+                        TriggerSourceRead::Latched(context) => {
+                            // Emblem LKI has no creator provenance; do not recover it
+                            // from a different incarnation or the creator's current card.
+                            if context.lki.name == *source_name {
+                                context.lki.printing.clone()
+                            } else {
+                                DisplayOnly::default()
+                            }
+                        }
                     }
                 }),
         },
-        _ => match live {
+        StackEntryKind::TriggeredAbility { .. }
+        | StackEntryKind::ActivatedAbility { .. }
+        | StackEntryKind::Spell { .. }
+        | StackEntryKind::KeywordAction { .. }
+        | StackEntryKind::CombatDamage { .. } => match live {
             Some(object) => StackRowSource {
                 name: object.name.clone(),
                 printing: live_source_printing(object),
@@ -3188,6 +3212,325 @@ mod tests {
     use crate::types::statics::ActivationExemption;
     use crate::types::zones::Zone;
     use std::collections::HashMap;
+
+    fn emblem_printing(collector: &str) -> CardPrinting {
+        CardPrinting {
+            set_code: "owner".into(),
+            collector_number: collector.into(),
+        }
+    }
+
+    fn emblem_row_fixture() -> (GameState, ObjectId) {
+        let mut state = GameState::new_two_player(42);
+        let id = crate::game::effects::create_emblem::grant_emblem(
+            &mut state,
+            PlayerId(0),
+            vec![],
+            vec![],
+            vec![],
+        );
+        let object = state.objects.get_mut(&id).unwrap();
+        object.emblem_source = Some(crate::game::game_object::EmblemSource {
+            name: "Creator".into(),
+            printed_ref: None,
+            printing: DisplayOnly::new(Some(emblem_printing("A"))),
+        });
+        (state, id)
+    }
+
+    fn emblem_trigger_row(
+        id: ObjectId,
+        name: &str,
+        context: Option<crate::types::game_state::TriggerSourceContext>,
+    ) -> StackEntry {
+        let mut ability = ResolvedAbility::new(Effect::NoOp, vec![], id, PlayerId(0));
+        ability.trigger_source = context;
+        StackEntry {
+            id: ObjectId(900),
+            source_id: id,
+            controller: PlayerId(0),
+            kind: StackEntryKind::TriggeredAbility {
+                source_id: id,
+                ability: Box::new(ability),
+                source_name: name.into(),
+                condition: None,
+                trigger_event: None,
+                description: None,
+                subject_match_count: None,
+                die_result: None,
+                provenance: None,
+            },
+        }
+    }
+
+    #[test]
+    fn emblem_stack_owner_printing_trigger_authority_matrix() {
+        let (mut state, id) = emblem_row_fixture();
+        // Synthetic contradictory own printing: creator metadata remains the authority.
+        state.objects.get_mut(&id).unwrap().printing = DisplayOnly::new(Some(emblem_printing("B")));
+        let context =
+            crate::game::triggers::trigger_source_context_for_latch(&state, &state.objects[&id]);
+        for name in ["Emblem", ""] {
+            for context in [None, Some(context.clone())] {
+                let entry = emblem_trigger_row(id, name, context);
+                assert_eq!(stack_entry_detail(&state, &entry).source_name, "Emblem");
+                assert_eq!(
+                    stack_entry_detail(&state, &entry).printing.get(),
+                    &Some(emblem_printing("A")),
+                    "live emblem reads captured printing for latch {name:?}"
+                );
+                for metadata in [
+                    Some(crate::game::game_object::EmblemSource {
+                        name: "Creator".into(),
+                        printed_ref: None,
+                        printing: DisplayOnly::default(),
+                    }),
+                    None,
+                ] {
+                    let mut absent = state.clone();
+                    absent.objects.get_mut(&id).unwrap().emblem_source = metadata;
+                    assert!(
+                        stack_entry_detail(&absent, &entry).printing.get().is_none(),
+                        "explicit missing provenance must not recover own B"
+                    );
+                }
+            }
+        }
+        // A synthetic emblem with its own printed identity stays on the ordinary image route.
+        let mut printed = state.clone();
+        printed.objects.get_mut(&id).unwrap().printed_ref =
+            Some(crate::types::card::PrintedCardRef {
+                oracle_id: "ordinary-oracle".into(),
+                face_name: "Emblem".into(),
+            });
+        for context in [None, Some(context.clone())] {
+            let entry = emblem_trigger_row(id, "Emblem", context);
+            assert_eq!(
+                stack_entry_detail(&printed, &entry).printing.get(),
+                &Some(emblem_printing("B")),
+                "own printed identity precedes emblem provenance"
+            );
+        }
+        let mismatch = emblem_trigger_row(id, "Different source", Some(context));
+        assert!(stack_entry_detail(&state, &mismatch)
+            .printing
+            .get()
+            .is_none());
+        let nameless = state.objects.get_mut(&id).unwrap();
+        nameless.name.clear();
+        nameless.is_emblem = false;
+        assert!(
+            stack_entry_detail(&state, &emblem_trigger_row(id, "", None))
+                .printing
+                .get()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn emblem_stack_owner_printing_stale_zone_and_departure_fail_closed() {
+        let (state, id) = emblem_row_fixture();
+        let context =
+            crate::game::triggers::trigger_source_context_for_latch(&state, &state.objects[&id]);
+        let entry = emblem_trigger_row(id, "Emblem", Some(context.clone()));
+        assert_eq!(
+            stack_entry_detail(&state, &entry).printing.get(),
+            &Some(emblem_printing("A"))
+        );
+        let mut moved = state.clone();
+        moved.objects.get_mut(&id).unwrap().zone = Zone::Exile;
+        moved
+            .objects
+            .get_mut(&id)
+            .unwrap()
+            .emblem_source
+            .as_mut()
+            .unwrap()
+            .printing = DisplayOnly::new(Some(emblem_printing("B")));
+        assert!(matches!(
+            context.source_read(&moved),
+            crate::types::game_state::TriggerSourceRead::Latched(_)
+        ));
+        assert!(
+            stack_entry_detail(&moved, &entry).printing.get().is_none(),
+            "stale expected zone must not select same-ID live creator B"
+        );
+        let mut reincarnated = state.clone();
+        let replacement = reincarnated.objects.get_mut(&id).unwrap();
+        replacement.incarnation += 1;
+        replacement.emblem_source.as_mut().unwrap().printing =
+            DisplayOnly::new(Some(emblem_printing("B")));
+        assert!(matches!(
+            context.source_read(&reincarnated),
+            crate::types::game_state::TriggerSourceRead::Latched(_)
+        ));
+        assert!(
+            stack_entry_detail(&reincarnated, &entry)
+                .printing
+                .get()
+                .is_none(),
+            "stale incarnation must not select same-ID live creator B"
+        );
+        // Synthetic removal: this pins the LKI boundary, not multiplayer elimination.
+        let mut gone = state.clone();
+        gone.lki_cache
+            .insert(id, state.objects[&id].snapshot_public_characteristics());
+        gone.objects.remove(&id);
+        for entry in [entry, emblem_trigger_row(id, "Emblem", None)] {
+            let row = stack_entry_detail(&gone, &entry);
+            assert_eq!(row.source_name, "Emblem");
+            assert!(
+                row.printing.get().is_none(),
+                "emblem LKI has no creator provenance"
+            );
+        }
+        let row = stack_entry_detail(&gone, &emblem_trigger_row(id, "", Some(context)));
+        assert_eq!(row.source_name, "Unknown");
+        assert!(row.printing.get().is_none());
+    }
+
+    #[test]
+    fn emblem_stack_owner_printing_other_kinds_and_ordinary_authority() {
+        let (mut state, id) = emblem_row_fixture();
+        let ability = Box::new(ResolvedAbility::new(Effect::NoOp, vec![], id, PlayerId(0)));
+        let kinds = [
+            StackEntryKind::ActivatedAbility {
+                source_id: id,
+                ability: ability.clone(),
+            },
+            StackEntryKind::Spell {
+                card_id: CardId(0),
+                ability: Some(ability),
+                casting_variant: CastingVariant::Normal,
+                actual_mana_spent: 0,
+            },
+            StackEntryKind::Spell {
+                card_id: CardId(0),
+                ability: None,
+                casting_variant: CastingVariant::Normal,
+                actual_mana_spent: 0,
+            },
+            StackEntryKind::KeywordAction {
+                action: KeywordAction::Equip {
+                    equipment_id: id,
+                    target_creature_id: id,
+                },
+            },
+            StackEntryKind::CombatDamage {
+                sub_step: CombatDamageSubStep::Regular,
+                assignments: vec![],
+            },
+        ];
+        // Non-ability emblem kinds are synthetic branch boundaries, not playable emblems.
+        for kind in kinds {
+            let entry = StackEntry {
+                id: ObjectId(900),
+                source_id: id,
+                controller: PlayerId(0),
+                kind,
+            };
+            assert_eq!(
+                stack_entry_detail(&state, &entry).printing.get(),
+                &Some(emblem_printing("A"))
+            );
+            let mut ordinary = state.clone();
+            ordinary.objects.get_mut(&id).unwrap().is_emblem = false;
+            ordinary.objects.get_mut(&id).unwrap().printing =
+                DisplayOnly::new(Some(emblem_printing("B")));
+            assert_eq!(
+                stack_entry_detail(&ordinary, &entry).printing.get(),
+                &Some(emblem_printing("B"))
+            );
+            ordinary
+                .lki_cache
+                .insert(id, ordinary.objects[&id].snapshot_public_characteristics());
+            ordinary.objects.get_mut(&id).unwrap().printing = DisplayOnly::default();
+            assert!(
+                stack_entry_detail(&ordinary, &entry)
+                    .printing
+                    .get()
+                    .is_none(),
+                "live absence overrides cached B"
+            );
+            ordinary.objects.remove(&id);
+            let row = stack_entry_detail(&ordinary, &entry);
+            assert_eq!(row.source_name, "Unknown");
+            assert!(row.printing.get().is_none());
+        }
+        state.objects.get_mut(&id).unwrap().is_emblem = false;
+        state.objects.get_mut(&id).unwrap().printing = DisplayOnly::new(Some(emblem_printing("B")));
+        let context =
+            crate::game::triggers::trigger_source_context_for_latch(&state, &state.objects[&id]);
+        let entry = emblem_trigger_row(id, "Emblem", Some(context));
+        assert_eq!(
+            stack_entry_detail(&state, &entry).printing.get(),
+            &Some(emblem_printing("B"))
+        );
+        state.objects.get_mut(&id).unwrap().printing = DisplayOnly::default();
+        assert!(stack_entry_detail(&state, &entry).printing.get().is_none());
+    }
+
+    #[test]
+    fn emblem_stack_owner_printing_is_display_only() {
+        use crate::types::display_only::rules_projection;
+        use std::hash::{Hash, Hasher};
+        let (mut state, id) = emblem_row_fixture();
+        state
+            .stack
+            .push_back(emblem_trigger_row(id, "Emblem", None));
+        let original = state.clone();
+        let baseline = rules_projection(&state).unwrap();
+        let mut projected = Vec::new();
+        let mut hashes = Vec::new();
+        for pair in [Some(emblem_printing("A")), Some(emblem_printing("B")), None] {
+            state
+                .objects
+                .get_mut(&id)
+                .unwrap()
+                .emblem_source
+                .as_mut()
+                .unwrap()
+                .printing = DisplayOnly::new(pair.clone());
+            let before = serde_json::to_value(&state).unwrap();
+            let envelope =
+                serde_json::to_value(ClientGameStateRef::wrap(&state, Some(PlayerId(0)))).unwrap();
+            let row = stack_entry_detail(&state, &state.stack[0]);
+            assert_eq!(row.printing.get(), &pair);
+            assert_eq!(row.source_name, "Emblem");
+            assert_eq!(state, original);
+            assert_eq!(rules_projection(&state).unwrap(), baseline);
+            assert_eq!(
+                serde_json::to_value(&state).unwrap(),
+                before,
+                "derivation cannot mutate authority"
+            );
+            assert_eq!(format!("{:?}", row.printing), "DisplayOnly(..)");
+            let mut hash = std::collections::hash_map::DefaultHasher::new();
+            row.printing.hash(&mut hash);
+            hashes.push(hash.finish());
+            projected.push(envelope);
+        }
+        assert_eq!(hashes[0], hashes[1]);
+        assert_eq!(hashes[1], hashes[2]);
+        for value in &projected[1..] {
+            assert_eq!(
+                value["derived"]["waiting_for_identity"],
+                projected[0]["derived"]["waiting_for_identity"]
+            );
+            assert_eq!(
+                value["derived"]["state_revision"],
+                projected[0]["derived"]["state_revision"]
+            );
+        }
+        assert_ne!(
+            projected[0]["derived"]["stack_entry_details"],
+            projected[1]["derived"]["stack_entry_details"]
+        );
+        assert_ne!(
+            projected[1]["derived"]["stack_entry_details"],
+            projected[2]["derived"]["stack_entry_details"]
+        );
+    }
 
     #[test]
     fn prompt_fence_is_optional_in_base_and_authoritative_on_filtered_delivery() {

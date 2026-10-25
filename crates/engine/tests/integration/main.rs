@@ -383,6 +383,7 @@ mod elenda_torgaar_starting_life_runtime;
 mod elspeth_resplendent_conjoined_counter_choice;
 mod elusive_otter_repro;
 mod embiggen_typeline_pump;
+mod emblem_stack_owner_printing;
 mod emissary_green;
 mod emissary_of_despair_and_hope;
 mod empower_jace;

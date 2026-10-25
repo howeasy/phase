@@ -494,6 +494,44 @@ describe("owner printing carrier surfaces (group 1)", () => {
     },
   );
 
+  it.each(["TriggeredAbility", "ActivatedAbility"] as const)(
+    "C1 keeps captured emblem art authoritative on a %s stack row", async (kind) => {
+      const env = await setup();
+      const unrelated = card({ printing: printingB });
+      const emblem = card({ zone: "Command", name: "Emblem", printed_ref: null, is_emblem: true,
+        printing: printingB, emblem_source: { name: "Alpha", printing: printingA,
+          printed_ref: { oracle_id: ORACLE, face_name: "Alpha" } } });
+      const entry = buildStackEntry({ source_id: emblem.id, kind: kind === "TriggeredAbility"
+        ? { type: kind, data: { source_id: emblem.id, source_name: "Emblem", ability: { targets: [] } } }
+        : { type: kind, data: { source_id: emblem.id, ability: { targets: [] } } } });
+      env.seed([emblem, unrelated], { stack: [entry], command_zone: [emblem.id] });
+      // resetModules gives each case fresh resolver/store instances; static imports retain stale ones.
+      const { StackEntry } = await import("../../stack/StackEntry.tsx");
+      const { PreferencesModal } = await import("../../settings/PreferencesModal.tsx");
+      const details = { source_name: "Emblem", kind_label: "Ability", printing: printingA };
+      const surface = render(<StackEntry entry={entry} details={details} index={0} isTop
+        cardSize={{ width: 120, height: 168 }} />);
+      await expectImage(surface.container, URL_A);
+      const settings = render(<PreferencesModal onClose={vi.fn()} initialTab="visual" />);
+      const checkbox = screen.getByRole("checkbox", { name: "Show cards as their owners chose" });
+      fireEvent.click(checkbox);
+      await expectImage(surface.container, URL_V);
+      fireEvent.click(checkbox);
+      await expectImage(surface.container, URL_A);
+      settings.unmount();
+      for (const printing of [null, undefined]) {
+        surface.rerender(<StackEntry entry={entry} details={{ ...details, printing }} index={0} isTop
+          cardSize={{ width: 120, height: 168 }} />);
+        await expectImage(surface.container, URL_V);
+      }
+      env.seed([{ ...emblem, emblem_source: { ...emblem.emblem_source!, printing: undefined } }, unrelated],
+        { stack: [entry], command_zone: [emblem.id] });
+      surface.rerender(<StackEntry entry={entry} details={{ source_name: "Emblem", kind_label: "Ability" }}
+        index={0} isTop cardSize={{ width: 120, height: 168 }} />);
+      await expectImage(surface.container, URL_V);
+    },
+  );
+
   it("V7 uses emblem-source printing rather than the emblem or another live object", async () => {
     const env = await setup();
     const unrelated = card({ printing: printingB });
