@@ -602,9 +602,16 @@ describe("owner printing remaining carrier surfaces (group 2)", () => {
       const other: WaitingFor = route === "OpeningHandBottomCards"
         ? { type: "OpeningHandBottomCards", data: { pending: [{ player: 1, count: 1 }], reason: { type: "TinyLeadersMultiCommander" } } }
         : { type: "MulliganDecision", data: { free_first_mulligan: false,
-          pending: [{ player: 1, mulligan_count: 0, phase: { type: "Declare" } }] } };
+          pending: [route === "BottomCards"
+            ? { player: 1, mulligan_count: 1, phase: { type: "BottomCards", count: 1, then: { type: "Keep" } } }
+            : { player: 1, mulligan_count: 0, phase: { type: "Declare" } }] } };
       act(() => env.store.setState({ waitingFor: other, gameState: { ...env.store.getState().gameState!, waiting_for: other } }));
-      await waitFor(() => expect(screen.queryByRole("heading", { name: heading.textContent! })).toBeNull());
+      await waitFor(() => {
+        expect(screen.queryByRole("heading", { name: heading.textContent! })).toBeNull();
+        if (route !== "Declare") {
+          expect(screen.queryByRole("button", { name: "Confirm Selection" })).toBeNull();
+        }
+      });
     },
   );
 
