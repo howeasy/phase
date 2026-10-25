@@ -549,6 +549,32 @@ describe("GameProvider native AI routing", () => {
     expect((nativeAdapters[0].deck as SubmissionDeck).printings).toEqual([artRow("Island", "aaa", 2)]);
   });
 
+  it("F3 WS keeps names, printing and bracket from one active deck", async () => {
+    artIo.activeDeck.mockReturnValue(detectAndParseDeck("2 Island (AAA) 001"));
+    localStorage.setItem("phase-deck:A", JSON.stringify({ bracket: 2 }));
+    localStorage.setItem("phase-deck:B", JSON.stringify({ bracket: 4 }));
+    localStorage.setItem("phase-active-deck", "A");
+    const release = holdArt();
+    const first = render(<GameProvider gameId="ws-bracket-A" mode="online" joinCode="ABC"><div /></GameProvider>);
+    await waitFor(() => expect(artIo.printings).toHaveBeenCalledOnce());
+    artIo.activeDeck.mockReturnValue(detectAndParseDeck("1 Mountain (BBB) 002"));
+    localStorage.setItem("phase-active-deck", "B");
+    await act(async () => { release(); });
+    await waitFor(() => expect(nativeAdapters).toHaveLength(1));
+    expect(nativeAdapters[0].deck).toMatchObject({
+      main_deck: ["Island", "Island"], bracket_tier: "core", printings: [artRow("Island", "aaa", 2)],
+    });
+    first.unmount();
+    render(<GameProvider gameId="ws-bracket-B" mode="online" joinCode="ABC"><div /></GameProvider>);
+    await waitFor(() => expect(nativeAdapters).toHaveLength(2));
+    expect(nativeAdapters[1].deck).toMatchObject({
+      main_deck: ["Mountain"], bracket_tier: "optimized", printings: [artRow("Mountain", "bbb")],
+    });
+    localStorage.removeItem("phase-active-deck");
+    localStorage.removeItem("phase-deck:A");
+    localStorage.removeItem("phase-deck:B");
+  });
+
   it.each(["supplied", "spectator"] as const)("V4 WS %s carries no owner selection", async (route) => {
     artIo.activeDeck.mockReturnValue(detectAndParseDeck("2 Island (AAA) 001"));
     render(<GameProvider gameId="ws-empty" mode={route === "spectator" ? "spectate" : "online"} joinCode="ABC"

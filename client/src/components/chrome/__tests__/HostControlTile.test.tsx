@@ -488,6 +488,59 @@ describe("HostControlTile", () => {
       if (action === "fill") expect(dispatch.mock.calls[1][0]).toEqual({ type: "Start" });
     });
 
+    it.each(["room", "session", "same-room"] as const)("F2 promotes the %s publication once after old preparation releases in the same tile", async (replacement) => {
+      const held = heldMetadata();
+      art.face.mockImplementationOnce(async () => { await held.promise; return { scryfall_oracle_id: "Forest" }; });
+      vi.spyOn(Math, "random").mockReturnValue(0);
+      const { dispatch } = mount([host, waiting]);
+      fireEvent.click(screen.getByRole("button", { name: "Add AI" }));
+      await waitFor(() => expect(art.face).toHaveBeenCalledOnce());
+      // Publish B and flush its effects BEFORE releasing A. Do not remount.
+      await act(async () => {
+        usePreferencesStore.setState({ artOverrides: { Forest: { scryfallId: "b", setCode: "bbb", collectorNumber: "002" } } });
+        useMultiplayerStore.setState({
+          ...(replacement === "room" ? { hostGameCode: "ROOMB" } : {}),
+          ...(replacement !== "same-room" ? { hostSession: { ...useMultiplayerStore.getState().hostSession! } } : {}),
+          playerSlots: [host, { ...waiting, name: "AI B", kind: {
+            type: "Ai", data: { difficulty: "Hard", deck: replacement === "session" ? { type: "Named", data: "B" } : { type: "Random" } },
+          } }],
+        });
+      });
+      expect(screen.getByRole("button", { name: "Start Game" })).toBeDisabled();
+      expect(dispatch).not.toHaveBeenCalled();
+      expect(art.face).toHaveBeenCalledOnce();
+      await act(async () => { held.resolve(); });
+      await waitFor(() => expect(dispatch).toHaveBeenCalledOnce());
+      expect(dispatch).toHaveBeenCalledWith({ type: "SetKind", data: {
+        seatIndex: 1, kind: { type: "Ai", data: {
+          difficulty: "Hard", deck: { type: "DeckList", data: { ...expandParsedDeck(A.deck), printings: printedB } },
+        } },
+      } });
+      await waitFor(() => expect(screen.getByRole("button", { name: "Start Game" })).toBeEnabled());
+      // No transport publication: releasing B's latch cannot promote B again.
+      await act(async () => { usePreferencesStore.setState({ artOverrides: {} }); });
+      expect(dispatch).toHaveBeenCalledOnce();
+      expect(art.face).toHaveBeenCalledTimes(2);
+    });
+
+    it("F2 unchanged-room promotion succeeds once without a transport echo", async () => {
+      const held = heldMetadata();
+      art.face.mockImplementationOnce(async () => { await held.promise; return { scryfall_oracle_id: "Forest" }; });
+      vi.spyOn(Math, "random").mockReturnValue(0);
+      const { dispatch } = mount([host, { ...waiting, name: "AI", kind: {
+        type: "Ai", data: { difficulty: "Medium", deck: { type: "Random" } },
+      } }]);
+      await waitFor(() => expect(art.face).toHaveBeenCalledOnce());
+      expect(dispatch).not.toHaveBeenCalled();
+      await act(async () => { held.resolve(); });
+      await waitFor(() => expect(screen.getByRole("button", { name: "Start Game" })).toBeEnabled());
+      expect(dispatch).toHaveBeenCalledOnce();
+      expect(dispatch.mock.calls[0][0]).toMatchObject({ type: "SetKind", data: { kind: { data: { deck: { data: { printings: printedA } } } } } });
+      await act(async () => { usePreferencesStore.setState({ artOverrides: {} }); });
+      expect(dispatch).toHaveBeenCalledOnce();
+      expect(art.face).toHaveBeenCalledOnce();
+    });
+
     it("disables every seat/Start/Fill control while held and refuses same-tick overlap through the ref", async () => {
       const held = heldMetadata();
       art.face.mockImplementation(async () => { await held.promise; return { scryfall_oracle_id: "Forest" }; });

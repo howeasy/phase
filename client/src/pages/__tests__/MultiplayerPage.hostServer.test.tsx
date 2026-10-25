@@ -12,6 +12,12 @@ import { P2PHostAdapter } from "../../adapter/p2p-adapter";
 import { submitParsedDeck } from "../../services/deckSubmission";
 import type { ParsedDeck } from "../../services/deckParser";
 
+import type { ComponentProps } from "react";
+import type * as HostSetupModule from "../../components/lobby/HostSetup";
+import type * as AiDeckCatalog from "../../services/aiDeckCatalog";
+import type * as EngineRuntime from "../../services/engineRuntime";
+import type * as Storage from "../../constants/storage";
+import type { AiDeckCandidate } from "../../services/aiDeckCatalog";
 /** Render the real page and store, recording the hosting boundary calls. */
 const harness = vi.hoisted(() => ({
   navigate: vi.fn(),
@@ -25,6 +31,8 @@ const harness = vi.hoisted(() => ({
   deckText: "Deck\n1 Island",
   deckExtras: {} as Partial<ParsedDeck>,
   chrome: null as Record<string, unknown> | null,
+  realHostSetup: false,
+  candidates: [] as AiDeckCandidate[],
 }));
 
 /**
@@ -46,11 +54,24 @@ vi.mock("react-router", async (importOriginal) => ({
   useNavigate: () => harness.navigate,
 }));
 
-vi.mock("../../components/lobby/HostSetup", () => ({
-  HostSetup: (props: Record<string, unknown>) => {
-    harness.hostSetup = props;
-    return <div data-testid="host-setup" />;
-  },
+vi.mock("../../components/lobby/HostSetup", async (importOriginal) => {
+  const actual = await importOriginal<typeof HostSetupModule>();
+  return {
+    HostSetup: (props: ComponentProps<typeof HostSetupModule.HostSetup>) => {
+      harness.hostSetup = props as unknown as Record<string, unknown>;
+      return harness.realHostSetup ? <actual.HostSetup {...props} /> : <div data-testid="host-setup" />;
+    },
+  };
+});
+
+vi.mock("../../services/engineRuntime", async (importOriginal) => ({
+  ...await importOriginal<typeof EngineRuntime>(),
+  bestOfThreeCeilingForFormat: vi.fn(async () => "Bo1"),
+  deckSupplyForFormat: vi.fn(async () => "PlayerBuilt"),
+}));
+vi.mock("../../services/aiDeckCatalog", async (importOriginal) => ({
+  ...await importOriginal<typeof AiDeckCatalog>(),
+  useAiDeckCatalog: () => ({ candidates: harness.candidates, allCandidates: harness.candidates, loading: false, error: null }),
 }));
 
 vi.mock("../../components/lobby/LobbyView", () => ({
@@ -89,7 +110,8 @@ vi.mock("../../stores/gameStore", () => ({
   saveActiveGame: vi.fn(),
 }));
 
-vi.mock("../../constants/storage", () => ({
+vi.mock("../../constants/storage", async (importOriginal) => ({
+  ...await importOriginal<typeof Storage>(),
   ACTIVE_DECK_KEY: "active-deck",
   loadActiveDeck: () => ({ ...detectAndParseDeck(harness.deckText), ...harness.deckExtras }),
   loadActiveDeckBracket: () => null,
@@ -151,7 +173,7 @@ vi.mock("../../services/multiplayerSession", () => ({
 
 import { OFFICIAL_MULTIPLAYER_SERVER_URL } from "../../config/multiplayerServer";
 import { MultiplayerPage } from "../MultiplayerPage";
-import { useMultiplayerStore } from "../../stores/multiplayerStore";
+import { FORMAT_DEFAULTS, useMultiplayerStore } from "../../stores/multiplayerStore";
 import { LOBBY_PROTOCOL_VERSION, PROTOCOL_VERSION } from "../../adapter/ws-adapter";
 import multiplayerEn from "../../i18n/locales/en/multiplayer.json";
 import { usePreferencesStore } from "../../stores/preferencesStore";
@@ -167,7 +189,7 @@ const URL_B = "wss://chosen.example/ws";
 
 const ensureSubscriptionSocket = vi.fn();
 const startHosting = vi.fn();
-const startP2PHostingSession = vi.fn(async () => true);
+const startP2PHostingSession = vi.fn<typeof realHosting.startP2PHostingSession>(async () => true);
 
 function renderPage(entry = "/multiplayer") {
   return render(
@@ -224,6 +246,8 @@ describe("MultiplayerPage host server", () => {
     vi.clearAllMocks();
     harness.deckText = "Deck\n1 Island";
     harness.deckExtras = {};
+    harness.realHostSetup = false;
+    harness.candidates = [];
     usePreferencesStore.setState({ artChain: [], artOverrides: {} });
     art.face.mockResolvedValue({ scryfall_oracle_id: "island" });
     art.printings.mockResolvedValue([
@@ -273,6 +297,67 @@ describe("MultiplayerPage host server", () => {
     cleanup();
     useMultiplayerStore.getState().cancelHosting();
     vi.unstubAllGlobals();
+  });
+
+  it.each([false, true])("F1 real setup cancels delegated preparation on mode switch; successor AI held=%s", async (holdSuccessorAi) => {
+    harness.realHostSetup = true;
+    harness.deckText = "Deck\n2 Island (AAA) 001";
+    harness.candidates = [{
+      id: "saved:AI", name: "AI Deck", source: { type: "saved" },
+      deck: detectAndParseDeck("1 Forest (BBB) 002"), coveragePct: 100, archetype: null, bracket: null,
+    }];
+    useMultiplayerStore.setState({
+      connectionMode: "server", hostingServer: URL_B,
+      formatConfig: FORMAT_DEFAULTS.FreeForAll,
+      lastHostConfig: {
+        format: "FreeForAll", formatConfig: FORMAT_DEFAULTS.FreeForAll, savedCustomFormatId: null,
+        playerCount: 3, matchType: "Bo1", loopDetection: { type: "Off" },
+        isPublic: true, startWhenFull: false, ranked: false, aiSeats: [],
+      },
+      userLobbySources: [{ url: URL_B, name: "Test", origin: "user", kind: "Full" }],
+      sourceStatus: new Map([[URL_B, { state: "open", playerCount: 0, serverInfo: {
+        version: "test", buildCommit: "test", mode: "Full",
+        protocolVersion: PROTOCOL_VERSION, lobbyProtocolVersion: LOBBY_PROTOCOL_VERSION,
+      } }]]),
+    });
+    const old = heldMetadata();
+    art.face.mockReturnValueOnce(old.promise);
+    renderPage("/multiplayer?view=host-setup");
+    const user = userEvent.setup();
+    await waitFor(() => expect(screen.getByRole("button", { name: "Host Game" })).toBeEnabled());
+    await user.click(screen.getByRole("button", { name: "Host Game" }));
+    await waitFor(() => expect(art.face).toHaveBeenCalledWith("Island"));
+    expect(startHosting).not.toHaveBeenCalled();
+    await user.click(screen.getByRole("button", { name: "You host (P2P)" }));
+    await waitFor(() => expect(screen.getByRole("button", { name: "Host P2P Game" })).toBeEnabled());
+    const successor = heldMetadata();
+    if (holdSuccessorAi) {
+      await user.click(screen.getAllByRole("button", { name: "Human" })[0]);
+      art.face.mockReturnValueOnce(successor.promise);
+      await user.click(screen.getByRole("button", { name: "Host P2P Game" }));
+      await waitFor(() => expect(art.face).toHaveBeenCalledWith("Forest"));
+    }
+    await act(async () => { old.resolve({ scryfall_oracle_id: "island" }); });
+    expect(startHosting).not.toHaveBeenCalled();
+    expect(startP2PHostingSession).not.toHaveBeenCalled();
+    expect(harness.navigate).not.toHaveBeenCalled();
+    if (holdSuccessorAi) {
+      expect(screen.getByRole("button", { name: "Opening…" })).toBeDisabled();
+      await act(async () => { successor.resolve({ scryfall_oracle_id: "forest" }); });
+    } else {
+      await user.click(screen.getByRole("button", { name: "Host P2P Game" }));
+    }
+    await waitFor(() => expect(startP2PHostingSession).toHaveBeenCalledOnce());
+    expect(startHosting).not.toHaveBeenCalled();
+    expect(startP2PHostingSession.mock.calls[0][1].printings).toEqual([
+      { section: "main_deck", name: "Island", count: 2, printing: { set_code: "aaa", collector_number: "001" } },
+    ]);
+    if (holdSuccessorAi) expect(startP2PHostingSession.mock.calls[0][0].aiSeats[0].deck).toMatchObject({
+      type: "DeckList", data: { printings: [
+        { section: "main_deck", name: "Forest", count: 1, printing: { set_code: "bbb", collector_number: "002" } },
+      ] },
+    });
+    expect(harness.navigate).toHaveBeenCalledExactlyOnceWith("/");
   });
 
   // V-U15g, leg (i)

@@ -382,6 +382,36 @@ describe("GameProvider P2P host lifecycle", () => {
     }
   });
 
+  it.each(["p2p-host", "p2p-join"] as const)("F3 %s keeps names, printing and bracket from one active deck", async (mode) => {
+    loadGame.mockResolvedValue(null);
+    loadP2PHostSession.mockResolvedValue(null);
+    localStorage.setItem("phase-deck:A", JSON.stringify({ bracket: 2 }));
+    localStorage.setItem("phase-deck:B", JSON.stringify({ bracket: 4 }));
+    localStorage.setItem("phase-active-deck", "A");
+    let release!: (value: PrintingEntry[]) => void;
+    art.printings.mockReturnValueOnce(new Promise<PrintingEntry[]>((resolve) => { release = resolve; }));
+    const first = render(<GameProvider gameId="bracket-A" mode={mode} joinCode="ABCDE"><div /></GameProvider>);
+    await waitFor(() => expect(art.printings).toHaveBeenCalledOnce());
+    art.activeDeck.mockReturnValue(detectAndParseDeck("2 Mountain (BBB) 002"));
+    localStorage.setItem("phase-active-deck", "B");
+    await act(async () => { release(CATALOG); });
+    await waitFor(() => expect(gameStore.initGame).toHaveBeenCalledOnce());
+    expect(mode === "p2p-host" ? art.hostPayloads[0] : art.guestArguments[0][0]).toMatchObject({ player: {
+      main_deck: ["Island"], bracket_tier: "core",
+      printings: [{ section: "main_deck", name: "Island", count: 1, printing: { set_code: "aaa", collector_number: "001" } }],
+    } });
+    first.unmount();
+    render(<GameProvider gameId="bracket-B" mode={mode} joinCode="ABCDE"><div /></GameProvider>);
+    await waitFor(() => expect(gameStore.initGame).toHaveBeenCalledTimes(2));
+    expect(mode === "p2p-host" ? art.hostPayloads[1] : art.guestArguments[1][0]).toMatchObject({ player: {
+      main_deck: ["Mountain", "Mountain"], bracket_tier: "optimized",
+      printings: [{ section: "main_deck", name: "Mountain", count: 2, printing: { set_code: "bbb", collector_number: "002" } }],
+    } });
+    localStorage.removeItem("phase-active-deck");
+    localStorage.removeItem("phase-deck:A");
+    localStorage.removeItem("phase-deck:B");
+  });
+
   it.each(["supplied", "reconnect"] as const)("V4a %s guest reaches setup without deck selection", async (route) => {
     const authority = { sessionKey: "retained-authority" };
     if (route === "reconnect") art.loadP2PSession.mockResolvedValue({ playerToken: "retained-token", authority });

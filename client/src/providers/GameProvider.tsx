@@ -824,6 +824,8 @@ export function GameProvider({
       // the guest, decides whether a guest's submission fits the room.
       const suppliedFormat = formatConfig && formatSuppliesDeck(formatConfig.format) ? formatConfig.format : null;
       const parsedDeck = suppliedFormat ? null : loadActiveDeck();
+      // Keep the active deck's bracket bound to the same pre-preparation selection.
+      const playerBracket = suppliedFormat ? null : loadActiveDeckBracket();
 
       const wireP2PEvents = (adapter: P2PHostAdapter | P2PGuestAdapter) => {
         // Host-only: proactively request notification permission while the
@@ -959,7 +961,7 @@ export function GameProvider({
               }
               deckList = buildPlayerOnlyDeckList({
                 ...prepared,
-                bracket_tier: suppliedFormat ? "core" : bracketToEngineTier(loadActiveDeckBracket()),
+                bracket_tier: suppliedFormat ? "core" : bracketToEngineTier(playerBracket),
               });
             }
 
@@ -1101,7 +1103,7 @@ export function GameProvider({
               ? emptySeat()
               : {
                   ...await submitParsedDeck(parsedDeck ?? EMPTY_PARSED_DECK),
-                  bracket_tier: bracketToEngineTier(loadActiveDeckBracket()),
+                  bracket_tier: bracketToEngineTier(playerBracket),
                 };
             signal.throwIfAborted();
             const deckList = buildPlayerOnlyDeckList(player);
@@ -1327,8 +1329,9 @@ export function GameProvider({
         // Reconnect/spectator authority carries no fresh deck; select only at a new join.
         const suppliedJoin = formatConfig !== undefined && formatSuppliesDeck(formatConfig.format);
         const parsedDeck = !reconnectSession && wsMode === "join" && !suppliedJoin ? loadActiveDeck() : null;
+        const playerBracket = parsedDeck ? loadActiveDeckBracket() : null;
         const deck = parsedDeck
-          ? { ...await submitParsedDeck(parsedDeck), bracket_tier: bracketToEngineTier(loadActiveDeckBracket()) }
+          ? { ...await submitParsedDeck(parsedDeck), bracket_tier: bracketToEngineTier(playerBracket) }
           : emptySeatDeck();
         if (cancelled) return;
 

@@ -285,6 +285,9 @@ export function HostControlTile() {
   const cancelHosting = useMultiplayerStore((s) => s.cancelHosting);
   const playerSlots = useMultiplayerStore((s) => s.playerSlots);
   const hostSession = useMultiplayerStore((s) => s.hostSession);
+  const promotedPublication = useRef<{
+    room: typeof hostSession; code: typeof hostGameCode; slots: typeof playerSlots;
+  } | null>(null);
   const seatMutate = useMultiplayerStore((s) => s.seatMutate);
   const seatMutateAsync = useMultiplayerStore((s) => s.seatMutateAsync);
   const startLobbyWithCurrentPlayers = useMultiplayerStore(
@@ -425,18 +428,24 @@ export function HostControlTile() {
 
   useEffect(() => {
     if (!canEditSeats || !haveAnyDeck || busyRef.current) return;
+    // Latch release wakes skipped publications, but must not resubmit the
+    // same publication while transport has yet to publish its concrete decks.
+    const previous = promotedPublication.current;
+    if (previous?.room === hostSession && previous.code === hostGameCode && previous.slots === playerSlots) return;
     const assignments: AiAssignment[] = [];
     for (const slot of playerSlots) {
       if (slot.kind.type !== "Ai" || slot.kind.data.deck.type === "DeckList") continue;
       const option = pickRandomAiDeck();
       if (option) assignments.push({ slot, option, difficulty: slot.kind.data.difficulty });
     }
+    if (assignments.length === 0) return;
+    promotedPublication.current = { room: hostSession, code: hostGameCode, slots: playerSlots };
     assignAi(assignments);
     // `pickRandomAiDeck` is intentionally omitted from deps — it closes over
     // `deckChoices` which is already a dep (via `haveAnyDeck`), and including
     // the function would cause an effect storm on every render.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [canEditSeats, haveAnyDeck, playerSlots, seatMutate]);
+  }, [busy, canEditSeats, haveAnyDeck, hostGameCode, hostSession, playerSlots, seatMutate]);
 
   if (hostingStatus === "idle") {
     return null;

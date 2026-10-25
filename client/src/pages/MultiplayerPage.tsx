@@ -1349,7 +1349,11 @@ function MultiplayerPageContent({
             onHost={handleHostSetupComplete}
             onBack={handleBack}
             connectionMode={connectionMode}
-            onConnectionModeChange={setConnectionMode}
+            onConnectionModeChange={(mode) => {
+              // HostSetup may already have delegated its human-deck preparation.
+              preparationAttempt.current += 1;
+              setConnectionMode(mode);
+            }}
             hostDisabled={liveCheck.status === "illegal" || liveCheck.status === "checking"}
             hostDisabledReason={
               liveCheck.status === "illegal"
