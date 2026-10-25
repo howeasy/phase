@@ -549,86 +549,127 @@ describe("V3 remote parity", () => {
   });
 });
 
-describe("V3 isolated cold-offline legacy identity", () => {
-  async function isolatedRun(kind: "explicit" | "name", ownerPrinting?: CardPrinting, warmMetadata = false) {
-    // Reference and candidate must not share metadata, preferences, or hook
-    // caches. Sharing setup's warmed Scryfall singleton hides this regression.
+describe("V3 isolated identity policy", () => {
+  interface IdentityCell {
+    offline: boolean;
+    isToken: boolean;
+    warmMetadata: boolean;
+    kind: "explicit" | "name" | "empty" | "preview";
+  }
+
+  async function isolatedRun(cell: IdentityCell, ownerPrinting?: CardPrinting) {
+    // Each reference/candidate owns fresh metadata, stores, and hook caches.
     cleanup();
     vi.restoreAllMocks();
     vi.unstubAllGlobals();
     vi.resetModules();
     vi.doUnmock("../../services/visualPacks/repository.ts");
     const { useCardImage, BoundedCache, resolve, fetchMock } = await setup({
-      cold: !warmMetadata, offline: true, installed: [viewer, owner, list],
+      cold: !cell.warmMetadata, offline: cell.offline, installed: [viewer, owner, list],
       canonical: true, nameSemantic: source,
     });
-    // Observe real cache writes through the existing exported cache primitive;
-    // no private-key export or test-only hook instrumentation is needed.
     const cacheWrites = vi.spyOn(BoundedCache.prototype, "set");
+    const metadataReady = cell.warmMetadata || (!cell.offline && !cell.isToken && cell.kind !== "empty");
+    const face = cell.kind === "explicit" && metadataReady ? 1 : 0;
+    const expectedSrc = cell.kind === "empty" ? null
+      : `/installed/${cell.kind === "name" && !cell.isToken && !metadataReady ? source.id : viewer.id}/${face}-normal.jpg`;
+    const expectedRotated = cell.kind === "explicit" && metadataReady;
     const options = {
-      ...(kind === "explicit" ? { oracleId: A, faceName: "Back Card", faceIndex: 0 } : {}),
+      ...(cell.kind === "explicit" ? { oracleId: A, faceName: "Back Card", faceIndex: 0 } : {}),
+      ...(cell.kind === "preview" ? { scryfallId: viewer.id } : {}),
+      ...(cell.isToken ? {
+        isToken: true,
+        tokenImageRef: {
+          scryfall_id: viewer.id, scryfall_oracle_id: A,
+          face_name: cell.kind === "explicit" ? "Back Card" : "Owner Card", preset_id: "",
+        },
+      } : {}),
       ownerPrinting,
     };
     function Consumer() {
-      const image = useCardImage("Owner Card", { ...options });
-      return <img alt="offline printing" src={image.src ?? undefined} data-loading={String(image.isLoading)} />;
+      const image = useCardImage(cell.kind === "empty" || cell.kind === "preview" ? "" : "Owner Card", { ...options });
+      return <img alt="identity policy" src={image.src ?? undefined}
+        data-loading={String(image.isLoading)} data-rotated={String(image.isRotated)}
+        data-flip={String(image.isFlip)} data-source={image.source?.kind ?? ""} />;
+    }
+    async function settledImage() {
+      const image = screen.getByRole("img", { name: "identity policy" });
+      // Installed online cards may settle before their ordinary metadata refresh.
+      // Observe the final reference identity, not that transient earlier image.
+      await waitFor(() => {
+        expect(image.getAttribute("src")).toBe(expectedSrc);
+        expect(image.getAttribute("data-loading")).toBe("false");
+        expect(image.getAttribute("data-rotated")).toBe(String(expectedRotated));
+        expect(image.getAttribute("data-source")).toBe(cell.kind === "empty" ? "fallback" : "installed");
+      });
+      let presentationKey: unknown;
+      let requestKey: unknown;
+      for (const [key, value] of cacheWrites.mock.calls) {
+        if (typeof value === "string") presentationKey = key;
+        else if (value !== null && typeof value === "object" && "sources" in value) requestKey = key;
+      }
+      const lastResolution = resolve.mock.calls[resolve.mock.calls.length - 1]?.[0];
+      return {
+        src: image.getAttribute("src"), loading: image.getAttribute("data-loading"),
+        rotated: image.getAttribute("data-rotated"), flip: image.getAttribute("data-flip"),
+        source: image.getAttribute("data-source"),
+        groups: JSON.stringify(lastResolution?.groups),
+        presentationKey, requestKey,
+      };
     }
     const mounted = render(<Consumer />);
-    const coldImage = screen.getByRole("img", { name: "offline printing" });
-    await waitFor(() => expect(coldImage.getAttribute("data-loading")).toBe("false"));
-    const coldSrc = coldImage.getAttribute("src");
+    const cold = await settledImage();
     mounted.unmount();
     render(<Consumer />);
-    const warmImage = screen.getByRole("img", { name: "offline printing" });
-    await waitFor(() => expect(warmImage.getAttribute("data-loading")).toBe("false"));
+    const warm = await settledImage();
     const result = {
-      coldSrc, warmSrc: warmImage.getAttribute("src"),
-      groups: [...new Set(resolve.mock.calls.map(([request]) => JSON.stringify(request.groups)))],
-      presentationKeys: [...new Set(cacheWrites.mock.calls
-        .filter(([, value]) => typeof value === "string").map(([key]) => key))],
-      requestKeys: [...new Set(cacheWrites.mock.calls
-        .filter(([, value]) => value !== null && typeof value === "object" && "sources" in value).map(([key]) => key))],
+      cold, warm,
       mainMetadataLoads: fetchMock.mock.calls.filter(([url]) => url === "/scryfall-data.json").length,
     };
     cacheWrites.mockRestore();
     return result;
   }
 
-  it.each([
-    ["explicit", "nonmember", { set_code: "bad", collector_number: "9" }],
-    ["explicit", "List", { set_code: "plst", collector_number: "6" }],
-    ["name", "nonmember", { set_code: "bad", collector_number: "9" }],
-    ["name", "List", { set_code: "plst", collector_number: "6" }],
-  ] as const)("%s cold-offline rejection preserves ownerless identity (%s)", async (kind, _label, pair) => {
-    const reference = await isolatedRun(kind);
-    const candidate = await isolatedRun(kind, pair);
-    const expected = `/installed/${kind === "explicit" ? viewer.id : source.id}/0-normal.jpg`;
-    expect(reference.coldSrc).toBe(expected);
-    expect(reference.warmSrc).toBe(expected);
-    expect(candidate.coldSrc).toBe(reference.coldSrc);
-    expect(candidate.warmSrc).toBe(reference.warmSrc);
-    expect(candidate.groups).toEqual(reference.groups);
-    expect(reference.presentationKeys).toEqual([expect.any(String)]);
-    expect(reference.requestKeys).toEqual([expect.any(String)]);
-    expect(candidate.presentationKeys).toEqual(reference.presentationKeys);
-    expect(candidate.requestKeys).toEqual(reference.requestKeys);
+  const cells = [false, true].flatMap((offline) => [false, true].flatMap((isToken) =>
+    [false, true].flatMap((warmMetadata) => (["explicit", "name"] as const).map((kind) => ({
+      offline, isToken, warmMetadata, kind,
+      network: offline ? "offline" : "online", family: isToken ? "token" : "card",
+      readiness: warmMetadata ? "warm" : "cold",
+    })))));
+  const rejectedOwners = [
+    { ownerCase: "nonmember", pair: { set_code: "bad", collector_number: "9" } },
+    { ownerCase: "List", pair: { set_code: "plst", collector_number: "6" } },
+  ];
+  it.each(cells.flatMap((cell) => rejectedOwners.map((ownerCase) => ({ ...cell, ...ownerCase }))))(
+    "$network $family $readiness $kind identity matrix ($ownerCase)", async (cell) => {
+      const reference = await isolatedRun(cell);
+      const candidate = await isolatedRun(cell, cell.pair);
+      expect(reference.cold.presentationKey).toEqual(expect.any(String));
+      expect(reference.cold.requestKey).toEqual(expect.any(String));
+      expect(reference.cold.flip).toBe("false");
+      expect(reference.warm).toEqual(reference.cold);
+      expect(candidate.cold).toEqual(reference.cold);
+      expect(candidate.warm).toEqual(reference.warm);
+      const expectedLoads = cell.warmMetadata || (!cell.offline && !cell.isToken) ? 1 : 0;
+      expect(reference.mainMetadataLoads).toBe(expectedLoads);
+      expect(candidate.mainMetadataLoads).toBe(reference.mainMetadataLoads);
+    });
+
+  it("empty identity cannot trigger main metadata discovery", async () => {
+    const cell: IdentityCell = { offline: false, isToken: false, warmMetadata: false, kind: "empty" };
+    const reference = await isolatedRun(cell);
+    const candidate = await isolatedRun(cell, { set_code: "bad", collector_number: "9" });
     expect(reference.mainMetadataLoads).toBe(0);
-    expect(candidate.mainMetadataLoads).toBe(0);
+    expect(candidate).toEqual(reference);
   });
 
-  it.each(["explicit", "name"] as const)("%s warm-metadata offline rejection also preserves identity", async (kind) => {
-    const reference = await isolatedRun(kind, undefined, true);
-    const candidate = await isolatedRun(kind, { set_code: "bad", collector_number: "9" }, true);
-    expect(reference.coldSrc).toBe(`/installed/${viewer.id}/${kind === "explicit" ? 1 : 0}-normal.jpg`);
-    expect(candidate.coldSrc).toBe(reference.coldSrc);
-    expect(candidate.warmSrc).toBe(reference.warmSrc);
-    expect(candidate.groups).toEqual(reference.groups);
-    expect(reference.presentationKeys).toEqual([expect.any(String)]);
-    expect(reference.requestKeys).toEqual([expect.any(String)]);
-    expect(candidate.presentationKeys).toEqual(reference.presentationKeys);
-    expect(candidate.requestKeys).toEqual(reference.requestKeys);
+  it("printing-only installed previews retain ordinary online metadata refresh", async () => {
+    const cell: IdentityCell = { offline: false, isToken: false, warmMetadata: false, kind: "preview" };
+    const reference = await isolatedRun(cell);
+    const candidate = await isolatedRun(cell, { set_code: "bad", collector_number: "9" });
+    expect(reference.cold.src).toBe(`/installed/${viewer.id}/0-normal.jpg`);
     expect(reference.mainMetadataLoads).toBe(1);
-    expect(candidate.mainMetadataLoads).toBe(1);
+    expect(candidate).toEqual(reference);
   });
 
   it("admits a known-Oracle owner offline without loading main metadata", async () => {
@@ -656,5 +697,52 @@ describe("V3 isolated cold-offline legacy identity", () => {
     await waitFor(() => expect(result.current.src).toBe(`/installed/${owner.id}/0-normal.jpg`));
     expect(result.current.isLoading).toBe(false);
     expect(fetchMock).toHaveBeenCalledWith("/scryfall-data.json");
+  });
+
+  it.each([false, true].flatMap((offline) => [false, true].map((warmMetadata) => ({
+    offline, warmMetadata,
+  }))))("admits a valid token owner (offline=$offline, warm=$warmMetadata)", async ({ offline, warmMetadata }) => {
+    const { useCardImage, fetchMock } = await setup({
+      cold: !warmMetadata, offline, installed: [owner, viewer],
+    });
+    const { result } = renderHook(() => useCardImage("Owner Card", {
+      isToken: true, oracleId: A, faceName: "Back Card", faceIndex: 0, ownerPrinting: ownerPair,
+      tokenImageRef: { scryfall_id: viewer.id, scryfall_oracle_id: A, face_name: "Back Card", preset_id: "" },
+    }));
+    await waitFor(() => expect(result.current.src).toBe(`/installed/${owner.id}/${warmMetadata ? 1 : 0}-normal.jpg`));
+    expect(result.current.source?.kind).toBe("installed");
+    expect(result.current.isRotated).toBe(warmMetadata);
+    expect(result.current.isLoading).toBe(false);
+    expect(fetchMock.mock.calls.filter(([url]) => url === "/scryfall-data.json")).toHaveLength(warmMetadata ? 1 : 0);
+  });
+
+  it("resolves an admitted token owner remotely without forcing main metadata", async () => {
+    const { useCardImage, fetchMock } = await setup({ cold: true, installed: [viewer], canonical: true });
+    const { result } = renderHook(() => useCardImage("Owner Card", {
+      isToken: true, oracleId: A, faceName: "Back Card", faceIndex: 0, ownerPrinting: ownerPair,
+      tokenImageRef: { scryfall_id: viewer.id, scryfall_oracle_id: A, face_name: "Back Card", preset_id: "" },
+    }));
+    await waitFor(() => expect(result.current.src).toBe(owner.faces[0].normal));
+    expect(result.current.source?.kind).toBe("remote");
+    expect(result.current.isLoading).toBe(false);
+    expect(fetchMock).not.toHaveBeenCalledWith("/scryfall-data.json");
+  });
+
+  it("rebinds discovery policy when switching a mounted token request to a card", async () => {
+    const data = deferred<Response>();
+    const { useCardImage, fetchMock } = await setup({ cold: true, data: data.promise, installed: [owner, viewer] });
+    const { result, rerender } = renderHook(({ isToken }) => useCardImage("Owner Card", {
+      isToken, oracleId: A, faceName: "Back Card", ownerPrinting: ownerPair,
+    }), { initialProps: { isToken: true } });
+    await waitFor(() => expect(result.current.src).toBe(`/installed/${owner.id}/0-normal.jpg`));
+    expect(fetchMock).not.toHaveBeenCalledWith("/scryfall-data.json");
+    rerender({ isToken: false });
+    expect(result.current.src).toBeNull();
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledWith("/scryfall-data.json"));
+    expect(result.current.src).toBeNull();
+    await act(async () => data.resolve(jsonResponse(metadata())));
+    await waitFor(() => expect(result.current.src).toBe(`/installed/${owner.id}/1-normal.jpg`));
+    expect(result.current.isRotated).toBe(true);
+    expect(result.current.isLoading).toBe(false);
   });
 });

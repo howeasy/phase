@@ -83,8 +83,9 @@ interface UseCardImageOptions {
    * and viewer preferences only after admission to the current Oracle's own
    * printings. Catalog-unavailable, excluded, or invalid choices use the
    * unchanged viewer request, including offline installed-art selection.
-   * Offline admission uses only the Oracle/face identity already available to
-   * that request; preparation never loads main card metadata to discover it. */
+   * Offline and token requests admit against the Oracle/face identity already
+   * available to the legacy path, without forcing main metadata discovery.
+   * Token rendering options do not exclude a valid current-Oracle member. */
   ownerPrinting?: CardPrinting | null;
   /** Overrides the live preference for this render; defaults to the store.
    * Real object/view forwarding is supplied by the rendering caller. */
@@ -870,6 +871,9 @@ export function useCardImage(
   const ownerCollector = typeof options?.ownerPrinting?.collector_number === "string"
     ? options.ownerPrinting.collector_number : "";
   const effectiveOffline = useEffectiveOffline();
+  // Only online cards eagerly discover main identity metadata. Installed
+  // tokens do not; a later token-name fallback owns its own metadata load.
+  const preparesCardMetadata = !effectiveOffline && !isToken;
   // Card art follows the UI language: the printing the user chose is kept, and
   // only its image is swapped for the same printing in their language. Cards
   // with no localized sibling keep their English art.
@@ -940,7 +944,7 @@ export function useCardImage(
   // Preparation has its own identity, never a legacy image-key component.
   // Scalar inputs prevent recreated props from restarting metadata work.
   const ownerLookupKey = showOwnerPrintings && ownerSet && ownerCollector
-    ? JSON.stringify([oracleId || cardName, faceName, faceIndex, ownerSet, ownerCollector, effectiveOffline])
+    ? JSON.stringify([oracleId || cardName, faceName, faceIndex, ownerSet, ownerCollector, effectiveOffline, isToken])
     : "";
   const [ownerSelection, setOwnerSelection] = useState<OwnerSelection>(() => {
     const ready = ownerLookupKey && isCardDataResident()
@@ -963,9 +967,9 @@ export function useCardImage(
     let cancelled = false;
     void (async () => {
       try {
-        // The offline legacy path never loads main metadata. Warming its
-        // singleton here would rebind a rejected request's Oracle/face keys.
-        if (!effectiveOffline) await loadScryfallData();
+        // Share the legacy discovery policy. An empty lookup cannot resolve
+        // an owner, even when a printing-only preview happens to be installed.
+        if (preparesCardMetadata && (oracleId || cardName)) await loadScryfallData();
         if (cancelled) return;
         const currentOracle = oracleId || resolveOracleIdSync(cardName) || "";
         const printings = currentOracle
@@ -986,7 +990,7 @@ export function useCardImage(
       }
     })();
     return () => { cancelled = true; };
-  }, [ownerLookupKey, oracleId, cardName, faceName, faceIndex, ownerSet, ownerCollector, effectiveOffline]);
+  }, [ownerLookupKey, oracleId, cardName, faceName, faceIndex, ownerSet, ownerCollector, preparesCardMetadata]);
 
   const explicitPrintingId = !isToken
     ? scryfallId || (resolvedOracleId ? artOverrides[resolvedOracleId]?.scryfallId ?? "" : "")
@@ -1208,7 +1212,7 @@ export function useCardImage(
         loadLocaleArtInBackground(language);
         try {
           let imageAsset = selectedRemoteOverride();
-          if (!isToken) {
+          if (preparesCardMetadata) {
             const metadata = await loadScryfallData();
             if (cancelled) return;
             if (metadata) {
@@ -1303,7 +1307,7 @@ export function useCardImage(
       const installed = nextSources.some((source) => source.kind === "installed");
       const settled = installed || effectiveOffline || !canResolveRemotely;
       publish(nextSources, undefined, settled);
-      if (installed && !isToken && !effectiveOffline) {
+      if (installed && preparesCardMetadata) {
         // Metadata readiness does not change the availability of installed art
         // or take ownership of its installed-to-remote continuation.
         const metadata = await loadScryfallData();
@@ -1334,6 +1338,7 @@ export function useCardImage(
       if (acquiredRemoteCache) releaseCachedImageSrc(requestKey);
     };
   }, [
+    preparesCardMetadata,
     admittedOwner,
     ownerPending,
     presentationKey,
