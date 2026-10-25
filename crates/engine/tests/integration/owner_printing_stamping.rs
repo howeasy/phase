@@ -1149,3 +1149,242 @@ fn format_gate_keeps_valid_and_invalid_name_deck_verdicts() {
         }
     }
 }
+
+#[test]
+fn engine_qualified_only_printing_is_a_loaded_normalization_fixed_point() {
+    let key = "shifty face [engine-qualified]";
+    let db = CardDatabase::from_json_str(&json!({
+        (key): {
+            "name": "Shifty Face",
+            "mana_cost": {"type":"Cost", "shards":[], "generic":0},
+            "card_type": {"supertypes":[], "core_types":["Land"], "subtypes":[]},
+            "keywords":[], "abilities":[], "triggers":[], "static_abilities":[], "replacements":[],
+            "color_identity":[], "scryfall_oracle_id": "engine-qualified"
+        }
+    }).to_string()).unwrap();
+    assert!(db.get_face_by_name("Shifty Face").is_none());
+    assert_eq!(
+        db.get_face_by_name(key)
+            .unwrap()
+            .scryfall_oracle_id
+            .as_deref(),
+        Some("engine-qualified")
+    );
+    let seat = PlayerDeckList {
+        main_deck: names(&[(key, 8)]),
+        printings: vec![choice(
+            DeckSection::MainDeck,
+            key,
+            u32::MAX,
+            "qualified-art",
+        )],
+        ..Default::default()
+    };
+    let mut list = DeckList {
+        player: seat.clone(),
+        opponent: seat,
+        ..Default::default()
+    };
+    let expected = choice(DeckSection::MainDeck, key, 8, "qualified-art");
+    for _ in 0..2 {
+        let payload = resolve_deck_list(&db, &list);
+        for seat in [&payload.player, &payload.opponent] {
+            assert_eq!(seat.main_deck.len(), 1);
+            assert_eq!(seat.main_deck[0].count, 8);
+            assert_eq!(seat.printings.as_slice(), std::slice::from_ref(&expected));
+        }
+        let mut state = GameState::new(FormatConfig::freeform(), 2, 4910);
+        load_and_hydrate_decks(&mut state, &payload, Some(&db));
+        start(&mut state);
+        assert_eq!(state.objects.len(), 16);
+        for owner in [PlayerId(0), PlayerId(1)] {
+            let objects: Vec<_> = state
+                .objects
+                .values()
+                .filter(|object| object.owner == owner)
+                .collect();
+            assert_eq!(objects.len(), 8);
+            for object in objects {
+                assert_eq!(object.name, "Shifty Face");
+                assert_eq!(
+                    object.printed_ref.as_ref().unwrap().oracle_id,
+                    "engine-qualified"
+                );
+                assert_eq!(object.printing.get().as_ref(), Some(&expected.printing));
+                assert_eq!(
+                    object.base_printing.get().as_ref(),
+                    Some(&expected.printing)
+                );
+            }
+        }
+        list.player.printings = payload.player.printings;
+        list.opponent.printings = payload.opponent.printings;
+    }
+}
+
+#[test]
+fn loaded_typed_shared_piles_hide_printings_until_their_reveal_transition() {
+    use engine::game::derived_views::ClientGameStateRef;
+    use engine::game::visibility::{filter_state_for_unseated_viewer, filter_state_for_viewer};
+    use engine::types::card_type::CoreType;
+    use engine::types::events::GameEvent;
+
+    // Separate typed fixture: the pinned allocation-reference database stays unchanged.
+    let db = supplementary_database();
+    for section in [DeckSection::PlanarDeck, DeckSection::SchemeDeck] {
+        let (shared_names, kind, owner, mut format) = match section {
+            DeckSection::PlanarDeck => (
+                ["Academy at Tolaria West", "Agyrem", "Akoum"],
+                CoreType::Plane,
+                PlayerId(0),
+                FormatConfig::planechase(),
+            ),
+            DeckSection::SchemeDeck => (
+                ["All in Good Time", "Default Scheme 1", "Default Scheme 2"],
+                CoreType::Scheme,
+                PlayerId(2),
+                FormatConfig::archenemy(),
+            ),
+            _ => unreachable!(),
+        };
+        if section == DeckSection::SchemeDeck {
+            format.archenemy_player = Some(owner);
+        }
+        let seat = |number: u8| {
+            let mut deck = PlayerDeckList {
+                main_deck: names(&[("Forest", 8)]),
+                printings: shared_names
+                    .iter()
+                    .enumerate()
+                    .map(|(index, name)| {
+                        choice(section, name, 1, &format!("p10-shared-{number}-{index}"))
+                    })
+                    .collect(),
+                ..Default::default()
+            };
+            match section {
+                DeckSection::PlanarDeck => {
+                    deck.planar_deck = shared_names.iter().map(|name| (*name).into()).collect()
+                }
+                DeckSection::SchemeDeck => {
+                    deck.scheme_deck = shared_names.iter().map(|name| (*name).into()).collect()
+                }
+                _ => unreachable!(),
+            }
+            deck
+        };
+        let list = DeckList {
+            player: seat(0),
+            opponent: seat(1),
+            ai_decks: vec![seat(2)],
+            ..Default::default()
+        };
+        let mut state = GameState::new(format, 3, 4910);
+        load_and_hydrate_decks(&mut state, &resolve_deck_list(&db, &list), Some(&db));
+        assert_eq!(state.objects.len(), 27);
+        let pile = |state: &GameState| match section {
+            DeckSection::PlanarDeck => state.planar_deck.iter().copied().collect::<Vec<_>>(),
+            DeckSection::SchemeDeck => state.scheme_deck.iter().copied().collect::<Vec<_>>(),
+            _ => unreachable!(),
+        };
+        let ids = pile(&state);
+        assert_eq!(ids.len(), 3);
+        let expected: Vec<_> = ids
+            .iter()
+            .map(|id| {
+                let object = &state.objects[id];
+                let index = shared_names
+                    .iter()
+                    .position(|name| *name == object.name)
+                    .unwrap();
+                assert!(object.card_types.core_types.contains(&kind));
+                assert_eq!(object.owner, owner);
+                assert!(object.face_down);
+                let printing = choice(
+                    section,
+                    &object.name,
+                    1,
+                    &format!("p10-shared-{}-{index}", owner.0),
+                )
+                .printing;
+                assert_eq!(object.printing.get().as_ref(), Some(&printing));
+                assert_eq!(object.base_printing.get().as_ref(), Some(&printing));
+                (*id, printing)
+            })
+            .collect();
+        start(&mut state);
+        assert_eq!(pile(&state), ids);
+        let revealed = ids[0];
+        let assert_exposure =
+            |state: &GameState, public: Option<engine::types::identifiers::ObjectId>| {
+                for viewer in [
+                    Some(PlayerId(0)),
+                    Some(PlayerId(1)),
+                    Some(PlayerId(2)),
+                    Some(PlayerId(255)),
+                    None,
+                ] {
+                    let filtered = viewer.map_or_else(
+                        || filter_state_for_unseated_viewer(state),
+                        |player| filter_state_for_viewer(state, player),
+                    );
+                    let forms = [
+                        serde_json::to_string(&filtered).unwrap(),
+                        serde_json::to_string(&ClientGameStateRef::wrap_filtered(
+                            state,
+                            &filtered,
+                            viewer.filter(|player| player.0 < 3),
+                        ))
+                        .unwrap(),
+                    ];
+                    for (id, printing) in &expected {
+                        for form in &forms {
+                            assert_eq!(
+                                form.contains(&printing.set_code),
+                                public == Some(*id),
+                                "{section:?} {viewer:?} sentinel {}",
+                                printing.set_code
+                            );
+                        }
+                    }
+                    for other in (0..3).filter(|seat| *seat != owner.0) {
+                        for index in 0..3 {
+                            let decoy = format!("p10-shared-{other}-{index}");
+                            assert!(forms.iter().all(|form| !form.contains(&decoy)));
+                        }
+                    }
+                }
+            };
+        assert_exposure(&state, None);
+        match section {
+            DeckSection::PlanarDeck => {
+                assert_eq!(engine::game::planechase::active_plane(&state), None);
+                engine::game::planechase::reveal_starting_plane(&mut state);
+                assert_eq!(
+                    engine::game::planechase::active_plane(&state),
+                    Some(revealed)
+                );
+            }
+            DeckSection::SchemeDeck => {
+                assert!(engine::game::archenemy::active_schemes(&state).is_empty());
+                let mut events = Vec::new();
+                engine::game::archenemy::set_in_motion(&mut state, &mut events);
+                assert_eq!(engine::game::archenemy::active_schemes(&state), [revealed]);
+                assert!(events.iter().any(|event| matches!(event,
+                    GameEvent::SchemeSetInMotion { player_id, scheme_id }
+                    if *player_id == owner && *scheme_id == revealed)));
+            }
+            _ => unreachable!(),
+        }
+        assert_eq!(pile(&state), ids[1..]);
+        assert!(state.command_zone.contains(&revealed));
+        for (id, printing) in &expected {
+            let object = &state.objects[id];
+            assert_eq!(object.face_down, *id != revealed);
+            assert!(object.card_types.core_types.contains(&kind));
+            assert_eq!(object.printing.get().as_ref(), Some(printing));
+            assert_eq!(object.base_printing.get().as_ref(), Some(printing));
+        }
+        assert_exposure(&state, Some(revealed));
+    }
+}

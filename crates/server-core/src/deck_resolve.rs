@@ -957,6 +957,75 @@ mod tests {
     }
 
     #[test]
+    fn simultaneous_homonym_printings_keep_independent_budgets_and_objects() {
+        let mut winner = card("Twin");
+        winner["scryfall_oracle_id"] = json!("winner");
+        let mut loser = card("Twin");
+        loser["scryfall_oracle_id"] = json!("loser");
+        let db = db_from_values(&[("twin", winner), ("twin [loser]", loser)]);
+        let mut source = deck(
+            &[
+                "Twin",
+                "twin [loser]",
+                "TWIN",
+                "twin [loser]",
+                "TWIN",
+                "twin [loser]",
+                "TWIN",
+                "TWIN",
+            ],
+            &[],
+            &[],
+        );
+        source.printings = vec![
+            selected(DeckSection::MainDeck, "Twin", u32::MAX, "winner-art"),
+            selected(DeckSection::MainDeck, "twin [loser]", u32::MAX, "loser-art"),
+        ];
+        let expected = [
+            selected(DeckSection::MainDeck, "Twin", 5, "winner-art"),
+            selected(DeckSection::MainDeck, "twin [loser]", 3, "loser-art"),
+        ];
+        let resolved = resolve_deck(&db, &source).unwrap();
+        assert_eq!(resolved.printings, expected);
+        let inverse = deck_data_from_payload(&db, &resolved);
+        assert_eq!(inverse.printings, expected);
+        let restored = resolve_deck(&db, &inverse).unwrap();
+        assert_eq!(restored.printings, expected);
+        for payload in [&resolved, &restored] {
+            for mode in 0..3 {
+                let state = loaded(
+                    &db,
+                    payload,
+                    engine::types::format::FormatConfig::freeform(),
+                    mode,
+                );
+                assert_eq!(state.objects.len(), 16);
+                for owner in [0, 1] {
+                    for (oracle, count, printing) in [
+                        ("winner", 5, &expected[0].printing),
+                        ("loser", 3, &expected[1].printing),
+                    ] {
+                        let objects: Vec<_> = state
+                            .objects
+                            .values()
+                            .filter(|object| {
+                                object.owner.0 == owner
+                                    && object.printed_ref.as_ref().unwrap().oracle_id == oracle
+                            })
+                            .collect();
+                        assert_eq!(objects.len(), count);
+                        for object in objects {
+                            assert_eq!(object.name, "Twin");
+                            assert_eq!(object.printing.get().as_ref(), Some(printing));
+                            assert_eq!(object.base_printing.get().as_ref(), Some(printing));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
     fn server_normalizes_duplicate_alias_budgets_and_invalid_rows() {
         let db = db_from(&["Forest", "Island"]);
         let mut source = deck(
