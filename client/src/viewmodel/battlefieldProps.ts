@@ -26,6 +26,7 @@ function canGroup(obj: GameObject, ringBearerIds: ReadonlySet<ObjectId>): boolea
 function groupKey(
   obj: GameObject,
   counterDisplay: Record<string, ObjectCounterDisplay> | undefined,
+  showOwnerPrintings: boolean,
 ): string {
   const kw = obj.keywords.map((k) => typeof k === "string" ? k : JSON.stringify(k)).sort().join(",");
   const colors = [...obj.color].sort().join("");
@@ -49,7 +50,10 @@ function groupKey(
   const tokenPreset = obj.token_image_ref?.preset_id ?? "";
   const isToken = obj.is_token ?? false;
   const isCommander = obj.is_commander ?? false;
-  return `${publicName(obj)}|${obj.tapped}|${obj.face_down}|${obj.flipped}|${obj.transformed}|${obj.power}|${obj.toughness}|${obj.loyalty}|${obj.damage_marked}|${obj.has_summoning_sickness}|${obj.class_level ?? ""}|${colors}|${kw}|${counters}|${tokenRules}|${tokenPreset}|${isToken}|${isCommander}`;
+  const legacyKey = `${publicName(obj)}|${obj.tapped}|${obj.face_down}|${obj.flipped}|${obj.transformed}|${obj.power}|${obj.toughness}|${obj.loyalty}|${obj.damage_marked}|${obj.has_summoning_sickness}|${obj.class_level ?? ""}|${colors}|${kw}|${counters}|${tokenRules}|${tokenPreset}|${isToken}|${isCommander}`;
+  if (!showOwnerPrintings) return legacyKey;
+  const p = obj.printing;
+  return JSON.stringify([legacyKey, p == null ? null : [p.set_code, p.collector_number]]);
 }
 
 export interface BattlefieldPartition {
@@ -115,17 +119,17 @@ const NO_RING_BEARERS: ReadonlySet<ObjectId> = new Set();
 const NO_UNBOUNDED_PILE: ReadonlySet<ObjectId> = new Set();
 
 /**
- * `counterDisplay` is POSITIONALLY REQUIRED even though it accepts `undefined`: `ringBearerIds`
- * and `unboundedPileIds` are *enrichment* inputs whose omission only degrades a badge, while
- * `counterDisplay` is a *correctness* input to the group identity itself — a default would
- * silently produce wrong grouping at any site that forgot it. Defaults are for enrichment;
- * correctness inputs get the compiler.
+ * `counterDisplay` and `showOwnerPrintings` are correctness inputs to display identity:
+ * callers must supply both explicitly. With owner printings disabled, the legacy key is
+ * unchanged; with them enabled, the delivered pair joins it by value (absence is a value).
+ * `ringBearerIds` and `unboundedPileIds` remain optional badge-enrichment inputs.
  */
 export function groupByName(
   objects: GameObject[],
   ringBearerIds: ReadonlySet<ObjectId> = NO_RING_BEARERS,
   unboundedPileIds: ReadonlySet<ObjectId> = NO_UNBOUNDED_PILE,
   counterDisplay: Record<string, ObjectCounterDisplay> | undefined,
+  showOwnerPrintings: boolean,
 ): GroupedPermanent[] {
   const groups = new Map<string, GameObject[]>();
 
@@ -136,7 +140,7 @@ export function groupByName(
       continue;
     }
 
-    const key = groupKey(obj, counterDisplay);
+    const key = groupKey(obj, counterDisplay, showOwnerPrintings);
     const existing = groups.get(key);
     if (existing) {
       existing.push(obj);
