@@ -73,6 +73,7 @@ function metadata() {
 async function setup(options: {
   installed?: PrintingEntry[];
   canonical?: boolean;
+  nameSemantic?: PrintingEntry;
   printings?: unknown;
   data?: Promise<Response>;
   offline?: boolean;
@@ -110,6 +111,20 @@ async function setup(options: {
   }
   for (const entry of options.installed ?? []) addInstalled(entry);
   if (options.canonical) addInstalled(viewer, A, true);
+  if (options.nameSemantic) {
+    const entry = options.nameSemantic;
+    for (const faceIndex of [0, 1]) for (const size of ["small", "normal", "art_crop"] as const) {
+      const groups = semanticCardCandidateGroups({
+        cardName: "Owner Card", faceName: faceIndex ? "Back Card" : "Owner Card",
+        variant: size === "art_crop" ? "art_crop" : "full_card", rung: size,
+      });
+      const match: ResolvedAsset = {
+        packId: packId("deck_library"), assetKey: assetKey(`asset:v1:exact_printing:${entry.id}_${faceIndex}`),
+        catalogRoot: catalogRoot("a".repeat(64)), url: `/installed/${entry.id}/${faceIndex}-${size}.jpg`, media: "image/jpeg",
+      };
+      for (const group of groups) for (const key of group.keys) installed.set(key, [match]);
+    }
+  }
   const fetchMock = vi.fn((url: string) => {
     if (url === "/scryfall-data.json") return options.data ?? Promise.resolve(jsonResponse(metadata()));
     if (url === "/scryfall-printings.json") return options.printings instanceof Promise ? options.printings : Promise.resolve(jsonResponse(options.printings ?? catalog));
@@ -123,8 +138,8 @@ async function setup(options: {
   useConnectivityStore.setState({ forcedOffline: options.offline ?? false, browserOnline: true });
   const scryfall = await import("../../services/scryfall.ts");
   if (!options.cold) await scryfall.loadScryfallData();
-  const { useCardImage } = await import("../useCardImage.ts");
-  return { useCardImage, resolve, realResolve, fetchMock, prefs: usePreferencesStore, scryfall };
+  const { useCardImage, BoundedCache } = await import("../useCardImage.ts");
+  return { useCardImage, BoundedCache, resolve, realResolve, fetchMock, prefs: usePreferencesStore, scryfall, connectivity: useConnectivityStore };
 }
 
 beforeEach(() => {
@@ -531,5 +546,115 @@ describe("V3 remote parity", () => {
     const disabled = renderHook(() => useCardImage("Owner Card", { oracleId: A, ownerPrinting: ownerPair, showOwnerPrintings: false }));
     await waitFor(() => expect(admitted.result.current.src).toBe(`/installed/${owner.id}/0-normal.jpg`));
     await waitFor(() => expect(disabled.result.current.src).toBe(`/installed/${viewer.id}/0-normal.jpg`));
+  });
+});
+
+describe("V3 isolated cold-offline legacy identity", () => {
+  async function isolatedRun(kind: "explicit" | "name", ownerPrinting?: CardPrinting, warmMetadata = false) {
+    // Reference and candidate must not share metadata, preferences, or hook
+    // caches. Sharing setup's warmed Scryfall singleton hides this regression.
+    cleanup();
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+    vi.resetModules();
+    vi.doUnmock("../../services/visualPacks/repository.ts");
+    const { useCardImage, BoundedCache, resolve, fetchMock } = await setup({
+      cold: !warmMetadata, offline: true, installed: [viewer, owner, list],
+      canonical: true, nameSemantic: source,
+    });
+    // Observe real cache writes through the existing exported cache primitive;
+    // no private-key export or test-only hook instrumentation is needed.
+    const cacheWrites = vi.spyOn(BoundedCache.prototype, "set");
+    const options = {
+      ...(kind === "explicit" ? { oracleId: A, faceName: "Back Card", faceIndex: 0 } : {}),
+      ownerPrinting,
+    };
+    function Consumer() {
+      const image = useCardImage("Owner Card", { ...options });
+      return <img alt="offline printing" src={image.src ?? undefined} data-loading={String(image.isLoading)} />;
+    }
+    const mounted = render(<Consumer />);
+    const coldImage = screen.getByRole("img", { name: "offline printing" });
+    await waitFor(() => expect(coldImage.getAttribute("data-loading")).toBe("false"));
+    const coldSrc = coldImage.getAttribute("src");
+    mounted.unmount();
+    render(<Consumer />);
+    const warmImage = screen.getByRole("img", { name: "offline printing" });
+    await waitFor(() => expect(warmImage.getAttribute("data-loading")).toBe("false"));
+    const result = {
+      coldSrc, warmSrc: warmImage.getAttribute("src"),
+      groups: [...new Set(resolve.mock.calls.map(([request]) => JSON.stringify(request.groups)))],
+      presentationKeys: [...new Set(cacheWrites.mock.calls
+        .filter(([, value]) => typeof value === "string").map(([key]) => key))],
+      requestKeys: [...new Set(cacheWrites.mock.calls
+        .filter(([, value]) => value !== null && typeof value === "object" && "sources" in value).map(([key]) => key))],
+      mainMetadataLoads: fetchMock.mock.calls.filter(([url]) => url === "/scryfall-data.json").length,
+    };
+    cacheWrites.mockRestore();
+    return result;
+  }
+
+  it.each([
+    ["explicit", "nonmember", { set_code: "bad", collector_number: "9" }],
+    ["explicit", "List", { set_code: "plst", collector_number: "6" }],
+    ["name", "nonmember", { set_code: "bad", collector_number: "9" }],
+    ["name", "List", { set_code: "plst", collector_number: "6" }],
+  ] as const)("%s cold-offline rejection preserves ownerless identity (%s)", async (kind, _label, pair) => {
+    const reference = await isolatedRun(kind);
+    const candidate = await isolatedRun(kind, pair);
+    const expected = `/installed/${kind === "explicit" ? viewer.id : source.id}/0-normal.jpg`;
+    expect(reference.coldSrc).toBe(expected);
+    expect(reference.warmSrc).toBe(expected);
+    expect(candidate.coldSrc).toBe(reference.coldSrc);
+    expect(candidate.warmSrc).toBe(reference.warmSrc);
+    expect(candidate.groups).toEqual(reference.groups);
+    expect(reference.presentationKeys).toEqual([expect.any(String)]);
+    expect(reference.requestKeys).toEqual([expect.any(String)]);
+    expect(candidate.presentationKeys).toEqual(reference.presentationKeys);
+    expect(candidate.requestKeys).toEqual(reference.requestKeys);
+    expect(reference.mainMetadataLoads).toBe(0);
+    expect(candidate.mainMetadataLoads).toBe(0);
+  });
+
+  it.each(["explicit", "name"] as const)("%s warm-metadata offline rejection also preserves identity", async (kind) => {
+    const reference = await isolatedRun(kind, undefined, true);
+    const candidate = await isolatedRun(kind, { set_code: "bad", collector_number: "9" }, true);
+    expect(reference.coldSrc).toBe(`/installed/${viewer.id}/${kind === "explicit" ? 1 : 0}-normal.jpg`);
+    expect(candidate.coldSrc).toBe(reference.coldSrc);
+    expect(candidate.warmSrc).toBe(reference.warmSrc);
+    expect(candidate.groups).toEqual(reference.groups);
+    expect(reference.presentationKeys).toEqual([expect.any(String)]);
+    expect(reference.requestKeys).toEqual([expect.any(String)]);
+    expect(candidate.presentationKeys).toEqual(reference.presentationKeys);
+    expect(candidate.requestKeys).toEqual(reference.requestKeys);
+    expect(reference.mainMetadataLoads).toBe(1);
+    expect(candidate.mainMetadataLoads).toBe(1);
+  });
+
+  it("admits a known-Oracle owner offline without loading main metadata", async () => {
+    const { useCardImage, fetchMock, prefs } = await setup({ cold: true, offline: true, installed: [owner, viewer] });
+    const { result } = renderHook(() => useCardImage("Owner Card", {
+      oracleId: A, faceName: "Back Card", faceIndex: 0, ownerPrinting: ownerPair,
+    }));
+    await waitFor(() => expect(result.current.src).toBe(`/installed/${owner.id}/0-normal.jpg`));
+    expect(result.current.isLoading).toBe(false);
+    expect(fetchMock).toHaveBeenCalledWith("/scryfall-printings.json");
+    expect(fetchMock).not.toHaveBeenCalledWith("/scryfall-data.json");
+    act(() => prefs.getState().setShowOwnerPrintings(false));
+    await waitFor(() => expect(result.current.src).toBe(`/installed/${viewer.id}/0-normal.jpg`));
+    expect(fetchMock).not.toHaveBeenCalledWith("/scryfall-data.json");
+  });
+
+  it("retries name-only owner admission when returning online", async () => {
+    const { useCardImage, connectivity, fetchMock } = await setup({
+      cold: true, offline: true, installed: [owner, viewer], canonical: true, nameSemantic: source,
+    });
+    const { result } = renderHook(() => useCardImage("Owner Card", { ownerPrinting: ownerPair }));
+    await waitFor(() => expect(result.current.src).toBe(`/installed/${source.id}/0-normal.jpg`));
+    expect(fetchMock).not.toHaveBeenCalledWith("/scryfall-data.json");
+    act(() => connectivity.setState({ forcedOffline: false }));
+    await waitFor(() => expect(result.current.src).toBe(`/installed/${owner.id}/0-normal.jpg`));
+    expect(result.current.isLoading).toBe(false);
+    expect(fetchMock).toHaveBeenCalledWith("/scryfall-data.json");
   });
 });

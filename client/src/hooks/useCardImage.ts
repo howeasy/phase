@@ -82,7 +82,9 @@ interface UseCardImageOptions {
   /** Display-only owner choice. When enabled, it outranks per-render previews
    * and viewer preferences only after admission to the current Oracle's own
    * printings. Catalog-unavailable, excluded, or invalid choices use the
-   * unchanged viewer request, including offline installed-art selection. */
+   * unchanged viewer request, including offline installed-art selection.
+   * Offline admission uses only the Oracle/face identity already available to
+   * that request; preparation never loads main card metadata to discover it. */
   ownerPrinting?: CardPrinting | null;
   /** Overrides the live preference for this render; defaults to the store.
    * Real object/view forwarding is supplied by the rendering caller. */
@@ -938,7 +940,7 @@ export function useCardImage(
   // Preparation has its own identity, never a legacy image-key component.
   // Scalar inputs prevent recreated props from restarting metadata work.
   const ownerLookupKey = showOwnerPrintings && ownerSet && ownerCollector
-    ? JSON.stringify([oracleId || cardName, faceName, faceIndex, ownerSet, ownerCollector])
+    ? JSON.stringify([oracleId || cardName, faceName, faceIndex, ownerSet, ownerCollector, effectiveOffline])
     : "";
   const [ownerSelection, setOwnerSelection] = useState<OwnerSelection>(() => {
     const ready = ownerLookupKey && isCardDataResident()
@@ -961,7 +963,9 @@ export function useCardImage(
     let cancelled = false;
     void (async () => {
       try {
-        await loadScryfallData();
+        // The offline legacy path never loads main metadata. Warming its
+        // singleton here would rebind a rejected request's Oracle/face keys.
+        if (!effectiveOffline) await loadScryfallData();
         if (cancelled) return;
         const currentOracle = oracleId || resolveOracleIdSync(cardName) || "";
         const printings = currentOracle
@@ -982,7 +986,7 @@ export function useCardImage(
       }
     })();
     return () => { cancelled = true; };
-  }, [ownerLookupKey, oracleId, cardName, faceName, faceIndex, ownerSet, ownerCollector]);
+  }, [ownerLookupKey, oracleId, cardName, faceName, faceIndex, ownerSet, ownerCollector, effectiveOffline]);
 
   const explicitPrintingId = !isToken
     ? scryfallId || (resolvedOracleId ? artOverrides[resolvedOracleId]?.scryfallId ?? "" : "")
