@@ -1294,6 +1294,7 @@ mod owner_printing_carriers;
 mod owner_printing_projection;
 mod owner_printing_rules_identity;
 mod owner_printing_sidecar;
+mod owner_printing_stamping;
 mod owner_relative_each_other_player;
 mod owner_scoped_graveyard_activation_8506;
 mod oxford_type_list_boundary_7451;

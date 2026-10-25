@@ -176,6 +176,7 @@ fn deck_payload_from_current_pools(state: &GameState) -> Result<DeckPayload, Str
             signature_spell: (*p.current_signature_spell).clone(),
             bracket_tier: p.bracket_tier,
             printings: Vec::new(),
+            printing_entry_names: Vec::new(),
         })
         .collect();
 
@@ -193,6 +194,7 @@ fn deck_payload_from_current_pools(state: &GameState) -> Result<DeckPayload, Str
             signature_spell: (*p0.current_signature_spell).clone(),
             bracket_tier: p0.bracket_tier,
             printings: Vec::new(),
+            printing_entry_names: Vec::new(),
         },
         opponent: PlayerDeckPayload {
             main_deck: (*p1.current_main).clone(),
@@ -207,6 +209,7 @@ fn deck_payload_from_current_pools(state: &GameState) -> Result<DeckPayload, Str
             signature_spell: (*p1.current_signature_spell).clone(),
             bracket_tier: p1.bracket_tier,
             printings: Vec::new(),
+            printing_entry_names: Vec::new(),
         },
         ai_decks,
         // cEDH bracket validation ran at game 1 setup; decks haven't

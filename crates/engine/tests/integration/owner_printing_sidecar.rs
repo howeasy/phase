@@ -2,9 +2,9 @@
 //! printing choices that rides on every deck wire and resolved type.
 //!
 //! CR 203.1 + CR 206.1: a card's illustration and expansion symbol have no effect
-//! on game play, so nothing below reads the sidecar; these rows pin only its wire
-//! contract (byte identity of name-only payloads, lenient decoding, the codec
-//! boundary) and that every conversion and resolver carries it unchanged.
+//! on game play. These rows pin the wire contract (byte identity of name-only
+//! payloads, lenient decoding, the codec boundary) and conversion carry. Resolver
+//! fixtures use valid normalized fixed points, whose sidecars remain unchanged.
 
 use std::collections::BTreeSet;
 
@@ -555,10 +555,10 @@ fn main_names(payload: &PlayerDeckPayload) -> Vec<String> {
         .collect()
 }
 
-/// Both engine resolvers carry each seat's sidecar unchanged and keep seats apart.
-/// Four seats each hold a distinct sidecar (the last holds none), so a cross-seat
-/// swap, a dropped field, or a `resolve_deck_list` that stopped delegating and
-/// copied a literal with an empty sidecar all fail.
+/// Both engine resolvers preserve these normalized fixed points and keep seats apart.
+/// Four seats each hold a distinct valid sidecar (the last holds none), so a cross-seat
+/// swap or a dropped field fails. Invalidity, caps and lookup-name normalization
+/// are exercised through actual loaded cards in owner_printing_stamping.
 #[test]
 fn engine_resolvers_carry_each_seats_sidecar_unchanged() {
     let db = db();

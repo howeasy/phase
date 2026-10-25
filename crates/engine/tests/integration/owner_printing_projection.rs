@@ -14,10 +14,10 @@
 //! cast reversal (CR 733.1) and the action-rejection snapshot restore replay the exact recorded
 //! values, which returns the pre-cast printing to a card that is back in hand face up.
 //!
-//! Sentinels: no producer stamps a printing yet, so each card here is stamped by hand with its
-//! own sentinel (set code `S<TAG>`), and a census walks the authoritative state, the
-//! authoritative events and every viewer's filtered state, client wire and filtered events for
-//! it. The same census over a real loaded game waits for the loader that stamps printings.
+//! Sentinels: these historical privacy fixtures stamp each card by hand with its
+//! own sentinel (set code `S<TAG>`), and a census walks authoritative state,
+//! events, filtered state, client wire and filtered events. The production
+//! resolver/loader seam is exercised separately in owner_printing_stamping.
 //!
 //! Recorded observations that these rows pin as parity, not as fixes: a face-down-redacted id's
 //! cached earlier-incarnation last-known information keeps its name and printing together; the
@@ -127,8 +127,8 @@ impl Board {
         self.runner.state_mut()
     }
 
-    /// Stamp `printing` and `base_printing` on the authoritative object, beside its current
-    /// name (no producer exists before the deck loader, so tests stamp by hand).
+    /// Stamp both fields beside the current name for this focused privacy fixture.
+    /// Production creation stamping is covered by owner_printing_stamping.
     fn stamp(&mut self, id: ObjectId, tag: &str) {
         let object = self
             .runner
