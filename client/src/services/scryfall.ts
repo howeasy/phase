@@ -1441,6 +1441,7 @@ export interface OwnerArtCatalogReader {
   prepareLocale(language: string, offline: boolean): Promise<void>;
   imageUrl(printing: PrintingEntry, faceIndex: number, size: ImageSize, language: string): string | null;
   subscribe(listener: () => void | Promise<void>): () => void;
+  release(): void;
 }
 
 const ownerArtListeners = new Set<() => void | Promise<void>>();
@@ -1452,7 +1453,11 @@ function notifyOwnerArtReadiness(): void {
     ownerFoldedIndex = null;
   }
   if (printingsDataResolved) ownerPrintings.snapshot = null;
-  if (localeArtResolved) ownerLocales.delete(localeArtResolved.lang);
+  if (localeArtResolved) {
+    const resource = ownerLocales.get(localeArtResolved.lang);
+    if (resource) resource.snapshot = null;
+    ownerLocales.delete(localeArtResolved.lang);
+  }
   for (const listener of ownerArtListeners) {
     try {
       void Promise.resolve(listener()).catch(() => {});
@@ -1462,13 +1467,23 @@ function notifyOwnerArtReadiness(): void {
   }
 }
 
+type OwnerAcquisitionOutcome = "ready" | "cache-only" | "unavailable" | "discarded";
+
 interface OwnerResource<T> {
   snapshot: T | null;
-  pending: Promise<void> | null;
+  pending: Promise<OwnerAcquisitionOutcome> | null;
+  consumers: Map<object, () => boolean>;
+  idleTimer: ReturnType<typeof setTimeout> | null;
 }
 
-const ownerMain: OwnerResource<ScryfallDataMap> = { snapshot: null, pending: null };
-const ownerPrintings: OwnerResource<PrintingsDataMap> = { snapshot: null, pending: null };
+const OWNER_ART_IDLE_GRACE_MS = 2000;
+
+function emptyOwnerResource<T>(): OwnerResource<T> {
+  return { snapshot: null, pending: null, consumers: new Map(), idleTimer: null };
+}
+
+const ownerMain = emptyOwnerResource<ScryfallDataMap>();
+const ownerPrintings = emptyOwnerResource<PrintingsDataMap>();
 const ownerLocales = new Map<string, OwnerResource<Map<string, LocalizedArtEntry>>>();
 const ownerSnapshotIds = new WeakMap<object, number>();
 let nextOwnerSnapshotId = 0;
@@ -1485,6 +1500,35 @@ function ownerSnapshotId(snapshot: object | null): number {
   return id;
 }
 
+function hasOnlineOwnerConsumer<T>(resource: OwnerResource<T>): boolean {
+  for (const canFetch of resource.consumers.values()) {
+    if (canFetch()) return true;
+  }
+  return false;
+}
+
+function retainOwnerResource<T>(
+  resource: OwnerResource<T>,
+  consumer: object,
+  canFetch: () => boolean,
+  onIdle: () => void,
+): () => void {
+  if (resource.idleTimer !== null) {
+    clearTimeout(resource.idleTimer);
+    resource.idleTimer = null;
+  }
+  resource.consumers.set(consumer, canFetch);
+  return () => {
+    if (!resource.consumers.delete(consumer) || resource.consumers.size > 0) return;
+    resource.idleTimer = setTimeout(() => {
+      resource.idleTimer = null;
+      if (resource.consumers.size > 0) return;
+      resource.snapshot = null;
+      onIdle();
+    }, OWNER_ART_IDLE_GRACE_MS);
+  };
+}
+
 async function prepareOwnerResource<T>(
   resource: OwnerResource<T>,
   url: string,
@@ -1496,29 +1540,49 @@ async function prepareOwnerResource<T>(
     resource.snapshot = null;
     return;
   }
-  if (resource.snapshot) return;
-  if (resource.pending) return resource.pending;
-  const pending = (async () => {
+  if (resource.snapshot || resource.consumers.size === 0) return;
+  if (resource.pending) {
+    const outcome = await resource.pending;
+    if (
+      (outcome === "cache-only" && !offline && hasOnlineOwnerConsumer(resource)
+        || outcome === "discarded" && resource.consumers.size > 0)
+      && !resource.snapshot && !resident()
+    ) {
+      await prepareOwnerResource(resource, url, offline, resident, parse);
+    }
+    return;
+  }
+  const pending = (async (): Promise<OwnerAcquisitionOutcome> => {
     let snapshot: T | null = null;
+    let networkAttempted = false;
     try {
       const cached = await globalThis.caches?.match(url);
+      if (resource.consumers.size === 0) return "discarded";
       if (cached?.ok) snapshot = parse(await cached.json());
     } catch {
       // CacheStorage may be unavailable or denied. Reads never create a bucket.
     }
-    if (!snapshot && !offline && !resident()) {
+    if (!snapshot && !offline && hasOnlineOwnerConsumer(resource) && !resident()) {
+      networkAttempted = true;
       try {
         const privateUrl = new URL(url, globalThis.location?.href ?? "http://localhost/");
         privateUrl.searchParams.set("phase-owner-art", "1");
         const response = await fetch(privateUrl.href, { cache: "no-store" });
+        if (resource.consumers.size === 0) return "discarded";
         if (response.ok) snapshot = parse(await response.json());
       } catch {
-        // A failed isolated attempt is retryable on a new meaningful attempt.
+        // A failed online attempt is retryable only on a new meaningful attempt.
       }
     }
-    if (snapshot && !resident()) resource.snapshot = snapshot;
-    if (resident()) resource.snapshot = null;
-    if (snapshot) notifyOwnerArtReadiness();
+    if (resident()) {
+      resource.snapshot = null;
+      return "ready";
+    }
+    if (resource.consumers.size === 0) return "discarded";
+    if (!snapshot) return networkAttempted ? "unavailable" : "cache-only";
+    resource.snapshot = snapshot;
+    notifyOwnerArtReadiness();
+    return "ready";
   })();
   resource.pending = pending;
   try {
@@ -1534,8 +1598,24 @@ async function prepareOwnerResource<T>(
  * persistent metadata. Cold online resources use a query-separated no-store URL;
  * offline resources use CacheStorage.match only. One private resource is shared
  * across mounts; canonical readiness supersedes and releases private duplicates.
+ * Each reader retains its prepared resources until release(); its current locale
+ * replaces the previous locale lease. Last-consumer release keeps settled data
+ * for 2000 ms to cover rapid remounts/toggles, then drops snapshots, name indexes
+ * and unused locale entries. In-flight completions with no consumers are discarded.
+ * Online callers joining a cache-only miss coalesce one online acquisition;
+ * failed online attempts do not automatically retry. Network permission is checked
+ * against live consumers immediately before fetch, including caller connectivity.
  */
-export function createOwnerArtCatalogReader(): OwnerArtCatalogReader {
+export function createOwnerArtCatalogReader(canFetchNetwork: () => boolean = () => true): OwnerArtCatalogReader {
+  const consumer = {};
+  const leases = new Map<object, () => void>();
+  let offline = true;
+  let localeLease: object | null = null;
+  const retain = <T>(resource: OwnerResource<T>, onIdle: () => void) => {
+    if (!leases.has(resource)) {
+      leases.set(resource, retainOwnerResource(resource, consumer, () => !offline && canFetchNetwork(), onIdle));
+    }
+  };
   const mainSnapshot = () => {
     if (scryfallDataResolved) {
       ownerMain.snapshot = null;
@@ -1552,6 +1632,8 @@ export function createOwnerArtCatalogReader(): OwnerArtCatalogReader {
   const localeSnapshot = (language: string) => {
     if (language === "en") return null;
     if (localeArtResolved?.lang === language) {
+      const resource = ownerLocales.get(language);
+      if (resource) resource.snapshot = null;
       ownerLocales.delete(language);
       return localeArtResolved.map;
     }
@@ -1586,6 +1668,12 @@ export function createOwnerArtCatalogReader(): OwnerArtCatalogReader {
       };
     },
     async prepare(input) {
+      offline = input.offline;
+      retain(ownerMain, () => {
+        ownerIndexedMain = null;
+        ownerFoldedIndex = null;
+      });
+      retain(ownerPrintings, () => {});
       await Promise.all([
         prepareOwnerResource(ownerMain, __SCRYFALL_DATA_URL__, input.offline,
           () => scryfallDataResolved, (value) => isScryfallDataMap(value) ? value : null),
@@ -1593,15 +1681,27 @@ export function createOwnerArtCatalogReader(): OwnerArtCatalogReader {
           () => printingsDataResolved, (value) => isPrintingsDataMap(value) ? value : null),
       ]);
     },
-    async prepareLocale(language, offline) {
-      if (language === "en" || localeArtResolved?.lang === language) return;
-      let resource = ownerLocales.get(language);
-      if (!resource) {
-        resource = { snapshot: null, pending: null };
+    async prepareLocale(language, effectiveOffline) {
+      offline = effectiveOffline;
+      let resource = language === "en" || localeArtResolved?.lang === language
+        ? undefined : ownerLocales.get(language);
+      if (!resource && language !== "en" && localeArtResolved?.lang !== language) {
+        resource = emptyOwnerResource<Map<string, LocalizedArtEntry>>();
         ownerLocales.set(language, resource);
       }
+      if (localeLease && localeLease !== resource) {
+        leases.get(localeLease)?.();
+        leases.delete(localeLease);
+        localeLease = null;
+      }
+      if (!resource) return;
+      const currentResource = resource;
+      localeLease = resource;
+      retain(resource, () => {
+        if (ownerLocales.get(language) === currentResource) ownerLocales.delete(language);
+      });
       await prepareOwnerResource(resource,
-        __SCRYFALL_IMAGES_LOCALE_URL_TEMPLATE__.replace("{lng}", language), offline,
+        __SCRYFALL_IMAGES_LOCALE_URL_TEMPLATE__.replace("{lng}", language), effectiveOffline,
         () => localeArtResolved?.lang === language ? localeArtResolved.map : null,
         (value) => value && typeof value === "object" && !Array.isArray(value) ? parseLocalizedArtMap(value) : null);
     },
@@ -1613,6 +1713,12 @@ export function createOwnerArtCatalogReader(): OwnerArtCatalogReader {
     subscribe(listener) {
       ownerArtListeners.add(listener);
       return () => ownerArtListeners.delete(listener);
+    },
+    release() {
+      offline = true;
+      for (const release of leases.values()) release();
+      leases.clear();
+      localeLease = null;
     },
   };
 }

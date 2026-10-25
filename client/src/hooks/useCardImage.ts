@@ -8,7 +8,7 @@ import { cardCandidateGroups } from "../services/visualPacks/candidateKeys.ts";
 import { VisualPackRepository } from "../services/visualPacks/repository.ts";
 import type { VisualCandidateGroup } from "../services/visualPacks/repository.ts";
 import type { CardImageSource, ImageRungs } from "../services/visualPacks/types.ts";
-import { useEffectiveOffline } from "../stores/connectivityStore.ts";
+import { getEffectiveOffline, useEffectiveOffline } from "../stores/connectivityStore.ts";
 import { usePreferencesStore } from "../stores/preferencesStore.ts";
 import { nextImageSourceIndex } from "./imageSourceLadder.ts";
 import { BoundedCache, useCardImage as useLegacyCardImage } from "./useLegacyCardImage.ts";
@@ -103,7 +103,7 @@ function useOwnerCardImageOverlay(input: OwnerInput | null): ImageResult | null 
   let currentKey = "";
   let warm: OwnerPresentation | undefined;
   if (input) {
-    readerRef.current ??= createOwnerArtCatalogReader();
+    readerRef.current ??= createOwnerArtCatalogReader(() => latest.current !== null && !getEffectiveOffline());
     const authority = readerRef.current.read(input);
     const printing = admittedPrinting(authority, input);
     if (printing) {
@@ -129,6 +129,7 @@ function useOwnerCardImageOverlay(input: OwnerInput | null): ImageResult | null 
       const authority = reader.read(activeInput);
       const printing = admittedPrinting(authority, activeInput);
       if (!printing) {
+        if (sessionKey) reader.release();
         generation += 1;
         sessionKey = "";
         unlistenRepository?.();
@@ -238,6 +239,7 @@ function useOwnerCardImageOverlay(input: OwnerInput | null): ImageResult | null 
       disposed = true;
       generation += 1;
       unlistenReadiness();
+      reader.release();
       unlistenRepository?.();
       advanceRef.current = () => {};
     };

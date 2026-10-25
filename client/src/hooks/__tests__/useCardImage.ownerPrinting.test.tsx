@@ -182,6 +182,7 @@ afterEach(() => {
   cleanup();
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
+  vi.useRealTimers();
 });
 
 describe("owner printing non-gating overlay", () => {
@@ -464,6 +465,7 @@ describe("isolated owner catalog authority", () => {
     expect(env.service.isCardDataResident()).toBe(true);
     await reader.prepare(input);
     expect(env.fetcher).toHaveBeenCalledTimes(4);
+    reader.release();
   });
 
   it("admits cache-only offline data without network and falls back safely without it", async () => {
@@ -528,6 +530,7 @@ describe("isolated owner catalog authority", () => {
     expect(await env.service.loadScryfallData()).not.toBeNull();
     expect(canonicalAttempts).toBe(2);
     expect(privateAttempts).toBe(2);
+    reader.release();
   });
 });
 
@@ -807,5 +810,229 @@ it("refines installed owner face/layout after optional main metadata arrives", a
   await act(async () => { main.resolve(env.data.main); });
   await waitFor(() => expect(hook.result.current.src).toBe("/owner-back.jpg"));
   expect(hook.result.current).toMatchObject({ isFlip: true, isRotated: false, isLoading: false });
+});
+
+
+async function privateOwnerFixture(options: SetupOptions = {}) {
+  const env = await setup({ ...options, canonicalMain: () => new Response(null, { status: 503 }) });
+  env.preferences.setState({ artOverrides: {}, artChain: [] });
+  env.install(encodeCandidateKey("oracle_face", [A, "alpha", "full_card", "normal"]), "/normal.jpg", "Tk9STUFM", "deck_library");
+  env.installPrinting(O1, "/owner.jpg");
+  return env;
+}
+
+describe("owner acquisition policy transitions", () => {
+  it("escalates a joined offline cache miss once after reconnect without another render trigger", async () => {
+    const env = await privateOwnerFixture({ offline: true });
+    const main = deferred<Response | undefined>();
+    const catalog = deferred<Response | undefined>();
+    const cache = vi.fn((url: string) => {
+      if (cache.mock.calls.length <= 2) return url.includes("printings") ? catalog.promise : main.promise;
+      return Promise.resolve(undefined);
+    });
+    vi.stubGlobal("caches", { match: cache });
+    const hooks = Array.from({ length: 4 }, () => renderHook(() =>
+      env.useCardImage("Alpha", { oracleId: A, ownerPrinting: owner })));
+    await waitFor(() => expect(hooks.every((hook) => hook.result.current.src === "/normal.jpg")).toBe(true));
+    expect(cache).toHaveBeenCalledTimes(2);
+    act(() => env.connectivity.setState({ forcedOffline: false }));
+    await act(async () => { main.resolve(undefined); catalog.resolve(undefined); });
+    await waitFor(() => expect(hooks.every((hook) => hook.result.current.src === "/owner.jpg")).toBe(true));
+    const requests = env.fetcher.mock.calls.filter(([url]) => String(url).includes("phase-owner-art"));
+    expect(requests.map(([url, init]) => [new URL(String(url)).pathname, init?.cache]).sort()).toEqual([
+      ["/scryfall-data.json", "no-store"], ["/scryfall-printings.json", "no-store"],
+    ]);
+    expect(env.service.resolveOracleIdSync("Alpha")).toBeNull();
+    expect(env.service.isCardDataResident()).toBe(false);
+    expect(env.service.hasAlternatePrintingsSync(A)).toBe(false);
+    expect(env.fetcher.mock.calls.filter(([url]) => String(url) === "/scryfall-printings.json")).toEqual([]);
+    for (const hook of hooks) hook.unmount();
+  });
+
+  it("does not begin network work after going offline with cache lookups held", async () => {
+    const env = await privateOwnerFixture();
+    const main = deferred<Response | undefined>();
+    const catalog = deferred<Response | undefined>();
+    const cache = vi.fn((url: string) => url.includes("printings") ? catalog.promise : main.promise);
+    vi.stubGlobal("caches", { match: cache });
+    const hook = renderHook(() => env.useCardImage("Alpha", { oracleId: A, ownerPrinting: owner }));
+    await waitFor(() => expect(hook.result.current.src).toBe("/normal.jpg"));
+    expect(cache).toHaveBeenCalledTimes(2);
+    act(() => env.connectivity.setState({ forcedOffline: true }));
+    const requestsBeforeRelease = env.fetcher.mock.calls.length;
+    await act(async () => { main.resolve(undefined); catalog.resolve(undefined); });
+    await settle();
+    expect(env.fetcher).toHaveBeenCalledTimes(requestsBeforeRelease);
+    expect(env.fetcher.mock.calls.filter(([url]) => String(url).includes("phase-owner-art"))).toEqual([]);
+    expect(hook.result.current.src).toBe("/normal.jpg");
+  });
+
+  it("coalesces concurrent offline-to-online reader escalation without retrying a failed online attempt", async () => {
+    const env = await setup();
+    const main = deferred<Response | undefined>();
+    const catalog = deferred<Response | undefined>();
+    const cache = vi.fn((url: string) => {
+      if (cache.mock.calls.length <= 2) return url.includes("printings") ? catalog.promise : main.promise;
+      return Promise.resolve(undefined);
+    });
+    vi.stubGlobal("caches", { match: cache });
+    env.fetcher.mockResolvedValue(new Response(null, { status: 503 }));
+    const readers = Array.from({ length: 8 }, () => env.service.createOwnerArtCatalogReader());
+    const input = { cardName: "Alpha", oracleId: A, faceIndex: 0 };
+    const offline = readers.map((reader) => reader.prepare({ ...input, offline: true }));
+    const online = readers.map((reader) => reader.prepare({ ...input, offline: false }));
+    main.resolve(undefined);
+    catalog.resolve(undefined);
+    await Promise.all([...offline, ...online]);
+    expect(env.fetcher).toHaveBeenCalledTimes(2);
+    expect(readers[0].read({ ...input, offline: false }).printings).toBeNull();
+    await settle();
+    expect(env.fetcher).toHaveBeenCalledTimes(2);
+    for (const reader of readers) reader.release();
+  });
+});
+
+describe("owner private resource retention", () => {
+  it.each(["unmount", "toggle"] as const)("keeps rapid warm reuse but refetches after the final %s grace expires", async (mode) => {
+    const env = await privateOwnerFixture();
+    vi.useFakeTimers();
+    const mount = () => renderHook(() => env.useCardImage("Alpha", { oracleId: A, ownerPrinting: owner }));
+    let hook = mount();
+    await settle();
+    expect(hook.result.current.src).toBe("/owner.jpg");
+    const privateCount = () => env.fetcher.mock.calls.filter(([url]) => String(url).includes("phase-owner-art")).length;
+    expect(privateCount()).toBe(2);
+    if (mode === "unmount") hook.unmount();
+    else act(() => env.preferences.setState({ showOwnerPrintings: false }));
+    await act(async () => { await vi.advanceTimersByTimeAsync(1999); });
+    if (mode === "unmount") hook = mount();
+    else act(() => env.preferences.setState({ showOwnerPrintings: true }));
+    expect(hook.result.current.src).toBe("/owner.jpg");
+    await settle();
+    expect(privateCount()).toBe(2);
+    if (mode === "unmount") hook.unmount();
+    else act(() => env.preferences.setState({ showOwnerPrintings: false }));
+    await act(async () => { await vi.advanceTimersByTimeAsync(2000); });
+    if (mode === "unmount") hook = mount();
+    else act(() => env.preferences.setState({ showOwnerPrintings: true }));
+    expect(hook.result.current.src).toBe("/normal.jpg");
+    await settle();
+    expect(hook.result.current.src).toBe("/owner.jpg");
+    expect(privateCount()).toBe(4);
+    expect(env.service.resolveOracleIdSync("Alpha")).toBeNull();
+  });
+
+  it("does not evict shared resources until the final mounted consumer leaves", async () => {
+    const env = await privateOwnerFixture();
+    vi.useFakeTimers();
+    const mount = () => renderHook(() => env.useCardImage("Alpha", { oracleId: A, ownerPrinting: owner }));
+    const first = mount();
+    const second = mount();
+    await settle();
+    expect(first.result.current.src).toBe("/owner.jpg");
+    expect(second.result.current.src).toBe("/owner.jpg");
+    first.unmount();
+    await act(async () => { await vi.advanceTimersByTimeAsync(2001); });
+    const third = mount();
+    expect(third.result.current.src).toBe("/owner.jpg");
+    await settle();
+    expect(env.fetcher.mock.calls.filter(([url]) => String(url).includes("phase-owner-art"))).toHaveLength(2);
+    second.unmount();
+    third.unmount();
+    await act(async () => { await vi.advanceTimersByTimeAsync(2000); });
+    const afterIdle = mount();
+    await settle();
+    expect(afterIdle.result.current.src).toBe("/owner.jpg");
+    expect(env.fetcher.mock.calls.filter(([url]) => String(url).includes("phase-owner-art"))).toHaveLength(4);
+  });
+
+  it("discards an in-flight catalog completion after disposal even within the idle grace", async () => {
+    const env = await privateOwnerFixture({ holdCatalog: true });
+    const original = env.fetcher.getMockImplementation()!;
+    let catalogsRequested = 0;
+    env.fetcher.mockImplementation(async (input, init) => {
+      if (String(input).includes("scryfall-printings") && ++catalogsRequested > 1) return json(env.data.catalog);
+      return original(input, init);
+    });
+    vi.useFakeTimers();
+    const mount = () => renderHook(() => env.useCardImage("Alpha", { oracleId: A, ownerPrinting: owner }));
+    const first = mount();
+    await settle();
+    expect(first.result.current.src).toBe("/normal.jpg");
+    expect(catalogsRequested).toBe(1);
+    first.unmount();
+    await act(async () => { env.gate.resolve(json(env.data.catalog)); });
+    await settle();
+    expect(env.ownerCalls()).toEqual([]);
+    const next = mount();
+    await settle();
+    expect(next.result.current.src).toBe("/owner.jpg");
+    expect(catalogsRequested).toBe(2);
+  });
+
+  it("evicts unused locale snapshots while retaining the active locale and rapid locale reuse", async () => {
+    const env = await privateOwnerFixture();
+    env.installed.delete(encodeCandidateKey("english_printing", [O1, 0, "full_card", "small"]));
+    env.installed.delete(encodeCandidateKey("english_printing", [O1, 0, "full_card", "normal"]));
+    env.data.catalog[A][0].faces[0].normal = `https://cards.scryfall.io/normal/front/1/1/${O1}.jpg`;
+    const original = env.fetcher.getMockImplementation()!;
+    env.fetcher.mockImplementation(async (input, init) => {
+      const match = String(input).match(/scryfall-images\.v2\.([a-z]+)\.json/);
+      if (match) return json({ [O1]: { id: O2, faces: [{
+        small: `/${match[1]}-small.jpg`, normal: `/${match[1]}-owner.jpg`, art_crop: `/${match[1]}-art.jpg`,
+      }] } });
+      return original(input, init);
+    });
+    env.preferences.setState({ language: "fr" });
+    vi.useFakeTimers();
+    const hook = renderHook(() => env.useCardImage("Alpha", { oracleId: A, ownerPrinting: owner }));
+    await settle();
+    await settle();
+    expect(hook.result.current.src).toBe("/fr-owner.jpg");
+    const frenchRequests = () => env.fetcher.mock.calls.filter(([url]) => String(url).includes("scryfall-images.v2.fr")).length;
+    expect(frenchRequests()).toBe(1);
+    act(() => env.preferences.setState({ language: "de" }));
+    await settle();
+    expect(hook.result.current.src).toBe("/de-owner.jpg");
+    await act(async () => { await vi.advanceTimersByTimeAsync(1999); });
+    act(() => env.preferences.setState({ language: "fr" }));
+    await settle();
+    expect(hook.result.current.src).toBe("/fr-owner.jpg");
+    expect(frenchRequests()).toBe(1);
+    act(() => env.preferences.setState({ language: "de" }));
+    await settle();
+    await act(async () => { await vi.advanceTimersByTimeAsync(2000); });
+    act(() => env.preferences.setState({ language: "fr" }));
+    await settle();
+    expect(hook.result.current.src).toBe("/fr-owner.jpg");
+    expect(frenchRequests()).toBe(2);
+    expect(env.service.isLocaleArtReady("fr")).toBe(false);
+  });
+});
+
+it("releases private resources when canonical authority withdraws admission without unmounting", async () => {
+  const replacement = catalogs().main;
+  const env = await setup({ offline: true, canonicalMain: () => json({ ...replacement, alpha: replacement[B] }) });
+  env.preferences.setState({ artOverrides: {}, artChain: [] });
+  env.install(encodeCandidateKey("name_face", ["alpha", "alpha", "full_card", "normal"]), "/normal.jpg", "Tk9STUFM", "deck_library");
+  env.installPrinting(O1, "/owner.jpg");
+  const cache = vi.fn(async (url: string) => cache.mock.calls.length <= 2
+    ? json(url.includes("printings") ? env.data.catalog : env.data.main) : undefined);
+  vi.stubGlobal("caches", { match: cache });
+  vi.useFakeTimers();
+  const hook = renderHook(() => env.useCardImage("Alpha", { ownerPrinting: owner }));
+  await settle();
+  expect(hook.result.current.src).toBe("/owner.jpg");
+  await act(async () => { await env.service.loadScryfallData(); });
+  await settle();
+  expect(hook.result.current.src).toBe("/normal.jpg");
+  await act(async () => { await vi.advanceTimersByTimeAsync(2000); });
+  const reader = env.service.createOwnerArtCatalogReader();
+  const input = { cardName: "Alpha", oracleId: A, offline: false, faceIndex: 0 };
+  await act(async () => { await reader.prepare(input); });
+  expect(reader.read(input).printings?.map((entry) => entry.id)).toContain(O1);
+  expect(env.fetcher.mock.calls.filter(([url]) => String(url).includes("phase-owner-art"))).toHaveLength(1);
+  expect(hook.result.current.src).toBe("/normal.jpg");
+  reader.release();
 });
 
