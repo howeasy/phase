@@ -139,6 +139,7 @@ function EmblemCard({ group, label }: { group: GroupedEmblem; label: string }) {
     faceIndex: imageLookup.faceIndex,
     oracleId: imageLookup.oracleId,
     faceName: imageLookup.faceName,
+    ownerPrinting: imageLookup.ownerPrinting,
   });
 
   // CR 114.4 + CR 602.1: an emblem can carry an activated ability (the Momir

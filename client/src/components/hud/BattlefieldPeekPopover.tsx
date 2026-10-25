@@ -167,6 +167,7 @@ export function BattlefieldPeekPopover({
               >
                 <CardImage
                   cardName={obj.name}
+                  ownerPrinting={obj.printing}
                   size="small"
                   isToken={obj.display_source === "Token"}
                   tokenFilters={obj.display_source === "Token" ? tokenFiltersForObject(obj) : undefined}

@@ -130,6 +130,8 @@ export function StackEntry({ entry, choiceObjectId = entry.id, groupedObjectIds,
     tokenImageRef: sourceTokenImageRef,
     oracleId: imageProps?.oracleId,
     faceName: imageProps?.faceName,
+    // A present engine row is authoritative, including null/omitted printing.
+    ownerPrinting: details ? details.printing : imageProps?.ownerPrinting,
     },
   );
 
