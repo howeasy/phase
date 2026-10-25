@@ -77,6 +77,8 @@ interface HostSetupProps {
    */
   onHost: (settings: HostSettings, serverUrl: string | null) => void | Promise<boolean>;
   onBack: () => void;
+  /** Parent-owned cancellation epoch, captured before AI preparation. */
+  preparationEpoch: Readonly<{ current: number }>;
   connectionMode: ConnectionMode;
   /** Host Game owns this choice; browsing and joining use either transport. */
   onConnectionModeChange: (mode: ConnectionMode) => void;
@@ -349,6 +351,7 @@ export function cappedMatchType(selected: MatchType, ceiling: MatchType | null):
 export function HostSetup({
   onHost,
   onBack,
+  preparationEpoch,
   connectionMode,
   onConnectionModeChange,
   hostDisabled = false,
@@ -886,6 +889,7 @@ export function HostSetup({
     // the belt-and-braces guard for a programmatic form submit.
     if (isResolvingFormat) return;
     const attempt = ++preparationAttempt.current;
+    const parentAttempt = preparationEpoch.current;
     setIsSubmitting(true);
     try {
       // The submission uses the chosen count; persistence keeps the format ceiling.
@@ -895,7 +899,9 @@ export function HostSetup({
       const submittedAiSeats: AiSeatConfig[] = suppliesDeck
         ? effectiveAiSeats.map((seat) => ({ ...seat, deck: suppliedAiDeckChoice().choice }))
         : await resolveCatalogAiSeats();
-      if (attempt !== preparationAttempt.current) return;
+      // A newer page action can supersede this still-mounted form.
+      // Fence both remembered selections and delegation into a new page attempt.
+      if (attempt !== preparationAttempt.current || parentAttempt !== preparationEpoch.current) return;
       const trimmedRoomName = roomName.trim();
       const resolvedRoomName =
         trimmedRoomName.length > 0

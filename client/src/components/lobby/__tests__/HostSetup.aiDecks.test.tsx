@@ -4,6 +4,8 @@ import userEvent from "@testing-library/user-event";
 import type * as Scryfall from "../../../services/scryfall";
 import { detectAndParseDeck } from "../../../services/deckParser";
 
+const testPreparationEpoch = { current: 0 };
+
 // Same WebStorage shadowing workaround as HostSetup.test.tsx.
 const localStorageItems = vi.hoisted(() => {
   const items = new Map<string, string>();
@@ -104,7 +106,7 @@ function rememberTwoAiSeats() {
 }
 
 function renderHostSetup(onHost = vi.fn().mockResolvedValue(false)) {
-  render(<HostSetup onHost={onHost} onBack={vi.fn()} connectionMode="server" onConnectionModeChange={vi.fn()} />);
+  render(<HostSetup preparationEpoch={testPreparationEpoch} onHost={onHost} onBack={vi.fn()} connectionMode="server" onConnectionModeChange={vi.fn()} />);
   return onHost;
 }
 
@@ -474,7 +476,7 @@ describe("HostSetup — per-seat AI decks", () => {
       });
       const onHost = vi.fn().mockResolvedValue(false);
       const onBack = vi.fn();
-      const view = render(<HostSetup onHost={onHost} onBack={onBack} connectionMode="server" onConnectionModeChange={vi.fn()} />);
+      const view = render(<HostSetup preparationEpoch={testPreparationEpoch} onHost={onHost} onBack={onBack} connectionMode="server" onConnectionModeChange={vi.fn()} />);
       await waitFor(() => expect(screen.getByRole("button", { name: "Host Game" })).toBeEnabled());
       const form = screen.getByRole("button", { name: "Host Game" }).closest("form")!;
       const remembered = useMultiplayerStore.getState().lastHostConfig;
@@ -487,7 +489,7 @@ describe("HostSetup — per-seat AI decks", () => {
         await waitFor(() => expect(art.face).toHaveBeenCalledTimes(4));
         if (stop === "back") await userEvent.click(screen.getByRole("button", { name: "Back" }));
         if (stop === "unmount") view.unmount();
-        if (stop === "replacement") view.rerender(<HostSetup onHost={onHost} onBack={onBack} connectionMode="p2p" onConnectionModeChange={vi.fn()} />);
+        if (stop === "replacement") view.rerender(<HostSetup preparationEpoch={testPreparationEpoch} onHost={onHost} onBack={onBack} connectionMode="p2p" onConnectionModeChange={vi.fn()} />);
       }
       await act(async () => { held.resolve(); });
       if (stop === "supersede") {

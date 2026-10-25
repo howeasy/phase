@@ -397,6 +397,7 @@ function MultiplayerPageContent({
   // the choice, then either execute the pending host/join action or return
   // to wherever the user triggered the "Change" affordance from.
   const handleSelectDeck = (name: string) => {
+    preparationAttempt.current += 1;
     setActiveDeckName(name);
     localStorage.setItem(ACTIVE_DECK_KEY, name);
 
@@ -418,6 +419,8 @@ function MultiplayerPageContent({
   };
 
   const handleEditDeck = useCallback((name: string) => {
+    preparationAttempt.current += 1;
+    setBrokerOfflinePrompt(null);
     // A Discord host flow must come back through the bot-link arrival: `view`
     // and `hostSeed` are component state, and the deck-builder route unmounts
     // this page.
@@ -1282,6 +1285,8 @@ function MultiplayerPageContent({
               </button>
               <button
                 onClick={() => {
+                  preparationAttempt.current += 1;
+                  setBrokerOfflinePrompt(null);
                   setDeckSelectReturn(view as MultiplayerView);
                   setPendingAction(null);
                   setView("deck-select");
@@ -1306,6 +1311,9 @@ function MultiplayerPageContent({
             </span>
             <button
               onClick={() => {
+                preparationAttempt.current += 1;
+                setBrokerOfflinePrompt(null);
+                setPendingAction(null);
                 setDeckSelectReturn(view as MultiplayerView);
                 setView("deck-select");
               }}
@@ -1346,6 +1354,7 @@ function MultiplayerPageContent({
             // mounted, so the seed is applied once, at mount.
             key={hostSeed?.code ?? "manual"}
             seed={hostSeed ?? undefined}
+            preparationEpoch={preparationAttempt}
             onHost={handleHostSetupComplete}
             onBack={handleBack}
             connectionMode={connectionMode}
