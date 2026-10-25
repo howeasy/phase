@@ -5,6 +5,7 @@ use rand::Rng;
 use rand::SeedableRng;
 use rand_chacha::ChaCha20Rng;
 
+use engine::types::card_printing::DeckPrinting;
 use engine::types::player::PlayerId;
 
 use crate::pack_source::PackSource;
@@ -438,7 +439,8 @@ pub fn apply(
             seat,
             main_deck,
             commanders,
-        } => apply_submit_deck(session, seat, main_deck, commanders),
+            printings,
+        } => apply_submit_deck(session, seat, main_deck, commanders, printings),
         DraftAction::GeneratePairings => apply_generate_pairings(session),
         DraftAction::ReportMatchResult {
             match_id,
@@ -1321,6 +1323,7 @@ fn apply_submit_deck(
     seat: u8,
     main_deck: Vec<String>,
     commanders: Vec<String>,
+    printings: Vec<DeckPrinting>,
 ) -> Result<Vec<DraftDelta>, DraftError> {
     if session.status != DraftStatus::Deckbuilding {
         return Err(DraftError::InvalidTransition {
@@ -1389,6 +1392,8 @@ fn apply_submit_deck(
             // CR 903.3: snapshotted, not re-derived. A later pool change
             // must never silently re-designate this seat's commander(s).
             commanders,
+            // Replace names and owner choices together, including empty clearing.
+            printings,
         },
     );
 
@@ -1442,6 +1447,73 @@ mod tests {
     // UNION (`draft_set_concessions_for`); these rows assert the union against
     // its parts, so they need the per-set answer too.
     use engine::game::deck_validation::draft_set_concessions;
+
+    #[test]
+    fn submitted_printings_replace_atomically_and_clear_on_empty_resubmission() {
+        use engine::types::card_printing::{CardPrinting, DeckSection};
+        let (mut session, _) = test_session(2);
+        session.status = DraftStatus::Deckbuilding;
+        let submission = |name: &str, set: Option<&str>| DraftAction::SubmitDeck {
+            seat: 0,
+            main_deck: vec![name.into(); 40],
+            commanders: Vec::new(),
+            printings: set
+                .into_iter()
+                .map(|set| DeckPrinting {
+                    section: DeckSection::MainDeck,
+                    name: name.into(),
+                    count: 2,
+                    printing: CardPrinting {
+                        set_code: set.into(),
+                        collector_number: "001".into(),
+                    },
+                })
+                .collect(),
+        };
+        for (name, set) in [
+            ("Plains", Some("lea")),
+            ("Island", Some("leb")),
+            ("Island", Some("2ed")),
+            ("Island", None),
+        ] {
+            let action = submission(name, set);
+            let DraftAction::SubmitDeck {
+                main_deck,
+                commanders,
+                printings,
+                ..
+            } = action.clone()
+            else {
+                unreachable!()
+            };
+            let deltas = apply(&mut session, action, None).unwrap();
+            assert!(deltas.contains(&DraftDelta::DeckSubmitted { seat: 0 }));
+            assert_eq!(session.status, DraftStatus::Deckbuilding);
+            assert_eq!(
+                session.submitted_decks[&PlayerId(0)],
+                DraftDeckSubmission {
+                    seat: 0,
+                    main_deck,
+                    commanders,
+                    printings
+                },
+                "accepted resubmission replaces names and printings, including empty clearing"
+            );
+        }
+        apply(&mut session, submission("Plains", Some("lea")), None).unwrap();
+        let before = session.submitted_decks.clone();
+        assert!(apply(&mut session, submission("Not in pool", Some("bad")), None).is_err());
+        assert_eq!(
+            session.submitted_decks, before,
+            "invalid names preserve the prior submission"
+        );
+        session.status = DraftStatus::Pairing;
+        assert!(apply(&mut session, submission("Island", None), None).is_err());
+        assert_eq!(
+            session.submitted_decks, before,
+            "invalid transition preserves the prior submission"
+        );
+    }
 
     #[test]
     fn cube_booster_pool_captures_original_entries_before_picks_and_restores() {
@@ -1923,6 +1995,7 @@ mod tests {
                 seat: 0,
                 main_deck,
                 commanders: Vec::new(),
+                printings: Vec::new(),
             },
             None,
         )
@@ -1957,6 +2030,7 @@ mod tests {
                 seat: 0,
                 main_deck,
                 commanders: Vec::new(),
+                printings: Vec::new(),
             },
             None,
         );
@@ -2015,6 +2089,7 @@ mod tests {
                 seat: 0,
                 main_deck,
                 commanders: Vec::new(),
+                printings: Vec::new(),
             },
             None,
         )
@@ -2059,6 +2134,7 @@ mod tests {
                 seat: 0,
                 main_deck: make_deck(),
                 commanders: Vec::new(),
+                printings: Vec::new(),
             },
             None,
         )
@@ -2071,6 +2147,7 @@ mod tests {
                 seat: 1,
                 main_deck: make_deck(),
                 commanders: Vec::new(),
+                printings: Vec::new(),
             },
             None,
         )
@@ -2146,6 +2223,7 @@ mod tests {
                 // so `CommanderNotInDeck` cannot fire. The row's subject is
                 // unchanged -- only what makes a Commander deck legal is.
                 commanders: vec!["Card 0".to_string()],
+                printings: Vec::new(),
             },
             None,
         )
@@ -2251,6 +2329,7 @@ mod tests {
                 // so `CommanderNotInDeck` cannot fire. The row's subject is
                 // unchanged -- only what makes a Commander deck legal is.
                 commanders: vec!["Card 0".to_string()],
+                printings: Vec::new(),
             },
             None,
         )
@@ -2274,6 +2353,7 @@ mod tests {
                 // so `CommanderNotInDeck` cannot fire. The row's subject is
                 // unchanged -- only what makes a Commander deck legal is.
                 commanders: vec!["Card 0".to_string()],
+                printings: Vec::new(),
             },
             None,
         )
@@ -2337,6 +2417,7 @@ mod tests {
                 seat: 0,
                 main_deck: make_deck(),
                 commanders: Vec::new(),
+                printings: Vec::new(),
             },
             None,
         )
@@ -2351,6 +2432,7 @@ mod tests {
                 seat: 1,
                 main_deck: make_deck(),
                 commanders: Vec::new(),
+                printings: Vec::new(),
             },
             None,
         )
@@ -2375,6 +2457,7 @@ mod tests {
                 seat: 0,
                 main_deck: vec![],
                 commanders: Vec::new(),
+                printings: Vec::new(),
             },
             None,
         );
@@ -3966,6 +4049,7 @@ mod tests {
                 seat: 0,
                 main_deck: deck_with(2),
                 commanders: designations.clone(),
+                printings: Vec::new(),
             },
             None,
         )
@@ -3980,6 +4064,7 @@ mod tests {
                 seat: 0,
                 main_deck: deck_with(3),
                 commanders: designations,
+                printings: Vec::new(),
             },
             None,
         );
@@ -4005,6 +4090,7 @@ mod tests {
                 seat: 0,
                 main_deck,
                 commanders: vec![filler.card_name.clone()],
+                printings: Vec::new(),
             },
             None,
         )
@@ -4035,6 +4121,7 @@ mod tests {
                 seat: 0,
                 main_deck: main_deck.clone(),
                 commanders: over_bound,
+                printings: Vec::new(),
             },
             None,
         );
@@ -4062,6 +4149,7 @@ mod tests {
                 seat: 0,
                 main_deck,
                 commanders: at_bound,
+                printings: Vec::new(),
             },
             None,
         )
@@ -4087,6 +4175,7 @@ mod tests {
                 seat: 0,
                 main_deck: main_deck.clone(),
                 commanders: vec!["Card 999".to_string()],
+                printings: Vec::new(),
             },
             None,
         );
@@ -4108,6 +4197,7 @@ mod tests {
                 seat: 0,
                 main_deck,
                 commanders: vec!["Card 0".to_string()],
+                printings: Vec::new(),
             },
             None,
         )
@@ -4282,6 +4372,7 @@ mod tests {
                 seat: 0,
                 main_deck: deck.clone(),
                 commanders: Vec::new(),
+                printings: Vec::new(),
             },
             None,
         )
@@ -4307,6 +4398,7 @@ mod tests {
                     seat: 0,
                     main_deck: deck.clone(),
                     commanders: Vec::new(),
+                    printings: Vec::new(),
                 },
                 None,
             )
@@ -4340,6 +4432,7 @@ mod tests {
                 seat: 0,
                 main_deck: deck.clone(),
                 commanders: Vec::new(),
+                printings: Vec::new(),
             },
             None,
         )
@@ -4368,6 +4461,7 @@ mod tests {
                 seat: 0,
                 main_deck: deck,
                 commanders: vec!["Card 0".to_string()],
+                printings: Vec::new(),
             },
             None,
         )
@@ -4388,6 +4482,7 @@ mod tests {
                 seat: 0,
                 main_deck: pooled_deck(40),
                 commanders: Vec::new(),
+                printings: Vec::new(),
             },
             None,
         )
@@ -4408,6 +4503,7 @@ mod tests {
                     "Card 1".to_string(),
                     "Card 2".to_string(),
                 ],
+                printings: Vec::new(),
             },
             None,
         )

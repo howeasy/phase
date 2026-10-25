@@ -118,6 +118,7 @@ impl TournamentHarness {
                     seat: seat as u8,
                     main_deck,
                     commanders: Vec::new(),
+                    printings: Vec::new(),
                 },
                 Some(&self.source),
             );
