@@ -714,6 +714,40 @@ describe("owner printing remaining carrier surfaces (group 2)", () => {
     }
   });
 
+  it("F1 keeps a catalog hover ownerless while explicit game previews follow their object", async () => {
+    const env = await setup({ holdCatalog: true });
+    const object = card();
+    env.seed([object]);
+    env.preferences.setState({ cardPreviewMode: "follow" });
+    env.ui.setState({ inspectedObjectId: object.id, previewSticky: true });
+    const { HoverCardPreview } = await import("../HoverCardPreview.tsx");
+    const { GameCardPreview } = await import("../GameCardPreview.tsx");
+    const catalog = render(<HoverCardPreview mode="follow" hoverDelayMs={0} card={{
+      name: "Alpha", scryfallId: VIEWER, sourcePrinting: { setCode: "pin", collectorNumber: "3" },
+    }} />);
+    const linked = render(<GameCardPreview />);
+    const expectCatalog = async () => {
+      await waitFor(() => expect(within(catalog.container).getByRole("img", { name: "Alpha" }))
+        .toHaveAttribute("src", URL_V));
+    };
+    await expectCatalog();
+    await expectImage(linked.container, URL_V);
+    await act(async () => env.admit());
+    await expectImage(linked.container, URL_A);
+    await expectCatalog();
+    for (const show of [false, true]) {
+      act(() => env.preferences.getState().setShowOwnerPrintings(show));
+      await expectImage(linked.container, show ? URL_A : URL_V);
+      await expectCatalog();
+    }
+    const current = env.store.getState().gameState!;
+    act(() => env.store.setState({ gameState: { ...current, objects: { ...current.objects,
+      [object.id]: { ...object, printing: printingB },
+    } } }));
+    await expectImage(linked.container, URL_B);
+    await expectCatalog();
+  });
+
   it.each([false, true])("V10 uses physical owner printing for a real preview (mobile=%s)", async (mobile) => {
     const env = await setup({ dfc: true });
     observation.mobile = mobile;

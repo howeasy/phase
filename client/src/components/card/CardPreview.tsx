@@ -310,7 +310,8 @@ function CardPreviewInner({
   const obj = useGameStore((s) =>
     previewObjectId != null ? s.gameState?.objects[previewObjectId] ?? null : null,
   );
-  const ownerPrinting = obj ? cardImageLookup(obj).ownerPrinting : undefined;
+  // Catalog previews may inherit legacy inspection metadata, but not owner art.
+  const ownerPrinting = objectId !== undefined && obj ? cardImageLookup(obj).ownerPrinting : undefined;
   // `card_report` context needs a live, participating game: `obj == null` (deck
   // builder) has no zone and a possibly-stale `gameMode`, `gameId == null` means
   // no game at all, and spectators don't report — building no context in these
