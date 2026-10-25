@@ -2,6 +2,15 @@ import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type * as WasmAdapter from "../../adapter/wasm-adapter";
+import type * as Scryfall from "../../services/scryfall";
+import { detectAndParseDeck } from "../../services/deckParser";
+import type * as PhaseSocket from "../../services/openPhaseSocket";
+import type * as Connection from "../../network/connection";
+import type * as Broker from "../../services/brokerClient";
+import { P2PHostAdapter } from "../../adapter/p2p-adapter";
+import { submitParsedDeck } from "../../services/deckSubmission";
+import type { ParsedDeck } from "../../services/deckParser";
 
 /** Render the real page and store, recording the hosting boundary calls. */
 const harness = vi.hoisted(() => ({
@@ -13,6 +22,9 @@ const harness = vi.hoisted(() => ({
    * executing — which is a fixture artefact, not the behaviour under test. */
   hostSetup: null as Record<string, unknown> | null,
   lobby: null as Record<string, unknown> | null,
+  deckText: "Deck\n1 Island",
+  deckExtras: {} as Partial<ParsedDeck>,
+  chrome: null as Record<string, unknown> | null,
 }));
 
 /**
@@ -48,7 +60,9 @@ vi.mock("../../components/lobby/LobbyView", () => ({
   },
 }));
 
-vi.mock("../../components/chrome/ScreenChrome", () => ({ ScreenChrome: () => null }));
+vi.mock("../../components/chrome/ScreenChrome", () => ({
+  ScreenChrome: (props: Record<string, unknown>) => { harness.chrome = props; return null; },
+}));
 vi.mock("../../components/chrome/ShellContext", () => ({ useInShell: () => false }));
 vi.mock("../../components/menu/MenuParticles", () => ({ MenuParticles: () => null }));
 vi.mock("../../components/menu/MyDecks", () => ({ MyDecks: () => null }));
@@ -77,13 +91,48 @@ vi.mock("../../stores/gameStore", () => ({
 
 vi.mock("../../constants/storage", () => ({
   ACTIVE_DECK_KEY: "active-deck",
-  loadActiveDeck: () => ({ main: ["Island"], sideboard: [] }),
+  loadActiveDeck: () => ({ ...detectAndParseDeck(harness.deckText), ...harness.deckExtras }),
   loadActiveDeckBracket: () => null,
   touchDeckPlayed: vi.fn(),
 }));
 
-vi.mock("../../services/deckParser", () => ({
-  expandParsedDeck: () => ({ main_deck: ["Island"], sideboard: [], commander: [] }),
+const art = vi.hoisted(() => ({ face: vi.fn(), printings: vi.fn(), bounds: vi.fn() }));
+vi.mock("../../adapter/wasm-adapter", async (importOriginal) => ({
+  ...await importOriginal<typeof WasmAdapter>(),
+  getSharedAdapter: () => ({ getCardFaceData: art.face, checkDeckPrintingsBounds: art.bounds }),
+}));
+vi.mock("../../services/scryfall", async (importOriginal) => ({
+  ...await importOriginal<typeof Scryfall>(),
+  getCardPrintings: art.printings,
+}));
+
+const transport = vi.hoisted(() => ({ send: vi.fn(), apply: vi.fn(), register: vi.fn() }));
+vi.mock("../../services/openPhaseSocket", async (importOriginal) => ({
+  ...await importOriginal<typeof PhaseSocket>(),
+  openPhaseSocket: vi.fn(async () => ({
+    serverInfo: { mode: "Full", protocolVersion: 14 },
+    ws: { readyState: 1, send: transport.send, close: vi.fn(), addEventListener: vi.fn(), removeEventListener: vi.fn() },
+  })),
+}));
+vi.mock("../../network/connection", async (importOriginal) => ({
+  ...await importOriginal<typeof Connection>(),
+  hostRoom: vi.fn(async () => ({
+    peer: { id: "test-peer", destroy: vi.fn() }, destroy: vi.fn(), roomCode: "ABCDE", onGuestConnected: vi.fn(),
+  })),
+}));
+vi.mock("../../services/brokerClient", async (importOriginal) => ({
+  ...await importOriginal<typeof Broker>(),
+  openBrokerClient: vi.fn(async () => ({
+    registerHost: transport.register, unregister: vi.fn(async () => undefined), close: vi.fn(), updateMetadata: vi.fn(),
+  })),
+}));
+vi.mock("../../adapter/p2p-adapter", () => ({
+  P2PHostAdapter: vi.fn().mockImplementation(function () {
+    return {
+      onEvent: vi.fn(), initialize: vi.fn(async () => undefined), applySeatMutation: transport.apply,
+      getPlayerSlots: () => [], dispose: vi.fn(),
+    };
+  }),
 }));
 
 vi.mock("../../services/deckCompatibility", () => ({
@@ -105,6 +154,11 @@ import { MultiplayerPage } from "../MultiplayerPage";
 import { useMultiplayerStore } from "../../stores/multiplayerStore";
 import { LOBBY_PROTOCOL_VERSION, PROTOCOL_VERSION } from "../../adapter/ws-adapter";
 import multiplayerEn from "../../i18n/locales/en/multiplayer.json";
+import { usePreferencesStore } from "../../stores/preferencesStore";
+const realHosting = {
+  startHosting: useMultiplayerStore.getState().startHosting,
+  startP2PHostingSession: useMultiplayerStore.getState().startP2PHostingSession,
+};
 
 /** The browsing anchor. */
 const URL_A = "wss://anchor.example/ws";
@@ -123,13 +177,21 @@ function renderPage(entry = "/multiplayer") {
   );
 }
 
+// The client's ES2021 lib has no Promise.withResolvers.
+function heldMetadata() {
+  let resolve!: (face: { scryfall_oracle_id: string }) => void;
+  const promise = new Promise<{ scryfall_oracle_id: string }>((done) => { resolve = done; });
+  return { promise, resolve };
+}
+
 /** Submit host-setup exactly as the real form does: the settings payload plus
  * the server this submit chose (`null` in P2P — see `HostSetup`'s prop doc). */
 async function submitHostSetup(
   serverUrl: string | null,
   overrides: Record<string, unknown> = {},
+  heldPreparation = false,
 ): Promise<void> {
-  await act(async () => {
+  const submit = async () => {
     await (harness.hostSetup!.onHost as (
       settings: unknown,
       serverUrl: string | null,
@@ -152,12 +214,26 @@ async function submitHostSetup(
       },
       serverUrl,
     );
-  });
+  };
+  if (heldPreparation) await submit();
+  else await act(submit);
 }
 
 describe("MultiplayerPage host server", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    harness.deckText = "Deck\n1 Island";
+    harness.deckExtras = {};
+    usePreferencesStore.setState({ artChain: [], artOverrides: {} });
+    art.face.mockResolvedValue({ scryfall_oracle_id: "island" });
+    art.printings.mockResolvedValue([
+      { id: "a", set: "aaa", collector_number: "001", released_at: "2000-01-01", frame_effects: [], faces: [] },
+      { id: "b", set: "bbb", collector_number: "002", released_at: "2001-01-01", frame_effects: [], faces: [] },
+    ]);
+    art.bounds.mockResolvedValue(undefined);
+    transport.apply.mockResolvedValue(undefined);
+    transport.register.mockResolvedValue({ gameCode: "ABCDE", playerToken: "token" });
+    useMultiplayerStore.setState({ hostingStatus: "idle", hostGameCode: null, hostSession: null, playerSlots: [] });
     harness.hostSetup = null;
     harness.lobby = null;
     localStorage.setItem("active-deck", "Test Deck");
@@ -195,6 +271,7 @@ describe("MultiplayerPage host server", () => {
 
   afterEach(() => {
     cleanup();
+    useMultiplayerStore.getState().cancelHosting();
     vi.unstubAllGlobals();
   });
 
@@ -370,4 +447,141 @@ describe("MultiplayerPage host server", () => {
     expect(showToast).toHaveBeenCalledWith("Couldn't connect to the dedicated multiplayer server.");
   });
 
+  describe("owner submission handovers (V6)", () => {
+    const expected = [{ section: "main_deck", name: "Island", count: 2, printing: { set_code: "aaa", collector_number: "001" } }];
+
+    it("preserves the route's existing section loss and freezes the deck across a later broker probe", async () => {
+      harness.deckText = "Deck\n2 Island (AAA) 001\nSideboard\n1 Forest";
+      harness.deckExtras = {
+        commander: ["Commander"], planar_deck: ["Plane"], scheme_deck: ["Scheme"],
+        companion: "Companion", signature_spell: ["Spell"], sticker_sheets: ["Stickers"],
+      };
+      useMultiplayerStore.setState(realHosting);
+      let release!: (socket: unknown) => void;
+      const probe = new Promise((resolve) => { release = resolve; });
+      ensureSubscriptionSocket.mockReturnValueOnce(probe);
+      renderPage("/multiplayer?view=host-setup");
+      const pending = submitHostSetup(URL_B, {}, true);
+      await waitFor(() => expect(ensureSubscriptionSocket).toHaveBeenCalledWith(URL_B));
+      expect(art.bounds).toHaveBeenCalledOnce();
+      expect(transport.send).not.toHaveBeenCalled();
+      act(() => usePreferencesStore.setState({ artOverrides: { island: { scryfallId: "b", setCode: "bbb", collectorNumber: "002" } } }));
+      await act(async () => { release({ serverInfo: { mode: "Full" } }); await pending; });
+      await waitFor(() => expect(transport.send).toHaveBeenCalledOnce());
+      const frame = JSON.parse(transport.send.mock.calls[0][0]);
+      expect(frame.data.deck).toEqual({
+        main_deck: ["Island", "Island"], sideboard: ["Forest"], commander: ["Commander"],
+        planar_deck: ["Plane"], scheme_deck: ["Scheme"], bracket_tier: "core", printings: expected,
+      });
+    });
+
+    it("leaves the all-AI shortcut selection-only for the provider's later submission", async () => {
+      harness.deckText = "Deck\n2 Island (AAA) 001";
+      renderPage("/multiplayer?view=host-setup");
+      await submitHostSetup(URL_B, {
+        aiSeats: [{ seatIndex: 1, difficulty: "Hard", deckName: "Chosen", deckId: "saved:Chosen" }],
+      });
+      expect(harness.navigate).toHaveBeenCalledWith(expect.stringContaining("mode=ai"));
+      expect(art.face).not.toHaveBeenCalled();
+      expect(startHosting).not.toHaveBeenCalled();
+      expect(startP2PHostingSession).not.toHaveBeenCalled();
+    });
+
+    it.each(["server", "p2p", "offline"] as const)("carries the real prepared owner and AI choices through %s hosting", async (route) => {
+      harness.deckText = "Deck\n2 Island (AAA) 001";
+      const ai = await submitParsedDeck(detectAndParseDeck("Deck\n1 Island (BBB) 002"));
+      useMultiplayerStore.setState(realHosting);
+      if (route === "offline") ensureSubscriptionSocket.mockResolvedValue(null);
+      renderPage("/multiplayer?view=host-setup");
+      await submitHostSetup(route === "server" ? URL_B : null, {
+        formatConfig: { format: "Commander", max_players: 3 },
+        aiSeats: [{ seatIndex: 1, difficulty: "Hard", deckName: null, deck: { type: "DeckList", data: ai } }],
+      });
+      if (route === "offline") {
+        expect(P2PHostAdapter).not.toHaveBeenCalled();
+        await userEvent.click(screen.getByRole("button", { name: "Continue without lobby" }));
+      }
+      if (route === "server") {
+        await waitFor(() => expect(transport.send).toHaveBeenCalled());
+        const frame = JSON.parse(transport.send.mock.calls[0][0]);
+        expect(frame.data.deck).toEqual({
+          main_deck: ["Island", "Island"], sideboard: [], commander: [], planar_deck: [], scheme_deck: [],
+          bracket_tier: "core", printings: expected,
+        });
+        expect(frame.data.ai_seats[0].deck.data.printings).toEqual([
+          { section: "main_deck", name: "Island", count: 1, printing: { set_code: "bbb", collector_number: "002" } },
+        ]);
+      } else {
+        await waitFor(() => expect(P2PHostAdapter).toHaveBeenCalledOnce());
+        expect(vi.mocked(P2PHostAdapter).mock.calls[0][0]).toMatchObject({ player: { printings: expected } });
+        expect(transport.apply).toHaveBeenCalledWith({
+          type: "SetKind", data: { seatIndex: 1, kind: { type: "Ai", data: { difficulty: "Hard", deck: { type: "DeckList", data: ai } } } },
+        });
+        expect(transport.register).toHaveBeenCalledTimes(route === "offline" ? 0 : 1);
+      }
+    });
+
+    it.each(["server", "p2p", "offline"] as const)("binds %s preferences before held metadata and preserves the captured payload", async (route) => {
+      harness.deckText = "Deck\n2 Island (AAA) 001";
+      renderPage("/multiplayer?view=host-setup");
+      if (route === "offline") {
+        ensureSubscriptionSocket.mockResolvedValue(null);
+        await submitHostSetup(null);
+      }
+      const held = heldMetadata();
+      art.face.mockClear().mockReturnValueOnce(held.promise);
+      const pending = route === "offline"
+        ? userEvent.click(screen.getByRole("button", { name: "Continue without lobby" }))
+        : submitHostSetup(route === "server" ? URL_B : null, {}, true);
+      await waitFor(() => expect(art.face).toHaveBeenCalled());
+      expect(startHosting).not.toHaveBeenCalled();
+      expect(startP2PHostingSession).not.toHaveBeenCalled();
+      act(() => usePreferencesStore.setState({ artOverrides: { island: { scryfallId: "b", setCode: "bbb", collectorNumber: "002" } } }));
+      await act(async () => { held.resolve({ scryfall_oracle_id: "island" }); await pending; });
+      const send = route === "server" ? startHosting : startP2PHostingSession;
+      await waitFor(() => expect(send).toHaveBeenCalledOnce());
+      expect(send.mock.calls[0][1].printings).toEqual(expected);
+      expect(harness.navigate).toHaveBeenCalledWith("/");
+    });
+
+    it.each(["server", "p2p", "offline"] as const)("drops stale %s preparation on Back, unmount and supersession; the live successor sends", async (route) => {
+      for (const stop of ["back", "unmount", "supersede"] as const) {
+        startHosting.mockClear();
+        startP2PHostingSession.mockClear();
+        harness.navigate.mockClear();
+        harness.deckText = "Deck\n2 Island (AAA) 001";
+        const rendered = renderPage("/multiplayer?view=host-setup");
+        if (route === "offline") {
+          ensureSubscriptionSocket.mockResolvedValue(null);
+          await submitHostSetup(null);
+        }
+        const held = heldMetadata();
+        art.face.mockClear().mockReturnValueOnce(held.promise);
+        const pending = route === "offline"
+          ? userEvent.click(screen.getByRole("button", { name: "Continue without lobby" }))
+          : submitHostSetup(route === "server" ? URL_B : null, {}, true);
+        await waitFor(() => expect(art.face).toHaveBeenCalled());
+        if (stop === "back") act(() => (harness.chrome!.onBack as () => void)());
+        if (stop === "unmount") rendered.unmount();
+        if (stop === "supersede") {
+          ensureSubscriptionSocket.mockResolvedValue({ serverInfo: { mode: "Full" } });
+          harness.deckText = "Deck\n1 Island (BBB) 002";
+          await submitHostSetup(URL_B);
+        }
+        const sent = startHosting.mock.calls.length + startP2PHostingSession.mock.calls.length;
+        const navigated = harness.navigate.mock.calls.length;
+        await act(async () => { held.resolve({ scryfall_oracle_id: "island" }); await pending; });
+        expect(startHosting.mock.calls.length + startP2PHostingSession.mock.calls.length).toBe(sent);
+        expect(harness.navigate).toHaveBeenCalledTimes(navigated);
+        cleanup();
+        ensureSubscriptionSocket.mockResolvedValue({ serverInfo: { mode: "Full" } });
+        renderPage("/multiplayer?view=host-setup");
+        await submitHostSetup(URL_B);
+        expect(startHosting.mock.calls[startHosting.mock.calls.length - 1][1].printings).toEqual(stop === "supersede"
+          ? [{ section: "main_deck", name: "Island", count: 1, printing: { set_code: "bbb", collector_number: "002" } }]
+          : expected);
+        cleanup();
+      }
+    });
+  });
 });

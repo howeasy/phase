@@ -53,7 +53,7 @@ import {
 } from "../../services/customFormats";
 import { getHostAdapter } from "../../adapter/wasm-adapter";
 import { isFormatConfigShape } from "../../adapter/format-config-shape";
-import { expandParsedDeck } from "../../services/deckParser";
+import { captureSubmissionArtPreferences, submitParsedDeck } from "../../services/deckSubmission";
 import { bracketToEngineTier } from "../../types/bracketEstimate";
 import { AiDeckPicker } from "../menu/AiDeckPicker";
 import { RandomPoolTree } from "../menu/RandomPoolTree";
@@ -504,6 +504,11 @@ export function HostSetup({
   const [aiSeats, setAiSeats] = useState<AiSeatConfig[]>(remembered?.aiSeats ?? []);
   const [startWhenFull, setStartWhenFull] = useState(remembered?.startWhenFull ?? true);
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const preparationAttempt = useRef(0);
+  useEffect(() => {
+    setIsSubmitting(false);
+    return () => { preparationAttempt.current += 1; };
+  }, [seed, connectionMode]);
 
   // ── Axis A: saved custom formats (client-persisted) ────────────────────
   // `savedCustomFormatId` is what identifies WHICH saved definition is active:
@@ -850,7 +855,8 @@ export function HostSetup({
    *  from the single-player pool preferences, pinned seats keep their pick. The
    *  seat's `deckId` stays the user's selection (Random remains Random) so the
    *  all-AI local start can still apply its own Random draw and cEDH fail-fast. */
-  const resolveCatalogAiSeats = (): AiSeatConfig[] => {
+  const resolveCatalogAiSeats = async (): Promise<AiSeatConfig[]> => {
+    const snapshot = captureSubmissionArtPreferences();
     const ordered = [...effectiveAiSeats].sort((a, b) => a.seatIndex - b.seatIndex);
     const requestedDeckIds = ordered.map((seat) => seat.deckId ?? AI_DECK_RANDOM);
     const picks = pickAiSeatDecks({
@@ -863,14 +869,14 @@ export function HostSetup({
       selectedFormat: formatConfig.format,
       poolSelection: aiPoolSelection,
     });
-    return ordered.map((seat, i) => ({
+    return Promise.all(ordered.map(async (seat, i) => ({
       ...seat,
       deckId: requestedDeckIds[i],
       deck: {
         type: "DeckList" as const,
-        data: { ...expandParsedDeck(picks[i].deck), bracket_tier: bracketToEngineTier(picks[i].bracket) },
+        data: { ...await submitParsedDeck(picks[i].deck, snapshot), bracket_tier: bracketToEngineTier(picks[i].bracket) },
       },
-    }));
+    })));
   };
 
   const handleHost = async () => {
@@ -879,55 +885,42 @@ export function HostSetup({
     // (valid) selection. `submitDisabled` already blocks the button; this is
     // the belt-and-braces guard for a programmatic form submit.
     if (isResolvingFormat) return;
+    const attempt = ++preparationAttempt.current;
     setIsSubmitting(true);
-    // `finalConfig` is the submission payload — `max_players` here is the
-    // user's chosen count, not the format ceiling. Do NOT mirror this
-    // into the store: the store tracks the format's invariants (so the
-    // deck picker can filter), and overwriting `max_players` there would
-    // collapse the picker on re-entry. The live mirror effect above
-    // keeps the store in sync with the format itself.
-    const finalConfig = { ...formatConfig, max_players: playerCount };
-    // Resolve every seat to a concrete catalog deck here: the server's own
-    // Random draws from a different (starter-deck) pool, so Random must not
-    // reach it. Supplied-deck formats submit the empty supplied deck instead.
-    const submittedAiSeats: AiSeatConfig[] = suppliesDeck
-      ? effectiveAiSeats.map((seat) => ({ ...seat, deck: suppliedAiDeckChoice().choice }))
-      : resolveCatalogAiSeats();
-    const trimmedRoomName = roomName.trim();
-    // Default to the placeholder value when the field is blank so the
-    // lobby title matches what the user was shown. Falls back to null
-    // (server uses host name) only if the user has no display name set.
-    const resolvedRoomName =
-      trimmedRoomName.length > 0
-        ? trimmedRoomName
-        : displayName
-          ? `${displayName}'s table`
-          : null;
-    // Remember the chosen settings so the next host session restores them
-    // instead of resetting to defaults. Persist the format's own config (with
-    // its true `max_players` ceiling), not `finalConfig` — the latter's
-    // `max_players` is the chosen player count and would cap the slider on
-    // restore. Room name and password are intentionally not persisted. A
-    // Discord game's pinned, private settings must not become the defaults.
-    if (!seed) {
-      rememberHostConfig({
-        format: selectedFormat,
-        formatConfig,
-        // Persisted so rehydration can resolve WHICH saved definition this was —
-        // `selectedFormat` is "Custom:0" for every Axis-A save and cannot.
-        savedCustomFormatId,
-        playerCount,
-        matchType,
-        loopDetection,
-        isPublic,
-        startWhenFull,
-        // Ranked rating updates aren't implemented in the engine — the room is
-        // always casual. The transport field is retained for protocol parity.
-        ranked: false,
-        aiSeats: effectiveAiSeats,
-      });
-    }
     try {
+      // The submission uses the chosen count; persistence keeps the format ceiling.
+      const finalConfig = { ...formatConfig, max_players: playerCount };
+      // Resolve Random locally: the server uses a different starter-deck pool.
+      // The batch captures one art authority, while remembered seats stay selections.
+      const submittedAiSeats: AiSeatConfig[] = suppliesDeck
+        ? effectiveAiSeats.map((seat) => ({ ...seat, deck: suppliedAiDeckChoice().choice }))
+        : await resolveCatalogAiSeats();
+      if (attempt !== preparationAttempt.current) return;
+      const trimmedRoomName = roomName.trim();
+      const resolvedRoomName =
+        trimmedRoomName.length > 0
+          ? trimmedRoomName
+          : displayName
+            ? `${displayName}'s table`
+            : null;
+      // A Discord game's pinned private settings must not become the defaults.
+      // Room name and password are intentionally not persisted.
+      if (!seed) {
+        rememberHostConfig({
+          format: selectedFormat,
+          formatConfig,
+          // Every Axis-A save uses Custom:0; this identifies the saved definition.
+          savedCustomFormatId,
+          playerCount,
+          matchType,
+          loopDetection,
+          isPublic,
+          startWhenFull,
+          // Ranked rating updates are not implemented; transport retains the field.
+          ranked: false,
+          aiSeats: effectiveAiSeats,
+        });
+      }
       const ok = await onHost(
         {
           displayName,
@@ -954,7 +947,7 @@ export function HostSetup({
     } catch {
       // The parent surfaces the specific failure as a toast/dialog.
     }
-    if (hostingStatus === "idle") {
+    if (attempt === preparationAttempt.current && hostingStatus === "idle") {
       setIsSubmitting(false);
     }
   };
@@ -1568,7 +1561,11 @@ export function HostSetup({
           </button>
           <button
             type="button"
-            onClick={onBack}
+            onClick={() => {
+              preparationAttempt.current += 1;
+              setIsSubmitting(false);
+              onBack();
+            }}
             className={`${menuButtonClass({ tone: "neutral", size: "sm" })} w-full`}
           >
             {t("hostSetup.back")}
