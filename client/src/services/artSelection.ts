@@ -7,10 +7,10 @@ import type { SourcePrinting } from "../hooks/useCardImage.ts";
 import type { ArtChainEntry, CardArtOverride } from "../stores/preferencesStore.ts";
 
 /**
- * The printing a deck list's `(SET) NUM` annotation names. Set codes are stored
- * lowercase in `scryfall-printings.json` but arrive uppercase from deck lists.
+ * Match a set/collector pair within the caller's Oracle-scoped printings.
+ * Set codes match case-insensitively; collector strings match exactly.
  */
-function matchSourcePrinting(
+export function matchSourcePrinting(
   printings: PrintingEntry[],
   source: SourcePrinting,
 ): PrintingEntry | null {
@@ -59,16 +59,11 @@ export function applyChain(
 }
 
 /**
- * The printing the app will display for this card under stored preferences.
+ * Select a printing under stored viewer/submission preferences. Downloaders
+ * and submission consumers use this authority rather than duplicating it.
  *
- * Single authority for "which printing": `useCardImage` renders what this
- * decides, so any consumer that needs to know the same answer ahead of render
- * (a downloader planning which images to cache, for instance) must ask here
- * rather than re-deriving the rule.
- *
- * Models branches 2-4 of `useCardImage`'s precedence. It does NOT model the
- * `scryfallId` prop (branch 1) — that is a per-render caller argument naming a
- * printing the UI is already showing, not a stored preference.
+ * This does not model `useCardImage`'s per-render `scryfallId` preview or its
+ * admitted owner-printing override. Neither changes the stored preferences.
  *
  * `null` means no stored preference resolves to a printing; the caller falls
  * back to the canonical `scryfall-data` entry.

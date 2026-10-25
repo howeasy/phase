@@ -9,6 +9,7 @@ import {
   deriveImageUrl,
   findPrintingById,
   getCardPrintings,
+  isCardDataResident,
   isCardImageFlipLayoutSync,
   isCardImageRotatedSync,
   isLocaleArtReady,
@@ -21,12 +22,12 @@ import {
 } from "../services/scryfall.ts";
 import type { ImageSize, PrintingEntry, TokenSearchFilters } from "../services/scryfall.ts";
 import type { CardImageAsset } from "../services/scryfall.ts";
-import { applyChain } from "../services/artSelection.ts";
+import { applyChain, matchSourcePrinting } from "../services/artSelection.ts";
 import {
   decodeTokenFilterKeywords,
   encodeTokenFilterKeywords,
 } from "../services/cardImageLookup.ts";
-import type { TokenImageRef } from "../adapter/types.ts";
+import type { CardPrinting, TokenImageRef } from "../adapter/types.ts";
 import {
   cardBackCandidate,
   cardCandidateGroups,
@@ -78,7 +79,19 @@ interface UseCardImageOptions {
    * printings list before falling back to default Scryfall art. If the art
    * chain contains a `source_printing` entry, the chain controls priority. */
   sourcePrinting?: SourcePrinting;
+  /** Display-only owner choice. When enabled, it outranks per-render previews
+   * and viewer preferences only after admission to the current Oracle's own
+   * printings. Catalog-unavailable, excluded, or invalid choices use the
+   * unchanged viewer request, including offline installed-art selection. */
+  ownerPrinting?: CardPrinting | null;
+  /** Overrides the live preference for this render; defaults to the store.
+   * Real object/view forwarding is supplied by the rendering caller. */
+  showOwnerPrintings?: boolean;
 }
+
+type OwnerSelection =
+  | { key: string; status: "pending" | "rejected" }
+  | { key: string; status: "admitted"; printing: PrintingEntry };
 
 interface UseCardImageResult {
   src: string | null;
@@ -256,6 +269,45 @@ function metadataRepositoryGroups(
   }
 }
 
+function candidateGroupsWithRungs(
+  size: ImageSize,
+  build: (rung: VisualImageRung | "large") => Array<{ keys: CandidateKey[] }>,
+  options?: Pick<VisualCandidateGroup, "packId" | "requireUnambiguousAsset">,
+): VisualCandidateGroup[] {
+  try {
+    const requested = build(size);
+    if (size === "art_crop") {
+      return requested.map((group) => ({ requested: group.keys, ...options }));
+    }
+    const small = build("small");
+    const normal = build("normal");
+    return requested.map((group, index) => ({
+      requested: group.keys,
+      small: small[index]?.keys,
+      normal: normal[index]?.keys,
+      ...options,
+    }));
+  } catch {
+    return [];
+  }
+}
+
+/** No aliases or Oracle/source alternatives: membership was established first. */
+function exactPrintingCandidateGroups(
+  size: ImageSize,
+  language: string,
+  printingId: string,
+  faceIndex: number,
+): VisualCandidateGroup[] {
+  return candidateGroupsWithRungs(size, (rung) => cardCandidateGroups({
+    language: language === "en" ? undefined : language,
+    englishPrintingId: printingId,
+    faceIndex,
+    variant: size === "art_crop" ? "art_crop" : "full_card",
+    rung,
+  }));
+}
+
 function localCandidateGroups(
   size: ImageSize,
   language: string,
@@ -269,37 +321,13 @@ function localCandidateGroups(
   sourcePrinting: SourcePrinting | undefined,
 ): VisualCandidateGroup[] {
   if (isToken && size === "art_crop") return [];
-  const requestedRung: VisualImageRung | "large" = size;
   const variant: VisualVariant = size === "art_crop" ? "art_crop" : "full_card";
   const groupsWithRungs = (
     build: (rung: VisualImageRung | "large") => Array<{ keys: CandidateKey[] }>,
     options?: Pick<VisualCandidateGroup, "packId" | "requireUnambiguousAsset">,
-  ): VisualCandidateGroup[] => {
-    try {
-      const requested = build(requestedRung);
-      if (size === "art_crop") {
-        return requested.map((group) => ({ requested: group.keys, ...options }));
-      }
-      const small = build("small");
-      const normal = build("normal");
-      return requested.map((group, index) => ({
-        requested: group.keys,
-        small: small[index]?.keys,
-        normal: normal[index]?.keys,
-        ...options,
-      }));
-    } catch {
-      return [];
-    }
-  };
-  const exactCardGroups = (printingId: string, includeLocalized = true) => groupsWithRungs((rung) =>
-    cardCandidateGroups({
-      language: includeLocalized && language !== "en" ? language : undefined,
-      englishPrintingId: printingId,
-      faceIndex: resolvedFaceIndex,
-      variant,
-      rung,
-    }));
+  ): VisualCandidateGroup[] => candidateGroupsWithRungs(size, build, options);
+  const exactCardGroups = (printingId: string, includeLocalized = true) =>
+    exactPrintingCandidateGroups(size, includeLocalized ? language : "en", printingId, resolvedFaceIndex);
   if (isToken) {
     const exact = tokenImageRef?.scryfall_id ? exactCardGroups(tokenImageRef.scryfall_id, false) : [];
     const reference = groupsWithRungs((rung) => tokenCandidateGroups({
@@ -833,6 +861,12 @@ export function useCardImage(
 
   const artOverrides = usePreferencesStore((s) => s.artOverrides);
   const artChain = usePreferencesStore((s) => s.artChain);
+  const ownerPreference = usePreferencesStore((s) => s.showOwnerPrintings);
+  const showOwnerPrintings = options?.showOwnerPrintings ?? ownerPreference;
+  const ownerSet = typeof options?.ownerPrinting?.set_code === "string"
+    ? options.ownerPrinting.set_code.toLowerCase() : "";
+  const ownerCollector = typeof options?.ownerPrinting?.collector_number === "string"
+    ? options.ownerPrinting.collector_number : "";
   const effectiveOffline = useEffectiveOffline();
   // Card art follows the UI language: the printing the user chose is kept, and
   // only its image is swapped for the same printing in their language. Cards
@@ -901,11 +935,63 @@ export function useCardImage(
   const resolvedFaceIndex =
     resolveFaceIndexSync(resolvedOracleId, faceName) ?? faceIndex;
 
+  // Preparation has its own identity, never a legacy image-key component.
+  // Scalar inputs prevent recreated props from restarting metadata work.
+  const ownerLookupKey = showOwnerPrintings && ownerSet && ownerCollector
+    ? JSON.stringify([oracleId || cardName, faceName, faceIndex, ownerSet, ownerCollector])
+    : "";
+  const [ownerSelection, setOwnerSelection] = useState<OwnerSelection>(() => {
+    const ready = ownerLookupKey && isCardDataResident()
+      ? printingsCacheMap.get(resolvedOracleId) : undefined;
+    if (!ready) return { key: "", status: "rejected" };
+    const printing = matchSourcePrinting(ready, { setCode: ownerSet, collectorNumber: ownerCollector });
+    return printing
+      ? { key: ownerLookupKey, status: "admitted", printing }
+      : { key: ownerLookupKey, status: "rejected" };
+  });
+  const currentOwnerSelection: OwnerSelection = !ownerLookupKey
+    ? { key: "", status: "rejected" }
+    : ownerSelection.key === ownerLookupKey
+      ? ownerSelection : { key: ownerLookupKey, status: "pending" };
+  const ownerPending = currentOwnerSelection.status === "pending";
+  const admittedOwner = currentOwnerSelection.status === "admitted" ? currentOwnerSelection.printing : null;
+
+  useEffect(() => {
+    if (!ownerLookupKey) return;
+    let cancelled = false;
+    void (async () => {
+      try {
+        await loadScryfallData();
+        if (cancelled) return;
+        const currentOracle = oracleId || resolveOracleIdSync(cardName) || "";
+        const printings = currentOracle
+          ? printingsCacheMap.get(currentOracle) ?? await getCardPrintings(currentOracle)
+          : [];
+        if (cancelled) return;
+        const printing = matchSourcePrinting(printings, {
+          setCode: ownerSet, collectorNumber: ownerCollector,
+        });
+        // Do not change legacy override-cache readiness for a rejected choice,
+        // or emit invalidation events merely because owner preparation finished.
+        if (printing) printingsCacheMap.set(currentOracle, printings);
+        setOwnerSelection(printing
+          ? { key: ownerLookupKey, status: "admitted", printing }
+          : { key: ownerLookupKey, status: "rejected" });
+      } catch {
+        if (!cancelled) setOwnerSelection({ key: ownerLookupKey, status: "rejected" });
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [ownerLookupKey, oracleId, cardName, faceName, faceIndex, ownerSet, ownerCollector]);
+
   const explicitPrintingId = !isToken
     ? scryfallId || (resolvedOracleId ? artOverrides[resolvedOracleId]?.scryfallId ?? "" : "")
     : "";
   const artChainKey = JSON.stringify(artChain);
   const currentArtInvalidationGeneration = `${globalArtInvalidationGeneration}:${resolvedOracleId ? cardArtInvalidationGenerations.get(resolvedOracleId) ?? 0 : 0}`;
+  const ownerKeySuffix = admittedOwner
+    ? `|owner:${JSON.stringify([resolvedOracleId, ownerSet, ownerCollector, admittedOwner.id])}`
+    : "";
 
   const presentationKey = imagePresentationKey(
     cardName,
@@ -929,7 +1015,7 @@ export function useCardImage(
     explicitPrintingId,
     artChainKey,
     effectiveOffline,
-  );
+  ) + ownerKeySuffix;
 
   const requestKey = imageRequestKey(
     cardName,
@@ -954,13 +1040,20 @@ export function useCardImage(
     artChainKey,
     effectiveOffline,
     currentArtInvalidationGeneration,
-  );
+  ) + ownerKeySuffix;
   const previousRequestKeyRef = useRef(requestKey);
   const requestChanged = previousRequestKeyRef.current !== requestKey;
   previousRequestKeyRef.current = requestKey;
   const effectRequestKeyRef = useRef<string | null>(null);
+  const ownerWasPending = useRef(false);
 
   useEffect(() => {
+    if (ownerPending) {
+      ownerWasPending.current = true;
+      return;
+    }
+    const resumesLegacy = ownerWasPending.current && !admittedOwner;
+    ownerWasPending.current = false;
     let cancelled = false;
     let acquiredRemoteCache = false;
     const effectRequestChanged = effectRequestKeyRef.current !== null
@@ -1034,6 +1127,15 @@ export function useCardImage(
     remoteContinuation.current = continuation;
 
     const selectedRemoteOverride = (): CardImageAsset | null => {
+      if (admittedOwner) {
+        const ownerUrl = resolvePrintingImageUrl(admittedOwner, resolvedFaceIndex, size);
+        return ownerUrl ? remoteAsset(ownerUrl, size, {
+          oracleId: resolvedOracleId.toLowerCase(),
+          englishPrintingId: admittedOwner.id.toLowerCase(),
+          faceIndex: resolvedFaceIndex,
+          alias: cardName.toLowerCase().normalize("NFC"),
+        }, isCardImageRotatedSync(resolvedOracleId, cardName, resolvedFaceIndex)) : null;
+      }
       if (isToken || !resolvedOracleId) return null;
       let overrideUrl: string | null = null;
       let overridePrintingId = "";
@@ -1117,7 +1219,7 @@ export function useCardImage(
             // Every active override binds its face and orientation after this load.
             imageAsset = selectedRemoteOverride();
           }
-          if (!imageAsset) {
+          if (!imageAsset && !admittedOwner) {
             acquiredRemoteCache = true;
             imageAsset = await acquireCachedImageSrc(
               requestKey,
@@ -1142,7 +1244,9 @@ export function useCardImage(
             return;
           }
           const result = await visualPackRepository.resolve({
-            groups: metadataRepositoryGroups(
+            groups: admittedOwner
+              ? exactPrintingCandidateGroups(size, language, admittedOwner.id, resolvedFaceIndex)
+              : metadataRepositoryGroups(
               imageAsset,
               size,
               cardName,
@@ -1168,7 +1272,9 @@ export function useCardImage(
     };
 
     async function resolveLocal(): Promise<void> {
-      const groups = localCandidateGroups(
+      const groups = admittedOwner
+        ? exactPrintingCandidateGroups(size, language, admittedOwner.id, resolvedFaceIndex)
+        : localCandidateGroups(
         size,
         language,
         cardName,
@@ -1215,13 +1321,18 @@ export function useCardImage(
       void continuation.start?.();
     }
 
-    void resolveLocal();
+    // Rejection preserves a settled legacy image without another lookup, but
+    // still needs a fresh continuation: the pending generation cancelled it.
+    if (!resumesLegacy || !cachedPresentation?.settled) void resolveLocal();
 
     return () => {
       cancelled = true;
       if (acquiredRemoteCache) releaseCachedImageSrc(requestKey);
     };
   }, [
+    admittedOwner,
+    ownerPending,
+    presentationKey,
     cardName,
     faceIndex,
     faceName,
@@ -1334,6 +1445,13 @@ export function useCardImage(
     sources,
     stateRequestKey,
   ]);
+
+  if (ownerPending) {
+    return {
+      src: null, isLoading: true, isRotated: false, isFlip: false,
+      source: null, advanceFailedSource,
+    };
+  }
 
   // Effects reset the state after render, so a component reused for a new card
   // would otherwise expose the previous card's src for one frame. Hand previews
