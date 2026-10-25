@@ -4,7 +4,7 @@ import userEvent from "@testing-library/user-event";
 import type * as Scryfall from "../../../services/scryfall";
 import { detectAndParseDeck } from "../../../services/deckParser";
 
-const testPreparationEpoch = { current: 0 };
+const testPreparationEpoch = { current: 0, invalidate() { this.current += 1; } };
 
 // Same WebStorage shadowing workaround as HostSetup.test.tsx.
 const localStorageItems = vi.hoisted(() => {

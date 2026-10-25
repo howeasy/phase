@@ -1354,7 +1354,14 @@ function MultiplayerPageContent({
             // mounted, so the seed is applied once, at mount.
             key={hostSeed?.code ?? "manual"}
             seed={hostSeed ?? undefined}
-            preparationEpoch={preparationAttempt}
+            preparationEpoch={{
+              get current() { return preparationAttempt.current; },
+              invalidate: () => {
+                preparationAttempt.current += 1;
+                setPendingAction(null);
+                setBrokerOfflinePrompt(null);
+              },
+            }}
             onHost={handleHostSetupComplete}
             onBack={handleBack}
             connectionMode={connectionMode}

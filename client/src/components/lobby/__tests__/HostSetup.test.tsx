@@ -4,7 +4,7 @@ import i18n from "i18next";
 import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 
-const testPreparationEpoch = { current: 0 };
+const testPreparationEpoch = { current: 0, invalidate() { this.current += 1; } };
 
 // A real `localStorage` for the store's `persist` middleware and for the
 // saved-custom-format service, installed before the modules under test are

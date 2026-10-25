@@ -1,4 +1,4 @@
-import { act, cleanup, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { createMemoryRouter, MemoryRouter, RouterProvider } from "react-router";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -17,6 +17,7 @@ import type * as HostSetupModule from "../../components/lobby/HostSetup";
 import type * as AiDeckCatalog from "../../services/aiDeckCatalog";
 import type * as EngineRuntime from "../../services/engineRuntime";
 import type * as Storage from "../../constants/storage";
+import { STORAGE_KEY_PREFIX } from "../../constants/storage";
 import type { AiDeckCandidate } from "../../services/aiDeckCatalog";
 import { hostLinkSearch } from "../multiplayerPageState";
 import type * as ServiceWorker from "../../pwa/registerServiceWorker";
@@ -75,7 +76,7 @@ vi.mock("../../components/lobby/HostSetup", async (importOriginal) => {
 vi.mock("../../services/engineRuntime", async (importOriginal) => ({
   ...await importOriginal<typeof EngineRuntime>(),
   bestOfThreeCeilingForFormat: vi.fn(async () => "Bo1"),
-  deckSupplyForFormat: vi.fn(async () => "PlayerBuilt"),
+  deckSupplyForFormat: vi.fn(async (format: string) => format === "Dandan" ? "HostPile" : "PlayerBuilt"),
 }));
 vi.mock("../../services/aiDeckCatalog", async (importOriginal) => ({
   ...await importOriginal<typeof AiDeckCatalog>(),
@@ -352,6 +353,172 @@ describe("MultiplayerPage host server", () => {
   });
 
   describe("cross-component cancellation", () => {
+    it.each(["not-found", "invalid"] as const)(
+      "recovers the same host form after a %s join link cancels held AI preparation",
+      async (arrival) => {
+        prepareRealSetup();
+        const lookupJoinTarget = vi.fn().mockResolvedValue({ ok: false, reason: "not_found", message: "Missing" });
+        useMultiplayerStore.setState({ lookupJoinTarget });
+        const router = createMemoryRouter([{ path: "/multiplayer", element: <MultiplayerPage /> }], {
+          initialEntries: ["/multiplayer?view=host-setup"],
+        });
+        render(<RouterProvider router={router} />);
+        const user = userEvent.setup();
+        const host = screen.getByRole("button", { name: "Host Game" });
+        const form = host.closest("form");
+        await waitFor(() => expect(host).toBeEnabled());
+        await user.click(screen.getAllByRole("button", { name: "Human" })[0]);
+        const remembered = useMultiplayerStore.getState().lastHostConfig;
+        const old = heldMetadata();
+        art.face.mockReturnValueOnce(old.promise);
+        await user.click(host);
+        await waitFor(() => expect(art.face).toHaveBeenCalledWith("Forest"));
+        await act(async () => {
+          await router.navigate(arrival === "not-found"
+            ? `/multiplayer?join=AB12CD@${URL_B}`
+            : "/multiplayer?join=invalid");
+        });
+        if (arrival === "not-found") {
+          await screen.findByText(multiplayerEn.page.waitingForHostTitle);
+          expect(lookupJoinTarget).toHaveBeenCalledOnce();
+        } else {
+          expect(useMultiplayerStore.getState().toasts.get("generic")?.message).toBe(multiplayerEn.page.invalidGameLink);
+        }
+        const navigated = harness.navigate.mock.calls.length; // The link's URL strip only.
+        await act(async () => { old.resolve({ scryfall_oracle_id: "forest" }); });
+        expect(startHosting).not.toHaveBeenCalled();
+        expect(startP2PHostingSession).not.toHaveBeenCalled();
+        expect(harness.navigate).toHaveBeenCalledTimes(navigated);
+        expect(useMultiplayerStore.getState().lastHostConfig).toBe(remembered);
+        if (arrival === "not-found") await user.click(screen.getByRole("button", { name: "Dismiss" }));
+        expect(host.closest("form")).toBe(form);
+        expect(screen.getByRole("button", { name: "Host Game" })).toBe(host);
+        expect(host).toBeEnabled();
+        await user.click(host);
+        await waitFor(() => expect(startHosting).toHaveBeenCalledOnce());
+        expect(startHosting.mock.calls[0][0].aiSeats[0].deck).toMatchObject({
+          type: "DeckList", data: { main_deck: ["Forest"], printings: [
+            { section: "main_deck", name: "Forest", count: 1,
+              printing: { set_code: "bbb", collector_number: "002" } },
+          ] },
+        });
+        expect(harness.navigate).toHaveBeenCalledTimes(navigated + 1);
+        expect(harness.navigate).toHaveBeenLastCalledWith("/");
+      },
+    );
+
+    describe("pile-source cancellation", () => {
+      beforeEach(() => {
+        prepareRealSetup();
+        useMultiplayerStore.setState({
+          formatConfig: FORMAT_DEFAULTS.Dandan,
+          lastHostConfig: {
+            ...useMultiplayerStore.getState().lastHostConfig!,
+            format: "Dandan", formatConfig: FORMAT_DEFAULTS.Dandan, playerCount: 2,
+          },
+        });
+        localStorage.setItem(`${STORAGE_KEY_PREFIX}Pile A`, JSON.stringify(detectAndParseDeck("2 Island (AAA) 001")));
+        localStorage.setItem(`${STORAGE_KEY_PREFIX}Pile B`, JSON.stringify(detectAndParseDeck("3 Forest (BBB) 002")));
+      });
+      afterEach(() => {
+        localStorage.removeItem(`${STORAGE_KEY_PREFIX}Pile A`);
+        localStorage.removeItem(`${STORAGE_KEY_PREFIX}Pile B`);
+      });
+
+      it.each(["", "Pile B"])("abandons held pile A for %s and hosts the new source from the same form", async (next) => {
+        const user = userEvent.setup();
+        renderPage("/multiplayer?view=host-setup");
+        const picker = await screen.findByRole("combobox", { name: "Pile" });
+        await user.selectOptions(picker, "Pile A");
+        const host = screen.getByRole("button", { name: "Host Game" });
+        const form = host.closest("form");
+        await waitFor(() => expect(host).toBeEnabled());
+        const old = heldMetadata();
+        art.face.mockReturnValueOnce(old.promise);
+        await user.click(host);
+        await waitFor(() => expect(art.face).toHaveBeenCalledWith("Island"));
+        expect(host).toBeDisabled();
+        await user.selectOptions(picker, next);
+        // Release at selection time, not only after the obsolete promise settles.
+        await waitFor(() => expect(host).toBeEnabled());
+        await act(async () => { old.resolve({ scryfall_oracle_id: "island" }); });
+        expect(startHosting).not.toHaveBeenCalled();
+        expect(startP2PHostingSession).not.toHaveBeenCalled();
+        expect(harness.navigate).not.toHaveBeenCalled();
+        expect(host.closest("form")).toBe(form);
+        expect(picker).toHaveValue(next);
+        await user.click(host);
+        await waitFor(() => expect(startHosting).toHaveBeenCalledOnce());
+        expect(startHosting.mock.calls[0][0].pile).toEqual(next
+          ? { type: "SavedDeck", name: next } : { type: "Default" });
+        expect(startHosting.mock.calls[0][1].main_deck).toEqual(next ? ["Forest", "Forest", "Forest"] : []);
+        expect(startHosting.mock.calls[0][1].printings).toEqual(next ? [
+          { section: "main_deck", name: "Forest", count: 3, printing: { set_code: "bbb", collector_number: "002" } },
+        ] : undefined);
+        expect(harness.navigate).toHaveBeenCalledExactlyOnceWith("/");
+      });
+
+      it("keeps a newer pile submission busy when the cancelled predecessor settles", async () => {
+        const user = userEvent.setup();
+        renderPage("/multiplayer?view=host-setup");
+        const picker = await screen.findByRole("combobox", { name: "Pile" });
+        await user.selectOptions(picker, "Pile A");
+        const host = screen.getByRole("button", { name: "Host Game" });
+        await waitFor(() => expect(host).toBeEnabled());
+        const old = heldMetadata();
+        art.face.mockReturnValueOnce(old.promise);
+        await user.click(host);
+        await waitFor(() => expect(art.face).toHaveBeenCalledWith("Island"));
+        await user.selectOptions(picker, "Pile B");
+        await waitFor(() => expect(host).toBeEnabled());
+        const successor = heldMetadata();
+        art.face.mockReturnValueOnce(successor.promise);
+        await user.click(host);
+        await waitFor(() => expect(art.face).toHaveBeenCalledWith("Forest"));
+        await act(async () => { old.resolve({ scryfall_oracle_id: "island" }); });
+        expect(startHosting).not.toHaveBeenCalled();
+        expect(harness.navigate).not.toHaveBeenCalled();
+        expect(host).toHaveTextContent("Opening…");
+        expect(host).toBeDisabled();
+        await user.click(host);
+        expect(art.face).toHaveBeenCalledTimes(2);
+        await act(async () => { successor.resolve({ scryfall_oracle_id: "forest" }); });
+        await waitFor(() => expect(startHosting).toHaveBeenCalledOnce());
+        expect(startHosting.mock.calls[0][1]).toMatchObject({
+          main_deck: ["Forest", "Forest", "Forest"],
+          printings: [{ section: "main_deck", name: "Forest", count: 3,
+            printing: { set_code: "bbb", collector_number: "002" } }],
+        });
+        expect(harness.navigate).toHaveBeenCalledExactlyOnceWith("/");
+      });
+
+      it("preserves a live submission when the picker reports the same source again", async () => {
+        const user = userEvent.setup();
+        renderPage("/multiplayer?view=host-setup");
+        const picker = await screen.findByRole("combobox", { name: "Pile" });
+        await user.selectOptions(picker, "Pile A");
+        const host = screen.getByRole("button", { name: "Host Game" });
+        await waitFor(() => expect(host).toBeEnabled());
+        const held = heldMetadata();
+        art.face.mockReturnValueOnce(held.promise);
+        await user.click(host);
+        await waitFor(() => expect(art.face).toHaveBeenCalledWith("Island"));
+        // A same-source notification is a new object with changed legality,
+        // not a new pile choice. Exercise the real picker callback while held.
+        fireEvent.change(picker, { target: { value: "Pile A" } });
+        expect(host).toHaveTextContent("Opening…");
+        expect(host).toBeDisabled();
+        await act(async () => { held.resolve({ scryfall_oracle_id: "island" }); });
+        await waitFor(() => expect(startHosting).toHaveBeenCalledOnce());
+        expect(startHosting.mock.calls[0][1]).toMatchObject({
+          main_deck: ["Island", "Island"],
+          printings: [{ section: "main_deck", name: "Island", count: 2,
+            printing: { set_code: "aaa", collector_number: "001" } }],
+        });
+        expect(harness.navigate).toHaveBeenCalledExactlyOnceWith("/");
+      });
+    });
+
     it.each(["server", "p2p", "offline-prompt", "offline-continue"] as const)(
       "cancels delegated human preparation on Change (%s)",
       async (route) => {

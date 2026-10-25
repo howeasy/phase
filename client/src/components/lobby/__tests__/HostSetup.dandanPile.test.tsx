@@ -3,7 +3,7 @@ import { act } from "react";
 import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 
-const testPreparationEpoch = { current: 0 };
+const testPreparationEpoch = { current: 0, invalidate() { this.current += 1; } };
 
 // Same WebStorage shadowing workaround as HostSetup.test.tsx.
 const localStorageItems = vi.hoisted(() => {

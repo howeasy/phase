@@ -59,7 +59,7 @@ import { AiDeckPicker } from "../menu/AiDeckPicker";
 import { RandomPoolTree } from "../menu/RandomPoolTree";
 import { menuButtonClass } from "../menu/buttonStyles";
 import { PileSourceChoice } from "../menu/PileSourceChoice";
-import { DEFAULT_PILE_CHOICE, suppliedAiDeckChoice, type PileChoice } from "../../services/pileSource";
+import { DEFAULT_PILE_CHOICE, pileSourceParam, suppliedAiDeckChoice, type PileChoice } from "../../services/pileSource";
 import { ConnectionModeSwitch } from "./ConnectionModeSwitch";
 import { IntegerField } from "../ui/IntegerField";
 import { MenuSelect, type MenuSelectGroup } from "../ui/MenuSelect";
@@ -77,8 +77,8 @@ interface HostSetupProps {
    */
   onHost: (settings: HostSettings, serverUrl: string | null) => void | Promise<boolean>;
   onBack: () => void;
-  /** Parent-owned cancellation epoch, captured before AI preparation. */
-  preparationEpoch: Readonly<{ current: number }>;
+  /** Parent-owned epoch: capture before AI preparation; invalidate delegated work on source changes. */
+  preparationEpoch: Readonly<{ current: number; invalidate: () => void }>;
   connectionMode: ConnectionMode;
   /** Host Game owns this choice; browsing and joining use either transport. */
   onConnectionModeChange: (mode: ConnectionMode) => void;
@@ -554,6 +554,16 @@ export function HostSetup({
   // stale membership.
   const poolFolderIndex = usePoolFolderIndex();
   const [pile, setPile] = useState<PileChoice>(DEFAULT_PILE_CHOICE);
+  const handlePileChange = (next: PileChoice) => {
+    // Legality refreshes allocate a new choice for the SAME source. Only a
+    // source change abandons both local AI and delegated page preparation.
+    if (pileSourceParam(next.source) !== pileSourceParam(pile.source)) {
+      preparationAttempt.current += 1;
+      setIsSubmitting(false);
+      preparationEpoch.invalidate();
+    }
+    setPile(next);
+  };
   // A pile is picked for one format; any format change returns to the default pile.
   const [pileFormat, setPileFormat] = useState(formatConfig.format);
   if (pileFormat !== formatConfig.format) {
@@ -927,7 +937,7 @@ export function HostSetup({
           aiSeats: effectiveAiSeats,
         });
       }
-      const ok = await onHost(
+      await onHost(
         {
           displayName,
           public: isPublic,
@@ -949,12 +959,13 @@ export function HostSetup({
         // a flow that can route through deck-select before it runs.
         isP2P ? null : selected,
       );
-      if (ok !== false) return;
     } catch {
       // The parent surfaces the specific failure as a toast/dialog.
-    }
-    if (attempt === preparationAttempt.current && hostingStatus === "idle") {
-      setIsSubmitting(false);
+    } finally {
+      // Every exit releases its own latch, including parent-epoch cancellation,
+      // rejection and successful delegation. Never release a successor's latch;
+      // the store's hostingStatus independently gates an opened/connecting room.
+      if (attempt === preparationAttempt.current) setIsSubmitting(false);
     }
   };
 
@@ -1166,7 +1177,7 @@ export function HostSetup({
               <PileSourceChoice
                 format={formatConfig.format}
                 value={pile.source}
-                onChange={setPile}
+                onChange={handlePileChange}
               />
             </div>
 
