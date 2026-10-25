@@ -17,7 +17,7 @@ import type { ImageRungs } from "../../services/visualPacks/types.ts";
 import { useIsMobile } from "../../hooks/useIsMobile.ts";
 import { useEngineCardData, useCardParseDetails, useCardRulings, type ParsedItem } from "../../hooks/useEngineCardData.ts";
 import { isUnbounded, pillsOf, useCounterDisplay } from "../../hooks/useCounterDisplay.ts";
-import { tokenFiltersForObject } from "../../services/cardImageLookup.ts";
+import { cardImageLookup, tokenFiltersForObject } from "../../services/cardImageLookup.ts";
 import { faceDownMarkerRef } from "./faceDownMarker.ts";
 import { shouldRenderCardBack } from "../../viewmodel/cardProps.ts";
 import type { CardRuling } from "../../services/engineRuntime.ts";
@@ -310,6 +310,7 @@ function CardPreviewInner({
   const obj = useGameStore((s) =>
     previewObjectId != null ? s.gameState?.objects[previewObjectId] ?? null : null,
   );
+  const ownerPrinting = obj ? cardImageLookup(obj).ownerPrinting : undefined;
   // `card_report` context needs a live, participating game: `obj == null` (deck
   // builder) has no zone and a possibly-stale `gameMode`, `gameId == null` means
   // no game at all, and spectators don't report — building no context in these
@@ -386,6 +387,7 @@ function CardPreviewInner({
       faceName: suppressArtLookup ? undefined : obj?.printed_ref?.face_name,
       scryfallId: suppressArtLookup ? undefined : scryfallId,
       sourcePrinting: suppressArtLookup ? undefined : sourcePrinting,
+      ownerPrinting: suppressArtLookup ? undefined : ownerPrinting,
     },
   );
   const classLevel = obj?.class_level;
@@ -446,6 +448,7 @@ function CardPreviewInner({
     faceIndex: otherFaceIndex,
     oracleId: otherFaceOracleId,
     faceName: otherFaceName,
+    ownerPrinting: showOtherFace ? ownerPrinting : undefined,
   });
 
   const activeImage = showOtherFace ? otherFaceImgResult : primaryImage;

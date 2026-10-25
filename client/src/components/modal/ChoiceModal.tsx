@@ -1,6 +1,7 @@
 import type { ReactNode } from "react";
 
 import type { CardType, ObjectId } from "../../adapter/types.ts";
+import { useGameStore } from "../../stores/gameStore.ts";
 import { RichLabel } from "../mana/RichLabel.tsx";
 import { CardTextboxPreview } from "./CardTextboxPreview.tsx";
 import { DialogShell } from "./DialogShell.tsx";
@@ -56,6 +57,9 @@ export function ChoiceModal({
   footer,
   scrollable,
 }: ChoiceModalProps) {
+  const ownerPrinting = useGameStore((s) =>
+    previewObjectId == null ? undefined : s.gameState?.objects[previewObjectId]?.printing,
+  );
   return (
     <DialogShell
       title={<RichLabel text={title} size="md" />}
@@ -69,6 +73,7 @@ export function ChoiceModal({
           <CardTextboxPreview
             cardName={previewCardName}
             cardTypes={previewCardTypes}
+            ownerPrinting={ownerPrinting}
           />
         </div>
       )}
