@@ -25,6 +25,15 @@ import { WIRE_PROTOCOL_VERSION, encodeWireMessage, type P2PMessage } from "../..
 import { p2pFinalStateCommitment } from "../../services/p2pTerminalResult";
 import { claimP2PHostLease, ownsP2PHostLease } from "../../services/p2pSession";
 import type { PersistedP2PHostSession } from "../../services/gamePersistence";
+import { usePreferencesStore } from "../../stores/preferencesStore";
+import { submitDeckList, type SubmissionDeck } from "../../services/deckSubmission";
+import type { PrintingEntry } from "../../services/scryfall";
+import type * as Scryfall from "../../services/scryfall";
+
+const ownerArt = vi.hoisted(() => ({ face: vi.fn(), printings: vi.fn() }));
+vi.mock("../../services/scryfall", async (original) => ({
+  ...await original<typeof Scryfall>(), getCardPrintings: ownerArt.printings,
+}));
 
 /** `multiplayer:reconnectRejected.hostDisconnectedBeforeSetup`, rendered in English. */
 const HOST_DISCONNECTED_BEFORE_SETUP = "Host disconnected before game setup completed";
@@ -438,6 +447,7 @@ vi.mock("../wasm-adapter", () => {
     checkDeckCompatibility: mocks.checkDeckCompatibility,
     evaluateDeckFormatGate: mocks.evaluateDeckFormatGate,
     checkDeckPrintingsBounds: mocks.checkDeckPrintingsBounds,
+    getCardFaceData: ownerArt.face,
     getState: mocks.getState,
     getLegalActions: mocks.getLegalActions,
     getSnapshot: mocks.getSnapshot,
@@ -461,6 +471,7 @@ vi.mock("../wasm-adapter", () => {
   return {
     WasmAdapter: vi.fn().mockImplementation(createEngine),
     getHostAdapter: vi.fn(createEngine),
+    getSharedAdapter: vi.fn(createEngine),
     createHostSessionOwner: vi.fn(() => Symbol("test-host-session-owner")),
   };
 });
@@ -2124,6 +2135,88 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
       "JoinedHuman",
     ]);
     adapter.dispose();
+  });
+
+  it.each(["WASM", "native"] as const)("V11 %s host preserves service-selected guest C and an ownerless guest beside host A", async (transport) => {
+    const catalog: PrintingEntry[] = ["aaa", "ccc"].map((set, index) => ({
+      id: set, set, set_name: set, collector_number: index === 0 ? "001" : "003",
+      released_at: "2000-01-01", border_color: "black", frame_effects: [], full_art: false, faces: [],
+    }));
+    ownerArt.face.mockImplementation(async () => ({ scryfall_oracle_id: "island-oracle" }));
+    ownerArt.printings.mockResolvedValue(catalog);
+    const original = usePreferencesStore.getState();
+    usePreferencesStore.setState({ artChain: [], artOverrides: {
+      "island-oracle": { scryfallId: "ccc", setCode: "ccc", collectorNumber: "003" },
+    } });
+    const guest = await submitDeckList({ main_deck: ["Island"], sideboard: [] });
+    expect(guest.printings).toEqual([{ section: "main_deck", name: "Island", count: 1,
+      printing: { set_code: "ccc", collector_number: "003" } }]);
+    usePreferencesStore.setState({ artOverrides: {} });
+    const ownerless = await submitDeckList({ main_deck: ["Island"], sideboard: [] });
+    expect(ownerless).not.toHaveProperty("printings");
+    usePreferencesStore.setState({ artOverrides: {
+      "island-oracle": { scryfallId: "aaa", setCode: "aaa", collectorNumber: "001" },
+    } });
+    const player = await submitDeckList({ main_deck: ["Island"], sideboard: [] });
+    expect(player.printings).toEqual([{ section: "main_deck", name: "Island", count: 1,
+      printing: { set_code: "aaa", collector_number: "001" } }]);
+    ownerArt.face.mockClear();
+    ownerArt.printings.mockClear();
+    mocks.checkDeckPrintingsBounds.mockClear();
+    const { peer, onGuestConnected, emitConnection } = createFakePeer();
+    nativeWebSocketMocks.real = transport === "native";
+    const adapter = new P2PHostAdapter(
+      { player, opponent: { main_deck: [], sideboard: [] }, ai_decks: [] },
+      peer as unknown as Peer, onGuestConnected, 3, undefined, undefined, 5_000, undefined, true,
+      undefined, undefined, transport === "native" ? {} : undefined,
+    );
+    const attach = async (pid: number) => {
+      await vi.waitFor(() => expect(AuditSocket.sockets).toHaveLength(pid + 1));
+      const socket = AuditSocket.sockets[pid];
+      await flushPromises(20);
+      socket.frame("ServerHello", { server_version: "0.0.0-test", build_commit: "testhash", protocol_version: PROTOCOL_VERSION, mode: "Full" });
+      await vi.waitFor(() => expect(socket.sent.length).toBeGreaterThan(0));
+      socket.frame("SessionAttached", { game_code: "ART", player_id: pid, player_token: `art-${pid}`, full_key: { game_code: "ART", generation: 1 } });
+      for (const active of AuditSocket.sockets) active.frame("PlayerSlotsUpdate", { slots: [], full_key: { game_code: "ART", generation: 1 } });
+    };
+    try {
+      const init = adapter.initialize();
+      if (transport === "native") await attach(0);
+      await init;
+      const first = joinGuest(emitConnection, { type: "guest_deck", deckData: { player: guest } });
+      if (transport === "native") await attach(1);
+      await first;
+      const second = joinGuest(emitConnection, { type: "guest_deck", deckData: { player: ownerless } });
+      if (transport === "native") await attach(2);
+      await second;
+      await flushPromises(30);
+      if (transport === "WASM") {
+        await adapter.initializeGame();
+        const [outgoing] = mockInitializeHostGame.mock.calls[0] as unknown as [{
+          player: SubmissionDeck; opponent: SubmissionDeck; ai_decks: SubmissionDeck[];
+        }];
+        expect(outgoing.player).toEqual(player);
+        expect(outgoing.opponent).toEqual(guest);
+        expect(outgoing.ai_decks[0]).toEqual(ownerless);
+        expect(outgoing.ai_decks[0]).not.toHaveProperty("printings");
+      } else {
+        expect(AuditSocket.sockets[0].sent).toContainEqual(expect.objectContaining({
+          type: "CreateGameWithSettings", data: expect.objectContaining({ deck: player }),
+        }));
+        expect(AuditSocket.sockets[1].sent).toContainEqual(expect.objectContaining({
+          type: "JoinGameWithPassword", data: expect.objectContaining({ deck: guest }),
+        }));
+        expect(AuditSocket.sockets[2].sent).toContainEqual(expect.objectContaining({
+          type: "JoinGameWithPassword", data: expect.objectContaining({ deck: ownerless }),
+        }));
+      }
+      expect(mocks.checkDeckPrintingsBounds.mock.calls).toEqual([[guest.printings], [undefined]]);
+      expect(ownerArt.face).not.toHaveBeenCalled();
+      expect(ownerArt.printings).not.toHaveBeenCalled();
+    } finally {
+      adapter.dispose();
+      usePreferencesStore.setState({ artChain: original.artChain, artOverrides: original.artOverrides });
+    }
   });
 
   it("fails closed: a failing sidecar check kicks the guest instead of admitting it unchecked", async () => {
