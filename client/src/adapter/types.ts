@@ -2211,6 +2211,8 @@ export interface StackEntryDisplay {
   /** Display-only printing of the physical card (CR 203.1/206.1); absent when the owner
    *  chose none or the viewer may not see it. */
   printing?: CardPrinting | null;
+  /** Oracle and face authority from the row printing's selected source read. */
+  printed_ref?: PrintedRef | null;
   kind_label: string;
   ability_kind?: StackAbilityKindView;
   ability_description?: string;

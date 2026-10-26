@@ -182,6 +182,7 @@ describe("BattlefieldPeekPopover", () => {
   it("regroups live A/A/B before admission, then renders admitted art through on/off/on", async () => {
     setState([1, 2, 3].map((id) => ({
       ...makeObject(id, "Alpha"), owner: 0,
+      printed_ref: { oracle_id: ORACLE, face_name: "Alpha" },
       printing: { set_code: "own", collector_number: id === 3 ? "2" : "1" },
     })));
     const state = useGameStore.getState().gameState;
@@ -214,7 +215,8 @@ describe("BattlefieldPeekPopover", () => {
       { ...makeObject(3, "Hidden"), face_down: true },
       { ...makeObject(4, "Hidden"), face_down: true },
       ...Array.from({ length: 12 }, (_, i) => makeObject(10 + i, `Other ${i}`)),
-      { ...makeObject(99, "Alpha"), printing: { set_code: "own", collector_number: "2" } },
+      { ...makeObject(99, "Alpha"), printing: { set_code: "own", collector_number: "2" },
+        printed_ref: { oracle_id: ORACLE, face_name: "Alpha" } },
     ];
     setState(objects);
     const props = { playerId: 1, opponentName: "Other", seatColor: "#a78bfa", isTargeting: true, legalTargetIds: [99] };

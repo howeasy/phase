@@ -209,7 +209,7 @@ describe("object-owned Oracle admission", () => {
     await waitFor(() => expect(hook.result.current.src).toBe("/viewer.jpg"));
   });
 
-  it("admits only the object's homonymous catalog while preserving name-only admission", async () => {
+  it("requires carrier identity even when the display name resolves to an admitting catalog", async () => {
     const env = await setup();
     Object.assign(env.data.main, {
       twin: { ...env.data.main[A], name: "Twin", face_names: ["twin"] },
@@ -228,7 +228,27 @@ describe("object-owned Oracle admission", () => {
     await settle();
     await waitFor(() => expect(hook.result.current.src).toBe("/viewer.jpg"));
     hook.rerender({ pair: owner, ref: undefined });
+    await settle();
+    expect(hook.result.current.src).toBe("/viewer.jpg");
+    hook.rerender({ pair: owner, ref: { oracle_id: A, face_name: "Twin" } });
     await waitFor(() => expect(hook.result.current.src).toBe("/twin-a.jpg"));
+  });
+
+  it("does not create an owner reader without identity, while oracleId alone admits", async () => {
+    const env = await setup();
+    env.installPrinting(P, "/viewer.jpg");
+    env.installPrinting(O1, "/owner.jpg");
+    const reader = vi.spyOn(env.service, "createOwnerArtCatalogReader");
+    const hook = renderHook(({ oracleId }: { oracleId?: string }) => env.useCardImage("Alpha", {
+      ownerPrinting: owner, oracleId,
+    }), { initialProps: {} });
+    await waitFor(() => expect(hook.result.current.src).toBe("/viewer.jpg"));
+    await settle();
+    expect(reader).not.toHaveBeenCalled();
+    expect(env.fetcher.mock.calls.filter(([url]) => String(url).includes("phase-owner-art"))).toEqual([]);
+    hook.rerender({ oracleId: A });
+    await waitFor(() => expect(hook.result.current.src).toBe("/owner.jpg"));
+    expect(reader).toHaveBeenCalled();
   });
 
   it("overrides conflicting legacy identity only for owner admission and strips owner-only options", async () => {
@@ -402,12 +422,13 @@ describe("owner printing non-gating overlay", () => {
     await waitFor(() => expect(hook.result.current.src).toBe("/owner-art.jpg"));
   });
 
-  it("discovers late name identity from canonical readiness without latching rejection", async () => {
+  it("keeps name-only owner art disabled after canonical readiness until identity arrives", async () => {
     const env = await setup({ offline: true });
     env.preferences.setState({ artOverrides: {} });
     env.install(encodeCandidateKey("name_face", ["alpha", "alpha", "full_card", "normal"]), "/name.jpg", "TkFNRQ", "deck_library");
     env.installPrinting(O1, "/owner.jpg", 1);
-    const hook = renderHook(() => env.useCardImage("Alpha", { ownerPrinting: owner, faceName: "Reverse" }));
+    const hook = renderHook(({ oracleId }: { oracleId?: string }) =>
+      env.useCardImage("Alpha", { ownerPrinting: owner, oracleId, faceName: "Reverse" }), { initialProps: {} });
     // Its ordinary face-name candidate is Reverse, while name identity remains cold.
     env.install(encodeCandidateKey("name_face", ["alpha", "reverse", "full_card", "normal"]), "/name.jpg", "TkFNRQ", "deck_library");
     await waitFor(() => expect(hook.result.current.src).toBe("/name.jpg"));
@@ -415,6 +436,10 @@ describe("owner printing non-gating overlay", () => {
     await settle();
     expect(env.ownerCalls()).toEqual([]);
     await act(async () => { await env.service.loadScryfallData(); });
+    await settle();
+    expect(hook.result.current.src).toBe("/name.jpg");
+    expect(env.ownerCalls()).toEqual([]);
+    hook.rerender({ oracleId: A });
     await waitFor(() => expect(hook.result.current.src).toBe("/owner.jpg"));
     expect(hook.result.current.isRotated).toBe(false);
   });
@@ -565,13 +590,18 @@ describe("isolated owner catalog authority", () => {
     reader.release();
   });
 
-  it("admits cache-only offline data without network and falls back safely without it", async () => {
+  it("admits cache-only offline owner data only with carrier identity and without network", async () => {
     const env = await setup({ offline: true });
     env.installPrinting(P, "/viewer.jpg");
     env.installPrinting(O1, "/owner.jpg");
     const cache = { match: vi.fn(async (url: string) => json(url.includes("printings") ? env.data.catalog : env.data.main)) };
     vi.stubGlobal("caches", cache);
-    const hook = renderHook(() => env.useCardImage("Alpha", { ownerPrinting: owner }));
+    const hook = renderHook(({ ref }: { ref?: PrintedRef }) =>
+      env.useCardImage("Alpha", { ownerPrinting: owner, ownerPrintedRef: ref }), { initialProps: {} });
+    await settle();
+    expect(env.ownerCalls()).toEqual([]);
+    expect(cache.match).not.toHaveBeenCalled();
+    hook.rerender({ ref: { oracle_id: A, face_name: "Alpha" } });
     await waitFor(() => expect(hook.result.current.src).toBe("/owner.jpg"));
     expect(env.fetcher).not.toHaveBeenCalled();
     expect(cache.match.mock.calls.map(([url]) => url)).toEqual(["/scryfall-data.json", "/scryfall-printings.json"]);
@@ -642,6 +672,9 @@ describe("normal history and admission boundary", () => {
           canonicalMain: () => mode === "retry" && ++attempts === 1
             ? new Response(null, { status: 503 }) : json(catalogs().main),
         });
+        const cachedRead = vi.fn(async (url: string) =>
+          url.includes("printings") ? env.gate.promise : json(env.data.main));
+        if (mode === "offline") vi.stubGlobal("caches", { match: cachedRead });
         env.preferences.setState({ artOverrides: {} });
         env.install(encodeCandidateKey("name_face", ["alpha", "alpha", "full_card", "normal"]), "/name.jpg", "TkFNRQ", "deck_library");
         env.install(encodeCandidateKey("oracle_face", [A, "alpha", "full_card", "normal"]), "/oracle.jpg", "T1JBQ0xF", "deck_library");
@@ -651,6 +684,7 @@ describe("normal history and admission boundary", () => {
         const hook = renderHook(() => {
           const value = env.useCardImage("Alpha", {
             ownerPrinting: withOwner ? foreignOwner : undefined,
+            ownerPrintedRef: withOwner ? { oracle_id: A, face_name: "Alpha" } : undefined,
             ...(mode === "token" ? { isToken: true, tokenImageRef: { preset_id: "", scryfall_id: P, scryfall_oracle_id: A, face_name: "Alpha" } } : {}),
           });
           const entry = [value.src, value.isLoading, value.source?.kind, value.isRotated, value.isFlip];
@@ -672,6 +706,13 @@ describe("normal history and admission boundary", () => {
           await waitFor(() => expect(hook.result.current.src).toBe("/default-front.jpg"));
           act(() => hook.result.current.advanceFailedSource?.("/default-front.jpg"));
           expect(hook.result.current.src).toBeNull();
+        }
+        if (withOwner) {
+          await waitFor(() => expect(mode === "offline"
+            ? cachedRead.mock.calls.some(([url]) => url.includes("printings"))
+            : env.fetcher.mock.calls.some(([url]) => String(url).includes("scryfall-printings.json")))
+            .toBe(true));
+          expect(env.ownerCalls()).toEqual([]);
         }
         const before = {
           requests: structuredClone(env.normalCalls()),
@@ -700,18 +741,31 @@ describe("normal history and admission boundary", () => {
       resetFixture();
       const env = await setup({ offline: true });
       env.preferences.setState({ artOverrides: {} });
+      const cachedRead = vi.fn(async (url: string) =>
+        url.includes("printings") ? env.gate.promise : json(env.data.main));
+      vi.stubGlobal("caches", { match: cachedRead });
       const publications: unknown[] = [];
       env.install(encodeCandidateKey("name_face", ["alpha", "alpha", "full_card", "normal"]), "/name.jpg", "TkFNRQ", "deck_library");
       env.install(encodeCandidateKey("oracle_face", [A, "alpha", "full_card", "normal"]), "/oracle.jpg", "T1JBQ0xF", "deck_library");
       const hook = renderHook(() => {
-        const result = env.useCardImage("Alpha", { ownerPrinting: withOwner ? foreignOwner : undefined });
+        const result = env.useCardImage("Alpha", {
+          ownerPrinting: withOwner ? foreignOwner : undefined,
+          ownerPrintedRef: withOwner ? { oracle_id: A, face_name: "Alpha" } : undefined,
+        });
         const presentation = [result.src, result.isLoading, result.source?.kind];
         if (JSON.stringify(publications[publications.length - 1]) !== JSON.stringify(presentation)) publications.push(presentation);
         return result;
       });
       await waitFor(() => expect(hook.result.current.src).toBe("/name.jpg"));
+      if (withOwner) {
+        await waitFor(() => expect(cachedRead.mock.calls.some(([url]) => url.includes("printings"))).toBe(true));
+        expect(env.ownerCalls()).toEqual([]);
+      }
       await act(async () => { await env.service.loadScryfallData(); await env.service.loadPrintingsData(); });
       expect(env.service.resolveOracleIdSync("Alpha")).toBe(A);
+      expect(hook.result.current.src).toBe("/name.jpg");
+      await act(async () => { env.gate.resolve(json(env.data.catalog)); });
+      await settle();
       expect(hook.result.current.src).toBe("/name.jpg");
       if (withOwner) act(() => env.preferences.setState({ showOwnerPrintings: false }));
       else hook.rerender();
@@ -852,7 +906,7 @@ describe("owner authority invalidation", () => {
     await waitFor(() => expect(hook.result.current.src).toBe("https://img.example/22222222-2222-4222-8222-222222222222-front.jpg"));
   });
 
-  it("withdraws private name authority when a conflicting canonical snapshot becomes resident", async () => {
+  it("keeps carrier identity authoritative across canonical name changes and withdraws when identity is removed", async () => {
     const env = await setup({ offline: true, canonicalMain: () => {
       const data = catalogs().main;
       return json({ ...data, alpha: data[B] });
@@ -861,10 +915,14 @@ describe("owner authority invalidation", () => {
     env.install(encodeCandidateKey("name_face", ["alpha", "alpha", "full_card", "normal"]), "/normal.jpg", "TkFNRQ", "deck_library");
     env.installPrinting(O1, "/owner.jpg");
     vi.stubGlobal("caches", { match: vi.fn(async (url: string) => json(url.includes("printings") ? env.data.catalog : env.data.main)) });
-    const hook = renderHook(() => env.useCardImage("Alpha", { ownerPrinting: owner }));
+    const hook = renderHook(({ identified }) => env.useCardImage("Alpha", {
+      ownerPrinting: owner,
+      ownerPrintedRef: identified ? { oracle_id: A, face_name: "Alpha" } : undefined,
+    }), { initialProps: { identified: true } });
     await waitFor(() => expect(hook.result.current.src).toBe("/owner.jpg"));
     await act(async () => { await env.service.loadScryfallData(); });
-    expect(hook.result.current.src).toBe("/normal.jpg");
+    expect(hook.result.current.src).toBe("/owner.jpg");
+    hook.rerender({ identified: false });
     await settle();
     expect(hook.result.current.src).toBe("/normal.jpg");
   });
@@ -1107,7 +1165,7 @@ describe("owner private resource retention", () => {
   });
 });
 
-it("releases private resources when canonical authority withdraws admission without unmounting", async () => {
+it("releases private resources when carrier identity withdraws admission without unmounting", async () => {
   const replacement = catalogs().main;
   const env = await setup({ offline: true, canonicalMain: () => json({ ...replacement, alpha: replacement[B] }) });
   env.preferences.setState({ artOverrides: {}, artChain: [] });
@@ -1117,10 +1175,16 @@ it("releases private resources when canonical authority withdraws admission with
     ? json(url.includes("printings") ? env.data.catalog : env.data.main) : undefined);
   vi.stubGlobal("caches", { match: cache });
   vi.useFakeTimers();
-  const hook = renderHook(() => env.useCardImage("Alpha", { ownerPrinting: owner }));
+  const hook = renderHook(({ identified }) => env.useCardImage("Alpha", {
+    ownerPrinting: owner,
+    ownerPrintedRef: identified ? { oracle_id: A, face_name: "Alpha" } : undefined,
+  }), { initialProps: { identified: true } });
   await settle();
   expect(hook.result.current.src).toBe("/owner.jpg");
   await act(async () => { await env.service.loadScryfallData(); });
+  await settle();
+  expect(hook.result.current.src).toBe("/owner.jpg");
+  hook.rerender({ identified: false });
   await settle();
   expect(hook.result.current.src).toBe("/normal.jpg");
   await act(async () => { await vi.advanceTimersByTimeAsync(2000); });

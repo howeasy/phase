@@ -101,6 +101,10 @@ pub struct StackEntryDisplay {
     /// or AI path reads it. Absent from the wire when empty.
     #[serde(default, skip_serializing_if = "DisplayOnly::is_none")]
     pub printing: DisplayOnly<Option<CardPrinting>>,
+    /// Oracle and face authority for row owner art, from the printing's selected read.
+    /// Display-only; no rules or AI path reads it. Absent when the row has no printing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub printed_ref: Option<PrintedCardRef>,
     pub kind_label: String,
     /// The typed template behind `kind_label` for activated and triggered
     /// ability entries (`StackAbilityKindView`); `None` for every other kind.
@@ -2763,6 +2767,7 @@ fn stack_entry_detail(state: &GameState, entry: &StackEntry) -> StackEntryDispla
         source_name: source.name,
         token_image_ref: stack_source_token_image_ref(state, entry),
         printing: source.printing,
+        printed_ref: source.printed_ref,
         kind_label,
         ability_kind,
         ability_description,
@@ -2825,6 +2830,7 @@ fn stack_source_token_image_ref(state: &GameState, entry: &StackEntry) -> Option
 struct StackRowSource {
     name: String,
     printing: DisplayOnly<Option<CardPrinting>>,
+    printed_ref: Option<PrintedCardRef>,
 }
 
 /// Mirrors image identity precedence without looking up the creator. Emblems without their
@@ -2844,73 +2850,77 @@ fn live_source_printing(object: &GameObject) -> DisplayOnly<Option<CardPrinting>
     }
 }
 
+/// Uses the same own-card / captured-emblem authority as `live_source_printing`.
+fn live_source_printed_ref(object: &GameObject) -> Option<&PrintedCardRef> {
+    if object.printed_ref.is_none() && object.is_emblem {
+        object.emblem_source.as_ref()?.printed_ref.as_ref()
+    } else {
+        object.printed_ref.as_ref()
+    }
+}
+
 fn stack_row_source(state: &GameState, entry: &StackEntry) -> StackRowSource {
     let live = state.objects.get(&entry.source_id);
-    // A row that displays a known latched name reads the live, already viewer-filtered object
-    // whenever it is present (a present but redacted object never falls back), and its
-    // filtered last-known information only once it no longer exists.
-    let latched_printing = || match live {
-        Some(object) => live_source_printing(object),
-        None => state
-            .lki_cache
-            .get(&entry.source_id)
-            .map(|lki| lki.printing.clone())
-            .unwrap_or_default(),
+    let live_art = |object| {
+        (
+            live_source_printing(object),
+            live_source_printed_ref(object),
+        )
     };
-    match &entry.kind {
+    let (name, printing, printed_ref) = match &entry.kind {
         StackEntryKind::TriggeredAbility {
             source_name,
             ability,
             ..
-        } if !source_name.is_empty() => StackRowSource {
-            name: source_name.clone(),
-            // The latched name came from the context's own read of its source (the exact
-            // live object while it still agrees with the context, else the context's
-            // snapshot), so the printing comes from that same read and only while that
-            // read still discloses the latched name: a source whose name changed after the row
-            // latched it shows no printing, and the context's older printing is never shown beside
-            // a newer name.
-            // Context-free legacy/synthetic rows retain the existing live-or-absent-LKI route.
-            printing: ability
-                .trigger_source
-                .as_ref()
-                .map_or_else(latched_printing, |context| {
-                    match context.source_read(state) {
-                        TriggerSourceRead::ExactLive(object) => {
-                            if object.name == *source_name {
-                                live_source_printing(object)
-                            } else {
-                                DisplayOnly::default()
-                            }
-                        }
-                        TriggerSourceRead::Latched(context) => {
-                            // Emblem LKI has no creator provenance; do not recover it
-                            // from a different incarnation or the creator's current card.
-                            if context.lki.name == *source_name {
-                                context.lki.printing.clone()
-                            } else {
-                                DisplayOnly::default()
-                            }
-                        }
+        } if !source_name.is_empty() => {
+            // Printing and identity follow one selected read and only while it still
+            // discloses the latched name. Never borrow from a newer incarnation.
+            let (printing, printed_ref) = match ability.trigger_source.as_ref() {
+                Some(context) => match context.source_read(state) {
+                    TriggerSourceRead::ExactLive(object) if object.name == *source_name => {
+                        live_art(object)
                     }
-                }),
-        },
+                    TriggerSourceRead::Latched(context) if context.lki.name == *source_name => {
+                        (context.lki.printing.clone(), context.printed_ref.as_ref())
+                    }
+                    TriggerSourceRead::ExactLive(_) | TriggerSourceRead::Latched(_) => {
+                        (DisplayOnly::default(), None)
+                    }
+                },
+                // Legacy/synthetic rows retain the live-or-absent-LKI route, but
+                // the LKI cache has no printed identity to authorize owner art.
+                None => match live {
+                    Some(object) => live_art(object),
+                    None => (
+                        state
+                            .lki_cache
+                            .get(&entry.source_id)
+                            .map(|lki| lki.printing.clone())
+                            .unwrap_or_default(),
+                        None,
+                    ),
+                },
+            };
+            (source_name.clone(), printing, printed_ref)
+        }
         StackEntryKind::TriggeredAbility { .. }
         | StackEntryKind::ActivatedAbility { .. }
         | StackEntryKind::Spell { .. }
         | StackEntryKind::KeywordAction { .. }
         | StackEntryKind::CombatDamage { .. } => match live {
-            Some(object) => StackRowSource {
-                name: object.name.clone(),
-                printing: live_source_printing(object),
-            },
-            // The source no longer exists and the row names no card, so it
-            // discloses no printing either, whatever its last-known information holds.
-            None => StackRowSource {
-                name: "Unknown".to_string(),
-                printing: DisplayOnly::default(),
-            },
+            Some(object) => {
+                let (printing, printed_ref) = live_art(object);
+                (object.name.clone(), printing, printed_ref)
+            }
+            None => ("Unknown".to_string(), DisplayOnly::default(), None),
         },
+    };
+    // Retained contexts may keep identity after their printing is concealed.
+    let printed_ref = printed_ref.filter(|_| printing.get().is_some()).cloned();
+    StackRowSource {
+        name,
+        printing,
+        printed_ref,
     }
 }
 
@@ -3264,6 +3274,229 @@ mod tests {
                 die_result: None,
                 provenance: None,
             },
+        }
+    }
+
+    fn owner_identity_fixture() -> (GameState, ObjectId, PrintedCardRef) {
+        let mut state = GameState::new_two_player(42);
+        let id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Twin".into(),
+            Zone::Battlefield,
+        );
+        let identity = PrintedCardRef {
+            oracle_id: "oracle-b".into(),
+            face_name: "Twin".into(),
+        };
+        let object = state.objects.get_mut(&id).unwrap();
+        object.printed_ref = Some(identity.clone());
+        object.printing = DisplayOnly::new(Some(emblem_printing("B")));
+        (state, id, identity)
+    }
+
+    #[test]
+    fn stack_owner_identity_follows_latched_read_and_requires_disclosed_printing() {
+        let (state, id, identity) = owner_identity_fixture();
+        let context =
+            crate::game::triggers::trigger_source_context_for_latch(&state, &state.objects[&id]);
+        assert_eq!(context.printed_ref.as_ref(), Some(&identity));
+        assert!(matches!(
+            context.source_read(&state),
+            TriggerSourceRead::ExactLive(_)
+        ));
+        let entry = emblem_trigger_row(id, "Twin", Some(context.clone()));
+        assert_eq!(
+            stack_entry_detail(&state, &entry).printed_ref,
+            Some(identity.clone())
+        );
+        for stale in ["departed", "incarnation", "zone"] {
+            let mut changed = state.clone();
+            if stale == "departed" {
+                changed.objects.remove(&id);
+                changed.battlefield.retain(|object_id| *object_id != id);
+            } else {
+                let object = changed.objects.get_mut(&id).unwrap();
+                if stale == "incarnation" {
+                    object.incarnation += 1;
+                } else {
+                    object.zone = Zone::Exile;
+                }
+                object.printed_ref.as_mut().unwrap().oracle_id = "stale-live-a".into();
+                object.printing = DisplayOnly::new(Some(emblem_printing("A")));
+            }
+            assert!(
+                matches!(context.source_read(&changed), TriggerSourceRead::Latched(_)),
+                "{stale}"
+            );
+            let row = stack_entry_detail(&changed, &entry);
+            assert_eq!(row.printing.get(), &Some(emblem_printing("B")), "{stale}");
+            assert_eq!(
+                row.printed_ref,
+                Some(identity.clone()),
+                "latched identity survives {stale}"
+            );
+            for absent in ["name", "printing", "identity"] {
+                let mut retained = context.clone();
+                match absent {
+                    "name" => retained.lki.name = "Changed".into(),
+                    "printing" => retained.lki.printing = DisplayOnly::default(),
+                    "identity" => retained.printed_ref = None,
+                    _ => unreachable!(),
+                }
+                assert!(matches!(
+                    retained.source_read(&changed),
+                    TriggerSourceRead::Latched(_)
+                ));
+                let row =
+                    stack_entry_detail(&changed, &emblem_trigger_row(id, "Twin", Some(retained)));
+                assert!(
+                    row.printed_ref.is_none(),
+                    "latched {absent} must not disclose identity"
+                );
+                assert_eq!(row.printing.get().is_some(), absent == "identity");
+            }
+        }
+    }
+
+    #[test]
+    fn stack_owner_identity_live_emblem_and_lki_cache_authorities() {
+        let (mut state, id, identity) = owner_identity_fixture();
+        let context =
+            crate::game::triggers::trigger_source_context_for_latch(&state, &state.objects[&id]);
+        for name in ["Twin", ""] {
+            for retained in [None, Some(context.clone())] {
+                let entry = emblem_trigger_row(id, name, retained);
+                assert_eq!(
+                    stack_entry_detail(&state, &entry).printed_ref,
+                    Some(identity.clone())
+                );
+                let mut concealed = state.clone();
+                concealed.objects.get_mut(&id).unwrap().printing = DisplayOnly::default();
+                assert!(stack_entry_detail(&concealed, &entry).printed_ref.is_none());
+            }
+        }
+        state
+            .lki_cache
+            .insert(id, state.objects[&id].snapshot_public_characteristics());
+        state.objects.remove(&id);
+        let cached = stack_entry_detail(&state, &emblem_trigger_row(id, "Twin", None));
+        assert_eq!(cached.printing.get(), &Some(emblem_printing("B")));
+        assert!(
+            cached.printed_ref.is_none(),
+            "LKI-only rows cannot synthesize identity"
+        );
+        let empty = stack_entry_detail(&state, &emblem_trigger_row(id, "", None));
+        assert!(empty.printing.get().is_none());
+        assert!(empty.printed_ref.is_none());
+
+        let (mut emblems, emblem) = emblem_row_fixture();
+        emblems
+            .objects
+            .get_mut(&emblem)
+            .unwrap()
+            .emblem_source
+            .as_mut()
+            .unwrap()
+            .printed_ref = Some(identity.clone());
+        let entry = emblem_trigger_row(emblem, "", None);
+        let row = stack_entry_detail(&emblems, &entry);
+        assert_eq!(row.printed_ref, Some(identity.clone()));
+        assert_eq!(row.printing.get(), &Some(emblem_printing("A")));
+        let object = emblems.objects.get_mut(&emblem).unwrap();
+        object.printed_ref = Some(PrintedCardRef {
+            oracle_id: "own".into(),
+            face_name: "Emblem".into(),
+        });
+        object.printing = DisplayOnly::new(Some(emblem_printing("B")));
+        assert_eq!(
+            stack_entry_detail(&emblems, &entry).printed_ref,
+            emblems.objects[&emblem].printed_ref
+        );
+        emblems.objects.get_mut(&emblem).unwrap().printed_ref = None;
+        emblems
+            .objects
+            .get_mut(&emblem)
+            .unwrap()
+            .emblem_source
+            .as_mut()
+            .unwrap()
+            .printed_ref = None;
+        let row = stack_entry_detail(&emblems, &entry);
+        assert!(row.printing.get().is_some());
+        assert!(
+            row.printed_ref.is_none(),
+            "optional emblem identity is never synthesized"
+        );
+    }
+
+    #[test]
+    fn stack_owner_identity_viewer_filtering_and_wire_contract() {
+        let (mut state, id, identity) = owner_identity_fixture();
+        let context =
+            crate::game::triggers::trigger_source_context_for_latch(&state, &state.objects[&id]);
+        state
+            .stack
+            .push_back(emblem_trigger_row(id, "Twin", Some(context)));
+        for viewer in [Some(PlayerId(0)), Some(PlayerId(1)), None] {
+            let wire = serde_json::to_value(ClientGameStateRef::wrap(&state, viewer)).unwrap();
+            let row = &wire["derived"]["stack_entry_details"]["900"];
+            assert_eq!(row["printed_ref"], serde_json::to_value(&identity).unwrap());
+            assert_eq!(
+                row["printing"],
+                serde_json::to_value(emblem_printing("B")).unwrap()
+            );
+        }
+        // A hidden live source still reaches ExactLive; its retained identity must not leak.
+        let id = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Twin".into(),
+            Zone::Hand,
+        );
+        let hidden = state.objects.get_mut(&id).unwrap();
+        hidden.printed_ref = Some(identity.clone());
+        hidden.printing = DisplayOnly::new(Some(emblem_printing("B")));
+        let context =
+            crate::game::triggers::trigger_source_context_for_latch(&state, &state.objects[&id]);
+        state.stack[0] = emblem_trigger_row(id, "Twin", Some(context));
+        let owner_wire =
+            serde_json::to_value(ClientGameStateRef::wrap(&state, Some(PlayerId(0)))).unwrap();
+        assert_eq!(
+            owner_wire["derived"]["stack_entry_details"]["900"]["printed_ref"],
+            serde_json::to_value(&identity).unwrap()
+        );
+        for viewer in [Some(PlayerId(1)), None] {
+            let filtered = match viewer {
+                Some(viewer) => crate::game::visibility::filter_state_for_viewer(&state, viewer),
+                None => crate::game::visibility::filter_state_for_unseated_viewer(&state),
+            };
+            let StackEntryKind::TriggeredAbility { ability, .. } = &filtered.stack[0].kind else {
+                unreachable!()
+            };
+            assert!(matches!(
+                ability
+                    .trigger_source
+                    .as_ref()
+                    .unwrap()
+                    .source_read(&filtered),
+                TriggerSourceRead::ExactLive(_)
+            ));
+            assert_ne!(filtered.objects[&id].name, state.objects[&id].name);
+            assert!(filtered.objects[&id].printing.get().is_none());
+            let wire =
+                serde_json::to_value(ClientGameStateRef::wrap_filtered(&state, &filtered, viewer))
+                    .unwrap();
+            let row = &wire["derived"]["stack_entry_details"]["900"];
+            assert!(row.get("printing").is_none());
+            assert!(
+                row.get("printed_ref").is_none(),
+                "hidden ExactLive identity must be omitted"
+            );
+            let legacy: StackEntryDisplay = serde_json::from_value(row.clone()).unwrap();
+            assert!(legacy.printed_ref.is_none());
         }
     }
 
@@ -5986,6 +6219,7 @@ mod tests {
             source_name: "Spell".to_string(),
             token_image_ref: None,
             printing: Default::default(),
+            printed_ref: None,
             kind_label: "Spell".to_string(),
             ability_kind: None,
             ability_description: None,

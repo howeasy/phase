@@ -9,7 +9,7 @@ import { useCanActForWaitingState } from "../../hooks/usePlayerId.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { usePreferencesStore } from "../../stores/preferencesStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
-import { cardImageLookup } from "../../services/cardImageLookup.ts";
+import { cardImageLookup, ownerPrintedRefOf } from "../../services/cardImageLookup.ts";
 import {
   collectObjectActions,
   deriveActivationAffordances,
@@ -76,10 +76,14 @@ function groupEmblems(
     const desc = descriptionOf(emblem, fallback);
     const sourceName = emblem.emblem_source?.name ?? null;
     const legacyKey = `${sourceName ?? ""}|${desc}`;
-    const p = emblem.emblem_source?.printing;
-    const key = showOwnerPrintings
-      ? JSON.stringify([legacyKey, p == null ? null : [p.set_code, p.collector_number]])
-      : legacyKey;
+    let key = legacyKey;
+    if (showOwnerPrintings) {
+      const lookup = cardImageLookup(emblem);
+      const p = lookup.ownerPrinting;
+      const ref = ownerPrintedRefOf(lookup);
+      const ownerArtKey = p && ref ? [p.set_code, p.collector_number, ref.oracle_id, ref.face_name] : null;
+      key = JSON.stringify([legacyKey, ownerArtKey]);
+    }
     const existing = byKey.get(key);
     if (existing) {
       // Activation remains reachable on every member, not just the image representative.

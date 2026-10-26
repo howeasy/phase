@@ -256,7 +256,8 @@ function useOwnerCardImageOverlay(input: OwnerInput | null): ImageResult | null 
  * An admitted exact owner printing replaces it when ready. Missing admitted art is
  * terminal null/nonloading, never a substitution from another printing. Toggle off
  * immediately reveals the still-live normal result; pending/rejected owners do not
- * blank it or add a loading flag. Real object-carrier forwarding belongs to phase 13.
+ * blank it or add a loading flag. Owner admission requires identity delivered with
+ * its carrier (`ownerPrintedRef`, or the caller's `oracleId`); never a name lookup.
  */
 export function useCardImage(cardName: string, options?: UseCardImageOptions): ImageResult {
   let legacyOptions: Parameters<typeof useLegacyCardImage>[1] = options;
@@ -272,11 +273,11 @@ export function useCardImage(cardName: string, options?: UseCardImageOptions): I
     eligible ? options?.showOwnerPrintings ?? state.showOwnerPrintings : false);
   const offline = useEffectiveOffline();
   const language = usePreferencesStore((state) => eligible && enabled ? state.language : "en");
+  const oracleId = options?.ownerPrintedRef?.oracle_id ?? options?.oracleId;
   let input: OwnerInput | null = null;
-  if (eligible && enabled) {
+  if (eligible && enabled && oracleId) {
     const setCode = owner.set_code.toLowerCase();
     const collectorNumber = owner.collector_number;
-    const oracleId = options?.ownerPrintedRef?.oracle_id ?? options?.oracleId;
     const faceName = options?.ownerPrintedRef?.face_name ?? options?.faceName;
     const faceIndex = options?.faceIndex ?? 0;
     const size = options?.size ?? "normal";

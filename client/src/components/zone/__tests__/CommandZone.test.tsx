@@ -71,6 +71,7 @@ vi.mock("../../../services/platform.ts", async (original) => ({
 }));
 
 const ORACLE = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+const OTHER_ORACLE = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
 const A = "11111111-1111-4111-8111-111111111111";
 const B = "22222222-2222-4222-8222-222222222222";
 const V = "33333333-3333-4333-8333-333333333333";
@@ -88,12 +89,15 @@ beforeAll(async () => {
     id, set, collector_number, set_name: set, released_at: "2026-01-01", border_color: "black",
     frame_effects: [], full_art: false, faces: [{ normal: `/${id}.jpg`, art_crop: `/${id}-crop.jpg` }],
   })) };
+  catalog[OTHER_ORACLE] = [{ ...catalog[ORACLE][0], id: B,
+    faces: [{ normal: `/${B}.jpg`, art_crop: `/${B}-crop.jpg` }] }];
   const gate = new Promise<Response>((resolve) => {
     admitCatalog = () => resolve(new Response(JSON.stringify(catalog)));
   });
   vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) =>
     new URL(String(input), "http://localhost").pathname === "/scryfall-printings.json"
-      ? gate : new Response(JSON.stringify({ [ORACLE]: entry, alpha: entry }))));
+      ? gate : new Response(JSON.stringify({ [ORACLE]: entry, alpha: entry,
+        [OTHER_ORACLE]: { ...entry, oracle_id: OTHER_ORACLE } }))));
   for (const id of [A, B, V]) {
     installed.set(encodeCandidateKey("english_printing", [id, 0, "art_crop", "art_crop"]), [{
       packId: packId("complete"), assetKey: assetKey("asset:v1:exact_printing:QQ"),
@@ -528,6 +532,50 @@ describe("CommandZone owner-printing groups", () => {
     expect(screen.getByTestId("emblem-card")).toHaveAttribute("data-grouped-ids", "700 701");
     expect(screen.getByTestId("emblem-card").querySelector("img")).toHaveAttribute("src", `/${A}-crop.jpg`);
   });
+
+  it.each(["different", "missing", "equal", "legacy"] as const)(
+    "uses selected own emblem authority with equal provenance: %s", async (authority) => {
+      for (const reverse of [false, true]) {
+        const state = seedPrintings([printingA, printingA]);
+        usePreferencesStore.setState({ showOwnerPrintings: true, artOverrides: {
+          [ORACLE]: { scryfallId: V, setCode: "pin", collectorNumber: "3" },
+          [OTHER_ORACLE]: { scryfallId: V, setCode: "pin", collectorNumber: "3" },
+        } });
+        for (const id of [700, 701]) {
+          state.objects[id].printing = printingA;
+          state.objects[id].printed_ref = { oracle_id: authority === "different" && id === 701 ? OTHER_ORACLE : ORACLE, face_name: "Alpha" };
+          state.objects[id].emblem_source = { name: "Alpha", printed_ref: null, printing: printingB };
+        }
+        if (authority === "missing" || authority === "legacy") state.objects[701].printed_ref = null;
+        if (authority === "legacy") state.objects[700].printed_ref = null;
+        if (reverse) state.command_zone!.reverse();
+        act(() => useGameStore.setState({ gameState: { ...state } }));
+        const surface = render(<CommandZone playerId={0} />);
+        const split = authority === "different" || authority === "missing";
+        const order = reverse ? [701, 700] : [700, 701];
+        const chips = screen.getAllByTestId("emblem-card");
+        expect(chips.map((chip) => chip.dataset.groupedIds)).toEqual(split ? order.map(String) : [order.join(" ")]);
+        for (const [index, chip] of chips.entries()) {
+          const id = order[index];
+          const expected = authority === "legacy" || (authority === "missing" && id === 701)
+            ? V : authority === "different" && id === 701 ? B : A;
+          await waitFor(() => expect(chip.querySelector("img")).toHaveAttribute("src", `/${expected}-crop.jpg`));
+        }
+        for (const id of [700, 701]) {
+          const action = { type: "ActivateAbility" as const, data: { source_id: id, ability_index: 0 } };
+          act(() => useGameStore.setState({ legalActionsByObject: { [id]: [action] } }));
+          vi.mocked(dispatchAction).mockClear();
+          const chip = screen.getAllByTestId("emblem-card").find((element) => element.dataset.groupedIds!.split(" ").includes(String(id)))!;
+          fireEvent.click(chip);
+          expect(dispatchAction).toHaveBeenCalledExactlyOnceWith(action);
+        }
+        act(() => usePreferencesStore.getState().setShowOwnerPrintings(false));
+        expect(screen.getByTestId("emblem-card").dataset.groupedIds).toBe(order.join(" "));
+        await waitFor(() => expect(screen.getByTestId("emblem-card").querySelector("img")).toHaveAttribute("src", `/${V}-crop.jpg`));
+        surface.unmount();
+      }
+    },
+  );
 
   it.each([
     [printingA, { set_code: "other", collector_number: "1" }],

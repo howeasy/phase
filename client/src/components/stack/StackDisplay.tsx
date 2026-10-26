@@ -14,7 +14,7 @@ import {
   getWaitingForObjectChoiceIds,
   isSplitBoardActive,
 } from "../../viewmodel/gameStateView.ts";
-import type { CardPrinting, ObjectId, StackDisplayGroup, StackEntry as StackEntryType, StackEntryDisplay } from "../../adapter/types.ts";
+import type { ObjectId, StackDisplayGroup, StackEntry as StackEntryType, StackEntryDisplay } from "../../adapter/types.ts";
 import { getStackCardSize } from "../board/boardSizing.ts";
 import { DraggableWidget } from "../flexlayout/DraggableWidget.tsx";
 
@@ -29,8 +29,10 @@ interface DisplayStackEntry {
   groupCount: number;
 }
 
-function samePrinting(a: CardPrinting | null | undefined, b: CardPrinting | null | undefined): boolean {
-  return a == null ? b == null : b != null && a.set_code === b.set_code && a.collector_number === b.collector_number;
+function ownerArtKey(details: StackEntryDisplay | undefined): string {
+  const p = details?.printing;
+  const ref = details?.printed_ref;
+  return JSON.stringify(p && ref ? [p.set_code, p.collector_number, ref.oracle_id, ref.face_name] : null);
 }
 
 /** A missing details row is missing comparison authority, not an absent printing. */
@@ -40,11 +42,13 @@ function shouldSplitStackGroup(
   detailsByEntry: Readonly<Record<string, StackEntryDisplay>>,
   showOwnerPrintings: boolean,
 ): boolean {
-  const firstPrinting = detailsByEntry[String(group.member_ids[0])]?.printing;
-  return legalMemberIds.length >= 2 || (showOwnerPrintings && group.member_ids.some((id) => {
+  if (legalMemberIds.length >= 2) return true;
+  if (!showOwnerPrintings) return false;
+  const firstKey = ownerArtKey(detailsByEntry[String(group.member_ids[0])]);
+  return group.member_ids.some((id) => {
     const details = detailsByEntry[String(id)];
-    return !details || !samePrinting(firstPrinting, details.printing);
-  }));
+    return !details || ownerArtKey(details) !== firstKey;
+  });
 }
 
 const STAGGER_Y = 24;

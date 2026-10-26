@@ -47,6 +47,7 @@ vi.mock("../../../services/platform.ts", async (original) => ({
   }),
 }));
 const ORACLE = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+const OTHER_ORACLE = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
 const A = "11111111-1111-4111-8111-111111111111";
 const B = "22222222-2222-4222-8222-222222222222";
 const V = "33333333-3333-4333-8333-333333333333";
@@ -64,12 +65,14 @@ beforeAll(async () => {
     id, set, collector_number, set_name: set, released_at: "2026-01-01", border_color: "black",
     frame_effects: [], full_art: false, faces: [{ normal: `/${id}.jpg` }],
   })) };
+  catalog[OTHER_ORACLE] = [{ ...catalog[ORACLE][0], id: B, faces: [{ normal: `/${B}.jpg` }] }];
   const gate = new Promise<Response>((resolve) => {
     admitCatalog = () => resolve(new Response(JSON.stringify(catalog)));
   });
   vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) =>
     new URL(String(input), "http://localhost").pathname === "/scryfall-printings.json"
-      ? gate : new Response(JSON.stringify({ [ORACLE]: entry, alpha: entry }))));
+      ? gate : new Response(JSON.stringify({ [ORACLE]: entry, alpha: entry,
+        [OTHER_ORACLE]: { ...entry, oracle_id: OTHER_ORACLE } }))));
   for (const id of [A, B, V]) {
     for (const rung of ["small", "normal"] as const) {
       installed.set(encodeCandidateKey("english_printing", [id, 0, "full_card", rung]), [{
@@ -104,7 +107,8 @@ function seed({
   for (const [index, id] of ids.entries()) {
     if (!missingRows.includes(id)) {
       details[String(id)] = { source_name: sourceKind === "emblem" ? "Emblem" : "Alpha",
-        kind_label: sourceKind === "emblem" ? "Triggered Ability" : "Spell", printing: printings[index] };
+        kind_label: sourceKind === "emblem" ? "Triggered Ability" : "Spell", printing: printings[index],
+        printed_ref: { oracle_id: ORACLE, face_name: "Alpha" } };
     }
   }
   const waitingFor = legalIds.length > 0
@@ -264,6 +268,43 @@ describe("StackDisplay real grouped surfaces", () => {
     expect(screen.getByText("×2")).toBeInTheDocument();
   });
 
+  it.each(["different", "missing", "equal", "legacy"] as const)(
+    "groups by effective row owner authority: %s, independent of representative order", async (authority) => {
+      for (const reverse of [false, true]) {
+        const state = seed({ printings: [printingA, printingA] });
+        usePreferencesStore.setState({ showOwnerPrintings: true, artOverrides: {
+          [ORACLE]: { scryfallId: V, setCode: "pin", collectorNumber: "3" },
+          [OTHER_ORACLE]: { scryfallId: V, setCode: "pin", collectorNumber: "3" },
+        } });
+        const details = state.derived!.stack_entry_details!;
+        if (authority === "different") details["11"].printed_ref = { oracle_id: OTHER_ORACLE, face_name: "Alpha" };
+        if (authority === "missing" || authority === "legacy") details["11"].printed_ref = undefined;
+        if (authority === "legacy") details["10"].printed_ref = undefined;
+        state.objects[1011].printed_ref = { oracle_id: OTHER_ORACLE, face_name: "Alpha" };
+        if (reverse) {
+          state.stack.reverse();
+          state.derived!.stack_display_groups = [{ representative: 11, member_ids: [11, 10], count: 2 }];
+        }
+        // Observe both real images before collapsing the engine-authored display group.
+        const groups = state.derived!.stack_display_groups;
+        act(() => useGameStore.setState({ gameState: { ...state, derived: { ...state.derived, stack_display_groups: [] } } }));
+        const surface = render(<StackDisplay effectiveMultiplayerBoardLayout="focused" />);
+        for (const id of [10, 11]) {
+          const expected = authority === "legacy" || (authority === "missing" && id === 11)
+            ? V : authority === "different" && id === 11 ? B : A;
+          await waitFor(() => expect(row(id).querySelector("img")).toHaveAttribute("src", `/${expected}.jpg`));
+        }
+        act(() => useGameStore.setState({ gameState: { ...state, derived: { ...state.derived, stack_display_groups: groups } } }));
+        const split = authority === "different" || authority === "missing";
+        expect(renderedIds().sort()).toEqual(split ? [10, 11] : [reverse ? 11 : 10]);
+        act(() => usePreferencesStore.getState().setShowOwnerPrintings(false));
+        expect(renderedIds()).toEqual([reverse ? 11 : 10]);
+        await waitFor(() => expect(row(reverse ? 11 : 10).querySelector("img")).toHaveAttribute("src", `/${V}.jpg`));
+        surface.unmount();
+      }
+    },
+  );
+
   it.each([false, true])("preserves legal-member choice identity independently of printing (%s)", (enabled) => {
     usePreferencesStore.setState({ showOwnerPrintings: enabled });
     for (const heterogeneous of [false, true]) {
@@ -291,7 +332,8 @@ describe("StackDisplay real grouped surfaces", () => {
     act(() => useGameStore.setState({ gameState: {
       ...state, derived: { ...state.derived, stack_entry_details: {
         ...state.derived!.stack_entry_details,
-        "11": { source_name: "Alpha", kind_label: "Spell", printing: printingA },
+        "11": { source_name: "Alpha", kind_label: "Spell", printing: printingA,
+          printed_ref: { oracle_id: ORACLE, face_name: "Alpha" } },
       } },
     } }));
     expect(renderedIds()).toEqual([10, 11]);
@@ -356,6 +398,7 @@ describe("StackDisplay real grouped surfaces", () => {
     state.derived!.stack_entry_details!["11"].targets = [{ target: { Player: 1 }, label: "Opponent" }];
     state.derived!.stack_entry_details!["20"] = {
       source_name: "Alpha", kind_label: "Spell", printing: printingA,
+      printed_ref: { oracle_id: ORACLE, face_name: "Alpha" },
       targets: [{ target: { Object: 11 }, label: "Second stack member" }],
     };
     const originalRect = HTMLElement.prototype.getBoundingClientRect;

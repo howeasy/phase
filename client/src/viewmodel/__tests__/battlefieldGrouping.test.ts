@@ -690,7 +690,8 @@ describe("owner-printing battlefield identity", () => {
   const a = { set_code: "own", collector_number: "01" };
   const b = { set_code: "own", collector_number: "02" };
   const card = (id: number, printing?: GameObject["printing"]) =>
-    buildGameObjectWithCoreTypes(["Creature"], { id, name: "Alpha", printing });
+    buildGameObjectWithCoreTypes(["Creature"], { id, name: "Alpha", printing,
+      printed_ref: { oracle_id: "oracle-a", face_name: "Alpha" } });
   const ids = (objects: GameObject[], enabled: boolean) =>
     groupByName(objects, undefined, undefined, undefined, enabled).map((group) => group.ids);
 
@@ -705,6 +706,46 @@ describe("owner-printing battlefield identity", () => {
     ];
     expect(ids(objects, true)).toEqual([[1, 2], [3], [4], [5, 6]]);
     expect(ids(objects, false)).toEqual([[1, 2, 3, 4, 5, 6]]);
+  });
+
+  it.each(["different", "face", "missing", "equal", "legacy"] as const)(
+    "groups the effective selected authority, not just the pair: %s", (authority) => {
+      const first = card(1, a);
+      const second = card(2, a);
+      if (authority === "different") second.printed_ref = { oracle_id: "oracle-b", face_name: "Alpha" };
+      if (authority === "face") second.printed_ref = { oracle_id: "oracle-a", face_name: "Reverse" };
+      if (authority === "missing" || authority === "legacy") second.printed_ref = null;
+      if (authority === "legacy") first.printed_ref = null;
+      for (const objects of [[first, second], [second, first]]) {
+        const order = objects.map((object) => object.id);
+        expect(ids(objects, true)).toEqual(["different", "face", "missing"].includes(authority)
+          ? order.map((id) => [id]) : [order]);
+        expect(ids(objects, false)).toEqual([order]);
+      }
+    },
+  );
+
+  it("coalesces transformed legacy names but separates identified emblem own art", () => {
+    const objects = [card(1, a), card(2, a)];
+    for (const [index, object] of objects.entries()) {
+      object.printed_ref = null;
+      object.transformed = true;
+      object.back_face = { ...objects[index], name: index === 0 ? "Front A" : "Front B" };
+    }
+    for (const order of [objects, [...objects].reverse()]) {
+      expect(ids(order, true)).toEqual([order.map((object) => object.id)]);
+      expect(ids(order, false)).toEqual([order.map((object) => object.id)]);
+    }
+    for (const object of objects) {
+      object.transformed = false;
+      object.is_emblem = true;
+      object.emblem_source = { name: "Creator", printed_ref: { oracle_id: "creator", face_name: "Creator" }, printing: b };
+      object.printed_ref = { oracle_id: `own-${object.id}`, face_name: "Alpha" };
+    }
+    for (const order of [objects, [...objects].reverse()]) {
+      expect(ids(order, true)).toEqual(order.map((object) => [object.id]));
+      expect(ids(order, false)).toEqual([order.map((object) => object.id)]);
+    }
   });
 
   it.each([
@@ -772,6 +813,7 @@ describe("owner-printing battlefield identity", () => {
       [a, { ...a }, b].map((printing, member) =>
         buildGameObjectWithCoreTypes([type], {
           id: index * 10 + member + 1, name: type, printing, owner: 1, controller: 0,
+          printed_ref: { oracle_id: "oracle-a", face_name: type },
         })));
     const state = buildGameState({ objects: buildObjectMap(...objects), battlefield: objects.map((object) => object.id) });
     for (const enabled of [false, true]) {

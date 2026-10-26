@@ -376,6 +376,7 @@ describe("AttackTargetPicker", () => {
     const state = makeState();
     for (const id of ATTACKERS) {
       state.objects[id].printing = { set_code: "own", collector_number: id === 103 ? "2" : "1" };
+      state.objects[id].printed_ref = { oracle_id: "oracle-a", face_name: state.objects[id].name };
     }
     useGameStore.setState({ gameState: state });
     const { onConfirm } = renderPicker();

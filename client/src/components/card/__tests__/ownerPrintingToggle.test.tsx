@@ -487,11 +487,13 @@ describe("owner printing carrier surfaces (group 1)", () => {
       const entry = buildStackEntry({ source_id: source.id });
       env.seed(kind === "departed" ? [] : [source], { stack: [entry] });
       const details = kind === "legacy" ? undefined : { source_name: "Alpha", kind_label: "Spell",
+        printed_ref: { oracle_id: ORACLE, face_name: "Alpha" },
         ...(kind === "omitted" ? {} : { printing: kind === "null" ? null
           : kind === "foreign" ? foreignPrinting : printingA }) };
       const { StackEntry } = await import("../../stack/StackEntry.tsx");
       const surface = render(<StackEntry entry={entry}
-        details={{ source_name: "Alpha", kind_label: "Spell", printing: printingA }} index={0} isTop
+        details={{ source_name: "Alpha", kind_label: "Spell", printing: printingA,
+          printed_ref: { oracle_id: ORACLE, face_name: "Alpha" } }} index={0} isTop
         cardSize={{ width: 120, height: 168 }} />);
       await expectImage(surface.container, URL_A);
       surface.rerender(<StackEntry entry={entry} details={details} index={0} isTop
@@ -516,7 +518,8 @@ describe("owner printing carrier surfaces (group 1)", () => {
       // resetModules gives each case fresh resolver/store instances; static imports retain stale ones.
       const { StackEntry } = await import("../../stack/StackEntry.tsx");
       const { PreferencesModal } = await import("../../settings/PreferencesModal.tsx");
-      const details = { source_name: "Emblem", kind_label: "Ability", printing: printingA };
+      const details = { source_name: "Emblem", kind_label: "Ability", printing: printingA,
+        printed_ref: { oracle_id: ORACLE, face_name: "Alpha" } };
       const surface = render(<StackEntry entry={entry} details={details} index={0} isTop
         cardSize={{ width: 120, height: 168 }} />);
       await expectImage(surface.container, URL_A);
@@ -935,7 +938,7 @@ describe("owner printing remaining carrier surfaces (group 2)", () => {
     const hidden = card({ zone: "Library", name: "", printed_ref: null, printing: printingB,
       display_visible_to_viewer: false });
     env.seed([hidden], { derived: { debug_library_cards: [{ object_id: hidden.id, name: "Alpha",
-      printing: printingA }] } });
+      printing: printingA, printed_ref: { oracle_id: ORACLE, face_name: "Alpha" } }] } });
     env.ui.setState({ debugLibraryViewer: { playerId: 0 } });
     const { DebugLibraryViewer } = await import("../../chrome/DebugLibraryViewer.tsx");
     render(<DebugLibraryViewer />);

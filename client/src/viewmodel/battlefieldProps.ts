@@ -8,6 +8,7 @@ import type {
 } from "../adapter/types";
 import { isMeldedPermanent, publicName, toCardProps } from "./cardProps";
 import type { CardViewProps } from "./cardProps";
+import { cardImageLookup, ownerPrintedRefOf } from "../services/cardImageLookup";
 
 function canGroup(obj: GameObject, ringBearerIds: ReadonlySet<ObjectId>): boolean {
   // Ring-bearers (CR 701.54) must never be hidden behind a same-named
@@ -52,8 +53,11 @@ function groupKey(
   const isCommander = obj.is_commander ?? false;
   const legacyKey = `${publicName(obj)}|${obj.tapped}|${obj.face_down}|${obj.flipped}|${obj.transformed}|${obj.power}|${obj.toughness}|${obj.loyalty}|${obj.damage_marked}|${obj.has_summoning_sickness}|${obj.class_level ?? ""}|${colors}|${kw}|${counters}|${tokenRules}|${tokenPreset}|${isToken}|${isCommander}`;
   if (!showOwnerPrintings) return legacyKey;
-  const p = obj.printing;
-  return JSON.stringify([legacyKey, p == null ? null : [p.set_code, p.collector_number]]);
+  const lookup = cardImageLookup(obj);
+  const p = lookup.ownerPrinting;
+  const ref = ownerPrintedRefOf(lookup);
+  const ownerArtKey = p && ref ? [p.set_code, p.collector_number, ref.oracle_id, ref.face_name] : null;
+  return JSON.stringify([legacyKey, ownerArtKey]);
 }
 
 export interface BattlefieldPartition {

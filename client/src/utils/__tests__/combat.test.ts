@@ -175,12 +175,17 @@ describe("groupAttackers", () => {
   it.each([false, true])("partitions printing before target sets and retains exact member identity (%s)", (enabled) => {
     const state = makeState([101, 102, 103, 104].map((id) => makeObject({
       id, printing: { set_code: "own", collector_number: id === 103 ? "2" : "1" },
+      printed_ref: { oracle_id: "goblin-oracle", face_name: "Goblin" },
     })));
     const targetsFor = (id: ObjectId): AttackTarget[] => id === 104 ? [P2] : [P1, P2];
     expect(groupAttackers([104, 103, 102, 101], state, enabled, targetsFor)
       .map((stack) => [stack.ids, stack.targets])).toEqual(enabled
       ? [[[101, 102], [P1, P2]], [[103], [P1, P2]], [[104], [P2]]]
       : [[[101, 102, 103], [P1, P2]], [[104], [P2]]]);
+    for (const object of Object.values(state.objects)) object.printed_ref = null;
+    expect(groupAttackers([104, 103, 102, 101], state, enabled, targetsFor)
+      .map((stack) => [stack.ids, stack.targets]))
+      .toEqual([[[101, 102, 103], [P1, P2]], [[104], [P2]]]);
     expect(groupAttackers([], state, enabled, targetsFor)).toEqual([]);
     expect(groupAttackers([103, 101], null, enabled, targetsFor).map((stack) => stack.ids)).toEqual([[101], [103]]);
   });

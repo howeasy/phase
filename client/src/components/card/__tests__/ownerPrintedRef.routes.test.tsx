@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { CardPrinting, GameObject, GameState, WaitingFor } from "../../../adapter/types.ts";
 import type * as Platform from "../../../services/platform.ts";
 import { gameObjectFactory } from "../../../test/factories/gameObjectFactory.ts";
-import { gameStateFactory } from "../../../test/factories/gameStateFactory.ts";
+import { buildStackEntry, gameStateFactory } from "../../../test/factories/gameStateFactory.ts";
 
 // Only metadata I/O and action transport are doubled; image resolution and every
 // mounted surface use their production implementations.
@@ -195,4 +195,44 @@ describe("object-owned Oracle on real secondary surfaces", () => {
     await image(legacy);
     expect(document.body.querySelector(`img[src="${ownerA}"]`)).toBeNull();
   });
+
+  it.each(["departed", "live", "stale-incarnation", "stale-zone"] as const)(
+    "stack rows never borrow name or same-ID live authority for %s sources", async (route) => {
+      const env = await setup();
+      const source = gameObjectFactory.creature(2, 2).onBattlefield().named("Twin").build({
+        printing: aPrinting, printed_ref: { oracle_id: A, face_name: "Twin" },
+        display_visible_to_viewer: true,
+        ...(route === "stale-incarnation" ? { incarnation: 2 } : {}),
+        ...(route === "stale-zone" ? { zone: "Exile" as const } : {}),
+      });
+      const entry = buildStackEntry({ source_id: source.id, kind: { type: "TriggeredAbility",
+        data: { source_id: source.id, source_name: "Twin", ability: { targets: [] } } } });
+      env.seed(source, { stack: [entry] });
+      if (route === "departed") {
+        env.store.setState({ gameState: { ...env.store.getState().gameState!, objects: {} } });
+        expect(env.store.getState().gameState!.objects[source.id]).toBeUndefined();
+      } else {
+        expect(env.store.getState().gameState!.objects[source.id].printed_ref?.oracle_id).toBe(A);
+      }
+      // setup resets modules; static imports would bind the previous resolver/store graph.
+      const { StackEntry } = await import("../../stack/StackEntry.tsx");
+      const props = { entry, index: 0, isTop: true, cardSize: { width: 120, height: 168 } };
+      const details = { source_name: "Twin", kind_label: "Triggered Ability", printing: bPrinting, printed_ref: ref };
+      const surface = render(<StackEntry {...props} details={details} />);
+      await image(ownerB);
+      act(() => env.preferences.getState().setShowOwnerPrintings(false));
+      await image(legacy);
+      act(() => env.preferences.getState().setShowOwnerPrintings(true));
+      await image(ownerB);
+      // A's pair is admitted by both the display name and the stale live identity.
+      surface.rerender(<StackEntry {...props} details={{ ...details, printing: aPrinting }} />);
+      await image(legacy);
+      surface.rerender(<StackEntry {...props} details={{ ...details, printing: aPrinting, printed_ref: undefined }} />);
+      await act(async () => { for (let i = 0; i < 20; i++) await Promise.resolve(); });
+      await image(legacy);
+      expect(document.body.querySelector(`img[src="${ownerA}"]`)).toBeNull();
+      surface.rerender(<StackEntry {...props} details={details} />);
+      await image(ownerB);
+    },
+  );
 });
