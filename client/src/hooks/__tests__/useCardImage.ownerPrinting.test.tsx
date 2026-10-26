@@ -1,7 +1,7 @@
 import { act, cleanup, fireEvent, render, renderHook, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import type { CardPrinting } from "../../adapter/types.ts";
+import type { CardPrinting, PrintedRef } from "../../adapter/types.ts";
 import type * as Platform from "../../services/platform.ts";
 import type { PrintingEntry } from "../../services/scryfall.ts";
 import type { VisualPackBackend } from "../../services/visualPacks/backend.ts";
@@ -183,6 +183,103 @@ afterEach(() => {
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
   vi.useRealTimers();
+});
+
+describe("object-owned Oracle admission", () => {
+  it("withdraws and admits a homonymous printing on identity-only A to B to A transitions", async () => {
+    const env = await setup();
+    Object.assign(env.data.main, {
+      twin: { ...env.data.main[A], name: "Twin", face_names: ["twin"] },
+      [A]: { ...env.data.main[A], name: "Twin", face_names: ["twin"] },
+      [B]: { ...env.data.main[B], name: "Twin", face_names: ["twin"] },
+    });
+    env.installPrinting(P, "/viewer.jpg");
+    env.installPrinting(FOREIGN, "/twin-b.jpg");
+    const hook = renderHook(({ oracleId }) => env.useCardImage("Twin", {
+      ownerPrinting: foreignOwner, ownerPrintedRef: { oracle_id: oracleId, face_name: "Twin" },
+    }), { initialProps: { oracleId: A } });
+    const reader = env.service.createOwnerArtCatalogReader();
+    await act(async () => { await reader.prepare({ cardName: "Twin", faceIndex: 0, offline: false }); });
+    reader.release();
+    await waitFor(() => expect(hook.result.current.src).toBe("/viewer.jpg"));
+    await settle();
+    hook.rerender({ oracleId: B });
+    await waitFor(() => expect(hook.result.current.src).toBe("/twin-b.jpg"));
+    hook.rerender({ oracleId: A });
+    await waitFor(() => expect(hook.result.current.src).toBe("/viewer.jpg"));
+  });
+
+  it("admits only the object's homonymous catalog while preserving name-only admission", async () => {
+    const env = await setup();
+    Object.assign(env.data.main, {
+      twin: { ...env.data.main[A], name: "Twin", face_names: ["twin"] },
+      [A]: { ...env.data.main[A], name: "Twin", face_names: ["twin"] },
+      [B]: { ...env.data.main[B], name: "Twin", face_names: ["twin"] },
+    });
+    env.installPrinting(P, "/viewer.jpg");
+    env.installPrinting(O1, "/twin-a.jpg");
+    env.installPrinting(FOREIGN, "/twin-b.jpg");
+    const hook = renderHook(({ pair, ref }) => env.useCardImage("Twin", {
+      ownerPrinting: pair, ownerPrintedRef: ref,
+    }), { initialProps: { pair: foreignOwner,
+      ref: { oracle_id: B, face_name: "Twin" } as PrintedRef | undefined } });
+    await waitFor(() => expect(hook.result.current.src).toBe("/twin-b.jpg"));
+    hook.rerender({ pair: owner, ref: { oracle_id: B, face_name: "Twin" } });
+    await settle();
+    await waitFor(() => expect(hook.result.current.src).toBe("/viewer.jpg"));
+    hook.rerender({ pair: owner, ref: undefined });
+    await waitFor(() => expect(hook.result.current.src).toBe("/twin-a.jpg"));
+  });
+
+  it("overrides conflicting legacy identity only for owner admission and strips owner-only options", async () => {
+    const env = await setup();
+    const legacy = await import("../useLegacyCardImage.ts");
+    const calls = vi.spyOn(legacy, "useCardImage");
+    env.installPrinting(O1, "/owner-back.jpg", 1);
+    const ref = { oracle_id: A, face_name: "Reverse" };
+    const ordinary = { oracleId: B, faceName: "Beta", faceIndex: 0, size: "normal" as const };
+    const hook = renderHook(({ onlyRef }) => env.useCardImage("Beta", onlyRef
+      ? { ownerPrintedRef: ref }
+      : { ...ordinary, ownerPrinting: owner, ownerPrintedRef: ref }), { initialProps: { onlyRef: false } });
+    await waitFor(() => expect(hook.result.current.src).toBe("/owner-back.jpg"));
+    expect(calls).toHaveBeenLastCalledWith("Beta", ordinary);
+    act(() => env.preferences.setState({ showOwnerPrintings: false }));
+    await waitFor(() => expect(hook.result.current.src).toBe("/default-front.jpg"));
+    expect(calls).toHaveBeenLastCalledWith("Beta", ordinary);
+    hook.rerender({ onlyRef: true });
+    await waitFor(() => expect(hook.result.current.src).toBe("/default-front.jpg"));
+    expect(calls).toHaveBeenLastCalledWith("Beta", {});
+  });
+
+  it("uses an untransformed MDFC's printed back face without altering toggle-off art", async () => {
+    const env = await setup();
+    env.data.main[A].layout = "modal_dfc";
+    env.data.main.alpha.layout = "modal_dfc";
+    env.installPrinting(O1, "/owner-back.jpg", 1);
+    env.installPrinting(P, "/viewer-front.jpg");
+    const { CardImage } = await import("../../components/card/CardImage.tsx");
+    const object = { name: "Alpha", transformed: false, printed_ref: { oracle_id: A, face_name: "Reverse" } };
+    const surface = render(<CardImage cardName={object.name} faceIndex={object.transformed ? 1 : 0}
+      ownerPrinting={owner} ownerPrintedRef={object.printed_ref} />);
+    await waitFor(() => expect(surface.container.querySelector("img")).toHaveAttribute("src", "/owner-back.jpg"));
+    act(() => env.preferences.setState({ showOwnerPrintings: false }));
+    await waitFor(() => expect(surface.container.querySelector("img")).toHaveAttribute("src", "/viewer-front.jpg"));
+  });
+
+  it("conceals owner identity and art when a populated CardImage turns face down", async () => {
+    const env = await setup();
+    env.installPrinting(O1, "/owner-front.jpg");
+    const { CardImage } = await import("../../components/card/CardImage.tsx");
+    const props = { cardName: "Alpha", ownerPrinting: owner, ownerPrintedRef: { oracle_id: A, face_name: "Alpha" } };
+    const surface = render(<CardImage {...props} />);
+    await waitFor(() => expect(surface.container.querySelector("img")).toHaveAttribute("src", "/owner-front.jpg"));
+    surface.rerender(<CardImage {...props} faceDown />);
+    await settle();
+    expect(surface.container.querySelector('img[src="/owner-front.jpg"]')).toBeNull();
+    expect(screen.getByRole("img", { name: "Card back" })).toBeInTheDocument();
+    surface.rerender(<CardImage {...props} />);
+    await waitFor(() => expect(surface.container.querySelector("img")).toHaveAttribute("src", "/owner-front.jpg"));
+  });
 });
 
 describe("owner printing non-gating overlay", () => {

@@ -17,7 +17,7 @@ import type { ImageRungs } from "../../services/visualPacks/types.ts";
 import { useIsMobile } from "../../hooks/useIsMobile.ts";
 import { useEngineCardData, useCardParseDetails, useCardRulings, type ParsedItem } from "../../hooks/useEngineCardData.ts";
 import { isUnbounded, pillsOf, useCounterDisplay } from "../../hooks/useCounterDisplay.ts";
-import { cardImageLookup, tokenFiltersForObject } from "../../services/cardImageLookup.ts";
+import { cardImageLookup, ownerPrintedRefOf, tokenFiltersForObject } from "../../services/cardImageLookup.ts";
 import { faceDownMarkerRef } from "./faceDownMarker.ts";
 import { shouldRenderCardBack } from "../../viewmodel/cardProps.ts";
 import type { CardRuling } from "../../services/engineRuntime.ts";
@@ -311,7 +311,9 @@ function CardPreviewInner({
     previewObjectId != null ? s.gameState?.objects[previewObjectId] ?? null : null,
   );
   // Catalog previews may inherit legacy inspection metadata, but not owner art.
-  const ownerPrinting = objectId !== undefined && obj ? cardImageLookup(obj).ownerPrinting : undefined;
+  const ownerLookup = objectId !== undefined && obj ? cardImageLookup(obj) : undefined;
+  const ownerPrinting = ownerLookup?.ownerPrinting;
+  const ownerPrintedRef = ownerLookup ? ownerPrintedRefOf(ownerLookup) : undefined;
   // `card_report` context needs a live, participating game: `obj == null` (deck
   // builder) has no zone and a possibly-stale `gameMode`, `gameId == null` means
   // no game at all, and spectators don't report — building no context in these
@@ -389,6 +391,7 @@ function CardPreviewInner({
       scryfallId: suppressArtLookup ? undefined : scryfallId,
       sourcePrinting: suppressArtLookup ? undefined : sourcePrinting,
       ownerPrinting: suppressArtLookup ? undefined : ownerPrinting,
+      ownerPrintedRef: suppressArtLookup ? undefined : ownerPrintedRef,
     },
   );
   const classLevel = obj?.class_level;

@@ -1,4 +1,4 @@
-import type { CardPrinting, GameObject, TokenArtDescriptor } from "../adapter/types.ts";
+import type { CardPrinting, GameObject, PrintedRef, TokenArtDescriptor } from "../adapter/types.ts";
 import type { TokenSearchFilters } from "./scryfall.ts";
 
 /**
@@ -27,6 +27,13 @@ export interface CardImageLookup {
   faceIndex: number;
   /** Delivered live printing, or emblem-source printing; never recovered locally. */
   ownerPrinting?: CardPrinting | null;
+}
+
+/** Owner admission uses the same identity as the selected object or emblem source. */
+export function ownerPrintedRefOf(lookup: CardImageLookup): PrintedRef | undefined {
+  return lookup.oracleId && lookup.faceName
+    ? { oracle_id: lookup.oracleId, face_name: lookup.faceName }
+    : undefined;
 }
 
 /**

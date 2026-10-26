@@ -16,7 +16,7 @@ import { useIsCompactHeight } from "../../hooks/useIsCompactHeight.ts";
 import { getPlayerId, useCanActForWaitingState, usePerspectivePlayerId } from "../../hooks/usePlayerId.ts";
 import { dispatchAction } from "../../game/dispatch.ts";
 import { previewAutomaticManaPayment } from "../../game/manaPaymentPreview.ts";
-import type { CardPrinting, GameObject, ManaCost, ObjectId, Zone } from "../../adapter/types.ts";
+import type { CardPrinting, GameObject, ManaCost, ObjectId, PrintedRef, Zone } from "../../adapter/types.ts";
 import {
   collectObjectActions,
   resolveDirectPlayOrCastAction,
@@ -663,6 +663,7 @@ export function PlayerHand({ interactionDisabled = false }: PlayerHandProps) {
                 zone="Exile"
                 cardName={obj.name}
                 ownerPrinting={obj.printing}
+                ownerPrintedRef={obj.printed_ref}
                 manaCost={obj.mana_cost}
                 backFaceManaCost={obj.back_face?.mana_cost}
                 unimplementedMechanics={obj.unimplemented_mechanics}
@@ -739,6 +740,7 @@ export function PlayerHand({ interactionDisabled = false }: PlayerHandProps) {
                 zone="Graveyard"
                 cardName={obj.name}
                 ownerPrinting={obj.printing}
+                ownerPrintedRef={obj.printed_ref}
                 manaCost={obj.mana_cost}
                 backFaceManaCost={obj.back_face?.mana_cost}
                 unimplementedMechanics={obj.unimplemented_mechanics}
@@ -1103,6 +1105,7 @@ interface ZoneFanCardProps {
   zone: Zone;
   cardName: string;
   ownerPrinting?: CardPrinting | null;
+  ownerPrintedRef?: PrintedRef | null;
   manaCost: ManaCost;
   backFaceManaCost?: ManaCost;
   unimplementedMechanics?: string[];
@@ -1136,6 +1139,7 @@ const ZoneFanCard = memo(function ZoneFanCard({
   zone,
   cardName,
   ownerPrinting,
+  ownerPrintedRef,
   manaCost,
   backFaceManaCost,
   unimplementedMechanics,
@@ -1234,6 +1238,7 @@ const ZoneFanCard = memo(function ZoneFanCard({
         <CardImage
           cardName={cardName}
           ownerPrinting={ownerPrinting}
+          ownerPrintedRef={ownerPrintedRef}
           size="normal"
           unimplementedMechanics={unimplementedMechanics}
           className="!w-[var(--hand-card-w)] !h-[var(--hand-card-h)]"

@@ -30,7 +30,7 @@ use crate::types::ability::{
     RestrictionExpiry, RestrictionPlayerScope, TargetFilter, TargetRef,
 };
 use crate::types::attribution::EffectRef;
-use crate::types::card::TokenImageRef;
+use crate::types::card::{PrintedCardRef, TokenImageRef};
 use crate::types::card_printing::CardPrinting;
 use crate::types::card_type::CoreType;
 use crate::types::counter::{positive_counter_entries, CounterType};
@@ -504,6 +504,9 @@ pub struct TurnOrderSlotView {
 pub struct DebugLibraryCardView {
     pub object_id: ObjectId,
     pub name: String,
+    /// Oracle and face authority for owner art, authorized with the debug name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub printed_ref: Option<PrintedCardRef>,
     /// The library card's printing, exposed only on this debug surface. Display-only:
     /// CR 203.1 + CR 206.1, a printing has no effect on game play, so no rules or AI path
     /// reads it. Absent from the wire when empty.
@@ -2253,6 +2256,7 @@ fn debug_library_cards(state: &GameState, viewer: Option<PlayerId>) -> Vec<Debug
                 .map(|object| DebugLibraryCardView {
                     object_id: *object_id,
                     name: object.name.clone(),
+                    printed_ref: object.printed_ref.clone(),
                     // Beside the name this authorized row already exposes, from the
                     // authoritative object.
                     printing: object.printing.clone(),
@@ -4425,11 +4429,13 @@ mod tests {
                 DebugLibraryCardView {
                     object_id: own,
                     name: "Authorized Debug Card".to_string(),
+                    printed_ref: None,
                     printing: Default::default(),
                 },
                 DebugLibraryCardView {
                     object_id: another_own,
                     name: "Second Authorized Debug Card".to_string(),
+                    printed_ref: None,
                     printing: Default::default(),
                 },
             ],
@@ -4451,6 +4457,45 @@ mod tests {
             unauthorized.debug_library_cards.is_empty(),
             "a player without debug permission must not receive a debug library projection"
         );
+    }
+
+    #[test]
+    fn debug_library_owner_identity_is_projected_only_with_authorization() {
+        let mut state = GameState::new(FormatConfig::standard(), 2, 42);
+        state.debug_mode = true;
+        state.debug_permitted.insert(PlayerId(0));
+        let id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Twin".to_string(),
+            Zone::Library,
+        );
+        let printed_ref = PrintedCardRef {
+            oracle_id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb".into(),
+            face_name: "Twin".into(),
+        };
+        state.objects.get_mut(&id).unwrap().printed_ref = Some(printed_ref.clone());
+        let rows = debug_library_cards(&state, Some(PlayerId(0)));
+        let wire = serde_json::to_value(&rows).unwrap();
+        assert_eq!(
+            wire[0]["printed_ref"],
+            serde_json::to_value(&printed_ref).unwrap(),
+            "authorized debug owner art must receive the object's Oracle and face"
+        );
+        assert_eq!(rows[0].printed_ref, Some(printed_ref));
+        assert!(debug_library_cards(&state, None).is_empty());
+        assert!(debug_library_cards(&state, Some(PlayerId(1))).is_empty());
+        state.debug_mode = false;
+        assert!(debug_library_cards(&state, Some(PlayerId(0))).is_empty());
+        state.debug_mode = true;
+        state.objects.get_mut(&id).unwrap().printed_ref = None;
+        let rows = debug_library_cards(&state, Some(PlayerId(0)));
+        let wire = serde_json::to_value(&rows[0]).unwrap();
+        assert!(wire.get("printed_ref").is_none());
+        let legacy: DebugLibraryCardView = serde_json::from_value(wire).unwrap();
+        assert_eq!(legacy.printed_ref, None);
+        assert_eq!(legacy.object_id, id);
     }
 
     #[test]
@@ -9772,6 +9817,7 @@ mod tests {
             vec![DebugLibraryCardView {
                 object_id: card,
                 name: "Shared Pile Card".to_string(),
+                printed_ref: None,
                 printing: Default::default(),
             }]
         );

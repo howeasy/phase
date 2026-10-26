@@ -2955,6 +2955,7 @@ function CommanderZoneChoiceModal({
             <CardImage
               cardName={obj?.name ?? "Unknown"}
               ownerPrinting={obj?.printing}
+              ownerPrintedRef={obj?.printed_ref}
               size="normal"
               className={CHOICE_CARD_IMAGE_CLASS}
             />
@@ -3032,6 +3033,7 @@ function RevealUntilKeptChoiceModal({
           <CardImage
             cardName={obj?.name ?? "Unknown"}
             ownerPrinting={obj?.printing}
+            ownerPrintedRef={obj?.printed_ref}
             size="normal"
             className={CHOICE_CARD_IMAGE_CLASS}
           />

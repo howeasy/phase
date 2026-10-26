@@ -4108,6 +4108,7 @@ export type BlockerAssignmentPair = [ObjectId, ObjectId];
 export interface DebugLibraryCardView {
   object_id: ObjectId;
   name: string;
+  printed_ref?: PrintedRef | null;
   /** Display-only printing of the physical card (CR 203.1/206.1); absent when the owner
    *  chose none or the viewer may not see it. */
   printing?: CardPrinting | null;

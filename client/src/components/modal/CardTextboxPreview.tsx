@@ -1,6 +1,6 @@
 import { useState } from "react";
 
-import type { CardPrinting, CardType } from "../../adapter/types.ts";
+import type { CardPrinting, CardType, PrintedRef } from "../../adapter/types.ts";
 import { useCardImage } from "../../hooks/useCardImage.ts";
 import { getCardImageSrcSetProps } from "../card/cardImageSrcSet.ts";
 
@@ -50,12 +50,14 @@ export function CardTextboxPreview({
   cardName,
   cardTypes,
   ownerPrinting,
+  ownerPrintedRef,
 }: {
   cardName: string;
   cardTypes?: CardType;
   ownerPrinting?: CardPrinting | null;
+  ownerPrintedRef?: PrintedRef | null;
 }) {
-  const { src, isLoading, rungs, advanceFailedSource } = useCardImage(cardName, { size: "normal", ownerPrinting });
+  const { src, isLoading, rungs, advanceFailedSource } = useCardImage(cardName, { size: "normal", ownerPrinting, ownerPrintedRef });
   const [failedSrc, setFailedSrc] = useState<string | null>(null);
 
   // Still resolving — stay absent rather than flash a band into the modal.

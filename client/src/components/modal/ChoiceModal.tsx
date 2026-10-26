@@ -60,6 +60,9 @@ export function ChoiceModal({
   const ownerPrinting = useGameStore((s) =>
     previewObjectId == null ? undefined : s.gameState?.objects[previewObjectId]?.printing,
   );
+  const ownerPrintedRef = useGameStore((s) =>
+    previewObjectId == null ? undefined : s.gameState?.objects[previewObjectId]?.printed_ref,
+  );
   return (
     <DialogShell
       title={<RichLabel text={title} size="md" />}
@@ -74,6 +77,7 @@ export function ChoiceModal({
             cardName={previewCardName}
             cardTypes={previewCardTypes}
             ownerPrinting={ownerPrinting}
+            ownerPrintedRef={ownerPrintedRef}
           />
         </div>
       )}

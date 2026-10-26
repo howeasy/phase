@@ -2664,6 +2664,7 @@ function MulliganDecisionPrompt({
                 <CardImage
                   cardName={obj.name}
                   ownerPrinting={obj.printing}
+                  ownerPrintedRef={obj.printed_ref}
                   size="normal"
                   className="h-[clamp(200px,40vh,360px)] w-[clamp(143px,28.6vh,257px)]"
                 />
@@ -2888,6 +2889,7 @@ function MulliganBottomCardsPrompt({
                   <CardImage
                     cardName={obj.name}
                     ownerPrinting={obj.printing}
+                    ownerPrintedRef={obj.printed_ref}
                     size="normal"
                     className="h-[clamp(200px,40vh,360px)] w-[clamp(143px,28.6vh,257px)]"
                   />

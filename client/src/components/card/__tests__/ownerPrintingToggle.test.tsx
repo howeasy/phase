@@ -145,7 +145,7 @@ interface Fixture {
 }
 let activeFixture: Fixture | undefined;
 
-async function setup({ holdCatalog = false, dfc = false } = {}): Promise<Fixture> {
+async function setup({ holdCatalog = false, dfc = false, homonyms = false } = {}): Promise<Fixture> {
   const entry = {
     oracle_id: ORACLE, name: dfc ? "Alpha // Reverse" : "Alpha", face_names: dfc ? ["alpha", "reverse"] : ["alpha"], layout: dfc ? "transform" : "normal",
     mana_cost: "{1}", cmc: 1, type_line: "Creature", colors: [], color_identity: [], keywords: [],
@@ -155,6 +155,14 @@ async function setup({ holdCatalog = false, dfc = false } = {}): Promise<Fixture
     [ORACLE]: [printing(OWNER_A, "own", "1"), printing(OWNER_B, "own", "2"), printing(VIEWER, "pin", "3")],
     [OTHER_ORACLE]: [printing(FOREIGN, "foreign", "9")],
   };
+  const homonym = { ...entry, name: "Twin", face_names: ["twin"] };
+  const main = homonyms
+    ? { [ORACLE]: homonym, twin: homonym, [OTHER_ORACLE]: { ...homonym, oracle_id: OTHER_ORACLE } }
+    : { [ORACLE]: entry, alpha: entry, reverse: entry };
+  if (homonyms) {
+    catalog[ORACLE] = [printing(OWNER_A, "own", "1"), printing(VIEWER, "pin", "3")];
+    catalog[OTHER_ORACLE] = [printing(OWNER_B, "own", "2")];
+  }
   let admit!: (response: Response) => void;
   const gate = new Promise<Response>((resolve) => { admit = resolve; });
   const installed = new Map<string, ResolvedAsset[]>();
@@ -170,7 +178,7 @@ async function setup({ holdCatalog = false, dfc = false } = {}): Promise<Fixture
   }));
   vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
     const url = new URL(String(input), "http://localhost/");
-    if (url.pathname === "/scryfall-data.json") return json({ [ORACLE]: entry, alpha: entry, reverse: entry });
+    if (url.pathname === "/scryfall-data.json") return json(main);
     if (url.pathname === "/scryfall-printings.json") return holdCatalog ? gate : json(catalog);
     throw new Error(`Unexpected fixture request ${String(input)}`);
   }));
@@ -586,6 +594,41 @@ describe("owner printing carrier surfaces (group 1)", () => {
 });
 
 describe("owner printing remaining carrier surfaces (group 2)", () => {
+  it.each(["Declare", "BottomCards", "OpeningHandBottomCards"] as const)(
+    "T2 binds homonymous owner art on the GamePage %s route", async (route) => {
+      const env = await setup({ homonyms: true });
+      const object = card({ name: "Twin", zone: "Hand", printing: printingB,
+        printed_ref: { oracle_id: OTHER_ORACLE, face_name: "Twin" } });
+      const waitingFor: WaitingFor = route === "OpeningHandBottomCards"
+        ? { type: "OpeningHandBottomCards", data: { pending: [{ player: 0, count: 1 }], reason: { type: "TinyLeadersMultiCommander" } } }
+        : { type: "MulliganDecision", data: { free_first_mulligan: false, pending: [{
+          player: 0, mulligan_count: 1, phase: route === "Declare" ? { type: "Declare" }
+            : { type: "BottomCards", count: 1, then: { type: "Keep" } },
+        }] } };
+      env.seed([object], { waiting_for: waitingFor,
+        players: gameStateFactory.withPlayers({ id: 0, hand: [object.id] }, 1).build().players });
+      env.store.setState({ gameId: "owner-art", legalActions: [
+        { type: "MulliganDecision", data: { choice: { type: "Keep" } } },
+        { type: "MulliganDecision", data: { choice: { type: "Mulligan" } } },
+      ] });
+      // resetModules requires the real route to bind this fixture's fresh stores.
+      const { GamePage } = await import("../../../pages/GamePage.tsx");
+      render(<MemoryRouter initialEntries={["/game/owner-art?mode=join"]}>
+        <Routes><Route path="/game/:id" element={<GamePage />} /></Routes>
+      </MemoryRouter>);
+      const heading = await screen.findByRole("heading", { name: route === "Declare"
+        ? "Review your opening hand" : "Put 1 card on the bottom" });
+      const prompt = heading.closest<HTMLElement>(".card-scale-reset")!;
+      await toggleCycle(env, prompt, URL_B);
+      const current = env.store.getState().gameState!;
+      act(() => env.store.setState({ gameState: { ...current, objects: {
+        ...current.objects, [object.id]: { ...object, printing: printingA },
+      } } }));
+      await expectImage(prompt, URL_V);
+      expect(prompt.querySelector(`img[src="${URL_A}"]`)).toBeNull();
+    },
+  );
+
   it.each(["Declare", "BottomCards", "OpeningHandBottomCards"] as const)(
     "V3a/V3b renders ordered same-name owner art through the real GamePage %s route", async (route) => {
       const env = await setup();

@@ -163,6 +163,7 @@ fn debug_row_with(printing: &Option<CardPrinting>) -> DebugLibraryCardView {
     DebugLibraryCardView {
         object_id: ObjectId(9),
         name: "Library Card".to_string(),
+        printed_ref: None,
         printing: carried(printing),
     }
 }

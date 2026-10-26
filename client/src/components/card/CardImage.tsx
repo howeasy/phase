@@ -2,7 +2,7 @@ import { useTranslation } from "react-i18next";
 import { useCardImage } from "../../hooks/useCardImage.ts";
 import { useEngineCardData } from "../../hooks/useEngineCardData.ts";
 import type { TokenSearchFilters } from "../../services/scryfall.ts";
-import type { CardPrinting, FaceDownCause, TokenImageRef } from "../../adapter/types.ts";
+import type { CardPrinting, FaceDownCause, PrintedRef, TokenImageRef } from "../../adapter/types.ts";
 import { faceDownMarkerName, faceDownMarkerRef } from "./faceDownMarker.ts";
 import { getBevelBorderStyle } from "./cardFrame.ts";
 import { getCardImageSrcSetProps } from "./cardImageSrcSet.ts";
@@ -45,6 +45,7 @@ interface CardImageProps {
   faceName?: string;
   /** Engine-delivered printing; the image facade owns the viewer preference. */
   ownerPrinting?: CardPrinting | null;
+  ownerPrintedRef?: PrintedRef | null;
   /**
    * Oracle text rendered inside the broken-image fallback when the image fails
    * to load. If omitted, the component looks it up via the engine card database.
@@ -69,6 +70,7 @@ export function CardImage({
   oracleId,
   faceName,
   ownerPrinting,
+  ownerPrintedRef,
   oracleText,
 }: CardImageProps) {
   const { t } = useTranslation("game");
@@ -86,6 +88,7 @@ export function CardImage({
     oracleId: faceDown ? undefined : oracleId,
     faceName: faceDown ? undefined : faceName,
     ownerPrinting: faceDown ? undefined : ownerPrinting,
+    ownerPrintedRef: faceDown ? undefined : ownerPrintedRef,
   });
   // Only resolve rules text when the art lookup has definitively failed. On the
   // first render `src` is null for every card while useCardImage is loading; an

@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 
-import type { CardPrinting } from "../adapter/types.ts";
+import type { CardPrinting, PrintedRef } from "../adapter/types.ts";
 import { matchSourcePrinting } from "../services/artSelection.ts";
 import { createOwnerArtCatalogReader, deriveImageUrl, imageUrlSize } from "../services/scryfall.ts";
 import type { ImageSize, OwnerArtCatalogReader, OwnerArtAuthority } from "../services/scryfall.ts";
@@ -21,6 +21,8 @@ type ImageResult = ReturnType<typeof useLegacyCardImage>;
 
 type UseCardImageOptions = LegacyOptions & {
   ownerPrinting?: CardPrinting | null;
+  /** Object-owned Oracle and face; never changes the legacy lookup request. */
+  ownerPrintedRef?: PrintedRef | null;
   showOwnerPrintings?: boolean;
 };
 
@@ -258,8 +260,8 @@ function useOwnerCardImageOverlay(input: OwnerInput | null): ImageResult | null 
  */
 export function useCardImage(cardName: string, options?: UseCardImageOptions): ImageResult {
   let legacyOptions: Parameters<typeof useLegacyCardImage>[1] = options;
-  if (options && ("ownerPrinting" in options || "showOwnerPrintings" in options)) {
-    const { ownerPrinting: _owner, showOwnerPrintings: _show, ...ordinary } = options;
+  if (options && ("ownerPrinting" in options || "ownerPrintedRef" in options || "showOwnerPrintings" in options)) {
+    const { ownerPrinting: _owner, ownerPrintedRef: _ref, showOwnerPrintings: _show, ...ordinary } = options;
     legacyOptions = ordinary;
   }
   const normal = useLegacyCardImage(cardName, legacyOptions);
@@ -274,11 +276,13 @@ export function useCardImage(cardName: string, options?: UseCardImageOptions): I
   if (eligible && enabled) {
     const setCode = owner.set_code.toLowerCase();
     const collectorNumber = owner.collector_number;
+    const oracleId = options?.ownerPrintedRef?.oracle_id ?? options?.oracleId;
+    const faceName = options?.ownerPrintedRef?.face_name ?? options?.faceName;
     const faceIndex = options?.faceIndex ?? 0;
     const size = options?.size ?? "normal";
     input = {
-      key: JSON.stringify([cardName, options?.oracleId, options?.faceName, faceIndex, setCode, collectorNumber, size, language, offline]),
-      cardName, oracleId: options?.oracleId, faceName: options?.faceName,
+      key: JSON.stringify([cardName, oracleId, faceName, faceIndex, setCode, collectorNumber, size, language, offline]),
+      cardName, oracleId, faceName,
       faceIndex, setCode, collectorNumber, size, language, offline,
     };
   }
