@@ -962,7 +962,9 @@ fn load_dump() -> GameState {
     )
     .read_to_string(&mut json)
     .expect("fixture .json.gz inflates to UTF-8 JSON");
-    let envelope: Value = serde_json::from_str(&json).expect("dump envelope parses as JSON");
+    let mut envelope: Value = serde_json::from_str(&json).expect("dump envelope parses as JSON");
+    // Committed pre-onset capture; onset-independent test (see record_captured_onsets).
+    engine::types::game_state::record_captured_onsets(&mut envelope);
     serde_json::from_value::<PersistedGameState>(envelope["gameState"].clone())
         .expect("gameState deserializes through the production decoder")
         .into_game_state()
@@ -1891,7 +1893,10 @@ fn real_saves_reconcile_as_before() {
         flate2::read::GzDecoder::new(committed_dump(name))
             .read_to_string(&mut json)
             .expect("fixture .json.gz inflates to UTF-8 JSON");
-        let envelope: Value = serde_json::from_str(&json).expect("dump envelope parses as JSON");
+        let mut envelope: Value =
+            serde_json::from_str(&json).expect("dump envelope parses as JSON");
+        // Committed pre-onset capture; onset-independent test (see record_captured_onsets).
+        engine::types::game_state::record_captured_onsets(&mut envelope);
         let loaded = serde_json::from_value::<PersistedGameState>(envelope["gameState"].clone())
             .expect("gameState deserializes through the production decoder")
             .into_game_state()
@@ -1924,7 +1929,9 @@ fn gunzip(gz: &[u8]) -> String {
 
 fn projected_capture_snapshot(gz: &[u8]) -> Value {
     let json = gunzip(gz);
-    let envelope: Value = serde_json::from_str(&json).expect("dump envelope parses as JSON");
+    let mut envelope: Value = serde_json::from_str(&json).expect("dump envelope parses as JSON");
+    // Committed pre-onset capture; onset-independent test (see record_captured_onsets).
+    engine::types::game_state::record_captured_onsets(&mut envelope);
     let mut snapshot = envelope["gameState"].clone();
     let object = snapshot
         .as_object_mut()
@@ -2176,8 +2183,10 @@ fn prompt_identity_priority_native_vector() {
 
 #[test]
 fn prompt_identity_matches_real_delivered_trigger_for_every_viewer() {
-    let envelope: Value =
+    let mut envelope: Value =
         serde_json::from_str(&gunzip(committed_dump("dellian_emblem_conqueror_4p"))).unwrap();
+    // Committed pre-onset capture; onset-independent test (see record_captured_onsets).
+    engine::types::game_state::record_captured_onsets(&mut envelope);
     let state = serde_json::from_value::<PersistedGameState>(envelope["gameState"].clone())
         .unwrap()
         .into_game_state()
