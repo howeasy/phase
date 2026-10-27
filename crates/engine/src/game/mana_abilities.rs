@@ -4150,14 +4150,14 @@ fn resume_mana_ability_root_payment(
         // `resume_waiting_for`, which `unreachable!()`s for this family.
         ManaAbilityResume::TurnFaceUp {
             player,
-            object_id,
+            source,
             cost,
             announced_x,
             cost_source,
         } => super::morph::resume_turn_face_up_payment(
             state,
             player,
-            object_id,
+            source,
             cost,
             cost_source,
             announced_x,
@@ -4285,7 +4285,7 @@ pub(crate) fn finish_mana_root_after_deferred_life_payment(
         ),
         ManaAbilityResume::TurnFaceUp {
             player,
-            object_id,
+            source,
             announced_x,
             cost_source,
             ..
@@ -4294,7 +4294,7 @@ pub(crate) fn finish_mana_root_after_deferred_life_payment(
         } => super::morph::finish_paid_turn_face_up(
             state,
             player,
-            object_id,
+            source,
             cost_source,
             announced_x,
             events,
@@ -6396,6 +6396,7 @@ mod tests {
             may_cost_paid: false,
             may_cost_remaining: None,
             delivery_boundary: None,
+            unrepresentable_life_change: Default::default(),
         });
         let live_prompt = WaitingFor::DiscardChoice {
             player: PlayerId(0),

@@ -23,6 +23,7 @@ import {
 } from "../animation/types";
 import type { AIDifficulty } from "../constants/ai";
 import { DEFAULT_AI_DIFFICULTY } from "../constants/ai";
+import { isMemoryConstrainedDevice } from "../utils/device";
 import {
   emptyPoolSelection,
   normalizePoolSelection,
@@ -288,7 +289,9 @@ function buildDefaultPreferences(): PreferencesState {
     boardBackground: "auto-wubrg",
     customBackgroundUrl: "",
     vfxQuality: "full",
-    cardAnimationStyle: "webgl",
+    // The WebGL card overlay adds GPU contexts and textures on top of an engine
+    // that already sits near iOS Safari's memory ceiling.
+    cardAnimationStyle: isMemoryConstrainedDevice() ? "classic" : "webgl",
     animationSpeedMultiplier: ANIMATION_SPEED_DEFAULT,
     pacingMultipliers: defaultPacingMultipliers(),
     phaseStops: [],
@@ -968,6 +971,10 @@ export const usePreferencesStore = create<PreferencesState & PreferencesActions>
       //          blobs normalize below (and in `merge` for current-version blobs).
       // v39 → v40: Add showOwnerPrintings; absent fields default to true via
       //          the shallow merge, while a saved false remains authoritative.
+      //          iOS devices and Android phones default to "classic" card animations.
+      //          Their stores persisted v36's "webgl" default, which almost no
+      //          one chose, so they move to "classic" once; picking New again
+      //          afterwards sticks.
       migrate: (persisted: unknown, version: number) => {
         if (!persisted || typeof persisted !== "object") return persisted;
         let migrated = persisted as Record<string, unknown>;
@@ -1196,6 +1203,10 @@ export const usePreferencesStore = create<PreferencesState & PreferencesActions>
               ? undefined
               : normalizePoolSelection(legacy.aiPoolSelection),
           };
+        }
+
+        if (version < 40 && isMemoryConstrainedDevice()) {
+          migrated = { ...migrated, cardAnimationStyle: "classic" };
         }
 
         return {

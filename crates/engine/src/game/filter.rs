@@ -390,6 +390,18 @@ fn filter_prop_uses_object_population(prop: &FilterProp) -> bool {
 pub(crate) const UNPAIRED_READS: CharacteristicKinds =
     CharacteristicKinds::CONTROLLER.union(CharacteristicKinds::CARD_TYPES);
 
+/// CR 303.4 + CR 702.103b + CR 702.103f: whether a source's "enchanted creature"
+/// is relative to the source itself. True for an Aura, and for a bestow card:
+/// CR 702.103b makes a bestowed spell and the permanent it becomes an Aura, and
+/// CR 702.103f ends that bestowed status when it becomes unattached, leaving a
+/// creature rather than an Aura. Its "enchanted creature" static still refers
+/// only to the creature it is attached to, never to creatures enchanted by
+/// other Auras.
+fn source_is_aura_or_bestow(subtypes: &[String], keywords: &[Keyword]) -> bool {
+    subtypes.iter().any(|subtype| subtype == "Aura")
+        || keywords.iter().any(|k| matches!(k, Keyword::Bestow(_)))
+}
+
 /// CR 301.5f + CR 303.4: true when every object `filter` admits must stand in an
 /// attachment relation — be what the source is attached to, or carry an
 /// attachment — because it requires `EquippedBy`/`EnchantedBy` on every branch.
@@ -5985,6 +5997,29 @@ pub(crate) fn filter_implies_battlefield_permanent(filter: &TargetFilter) -> boo
             TypeFilter::Instant | TypeFilter::Sorcery | TypeFilter::Card | TypeFilter::Any => false,
         }
     }
+    // CR 109.2: Descriptions that include the word "card" do not denote
+    // permanents on the battlefield. Reject any filter that contains Card.
+    fn type_includes_card(t: &TypeFilter) -> bool {
+        match t {
+            TypeFilter::Card => true,
+            TypeFilter::Non(inner) => type_includes_card(inner),
+            TypeFilter::AnyOf(inners) => inners.iter().any(type_includes_card),
+            _ => false,
+        }
+    }
+    fn filter_includes_card(f: &TargetFilter) -> bool {
+        match f {
+            TargetFilter::Typed(tf) => tf.type_filters.iter().any(type_includes_card),
+            TargetFilter::And { filters } | TargetFilter::Or { filters } => {
+                filters.iter().any(filter_includes_card)
+            }
+            TargetFilter::Not { filter } => filter_includes_card(filter),
+            _ => false,
+        }
+    }
+    if filter_includes_card(filter) {
+        return false;
+    }
     match filter {
         // The terms of one `Typed` filter are conjunctive ("artifact creature"),
         // so one battlefield-only term settles it.
@@ -5995,6 +6030,24 @@ pub(crate) fn filter_implies_battlefield_permanent(filter: &TargetFilter) -> boo
         }
         _ => false,
     }
+}
+
+/// CR 109.2: does `filter` denote ONLY permanents on the battlefield? True
+/// when it describes its object by a permanent card type or subtype
+/// ([`filter_implies_battlefield_permanent`]) and names no zone of its own
+/// (`population_zones`, the union of both zone readers, so a stack or
+/// graveyard reference counts as one). "A creature" is such a description; "a
+/// creature card in a graveyard", "a creature spell", `SelfRef`, and a plain
+/// "card" filter are not.
+///
+/// Event-subject matchers pair this with a zone read on the event's object:
+/// the type reading alone cannot exclude a card in another zone, since a
+/// creature card in a graveyard still has the creature card type (CR 205.2a).
+/// Callers: `replacement::replacement_valid_card_matches` (counter
+/// replacements) and `trigger_matchers::match_becomes_target` (Horobi,
+/// Death's Wail's "Whenever a creature becomes the target...").
+pub(crate) fn filter_denotes_battlefield_permanent(filter: &TargetFilter) -> bool {
+    filter.population_zones().is_empty() && filter_implies_battlefield_permanent(filter)
 }
 
 /// Check if an object matches a typed TargetFilter against the given context.
@@ -7660,7 +7713,7 @@ pub(crate) fn source_subject_matches_filter(
 /// transitions, so a missing entry means no record survives — never that a
 /// later object at the same storage id may answer in the captured
 /// incarnation's place.
-fn exit_lki_for_incarnation(
+pub(crate) fn exit_lki_for_incarnation(
     state: &GameState,
     object_id: ObjectId,
     incarnation: u64,
@@ -7778,6 +7831,7 @@ fn matches_target_filter_on_lki_snapshot_with_incarnation(
         // `FilterProp::Prepared` reads last known information for a departed
         // source's intervening-if recheck (CR 603.4).
         was_prepared: lki.was_prepared,
+        departure: crate::types::game_state::ZoneDeparture::Moved,
     };
     matches_target_filter_on_zone_change_record(state, &record, filter, ctx)
 }
@@ -8796,12 +8850,14 @@ fn filter_inner_for_object(
         // CR 615: compound damage recipient, lowered to `DamageTargetFilter`
         // before runtime — never object-matched here.
         | TargetFilter::ControllerAndControlledPermanents { .. } => false,
-        // CR 201.2 + CR 602.5: "card with the chosen name" — match against source's
-        // ChosenAttribute::CardName. The chosen name comes from a player UI prompt;
-        // the comparison must mirror the spell-cast prohibition path
-        // (`cant_cast_filter_matches`) which uses `eq_ignore_ascii_case`. Without
-        // parity, Pithing Needle's activation-prohibition leg would silently miss
-        // names that differ only by casing from the player's typed input.
+        // CR 201.2a + CR 602.5: "card with the chosen name" — match against source's
+        // ChosenAttribute::CardName. The chosen name comes from a player UI prompt
+        // that accepts any casing (Unicode-aware), so compare via
+        // `card_names_match` — the same comparison the spell-cast prohibition
+        // path (`cant_cast_filter_matches`) uses. Without parity, Pithing
+        // Needle's activation-prohibition leg or Brain Pry's discard would
+        // silently miss names that differ only by casing ("éowyn" / "Éowyn")
+        // from the player's typed input.
         TargetFilter::HasChosenName => {
             let source_ctx = source_context_from_filter(
                 state,
@@ -8817,7 +8873,7 @@ fn filter_inner_for_object(
                 ChosenAttribute::CardName(n) => Some(n.as_str()),
                 _ => None,
             });
-            chosen_name.is_some_and(|name| obj.name.eq_ignore_ascii_case(name))
+            chosen_name.is_some_and(|name| card_names_match(&obj.name, name))
         }
         // CR 609.7a: "the chosen source" — match the ObjectId selected by
         // the prior damage-source choice while its continuation resolves.
@@ -9123,7 +9179,7 @@ fn zone_change_filter_inner(
                     ChosenAttribute::CardName(n) => Some(n.as_str()),
                     _ => None,
             });
-            chosen_name.is_some_and(|name| record.name.eq_ignore_ascii_case(name))
+            chosen_name.is_some_and(|name| card_names_match(&record.name, name))
         }
         // CR 607.2d + CR 603.10a + CR 400.7: the remembered object on the
         // leaves-the-battlefield look-back path. The candidate occurrence is the
@@ -10524,6 +10580,7 @@ fn source_context_from_filter<'a>(
                     is_suspected: false,
                     was_prepared: false,
                     attachments: Vec::new(),
+                    intensity: 0,
                 });
             (
                 lki,
@@ -10533,7 +10590,7 @@ fn source_context_from_filter<'a>(
                 Vec::new(),
             )
         };
-    let source_is_aura = lki.subtypes.iter().any(|subtype| subtype == "Aura");
+    let source_is_aura = source_is_aura_or_bestow(&lki.subtypes, &lki.keywords);
     let source_is_equipment = lki.subtypes.iter().any(|subtype| subtype == "Equipment");
     let chosen_creature_type = lki
         .chosen_attributes
@@ -12831,7 +12888,9 @@ fn object_shared_quality_values(
     )
 }
 
-fn lki_shared_quality_values(
+/// CR 608.2h: the values of `quality` read from an object's last known
+/// information.
+pub(crate) fn lki_shared_quality_values(
     lki: &LKISnapshot,
     quality: &SharedQuality,
     all_creature_types: &[String],
@@ -12852,7 +12911,10 @@ fn lki_shared_quality_values(
     )
 }
 
-fn quality_sets_overlap(left: &HashSet<String>, right: &HashSet<String>) -> bool {
+/// CR 608.2c + CR 201.2a: two value sets share a quality only when both are
+/// non-empty and intersect. The comparator for every shared-quality test,
+/// including `AbilityCondition::ObjectsShareQuality`.
+pub(crate) fn quality_sets_overlap(left: &HashSet<String>, right: &HashSet<String>) -> bool {
     !left.is_empty() && !right.is_empty() && !left.is_disjoint(right)
 }
 
@@ -12965,6 +13027,7 @@ fn source_context_from_spell_filter(context: SpellFilterContext<'_>) -> SourceCo
             is_suspected: false,
             was_prepared: false,
             attachments: Vec::new(),
+            intensity: 0,
         });
     SourceContext {
         id: context.source_id,
@@ -12977,7 +13040,7 @@ fn source_context_from_spell_filter(context: SpellFilterContext<'_>) -> SourceCo
         trigger_source: None,
         attached_to: source_obj.and_then(|o| o.attached_to),
         source_is_aura: source_obj
-            .is_some_and(|o| o.card_types.subtypes.iter().any(|s| s == "Aura")),
+            .is_some_and(|o| source_is_aura_or_bestow(&o.card_types.subtypes, &o.keywords)),
         source_is_equipment: source_obj
             .is_some_and(|o| o.card_types.subtypes.iter().any(|s| s == "Equipment")),
         saddled_by: source_obj.map_or_else(Vec::new, |o| o.saddled_by.clone()),
@@ -13295,26 +13358,6 @@ fn most_prevalent_creature_types_in_zone(
 /// For "creature type": all objects must share at least one creature subtype.
 /// For "color": all objects must share at least one color.
 /// For "card type": all objects must share at least one card type.
-/// CR 608.2c + CR 201.2: True when two objects share at least one value of the
-/// named quality. Used by `AbilityCondition::ObjectsShareQuality`.
-pub fn objects_share_quality(
-    state: &GameState,
-    left: ObjectId,
-    right: ObjectId,
-    quality: &SharedQuality,
-) -> bool {
-    let Some(left_obj) = state.objects.get(&left) else {
-        return false;
-    };
-    let Some(right_obj) = state.objects.get(&right) else {
-        return false;
-    };
-    let left_vals = object_shared_quality_values(left_obj, quality, &state.all_creature_types);
-    let right_vals = object_shared_quality_values(right_obj, quality, &state.all_creature_types);
-    !left_vals.is_disjoint(&right_vals)
-}
-
-/// CR 608.2b: Validate that all targeted objects share at least one value of the named quality.
 pub fn validate_shares_quality(
     state: &GameState,
     targets: &[TargetRef],
@@ -13327,15 +13370,29 @@ pub fn validate_shares_quality(
             TargetRef::Player(_) => None,
         })
         .collect();
+    objects_have_common_quality_value(state, &obj_ids, quality)
+}
 
+/// Whether some value of `quality` is common to every object in `ids`
+/// (group form; contrast the pairwise `quality_sets_overlap`).
+/// Vacuously true for fewer than two ids, decided before any lookup; with
+/// two or more ids, false if any id is missing from `state.objects`,
+/// otherwise true iff the objects' value sets have a non-empty intersection.
+/// Shared group core for target validation (`validate_shares_quality`) and
+/// library-search selection (`search_library::selection_satisfies_constraint`).
+pub fn objects_have_common_quality_value(
+    state: &GameState,
+    ids: &[ObjectId],
+    quality: &SharedQuality,
+) -> bool {
     // Fewer than 2 objects — constraint is trivially satisfied.
-    if obj_ids.len() < 2 {
+    if ids.len() < 2 {
         return true;
     }
 
     let mut sets = Vec::new();
-    for id in obj_ids {
-        let Some(obj) = state.objects.get(&id) else {
+    for id in ids {
+        let Some(obj) = state.objects.get(id) else {
             return false;
         };
         sets.push(object_shared_quality_values(
@@ -16152,6 +16209,7 @@ mod tests {
                 is_suspected: false,
                 was_prepared: false,
                 attachments: Vec::new(),
+                intensity: 0,
             },
         );
 
@@ -18842,17 +18900,24 @@ mod tests {
         ));
     }
 
+    /// CR 608.2c + CR 201.2: the comparator `AbilityCondition::ObjectsShareQuality`
+    /// uses, over per-object quality values.
     #[test]
-    fn objects_share_quality_matches_shared_card_type() {
+    fn quality_sets_overlap_matches_shared_card_type() {
+        let card_types = |state: &GameState, id: ObjectId| {
+            super::object_shared_quality_values(
+                &state.objects[&id],
+                &SharedQuality::CardType,
+                &state.all_creature_types,
+            )
+        };
         let mut state = setup();
         let creature_a = add_creature(&mut state, PlayerId(0), "Creature A");
         let creature_b = add_creature(&mut state, PlayerId(0), "Creature B");
 
-        assert!(super::objects_share_quality(
-            &state,
-            creature_a,
-            creature_b,
-            &SharedQuality::CardType,
+        assert!(super::quality_sets_overlap(
+            &card_types(&state, creature_a),
+            &card_types(&state, creature_b),
         ));
         let instant = create_object(
             &mut state,
@@ -18882,17 +18947,13 @@ mod tests {
             .card_types
             .core_types
             .push(CoreType::Land);
-        assert!(!super::objects_share_quality(
-            &state,
-            creature_a,
-            land,
-            &SharedQuality::CardType,
+        assert!(!super::quality_sets_overlap(
+            &card_types(&state, creature_a),
+            &card_types(&state, land),
         ));
-        assert!(!super::objects_share_quality(
-            &state,
-            creature_a,
-            instant,
-            &SharedQuality::CardType,
+        assert!(!super::quality_sets_overlap(
+            &card_types(&state, creature_a),
+            &card_types(&state, instant),
         ));
     }
 
@@ -23056,6 +23117,7 @@ mod tests {
             is_suspected: false,
             was_prepared: false,
             attachments: Vec::new(),
+            intensity: 0,
         };
         let filter =
             TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::Cmc {
@@ -23106,6 +23168,7 @@ mod tests {
             is_suspected: false,
             was_prepared: false,
             attachments: Vec::new(),
+            intensity: 0,
         };
         let entrant = ObjectId(700);
         let filter = TargetFilter::Typed(
@@ -23246,6 +23309,7 @@ mod tests {
             is_suspected: false,
             was_prepared: false,
             attachments: Vec::new(),
+            intensity: 0,
         };
         let filter =
             TargetFilter::Typed(
@@ -23394,6 +23458,7 @@ mod tests {
             is_suspected: false,
             was_prepared: false,
             attachments: Vec::new(),
+            intensity: 0,
         };
 
         // Left the battlefield TAPPED.
@@ -24289,6 +24354,7 @@ mod tests {
             recorded_turn_number: 0,
             is_suspected: false,
             was_prepared: false,
+            departure: crate::types::game_state::ZoneDeparture::Moved,
         };
         let goblin_filter = make_subtype_filter("Goblin");
         let plains_filter = make_subtype_filter("Plains");
@@ -24385,6 +24451,7 @@ mod tests {
             is_suspected: false,
             was_prepared: false,
             attachments: Vec::new(),
+            intensity: 0,
         };
         let land_lki = LKISnapshot {
             name: "Test Land".to_string(),
@@ -24408,6 +24475,7 @@ mod tests {
             is_suspected: false,
             was_prepared: false,
             attachments: Vec::new(),
+            intensity: 0,
         };
 
         let filter =
@@ -24526,6 +24594,7 @@ mod tests {
             is_suspected: false,
             was_prepared: false,
             attachments: Vec::new(),
+            intensity: 0,
         };
         let filter = TargetFilter::Typed(
             TypedFilter::default().properties(vec![FilterProp::SameNameAsParentTarget]),
@@ -24671,6 +24740,7 @@ mod tests {
                 is_suspected: false,
                 was_prepared: false,
                 attachments: Vec::new(),
+                intensity: 0,
             },
         );
 
@@ -24744,6 +24814,7 @@ mod tests {
                 is_suspected: false,
                 was_prepared: false,
                 attachments: Vec::new(),
+                intensity: 0,
             },
         );
 
@@ -25504,6 +25575,43 @@ mod tests {
 
     fn equipped_creature() -> TargetFilter {
         TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::EquippedBy]))
+    }
+
+    /// CR 303.4 + CR 702.103b: a bestow card on the battlefield as an unattached
+    /// creature (Nyxborn Rollicker) has "enchanted creature gets +1/+1" that
+    /// refers only to what it is attached to — creatures enchanted by other
+    /// Auras are not "enchanted creature" for it.
+    #[test]
+    fn unattached_bestow_creature_enchanted_by_matches_nothing() {
+        let mut state = setup();
+        let rollicker = add_creature(&mut state, PlayerId(0), "Nyxborn Rollicker");
+        state
+            .objects
+            .get_mut(&rollicker)
+            .unwrap()
+            .keywords
+            .push(Keyword::Bestow(crate::types::keywords::BestowCost::Mana(
+                ManaCost::zero(),
+            )));
+        let bear = add_creature(&mut state, PlayerId(0), "Bear");
+        let other_aura = add_artifact(&mut state, "Other Aura", &["Aura"]);
+        attach(&mut state, other_aura, bear);
+        let filter =
+            TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::EnchantedBy]));
+
+        // Positive guard: the bear really is enchanted, by a different Aura.
+        assert!(matches_target_filter(&state, bear, &filter, other_aura));
+        // Unattached bestow creature: nothing is enchanted by it.
+        assert!(!matches_target_filter(&state, bear, &filter, rollicker));
+        assert!(!matches_target_filter(
+            &state, rollicker, &filter, rollicker
+        ));
+
+        // Attached (Aura form): only its host qualifies.
+        let host = add_creature(&mut state, PlayerId(0), "Host");
+        attach(&mut state, rollicker, host);
+        assert!(matches_target_filter(&state, host, &filter, rollicker));
+        assert!(!matches_target_filter(&state, bear, &filter, rollicker));
     }
 
     /// CR 301.5f: `attachment_relation_rejects` proves rejection only for an
@@ -27476,6 +27584,7 @@ mod entry_projection_tests {
             may_cost_paid: false,
             may_cost_remaining: None,
             delivery_boundary: None,
+            unrepresentable_life_change: Default::default(),
         };
 
         // An answer pins the boundary before it changes the proposal.
@@ -27516,6 +27625,42 @@ mod entry_projection_tests {
         ));
         unrelated.inherit_delivery_boundary(&original);
         assert!(!unrelated.parks_delivery(&original));
+    }
+
+    #[test]
+    fn filter_denotes_battlefield_permanent_respects_cr_109_2() {
+        // "a creature" -> battlefield permanent
+        assert!(filter_denotes_battlefield_permanent(&TargetFilter::Typed(
+            TypedFilter::creature()
+        )));
+
+        // "a creature card in a graveyard" -> has zone, not battlefield-only
+        assert!(!filter_denotes_battlefield_permanent(&TargetFilter::Typed(
+            TypedFilter::creature().properties(vec![FilterProp::InZone {
+                zone: Zone::Graveyard
+            }])
+        )));
+
+        // Filter containing Card (e.g. [Creature, Card]) -> includes word "card", not battlefield-only (CR 109.2)
+        assert!(!filter_denotes_battlefield_permanent(&TargetFilter::Typed(
+            TypedFilter {
+                type_filters: vec![TypeFilter::Creature, TypeFilter::Card],
+                ..Default::default()
+            }
+        )));
+
+        // Bare Card -> not battlefield-only
+        assert!(!filter_denotes_battlefield_permanent(&TargetFilter::Typed(
+            TypedFilter::new(TypeFilter::Card)
+        )));
+
+        // Conjunction containing Card -> not battlefield-only
+        assert!(!filter_denotes_battlefield_permanent(&TargetFilter::And {
+            filters: vec![
+                TargetFilter::Typed(TypedFilter::creature()),
+                TargetFilter::Typed(TypedFilter::new(TypeFilter::Card)),
+            ],
+        }));
     }
 }
 
@@ -27993,6 +28138,7 @@ mod attached_set_host_filter_tests {
             is_suspected: false,
             was_prepared: false,
             attachments: Vec::new(),
+            intensity: 0,
         }
     }
 
@@ -28095,6 +28241,7 @@ mod attached_set_host_filter_tests {
                     controller: PlayerId(1),
                     kind: crate::types::ability::AttachmentKind::Aura,
                 }],
+                intensity: 0,
             },
         );
         state.objects.remove(&host);

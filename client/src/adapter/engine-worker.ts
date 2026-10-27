@@ -58,6 +58,7 @@ import init, {
   get_card_rulings,
   canonicalCardNames,
 } from "@wasm/engine";
+import * as engineWasm from "@wasm/engine";
 
 import {
   isActionOutcome,
@@ -72,6 +73,7 @@ import type {
 } from "./generated/interaction";
 import type { BracketDeckRequest } from "../types/bracketEstimate";
 import { classifyInitFailure, type InitFailure } from "./init-envelope";
+import { ENGINE_QUERIES, runEngineQuery, type EngineQueryName } from "./engine-queries";
 
 // ── Message Protocol ─────────────────────────────────────────────────────
 
@@ -158,6 +160,7 @@ type EngineRequest =
   | { type: "getCardParseDetails"; id: number; cardName: string }
   | { type: "getCardRulings"; id: number; cardName: string }
   | { type: "canonicalCardNames"; id: number; names: string[] }
+  | { type: "query"; id: number; name: EngineQueryName; args: unknown[] }
   | { type: "resetGame"; id: number }
   | { type: "setMultiplayerMode"; id: number; enabled: boolean }
   | { type: "ping"; id: number }
@@ -264,6 +267,7 @@ self.onmessage = async (e: MessageEvent<EngineRequest>) => {
           );
         const text = await resp.text();
         const count = load_card_database(text);
+        if (count <= 0) throw new Error("Failed to load card-data.json (no cards loaded)");
         cardDbLoaded = true;
         result(msg.id, count);
         break;
@@ -346,6 +350,16 @@ self.onmessage = async (e: MessageEvent<EngineRequest>) => {
 
       case "canonicalCardNames": {
         result(msg.id, canonicalCardNames(msg.names));
+        break;
+      }
+
+      case "query": {
+        if (ENGINE_QUERIES[msg.name].needsCardDb && !cardDbLoaded) {
+          error(msg.id, "Card database not loaded. Call loadCardDb or loadCardDbFromUrl first.");
+          break;
+        }
+        // The client types `args` against `name`; the worker boundary carries them untyped.
+        result(msg.id, runEngineQuery(engineWasm, msg.name, msg.args as never));
         break;
       }
 
