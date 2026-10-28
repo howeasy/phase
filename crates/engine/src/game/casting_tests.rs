@@ -16382,7 +16382,7 @@ fn snuff_out_from_card_database_alt_cost_destroys_target() {
         GameAction::CastSpell {
             object_id: spell_id,
             card_id,
-            targets: vec![TargetRef::Object(target_id)],
+            targets: vec![target_id],
             payment_mode: CastPaymentMode::Auto,
         },
     )
