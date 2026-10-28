@@ -592,6 +592,7 @@ impl std::fmt::Debug for LKISnapshot {
             is_suspected,
             was_prepared,
             attachments,
+            intensity,
         } = self;
         f.debug_struct("LKISnapshot")
             .field("name", name)
@@ -614,6 +615,7 @@ impl std::fmt::Debug for LKISnapshot {
             .field("is_suspected", is_suspected)
             .field("was_prepared", was_prepared)
             .field("attachments", attachments)
+            .field("intensity", intensity)
             .finish()
     }
 }
