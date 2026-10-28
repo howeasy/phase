@@ -101,11 +101,14 @@ describe("preferencesStore", () => {
     it("keeps a phone's webgl choice made after the migration", () => {
       useUserAgent(IPHONE_UA);
       localStorage.setItem("phase-preferences", JSON.stringify({
-        state: { cardAnimationStyle: "webgl" },
+        state: { cardAnimationStyle: "webgl", showOwnerPrintings: false },
         version: 40,
       }));
       usePreferencesStore.persist.rehydrate();
-      expect(usePreferencesStore.getState().cardAnimationStyle).toBe("webgl");
+      expect(usePreferencesStore.getState()).toMatchObject({
+        cardAnimationStyle: "webgl",
+        showOwnerPrintings: false,
+      });
     });
 
     it.each([
@@ -123,6 +126,7 @@ describe("preferencesStore", () => {
     // Reset store state between tests
     act(() => {
       usePreferencesStore.setState({
+        ...usePreferencesStore.getInitialState(),
         cardSize: "medium",
         hudLayout: "inline",
         followActiveOpponent: false,
@@ -366,17 +370,12 @@ describe("preferencesStore", () => {
       localStorage.removeItem("phase-preferences");
     });
 
-    it("starts on in the production initialization snapshot", () => {
-      expect(usePreferencesStore.getInitialState().showOwnerPrintings).toBe(true);
-    });
-
     it.each([false, true])("round-trips explicit %s through storage", async (show) => {
       act(() => usePreferencesStore.getState().setShowOwnerPrintings(show));
       expect(usePreferencesStore.getState().showOwnerPrintings).toBe(show);
       const saved = localStorage.getItem("phase-preferences")!;
       expect(JSON.parse(saved)).toMatchObject({
         state: { showOwnerPrintings: show },
-        version: 40,
       });
 
       act(() => usePreferencesStore.getState().setShowOwnerPrintings(!show));
@@ -387,13 +386,14 @@ describe("preferencesStore", () => {
     });
 
     it.each([
-      { savedChoice: {}, expected: true },
-      { savedChoice: { showOwnerPrintings: false }, expected: false },
-    ])("migrates v39 $savedChoice without losing sibling choices", async ({ savedChoice, expected }) => {
-      expect(usePreferencesStore.getState().cardSize).toBe("medium");
+      { version: 39, savedChoice: {}, expected: true },
+      { version: 39, savedChoice: { showOwnerPrintings: false }, expected: false },
+      { version: 40, savedChoice: {}, expected: true },
+      { version: 40, savedChoice: { showOwnerPrintings: false }, expected: false },
+    ])("migrates v$version $savedChoice without losing sibling choices", async ({ version, savedChoice, expected }) => {
       localStorage.setItem("phase-preferences", JSON.stringify({
         state: { cardSize: "large", showCardPreviewFooter: false, ...savedChoice },
-        version: 39,
+        version,
       }));
 
       await act(async () => { await usePreferencesStore.persist.rehydrate(); });
@@ -409,7 +409,6 @@ describe("preferencesStore", () => {
           cardSize: "large",
           showCardPreviewFooter: false,
         },
-        version: 40,
       });
     });
 

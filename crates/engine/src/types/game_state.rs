@@ -13216,6 +13216,10 @@ fn reconcile_current_turn_zone_changed_record(
 /// are display-free. A display-bearing record or member disables the fallback
 /// (it is not merely excluded), so a printing never selects between rules-identical
 /// occurrences (CR 203.1 + CR 206.1).
+///
+/// Genuine pre-stamp saves predate display carriers and cannot contain printing
+/// data. Hand-authored or mixed newer data can still reach this boundary, so the
+/// display-free guard remains necessary and fails closed.
 fn legacy_raw_occurrence<'a>(
     fingerprint: &PersistedZoneChangeFingerprint,
     candidates: &[&'a PersistedZoneChangeOccurrence],

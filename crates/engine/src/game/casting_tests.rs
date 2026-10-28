@@ -16355,78 +16355,38 @@ fn snuff_out_alt_cost_paid_resolves_destroy_on_chosen_target() {
     ));
 }
 
-// End-to-end variant of the previous test: load Snuff Out from the actual
-// card export so any parser/export drift in `abilities`, `casting_options`,
-// or `condition` shape would surface here.
+// Real-card regression through production actions. The shared committed card
+// database supplies parsed definitions; fresh full-export validation is a
+// separate gate, not an optional filesystem-dependent branch in this test.
 #[test]
 fn snuff_out_from_card_database_alt_cost_destroys_target() {
-    use std::path::PathBuf;
-    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("..")
-        .join("..")
-        .join("client")
-        .join("public")
-        .join("card-data.json");
-    if !path.exists() {
-        eprintln!(
-            "skipping: {} not found (run ./scripts/gen-card-data.sh)",
-            path.display()
-        );
-        return;
-    }
-    // The full export contains a deserialization quirk on an unrelated card
-    // in some builds. Extract Snuff Out's record directly via jq-style lookup
-    // so this regression test is robust to that.
-    let raw = std::fs::read_to_string(&path).expect("card-data.json readable");
-    let map: serde_json::Map<String, serde_json::Value> =
-        serde_json::from_str(&raw).expect("card-data.json is a JSON object");
-    let snuff_value = map
-        .get("snuff out")
-        .expect("Snuff Out should be in the export keyed by lowercase name");
-    let snuff: crate::types::card::CardFace =
-        serde_json::from_value(snuff_value.clone()).expect("Snuff Out record parses as CardFace");
-    let snuff = &snuff;
+    use crate::game::engine::apply_as_current;
+    use crate::game::scenario::{GameScenario, P0, P1};
+    use crate::game::scenario_db::GameScenarioDbExt;
+    use crate::types::ability::TargetRef;
 
-    let mut state = setup_game_at_main_phase();
-    state.players[0].life = 20;
-
-    let spell_id =
-        crate::game::deck_loading::create_object_from_card_face(&mut state, snuff, PlayerId(0));
-    // Move from library to hand for casting.
-    crate::game::zones::move_to_zone(&mut state, spell_id, Zone::Hand, &mut Vec::new());
-
-    let swamp_id = create_object(
-        &mut state,
-        CardId(7777),
-        PlayerId(0),
-        "Swamp".to_string(),
-        Zone::Battlefield,
-    );
-    {
-        let swamp = state.objects.get_mut(&swamp_id).unwrap();
-        swamp.card_types.core_types.push(CoreType::Land);
-        swamp.card_types.subtypes.push("Swamp".to_string());
-    }
-
-    let target_id = create_object(
-        &mut state,
-        CardId(7778),
-        PlayerId(1),
-        "Nonblack Bear".to_string(),
-        Zone::Battlefield,
-    );
-    state
-        .objects
-        .get_mut(&target_id)
-        .unwrap()
-        .card_types
-        .core_types
-        .push(CoreType::Creature);
+    let db = crate::test_support::shared_card_db();
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_life(P0, 20);
+    let spell_id = scenario.add_real_card(P0, "Snuff Out", Zone::Hand, db);
+    scenario.add_real_card(P0, "Swamp", Zone::Battlefield, db);
+    let target_id = scenario.add_real_card(P1, "Grizzly Bears", Zone::Battlefield, db);
+    let mut state = scenario.state;
 
     let card_id = state.objects[&spell_id].card_id;
-    let waiting = handle_cast_spell(&mut state, PlayerId(0), spell_id, card_id, &mut Vec::new())
-        .expect("Snuff Out should reach the alternative-cost choice");
-    state.waiting_for = waiting;
+    // CR 601.2 + CR 118.9: announce through the action boundary before choosing
+    // the printed alternative cost; no announcement carrier escapes its action.
+    apply_as_current(
+        &mut state,
+        GameAction::CastSpell {
+            object_id: spell_id,
+            card_id,
+            targets: vec![TargetRef::Object(target_id)],
+            payment_mode: CastPaymentMode::Auto,
+        },
+    )
+    .expect("Snuff Out should offer its printed alternative cost");
     assert!(
         matches!(
             state.waiting_for,
@@ -16439,7 +16399,7 @@ fn snuff_out_from_card_database_alt_cost_destroys_target() {
         state.waiting_for
     );
 
-    crate::game::engine::apply_as_current(&mut state, GameAction::DecideOptionalCost { pay: true })
+    apply_as_current(&mut state, GameAction::DecideOptionalCost { pay: true })
         .expect("paying 4 life should commit Snuff Out to the stack");
 
     assert_eq!(state.players[0].life, 16);
@@ -16452,16 +16412,12 @@ fn snuff_out_from_card_database_alt_cost_destroys_target() {
     else {
         panic!("expected spell on stack");
     };
-    assert_eq!(
-        ability.targets.len(),
-        1,
-        "Snuff Out's resolved ability must carry one target after alt-cost prompt; \
-             targets = {:?}",
-        ability.targets
-    );
+    assert_eq!(ability.targets, vec![TargetRef::Object(target_id)]);
 
-    let mut events = Vec::new();
-    crate::game::stack::resolve_top(&mut state, &mut events);
+    // CR 117.4: both players pass in succession to resolve the spell.
+    apply_as_current(&mut state, GameAction::PassPriority).expect("caster passes priority");
+    apply_as_current(&mut state, GameAction::PassPriority).expect("opponent passes priority");
+    assert!(state.stack.is_empty());
 
     let target_zone = state.objects.get(&target_id).map(|o| o.zone);
     assert_eq!(
@@ -16469,6 +16425,7 @@ fn snuff_out_from_card_database_alt_cost_destroys_target() {
         Some(Zone::Graveyard),
         "Snuff Out should have destroyed the target creature on resolution"
     );
+    assert_eq!(state.objects[&spell_id].zone, Zone::Graveyard);
 }
 
 /// CR 601.2 + CR 118.9a + CR 903.8 (issue #2000): Dracogenesis lets Dragon
