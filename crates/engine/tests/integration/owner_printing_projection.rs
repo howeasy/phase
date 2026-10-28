@@ -838,7 +838,7 @@ fn lki_and_side_tables_follow_the_name() {
 /// costs {3}).
 fn add_morph(s: &mut GameScenario, player: PlayerId, name: &str) -> ObjectId {
     s.add_creature_to_hand(player, name, 4, 5)
-        .with_keyword(Keyword::Morph(ManaCost::generic(4)))
+        .with_keyword(Keyword::Morph(ManaCost::generic(4).into()))
         .with_mana_cost(ManaCost::generic(5))
         .id()
 }

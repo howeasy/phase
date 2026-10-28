@@ -399,7 +399,7 @@ fn face_down_under_tax(players: u8, code: &str) -> (GameRunner, ObjectId, Vec<Ob
     scenario.at_phase(Phase::PreCombatMain);
     let morph = scenario
         .add_creature_to_hand(P0, "Secret Beast", 4, 5)
-        .with_keyword(Keyword::Morph(ManaCost::generic(4)))
+        .with_keyword(Keyword::Morph(ManaCost::generic(4).into()))
         .with_mana_cost(ManaCost::generic(5))
         .id();
     let tax = scenario.add_creature(P1, "Tax Source", 1, 1).id();
