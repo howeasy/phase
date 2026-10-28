@@ -2656,10 +2656,10 @@ mod tests {
                 options: vec!["chosen".to_string()],
             },
             options: vec!["chosen".to_string()],
-            source: Some(NamedChoiceSource::from_trigger_source(
+            source: Some(Box::new(NamedChoiceSource::from_trigger_source(
                 context,
                 NamedChoiceSourceBinding::ExactObjectAndResolution,
-            )),
+            ))),
             persist_player: None,
         };
         state.park_ability_continuation(pending_source_bound_continuation(

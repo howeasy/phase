@@ -12019,7 +12019,7 @@ fn raise_as_enters_named_choice(
         free_entry: choice_type.free_entry(),
         choice_type,
         options,
-        source,
+        source: source.map(Box::new),
         persist_player: None,
     };
     ReplacementResult::NeedsChoice(player)

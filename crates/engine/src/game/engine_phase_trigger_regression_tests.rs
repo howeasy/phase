@@ -3565,7 +3565,7 @@ fn choose_option_with_exact_source_stores_chosen_attribute() {
             "Red".to_string(),
             "Green".to_string(),
         ],
-        source: Some(
+        source: Some(Box::new(
             crate::types::game_state::NamedChoiceSource::from_trigger_source(
                 crate::game::triggers::trigger_source_context_for_latch(
                     &state,
@@ -3573,7 +3573,7 @@ fn choose_option_with_exact_source_stores_chosen_attribute() {
                 ),
                 crate::types::game_state::NamedChoiceSourceBinding::ExactObjectAndResolution,
             ),
-        ),
+        )),
         persist_player: None,
     };
 
