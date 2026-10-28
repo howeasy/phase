@@ -92,6 +92,7 @@ impl CastUndoValues {
 
     /// Apply an earlier inverse to both captures in lockstep. A step without a
     /// comparison list drops the rules capture: a legacy inverse never yields one.
+    #[cfg(any(test, feature = "test-support"))]
     fn undo(
         &mut self,
         restoration: &[crate::types::game_state::SpellCastUndo],
