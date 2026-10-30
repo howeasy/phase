@@ -686,6 +686,8 @@ fn default_true() -> bool {
     true
 }
 
+/// On a codec-confirmed connection, top-level type values Full and Delta are
+/// state-codec frames. These tags are reserved and must not become ServerMessage tags.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
 pub enum ServerMessage {
