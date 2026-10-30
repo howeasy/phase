@@ -1587,10 +1587,10 @@ pub(crate) fn parse_static_line_inner(
     // player"; Curse of Hospitality) — so it is parsed as one `alt` in
     // `parse_attacking_defender_scope` rather than a dispatch arm per scope. Must
     // precede the generic "all creatures " branch below, which would otherwise
-    // consume the "all creatures " prefix and resolve the subject without the
-    // typed defending-player restriction (`parse_continuous_gets_has` extracts
-    // modifications without requiring a leading verb, so a non-verb-led
-    // continuation is not rejected there).
+    // consume the "all creatures " prefix and send the "attacking <scope>"
+    // qualifier through the generic subject authority
+    // (`parse_continuous_subject_filter`) instead of the typed defending-player
+    // scope built here.
     if let Some((rest, defender)) = parse_attacking_defender_scope(&tp) {
         let filter =
             TargetFilter::Typed(
