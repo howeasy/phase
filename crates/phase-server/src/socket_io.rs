@@ -14,8 +14,8 @@
 //! warn-and-skip policy. Non-state traffic and post-game idle retain the last
 //! bounded baseline until replacement or teardown.
 //!
-//! Legacy is the only externally selected lane here. Phase-2 negotiation will
-//! select the complete codec constructor mid-connection before codec publication.
+//! A confirmed ControlLane selection switches Legacy to Codec once, at the
+//! next FIFO encoding boundary. Compression remains independently negotiated.
 
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -24,7 +24,7 @@ use std::time::{Duration, Instant};
 use axum::extract::ws::{CloseFrame, Message, WebSocket};
 use engine::types::player::PlayerId;
 use futures_util::{Sink, SinkExt, Stream, StreamExt};
-use server_core::protocol::{ServerMessage, WireFormat};
+use server_core::protocol::{ServerMessage, StateCodec, WireFormat};
 use server_core::FullSessionKey;
 use state_codec::WireState;
 use tokio::sync::{mpsc, oneshot, watch};
@@ -188,6 +188,20 @@ impl NegotiatedSocket {
 
     pub(crate) fn set_wire_format(&mut self, format: Option<WireFormat>) {
         self.control.accept_wire_format(format);
+    }
+
+    pub(crate) fn set_state_codec(&self, codec: Option<StateCodec>) {
+        self.control.accept_state_codec(codec);
+    }
+
+    pub(crate) fn state_codec(&self) -> Option<StateCodec> {
+        self.control.state_codec()
+    }
+
+    pub(crate) fn try_admit_resync(
+        &self,
+    ) -> Result<crate::socket_mailbox::ResyncPermit, crate::socket_mailbox::RefusalError> {
+        self.messages.try_admit_resync()
     }
 
     pub(crate) fn uses_gzip_envelope(&self) -> bool {
@@ -389,6 +403,18 @@ pub(crate) fn start(
                 );
                 #[cfg(test)]
                 hooks.before_encode(&message.message).await;
+                #[cfg(test)]
+                if matches!(
+                    &message.state_encoding,
+                    crate::socket_mailbox::StateEncoding::Resync(_)
+                ) {
+                    hooks.before_resync_encode().await;
+                }
+                if matches!(connection_encoder, ConnectionEncoder::Legacy)
+                    && control.state_codec() == Some(StateCodec::StateCodecV1)
+                {
+                    connection_encoder = ConnectionEncoder::codec();
+                }
                 let encoding =
                     encode_application(&executor, connection_encoder, message, control.encoding());
                 tokio::pin!(encoding);
@@ -402,14 +428,7 @@ pub(crate) fn start(
                 };
                 let outcome = match outcome {
                     Ok(outcome) => outcome,
-                    Err(EncodingFailure::Serialization(error)) => {
-                        // Worker execution errors are transport failures; retain
-                        // the existing diagnostic if that contract ever changes.
-                        warn!(connection, %error, "WebSocket application encoding failed");
-                        death.record(Cause::EncodingFailure);
-                        break;
-                    }
-                    Err(EncodingFailure::Transport(error)) => {
+                    Err(error) => {
                         warn!(connection, %error, "WebSocket application encoding failed");
                         death.record(Cause::EncodingFailure);
                         break;
@@ -791,19 +810,21 @@ struct EncodingOutcome {
 }
 
 impl ConnectionEncoder {
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "selected by phase-2 negotiation")
-    )]
     fn codec() -> Self {
         Self::Codec(DeliveredState { baseline: None })
     }
 
     fn prepare(
         &self,
-        envelope: crate::socket_mailbox::Envelope,
+        mut envelope: crate::socket_mailbox::Envelope,
         encoding: Encoding,
     ) -> Result<PreparedApplication, EncodingFailure> {
+        // Move ownership out of the serde-skipped policy, retaining it until
+        // this blocking preparation (including framing) completes or fails.
+        let resync = match std::mem::take(&mut envelope.state_encoding) {
+            crate::socket_mailbox::StateEncoding::Automatic => None,
+            crate::socket_mailbox::StateEncoding::Resync(permit) => Some(permit),
+        };
         let is_server_hello = matches!(&envelope.message, ServerMessage::ServerHello { .. });
         let projected = match self {
             Self::Legacy => None,
@@ -851,6 +872,7 @@ impl ConnectionEncoder {
                         && baseline.viewer == viewer
                         && Some(revision) >= baseline.state.revision()
                         && !matches!(&envelope.message, ServerMessage::GameStarted { .. })
+                        && resync.is_none()
                 });
                 let frame = state_codec::encode(baseline.map(|baseline| &baseline.state), &state)
                     .map_err(|error| EncodingFailure::Transport(error.to_string()))?;
@@ -868,6 +890,7 @@ impl ConnectionEncoder {
             encoding == Encoding::GzipEnvelope && !is_server_hello,
         )
         .map_err(EncodingFailure::Transport)?;
+        drop(resync);
         Ok(PreparedApplication {
             frame,
             candidate: candidate.map(|(full_key, viewer, state)| Baseline {
@@ -902,7 +925,7 @@ async fn encode_application(
     encoder: ConnectionEncoder,
     message: crate::socket_mailbox::Envelope,
     encoding: Encoding,
-) -> Result<EncodingOutcome, EncodingFailure> {
+) -> Result<EncodingOutcome, tokio::task::JoinError> {
     let state_bearing = matches!(
         &message.message,
         ServerMessage::StateUpdate { .. }
@@ -915,12 +938,11 @@ async fn encode_application(
     };
     // Each connection still encodes exactly one FIFO frame at a time. Metadata
     // has an independent blocking lane; it never waits behind game CPU permits.
-    let encoded = if state_bearing {
+    if state_bearing {
         executor.try_run(encode).await
     } else {
         tokio::task::spawn_blocking(encode).await
-    };
-    encoded.map_err(|error| EncodingFailure::Transport(error.to_string()))
+    }
 }
 
 fn sample_backlog(
@@ -1020,7 +1042,7 @@ mod codec_tests {
         source
             .guard()
             .expect("typed transport fixture is publishable");
-        if viewer == PlayerId(u8::MAX) {
+        if viewer == crate::SPECTATOR_PLAYER_ID {
             crate::build_spectator_state_update_message(&key(), state, &result.1, &[], revision)
                 .unwrap()
         } else {
@@ -1084,6 +1106,7 @@ mod codec_tests {
             message,
             command_id,
             quota_refusal: None,
+            state_encoding: crate::socket_mailbox::StateEncoding::Automatic,
         }
     }
 
@@ -1178,7 +1201,7 @@ mod codec_tests {
             "real action supplies event coverage"
         );
         for encoding in [Encoding::Plain, Encoding::GzipEnvelope] {
-            for viewer in [PlayerId(1), PlayerId(u8::MAX)] {
+            for viewer in [PlayerId(1), crate::SPECTATOR_PLAYER_ID] {
                 let mut encoder = ConnectionEncoder::codec();
                 let mut receiver = None;
                 let first = projected_update(runner.state(), viewer, 101, applied.events.clone());
@@ -1392,7 +1415,21 @@ mod codec_tests {
     #[tokio::test]
     async fn codec_binding_changes_and_revision_regression_force_full() {
         let raw = raw_state(12);
-        for axis in ["game_code", "generation", "seat", "spectator", "revision"] {
+        #[derive(Debug)]
+        enum Axis {
+            GameCode,
+            Generation,
+            Seat,
+            Spectator,
+            Revision,
+        }
+        for axis in [
+            Axis::GameCode,
+            Axis::Generation,
+            Axis::Seat,
+            Axis::Spectator,
+            Axis::Revision,
+        ] {
             let mut encoder = ConnectionEncoder::codec();
             let mut receiver = None;
             deliver(
@@ -1423,12 +1460,11 @@ mod codec_tests {
             } = &mut message
             {
                 match axis {
-                    "game_code" => full_key.as_mut().unwrap().game_code = "CODEC2".into(),
-                    "generation" => full_key.as_mut().unwrap().generation += 1,
-                    "seat" => state.viewer_projection = Some(PlayerId(1)),
-                    "spectator" => state.viewer_projection = Some(PlayerId(u8::MAX)),
-                    "revision" => *state_revision = 99,
-                    _ => unreachable!(),
+                    Axis::GameCode => full_key.as_mut().unwrap().game_code = "CODEC2".into(),
+                    Axis::Generation => full_key.as_mut().unwrap().generation += 1,
+                    Axis::Seat => state.viewer_projection = Some(PlayerId(1)),
+                    Axis::Spectator => state.viewer_projection = Some(crate::SPECTATOR_PLAYER_ID),
+                    Axis::Revision => *state_revision = 99,
                 }
             }
             let candidate = envelope(message.clone(), None);
@@ -1437,13 +1473,13 @@ mod codec_tests {
                     .unwrap()
                     .kind(),
                 FrameKind::Delta,
-                "{axis}: codec-alone control must reach DELTA on the exact pair",
+                "{axis:?}: codec-alone control must reach DELTA on the exact pair",
             );
             receiver = None;
             assert_eq!(
                 deliver(&mut encoder, &mut receiver, candidate, Encoding::Plain).await,
                 FrameKind::Full,
-                "{axis}"
+                "{axis:?}"
             );
             if let ServerMessage::StateUpdate { state_revision, .. } = &mut message {
                 *state_revision += 1;
@@ -1457,7 +1493,7 @@ mod codec_tests {
                 )
                 .await,
                 FrameKind::Delta,
-                "{axis}: committed replacement supports later DELTA"
+                "{axis:?}: committed replacement supports later DELTA"
             );
         }
 
@@ -1488,11 +1524,19 @@ mod codec_tests {
         )
         .await;
         let expected_baseline = delivered(&encoder).state.as_bytes().to_vec();
+        #[derive(Clone, Copy)]
+        enum MissingProvenance {
+            FullSessionKey,
+            ViewerProjection,
+        }
         for valid in [
             projected_update(&raw, PlayerId(0), 101, Vec::new()),
             projected_started(&raw, PlayerId(0)),
         ] {
-            for missing_key in [true, false] {
+            for missing in [
+                MissingProvenance::FullSessionKey,
+                MissingProvenance::ViewerProjection,
+            ] {
                 let mut invalid = valid.clone();
                 match &mut invalid {
                     ServerMessage::StateUpdate {
@@ -1500,13 +1544,10 @@ mod codec_tests {
                     }
                     | ServerMessage::GameStarted {
                         full_key, state, ..
-                    } => {
-                        if missing_key {
-                            *full_key = None;
-                        } else {
-                            state.viewer_projection = None;
-                        }
-                    }
+                    } => match missing {
+                        MissingProvenance::FullSessionKey => *full_key = None,
+                        MissingProvenance::ViewerProjection => state.viewer_projection = None,
+                    },
                     _ => unreachable!(),
                 }
                 let invalid = envelope(invalid, None);
@@ -1529,10 +1570,9 @@ mod codec_tests {
                 encoder = outcome.encoder;
                 match outcome.prepared {
                     Err(EncodingFailure::Transport(error)) => assert!(
-                        error.contains(if missing_key {
-                            "FullSessionKey"
-                        } else {
-                            "viewer_projection"
+                        error.contains(match missing {
+                            MissingProvenance::FullSessionKey => "FullSessionKey",
+                            MissingProvenance::ViewerProjection => "viewer_projection",
                         }),
                         "missing provenance diagnostic: {error}",
                     ),
@@ -1557,6 +1597,101 @@ mod codec_tests {
             );
             // No commit: keep the shared delivered control for the next variant.
         }
+    }
+
+    #[tokio::test]
+    async fn codec_resync_hint_forces_only_its_frame() {
+        use crate::socket_mailbox::StateEncoding;
+        let raw = raw_state(12);
+        let mut encoder = ConnectionEncoder::codec();
+        let mut receiver = None;
+        deliver(
+            &mut encoder,
+            &mut receiver,
+            envelope(
+                projected_update(&raw, PlayerId(0), 100, Vec::new()),
+                Some(CommandId(77)),
+            ),
+            Encoding::Plain,
+        )
+        .await;
+        let mut recovery = envelope(projected_update(&raw, PlayerId(0), 100, Vec::new()), None);
+        assert_eq!(
+            state_codec::encode(Some(&delivered(&encoder).state), &wire_state(&recovery))
+                .unwrap()
+                .kind(),
+            FrameKind::Delta,
+            "equal-revision command removal is delta eligible"
+        );
+        let (sender, _mailbox) = crate::socket_mailbox::channel();
+        recovery.state_encoding = StateEncoding::Resync(sender.try_admit_resync().unwrap());
+        let expected = serde_json::to_vec(&recovery).unwrap();
+        let before = delivered(&encoder).state.as_bytes().to_vec();
+        assert_ne!(
+            before, expected,
+            "candidate removes the delivered command metadata"
+        );
+        let prepared = encoder.prepare(recovery, Encoding::Plain).unwrap();
+        let next_permit = sender
+            .try_admit_resync()
+            .expect("encoding releases before flush");
+        drop(next_permit);
+        assert_eq!(
+            delivered(&encoder).state.as_bytes(),
+            before,
+            "preparation is not commit"
+        );
+        let frame = codec_frame(prepared.frame).await;
+        assert_eq!(frame.kind(), FrameKind::Full);
+        let decoded = state_codec::decode(None, &frame).unwrap();
+        assert_eq!(decoded.as_bytes(), expected);
+        encoder.commit(prepared.candidate);
+        receiver = Some(decoded);
+        assert_eq!(
+            deliver(
+                &mut encoder,
+                &mut receiver,
+                envelope(projected_update(&raw, PlayerId(0), 101, Vec::new()), None),
+                Encoding::Plain
+            )
+            .await,
+            FrameKind::Delta,
+            "hint does not leak to ordinary frame"
+        );
+    }
+
+    #[tokio::test]
+    async fn codec_resync_preparation_failure_releases_ownership() {
+        let raw = raw_state(12);
+        let (sender, _mailbox) = crate::socket_mailbox::channel();
+        let mut invalid = projected_update(&raw, PlayerId(0), 101, Vec::new());
+        if let ServerMessage::StateUpdate { state, .. } = &mut invalid {
+            state.viewer_projection = None;
+        }
+        let mut invalid = envelope(invalid, None);
+        invalid.state_encoding =
+            crate::socket_mailbox::StateEncoding::Resync(sender.try_admit_resync().unwrap());
+        let outcome = encode_application(
+            &GameExecutor::new(NonZeroUsize::MIN),
+            ConnectionEncoder::codec(),
+            invalid,
+            Encoding::Plain,
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            outcome.prepared,
+            Err(EncodingFailure::Transport(_))
+        ));
+        let mut valid = envelope(projected_update(&raw, PlayerId(0), 101, Vec::new()), None);
+        valid.state_encoding = crate::socket_mailbox::StateEncoding::Resync(
+            sender
+                .try_admit_resync()
+                .expect("fatal prepare released admission"),
+        );
+        let prepared = outcome.encoder.prepare(valid, Encoding::Plain).unwrap();
+        assert!(sender.try_admit_resync().is_ok());
+        assert_eq!(codec_frame(prepared.frame).await.kind(), FrameKind::Full);
     }
 
     #[tokio::test]
@@ -2150,6 +2285,8 @@ mod socket_tests {
                             wire_formats: vec![WireFormat::GzipEnvelopeV1],
                             heartbeat: None,
                             command_correlation: None,
+                            state_codecs: Vec::new(),
+                            selected_state_codec: None,
                         },
                         None,
                     ),
@@ -2215,6 +2352,69 @@ mod socket_tests {
             }
             socket.close(None).await.unwrap();
             tasks.shutdown().await;
+            // Exercise fatal provenance on the actual selected start/encoder
+            // path, with a successful projected sibling before EACH fault.
+            #[derive(Clone, Copy)]
+            enum MissingProvenance {
+                FullSessionKey,
+                ViewerProjection,
+            }
+            for valid in [
+                projected_started(&raw, PlayerId(0)),
+                projected_update(&raw, PlayerId(0), 101, Vec::new()),
+            ] {
+                for missing in [
+                    MissingProvenance::FullSessionKey,
+                    MissingProvenance::ViewerProjection,
+                ] {
+                    let (mut socket, _) =
+                        tokio_tungstenite::connect_async(format!("ws://{address}/ws"))
+                            .await
+                            .unwrap();
+                    let (facade, _incoming, tasks) = accepted.recv().await.unwrap();
+                    facade.set_state_codec(Some(StateCodec::StateCodecV1));
+                    facade.enqueue_reply(valid.clone()).unwrap();
+                    let json = loop {
+                        match socket.next().await.unwrap().unwrap() {
+                            WsMessage::Text(text) => break text,
+                            WsMessage::Ping(_) | WsMessage::Pong(_) => continue,
+                            other => panic!("expected codec FULL: {other:?}"),
+                        }
+                    };
+                    let frame = state_codec::Frame::from_bytes(json.as_bytes()).unwrap();
+                    assert_eq!(frame.kind(), state_codec::FrameKind::Full);
+                    let decoded = state_codec::decode(None, &frame).unwrap();
+                    assert_eq!(
+                        serde_json::from_slice::<serde_json::Value>(decoded.as_bytes()).unwrap(),
+                        serde_json::to_value(envelope(valid.clone(), None)).unwrap()
+                    );
+                    let mut invalid = valid.clone();
+                    match &mut invalid {
+                        ServerMessage::GameStarted {
+                            full_key, state, ..
+                        }
+                        | ServerMessage::StateUpdate {
+                            full_key, state, ..
+                        } => match missing {
+                            MissingProvenance::FullSessionKey => *full_key = None,
+                            MissingProvenance::ViewerProjection => state.viewer_projection = None,
+                        },
+                        _ => unreachable!("projected sibling"),
+                    }
+                    let mut closed = tasks.closed();
+                    facade.enqueue_reply(invalid).unwrap();
+                    closed.wait_for(Option::is_some).await.unwrap();
+                    assert_eq!(tasks.disconnect().unwrap().cause, Cause::EncodingFailure);
+                    tasks.shutdown().await;
+                    while let Some(frame) = socket.next().await {
+                        match frame {
+                            Ok(WsMessage::Ping(_) | WsMessage::Pong(_) | WsMessage::Close(_))
+                            | Err(_) => {}
+                            Ok(other) => panic!("fatal codec error silently continued: {other:?}"),
+                        }
+                    }
+                }
+            }
         })
         .await;
         server.abort();

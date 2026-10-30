@@ -895,6 +895,7 @@ fn measure_publication(result: &ActionResult, revision: u64, totals: &mut [SeatM
             message,
             command_id: None,
             quota_refusal: None,
+            state_encoding: crate::socket_mailbox::StateEncoding::Automatic,
         })
         .expect("StateUpdate serializes");
         let frames = total.baselines.deliver(&json, revision);
@@ -1072,6 +1073,7 @@ fn completion_envelope_removes_command_id_through_delta() {
             message,
             command_id,
             quota_refusal: None,
+            state_encoding: crate::socket_mailbox::StateEncoding::Automatic,
         })
         .expect("completion Envelope serializes");
         let original: serde_json::Value = serde_json::from_str(&json).unwrap();

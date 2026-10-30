@@ -1,4 +1,7 @@
 //! Exercise ordered Full publications through real WebSocket connections.
+//! Codec peers retain an independent receiver baseline. Resync race tests use
+//! instance-scoped gates and ordinary application FIFO fences, never sleeps or
+//! heartbeat replies, to establish completion and publication ownership.
 
 use std::num::NonZeroUsize;
 use std::sync::Arc;
@@ -205,6 +208,769 @@ impl NativeTable {
             .await;
         drop(lease);
     }
+}
+
+struct CodecPeer {
+    socket: ClientSocket,
+    baseline: Option<state_codec::WireState>,
+    gzip: bool,
+}
+
+struct CodecReply {
+    value: serde_json::Value,
+    kind: Option<state_codec::FrameKind>,
+    text: bool,
+}
+
+impl CodecPeer {
+    async fn next(&mut self) -> CodecReply {
+        use futures_util::StreamExt;
+        use tokio_tungstenite::tungstenite::Message;
+        let (json, text) = loop {
+            match self.socket.next().await.unwrap().unwrap() {
+                Message::Text(text) => break (text.to_string(), true),
+                Message::Binary(bytes) => {
+                    assert!(self.gzip, "plain peer must receive text");
+                    break (
+                        crate::wire::decode_client_envelope(bytes.to_vec(), 16 * 1024 * 1024)
+                            .await
+                            .unwrap(),
+                        false,
+                    );
+                }
+                Message::Ping(_) | Message::Pong(_) => continue,
+                other => panic!("expected live application frame, got {other:?}"),
+            }
+        };
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        match value["type"].as_str().unwrap() {
+            "Full" | "Delta" => {
+                let frame = state_codec::Frame::from_bytes(json.as_bytes()).unwrap();
+                let decoded = state_codec::decode(self.baseline.as_ref(), &frame).unwrap();
+                let value = serde_json::from_slice(decoded.as_bytes()).unwrap();
+                self.baseline = Some(decoded);
+                CodecReply {
+                    value,
+                    kind: Some(frame.kind()),
+                    text,
+                }
+            }
+            _ => {
+                // Also validate the ordinary typed protocol, not just its tag.
+                let _: ServerMessage = serde_json::from_str(&json).unwrap();
+                CodecReply {
+                    value,
+                    kind: None,
+                    text,
+                }
+            }
+        }
+    }
+
+    async fn send(&mut self, message: &ClientMessage) {
+        send_test_message(&mut self.socket, message, self.gzip).await;
+    }
+
+    async fn state(&mut self) -> CodecReply {
+        loop {
+            let reply = self.next().await;
+            match reply.value["type"].as_str().unwrap() {
+                "StateUpdate" | "GameStarted" => return reply,
+                "Error" | "ActionFailed" | "ActionRejected" => {
+                    panic!("state request rejected: {}", reply.value)
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// Subscription is an ordinary application command, unlike Pong. A state
+    /// arriving before this reply is either explicitly drained or a failure.
+    async fn fence(&mut self, allow_state: bool) {
+        self.send(&ClientMessage::SubscribeLobby).await;
+        loop {
+            let reply = self.next().await;
+            match reply.value["type"].as_str().unwrap() {
+                "LobbyUpdate" => break,
+                "ServerHello" => panic!("unexpected second/redundant confirmation"),
+                "StateUpdate" | "GameStarted" => {
+                    assert!(allow_state, "unexpected state: {}", reply.value)
+                }
+                "Error" => panic!("application FIFO fence rejected: {}", reply.value),
+                _ => {}
+            }
+        }
+    }
+
+    async fn denial(&mut self) {
+        loop {
+            let reply = self.next().await;
+            match reply.value["type"].as_str().unwrap() {
+                "Error" => break,
+                "StateUpdate" | "GameStarted" => {
+                    panic!("denied route disclosed state: {}", reply.value)
+                }
+                _ => {}
+            }
+        }
+    }
+
+    async fn resync(&mut self) -> CodecReply {
+        self.send(&ClientMessage::ResyncState).await;
+        let reply = self.state().await;
+        assert_eq!(reply.kind, Some(state_codec::FrameKind::Full));
+        assert_eq!(reply.value["type"], "StateUpdate");
+        assert!(reply.value.get("command_id").is_none());
+        assert_eq!(reply.value["data"]["events"], serde_json::json!([]));
+        assert_eq!(reply.value["data"]["log_entries"], serde_json::json!([]));
+        reply
+    }
+}
+
+async fn codec_hello(url: &str, gzip: bool, offers: Option<serde_json::Value>) -> CodecPeer {
+    use futures_util::SinkExt;
+    use tokio_tungstenite::tungstenite::Message;
+    let (socket, _) = tokio_tungstenite::connect_async(url).await.unwrap();
+    let mut peer = CodecPeer {
+        socket,
+        baseline: None,
+        gzip,
+    };
+    let initial = peer.next().await;
+    assert!(initial.text, "initial ServerHello must be text");
+    assert_eq!(initial.value["type"], "ServerHello");
+    assert!(initial.value["data"].get("selected_state_codec").is_none());
+    let full = initial.value["data"]["mode"] == "Full";
+    if full {
+        assert_eq!(
+            initial.value["data"]["state_codecs"],
+            serde_json::json!(["StateCodecV1"])
+        );
+    } else {
+        assert!(initial.value["data"].get("state_codecs").is_none());
+    }
+    let mut hello = serde_json::to_value(crate::issue_4548_full_create_tests::test_client_hello(
+        if gzip {
+            vec![server_core::protocol::WireFormat::GzipEnvelopeV1]
+        } else {
+            Vec::new()
+        },
+    ))
+    .unwrap();
+    let selected = full
+        && offers.as_ref().is_some_and(|offers| {
+            offers
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|entry| entry == "StateCodecV1")
+        });
+    if let Some(offers) = offers {
+        hello["data"]["state_codecs"] = offers;
+    }
+    peer.socket
+        .send(Message::Text(hello.to_string().into()))
+        .await
+        .unwrap();
+    if selected {
+        let confirmation = peer.next().await;
+        assert!(
+            confirmation.text,
+            "codec confirmation must remain text with gzip selected"
+        );
+        assert_eq!(confirmation.value["type"], "ServerHello");
+        assert_eq!(
+            confirmation.value["data"]["selected_state_codec"],
+            "StateCodecV1"
+        );
+        let mut metadata = confirmation.value;
+        metadata["data"]
+            .as_object_mut()
+            .unwrap()
+            .remove("selected_state_codec");
+        assert_eq!(
+            metadata, initial.value,
+            "both hellos share metadata authority"
+        );
+    }
+    peer
+}
+
+async fn codec_seat(table: &NativeTable, player: PlayerId, gzip: bool) -> CodecPeer {
+    let mut peer = codec_hello(&table.url, gzip, Some(serde_json::json!(["StateCodecV1"]))).await;
+    peer.send(&ClientMessage::Reconnect {
+        game_code: table.key.game_code.clone(),
+        player_token: table.tokens[usize::from(player.0)].clone(),
+        full_key: table.key.clone(),
+    })
+    .await;
+    let started = peer.state().await;
+    assert_eq!(started.kind, Some(state_codec::FrameKind::Full));
+    assert_eq!(started.value["type"], "GameStarted");
+    assert_projection(&started.value, &table.key, player);
+    peer
+}
+
+async fn codec_spectator(table: &NativeTable, gzip: bool) -> CodecPeer {
+    let mut peer = codec_hello(&table.url, gzip, Some(serde_json::json!(["StateCodecV1"]))).await;
+    peer.send(&ClientMessage::SpectatorJoin {
+        game_code: table.key.game_code.clone(),
+    })
+    .await;
+    let started = peer.state().await;
+    assert_eq!(started.kind, Some(state_codec::FrameKind::Full));
+    assert_projection(&started.value, &table.key, crate::SPECTATOR_PLAYER_ID);
+    peer
+}
+
+fn assert_projection(value: &serde_json::Value, key: &FullSessionKey, viewer: PlayerId) {
+    let message: ServerMessage = serde_json::from_value(value.clone()).unwrap();
+    match message {
+        ServerMessage::GameStarted {
+            full_key, state, ..
+        }
+        | ServerMessage::StateUpdate {
+            full_key, state, ..
+        } => {
+            assert_eq!(full_key.as_ref(), Some(key));
+            assert_eq!(state.viewer_projection, Some(viewer));
+        }
+        other => panic!("not projected state: {other:?}"),
+    }
+}
+
+async fn current_action(table: &NativeTable) -> (PlayerId, GameAction) {
+    let session = crate::lock_session(&table.app.sessions, &table.key.game_code)
+        .await
+        .unwrap();
+    assert!(
+        session.ai_seats.is_empty(),
+        "lease tests must not have AI work"
+    );
+    let actor = server_core::acting_players(&session.state)[0];
+    let decision = crate::DecisionSnapshot::from_state(&session.state);
+    let action = decision
+        .legal_actions
+        .iter()
+        .find(|action| matches!(action, GameAction::PassPriority))
+        .or_else(|| decision.legal_actions.first())
+        .expect("engine-supplied legal action")
+        .clone();
+    (actor, action)
+}
+
+async fn resync_reference(
+    table: &NativeTable,
+    viewer: Option<PlayerId>,
+) -> (serde_json::Value, serde_json::Value, u64) {
+    let session = crate::lock_session(&table.app.sessions, &table.key.game_code)
+        .await
+        .unwrap();
+    let revision = session.state_revision;
+    let state = serde_json::to_value(&session.state).unwrap();
+    let reference =
+        serde_json::to_value(crate::build_resync_state_message(&session, viewer).unwrap()).unwrap();
+    (reference, state, revision)
+}
+
+#[test]
+fn codec_confirmation_precedes_state() {
+    run_async_test(|| async {
+        let table = NativeTable::new().await;
+        let outcome = tokio::time::timeout(Duration::from_secs(20), async {
+            table.keep_all().await;
+            // Recompute the engine-supplied actor/action after each real action.
+            for gzip in [false, true] {
+                let (actor, action) = current_action(&table).await;
+                let mut peer = codec_seat(&table, actor, gzip).await;
+                peer.resync().await; // StateUpdate baseline, distinct from bootstrap.
+                peer.fence(false).await;
+                // Redundant hellos cannot reset the encoder's delivered baseline.
+                peer.send(&crate::issue_4548_full_create_tests::test_client_hello(
+                    Vec::new(),
+                ))
+                .await;
+                peer.send(&ClientMessage::Action {
+                    action: action.clone(),
+                })
+                .await;
+                let update = peer.state().await;
+                assert_eq!(update.kind, Some(state_codec::FrameKind::Delta));
+                assert_projection(&update.value, &table.key, actor);
+                peer.socket.close(None).await.unwrap();
+            }
+        })
+        .await;
+        table.server.abort();
+        outcome.expect("negotiated production publication");
+    });
+}
+
+#[test]
+fn codec_absent_and_unknown_remain_legacy() {
+    run_async_test(|| async {
+        let table = NativeTable::new().await;
+        let outcome = tokio::time::timeout(Duration::from_secs(20), async {
+            table.keep_all().await;
+            for gzip in [false, true] {
+                for offers in [None, Some(serde_json::json!(["FutureCodecV9"]))] {
+                    let (actor, action) = current_action(&table).await;
+                    let mut peer = codec_hello(&table.url, gzip, offers).await;
+                    peer.fence(false).await; // no second hello before app completion
+                    peer.send(&ClientMessage::Reconnect {
+                        game_code: table.key.game_code.clone(),
+                        player_token: table.tokens[usize::from(actor.0)].clone(),
+                        full_key: table.key.clone(),
+                    })
+                    .await;
+                    let started = peer.state().await;
+                    assert!(started.kind.is_none());
+                    assert_eq!(started.value["type"], "GameStarted");
+                    peer.send(&ClientMessage::Action { action }).await;
+                    let update = peer.state().await;
+                    assert!(update.kind.is_none());
+                    assert_eq!(update.value["type"], "StateUpdate");
+                    assert_projection(&update.value, &table.key, actor);
+                    peer.send(&ClientMessage::ResyncState).await;
+                    loop {
+                        let reply = peer.next().await;
+                        if reply.value["type"] == "Error" {
+                            break;
+                        }
+                        assert!(reply.kind.is_none());
+                        assert_ne!(reply.value["type"], "StateUpdate");
+                    }
+                    peer.fence(false).await;
+                    peer.socket.close(None).await.unwrap();
+                }
+            }
+        })
+        .await;
+        table.server.abort();
+        outcome.expect("legacy negotiated omissions");
+    });
+}
+
+#[test]
+fn codec_player_resync_full_then_delta() {
+    run_async_test(|| async {
+        let table = NativeTable::new().await;
+        let outcome = tokio::time::timeout(Duration::from_secs(20), async {
+            table.keep_all().await;
+            let (actor, action) = current_action(&table).await;
+            let mut peer = codec_seat(&table, actor, false).await;
+            let other = PlayerId((actor.0 + 1) % 4);
+            let mut other_peer = codec_seat(&table, other, false).await;
+            let mut spectator = codec_spectator(&table, false).await;
+            peer.resync().await;
+            peer.fence(false).await;
+            other_peer.fence(true).await;
+            spectator.fence(true).await;
+            let (reference, state_before, revision) = resync_reference(&table, Some(actor)).await;
+            assert!(!reference["data"]["legal_actions"]
+                .as_array()
+                .unwrap()
+                .is_empty());
+            peer.baseline = None; // receiver recovery cannot use the lost baseline
+            let recovered = peer.resync().await;
+            assert_eq!(
+                recovered.value, reference,
+                "separately built envelopes compared structurally"
+            );
+            assert_projection(&recovered.value, &table.key, actor);
+            let (_, state_after, after_revision) = resync_reference(&table, Some(actor)).await;
+            assert_eq!(state_after, state_before);
+            assert_eq!(after_revision, revision);
+            other_peer.fence(false).await;
+            spectator.fence(false).await;
+            peer.send(&ClientMessage::Action { action }).await;
+            let update = peer.state().await;
+            assert_eq!(update.kind, Some(state_codec::FrameKind::Delta));
+            assert!(update.value["data"]["state_revision"].as_u64().unwrap() > revision);
+            for other in [&mut other_peer, &mut spectator] {
+                let publication = other.state().await;
+                assert!(
+                    publication.value["data"]["state_revision"]
+                        .as_u64()
+                        .unwrap()
+                        > revision
+                );
+            }
+        })
+        .await;
+        table.server.abort();
+        outcome.expect("recipient-local recovery and publication");
+    });
+}
+
+#[test]
+fn codec_spectator_resync_authority() {
+    run_async_test(|| async {
+        use crate::socket_test_hooks::ResyncPoint;
+        let table = NativeTable::new().await;
+        let outcome = tokio::time::timeout(Duration::from_secs(20), async {
+            table.keep_all().await;
+            let mut peer = codec_seat(&table, PlayerId(0), false).await;
+            peer.send(&ClientMessage::SpectatorJoin {
+                game_code: table.key.game_code.clone(),
+            })
+            .await;
+            assert_projection(
+                &peer.state().await.value,
+                &table.key,
+                crate::SPECTATOR_PLAYER_ID,
+            );
+            let seated = peer.resync().await;
+            assert_projection(&seated.value, &table.key, PlayerId(0));
+            // Reject the seat at its FINAL fence, not merely before projection.
+            let built = table
+                .app
+                .context
+                .socket_hooks
+                .arm_resync(ResyncPoint::Built);
+            peer.send(&ClientMessage::ResyncState).await;
+            built.entered.notified().await;
+            let old_route = table
+                .app
+                .connections
+                .lock()
+                .await
+                .get_mut(&table.key.game_code)
+                .unwrap()
+                .remove(&PlayerId(0))
+                .unwrap();
+            built.release.notify_one();
+            let public = peer.state().await;
+            assert_eq!(public.kind, Some(state_codec::FrameKind::Full));
+            assert_projection(&public.value, &table.key, crate::SPECTATOR_PLAYER_ID);
+            let (reference, _, _) = resync_reference(&table, None).await;
+            assert_eq!(
+                public.value, reference,
+                "spectator structural projection parity"
+            );
+            assert_eq!(public.value["data"]["legal_actions"], serde_json::json!([]));
+            assert_eq!(
+                public.value["data"]["rewind_targets"],
+                serde_json::json!([])
+            );
+            assert!(public.value.get("command_id").is_none());
+            assert_eq!(public.value["data"]["events"], serde_json::json!([]));
+            assert_eq!(public.value["data"]["log_entries"], serde_json::json!([]));
+            // Stale seat before build also falls back; it does not disclose hand data.
+            peer.baseline = None;
+            assert_projection(
+                &peer.resync().await.value,
+                &table.key,
+                crate::SPECTATOR_PLAYER_ID,
+            );
+            let built = table
+                .app
+                .context
+                .socket_hooks
+                .arm_resync(ResyncPoint::Built);
+            peer.send(&ClientMessage::ResyncState).await;
+            built.entered.notified().await;
+            let membership = table
+                .app
+                .game_spectators
+                .lock()
+                .await
+                .remove(&table.key.game_code)
+                .unwrap();
+            built.release.notify_one();
+            peer.denial().await;
+            peer.fence(false).await;
+            table
+                .app
+                .game_spectators
+                .lock()
+                .await
+                .insert(table.key.game_code.clone(), membership);
+            assert_projection(
+                &peer.resync().await.value,
+                &table.key,
+                crate::SPECTATOR_PLAYER_ID,
+            );
+            // Keep the original seat invalid while observing ordinary public deltas.
+            drop(old_route);
+            let (actor, action) = current_action(&table).await;
+            let mut acting = codec_seat(&table, actor, false).await;
+            peer.fence(true).await;
+            peer.resync().await;
+            acting.send(&ClientMessage::Action { action }).await;
+            let update = peer.state().await;
+            assert_eq!(update.kind, Some(state_codec::FrameKind::Delta));
+            assert_projection(&update.value, &table.key, crate::SPECTATOR_PLAYER_ID);
+        })
+        .await;
+        table.server.abort();
+        outcome.expect("live seat precedence and independently authorized spectator fallback");
+    });
+}
+
+#[test]
+fn codec_resync_rejects_stale_routes() {
+    run_async_test(|| async {
+        use crate::socket_test_hooks::ResyncPoint;
+        let table = NativeTable::new().await;
+        let outcome = tokio::time::timeout(Duration::from_secs(20), async {
+            table.keep_all().await;
+            let mut unattached =
+                codec_hello(&table.url, false, Some(serde_json::json!(["StateCodecV1"]))).await;
+            unattached.send(&ClientMessage::ResyncState).await;
+            unattached.denial().await;
+            unattached.fence(false).await;
+            // A denied request must release admission so this socket can recover after attach.
+            unattached
+                .send(&ClientMessage::Reconnect {
+                    game_code: table.key.game_code.clone(),
+                    player_token: table.tokens[0].clone(),
+                    full_key: table.key.clone(),
+                })
+                .await;
+            unattached.state().await;
+            unattached.resync().await;
+            let mut other = codec_seat(&table, PlayerId(1), false).await;
+            unattached.fence(true).await;
+            let built = table
+                .app
+                .context
+                .socket_hooks
+                .arm_resync(ResyncPoint::Built);
+            unattached.send(&ClientMessage::ResyncState).await;
+            built.entered.notified().await;
+            {
+                let mut routes = table.app.connections.lock().await;
+                let players = routes.get_mut(&table.key.game_code).unwrap();
+                let replacement = players.get(&PlayerId(1)).unwrap().clone();
+                players.insert(PlayerId(0), replacement);
+            }
+            built.release.notify_one();
+            unattached.denial().await;
+            unattached.fence(false).await;
+            other.fence(true).await;
+            let mut current = codec_seat(&table, PlayerId(0), false).await;
+            current.resync().await;
+            unattached.send(&ClientMessage::ResyncState).await;
+            unattached.denial().await;
+            unattached.fence(false).await;
+            // A current channel is insufficient when its token no longer resolves
+            // to that seat in the SAME session.
+            {
+                let mut session = crate::lock_session(&table.app.sessions, &table.key.game_code)
+                    .await
+                    .unwrap();
+                session.player_tokens.swap(0, 1);
+            }
+            current.send(&ClientMessage::ResyncState).await;
+            current.denial().await;
+            current.fence(false).await;
+            {
+                let mut session = crate::lock_session(&table.app.sessions, &table.key.game_code)
+                    .await
+                    .unwrap();
+                session.player_tokens.swap(0, 1);
+            }
+            current.resync().await;
+            assert!(table
+                .app
+                .sessions
+                .lock()
+                .await
+                .remove_game(&table.key.game_code));
+            current.send(&ClientMessage::ResyncState).await;
+            current.denial().await;
+            current.fence(false).await;
+        })
+        .await;
+        table.server.abort();
+        outcome.expect("stale routes cannot disclose projected state");
+    });
+}
+
+#[test]
+fn codec_resync_burst_coalesces() {
+    run_async_test(|| async {
+        use crate::socket_test_hooks::ResyncPoint;
+        let table = NativeTable::new().await;
+        let outcome = tokio::time::timeout(Duration::from_secs(20), async {
+            table.keep_all().await;
+            let work = table.app.context.socket_hooks.arm_parser_work();
+            let mut peer = codec_seat(&table, PlayerId(0), false).await;
+            work.wait_completed(2).await;
+            let dispatch = table
+                .app
+                .context
+                .socket_hooks
+                .arm_resync(ResyncPoint::Dispatch);
+            let built = table
+                .app
+                .context
+                .socket_hooks
+                .arm_resync(ResyncPoint::Built);
+            let encoding = table
+                .app
+                .context
+                .socket_hooks
+                .arm_resync(ResyncPoint::Encoding);
+            peer.send(&ClientMessage::ResyncState).await;
+            dispatch.entered.notified().await;
+            for _ in 0..4 {
+                peer.send(&ClientMessage::ResyncState).await;
+            }
+            work.wait_completed(7).await;
+            dispatch.release.notify_one();
+            built.entered.notified().await;
+            for _ in 0..4 {
+                peer.send(&ClientMessage::ResyncState).await;
+            }
+            work.wait_completed(11).await;
+            built.release.notify_one();
+            encoding.entered.notified().await;
+            for _ in 0..4 {
+                peer.send(&ClientMessage::ResyncState).await;
+            }
+            work.wait_completed(15).await;
+            encoding.release.notify_one();
+            assert_eq!(peer.state().await.kind, Some(state_codec::FrameKind::Full));
+            peer.fence(false).await; // any extra pending FULL fails before sentinel
+            peer.resync().await; // encoding completion makes a later retry usable
+            peer.send(&ClientMessage::Ping { timestamp: 901 }).await;
+            loop {
+                let reply = peer.next().await;
+                if reply.value["type"] == "Pong" {
+                    break;
+                }
+            }
+            peer.fence(false).await;
+        })
+        .await;
+        table.server.abort();
+        outcome.expect("one pending resync through dispatch/mailbox/encoding");
+    });
+}
+
+#[test]
+fn codec_resync_holds_publication_lease() {
+    run_async_test(|| async {
+        use crate::socket_test_hooks::ResyncPoint;
+        let table = NativeTable::new().await;
+        let outcome =
+            tokio::time::timeout(Duration::from_secs(20), async {
+                table.keep_all().await;
+                let (actor, action) = current_action(&table).await;
+                let mut acting = codec_seat(&table, actor, false).await;
+                let mut requester = codec_spectator(&table, false).await;
+                acting.fence(true).await;
+                requester.resync().await;
+                requester.fence(false).await;
+                let handle = table
+                    .app
+                    .sessions
+                    .lock()
+                    .await
+                    .session(&table.key.game_code)
+                    .unwrap();
+                assert!(
+                    handle.clone().try_lock_owned().is_ok(),
+                    "drained fixture has no background lease owner"
+                );
+                // Ownership sub-case: NO competing command exists at either assertion.
+                let built = table
+                    .app
+                    .context
+                    .socket_hooks
+                    .arm_resync(ResyncPoint::Built);
+                let enqueued = table
+                    .app
+                    .context
+                    .socket_hooks
+                    .arm_resync(ResyncPoint::Enqueued);
+                requester.send(&ClientMessage::ResyncState).await;
+                built.entered.notified().await;
+                let (key, revision) = built.snapshot.lock().clone().unwrap();
+                assert_eq!(key, table.key);
+                assert!(
+                    handle.clone().try_lock_owned().is_err(),
+                    "resync owns after-build lease"
+                );
+                built.release.notify_one();
+                enqueued.entered.notified().await;
+                let full = requester.state().await; // prove real enqueue BEFORE ownership check
+                assert_eq!(full.kind, Some(state_codec::FrameKind::Full));
+                assert_eq!(full.value["data"]["state_revision"], revision);
+                assert!(handle.clone().try_lock_owned().is_err(),
+                "same resync lease must survive enqueue; both early-release mutations fail here");
+                assert_eq!(
+                    *enqueued.snapshot.lock(),
+                    Some((table.key.clone(), revision))
+                );
+                enqueued.release.notify_one();
+                requester.fence(false).await;
+                // Separate ordering sub-case: independent socket enters BEFORE preflight.
+                let built = table
+                    .app
+                    .context
+                    .socket_hooks
+                    .arm_resync(ResyncPoint::Built);
+                let preflight = table
+                    .app
+                    .context
+                    .socket_hooks
+                    .arm_resync(ResyncPoint::ActionPreflight);
+                requester.send(&ClientMessage::ResyncState).await;
+                built.entered.notified().await;
+                let (_, revision) = built.snapshot.lock().clone().unwrap();
+                acting.send(&ClientMessage::Action { action }).await;
+                preflight.entered.notified().await;
+                preflight.release.notify_one(); // action proceeds toward its first session acquisition
+                built.release.notify_one();
+                let full = requester.state().await;
+                assert_eq!(full.kind, Some(state_codec::FrameKind::Full));
+                assert_eq!(full.value["data"]["state_revision"], revision);
+                let publication = requester.state().await;
+                assert!(
+                    publication.value["data"]["state_revision"]
+                        .as_u64()
+                        .unwrap()
+                        > revision
+                );
+                let acting_publication = acting.state().await;
+                assert!(
+                    acting_publication.value["data"]["state_revision"]
+                        .as_u64()
+                        .unwrap()
+                        > revision
+                );
+                requester.fence(false).await;
+            })
+            .await;
+        table.server.abort();
+        outcome.expect("resync retains publication lease through final enqueue");
+    });
+}
+
+#[test]
+fn codec_lobby_only_rejects_resync() {
+    run_async_test(|| async {
+        let (url, server, _directory, _app) = spawn_server(
+            crate::ServerMode::LobbyOnly,
+            crate::draft_pools::DraftPools::default(),
+            Arc::new(basic_land_test_database()),
+            crate::ServerContext::default(),
+        )
+        .await;
+        let outcome = tokio::time::timeout(Duration::from_secs(10), async {
+            let mut peer =
+                codec_hello(&url, false, Some(serde_json::json!(["StateCodecV1"]))).await;
+            peer.send(&ClientMessage::ResyncState).await;
+            peer.denial().await;
+            peer.fence(false).await;
+        })
+        .await;
+        server.abort();
+        outcome.expect("lobby capability remains absent and unsupported");
+    });
 }
 
 fn enable_ai(session: &mut GameSession, players: impl IntoIterator<Item = PlayerId>) {
@@ -1950,5 +2716,162 @@ fn socket_hosted_json_pings_keep_the_listing_alive() {
                 panic!("{mode:?} hosted socket lifecycle failed: {error}");
             });
         }
+    });
+}
+
+fn codec_deck() -> DeckData {
+    DeckData {
+        main_deck: vec!["Network Test Land".to_string(); 60],
+        ..Default::default()
+    }
+}
+
+async fn codec_create(table: &NativeTable, players: u8) -> (FullSessionKey, CodecPeer) {
+    let mut host = codec_hello(&table.url, false, Some(serde_json::json!(["StateCodecV1"]))).await;
+    host.send(&crate::socket_test_hooks::room_request(
+        codec_deck(),
+        players,
+        None,
+    ))
+    .await;
+    loop {
+        let reply = host.next().await;
+        match reply.value["type"].as_str().unwrap() {
+            "GameCreated" => {
+                return (
+                    serde_json::from_value(reply.value["data"]["full_key"].clone()).unwrap(),
+                    host,
+                )
+            }
+            "Error" => panic!("create failed: {}", reply.value),
+            _ => {}
+        }
+    }
+}
+
+#[test]
+fn codec_dual_attachment_cross_game_authority() {
+    run_async_test(|| async {
+        use crate::socket_test_hooks::ResyncPoint;
+        let table = NativeTable::new().await;
+        let outcome = tokio::time::timeout(Duration::from_secs(20), async {
+            table.keep_all().await;
+            let mut peer = codec_seat(&table, PlayerId(0), false).await;
+            let (other_key, mut host) = codec_create(&table, 2).await;
+            let mut guest =
+                codec_hello(&table.url, false, Some(serde_json::json!(["StateCodecV1"]))).await;
+            guest
+                .send(&ClientMessage::JoinGame {
+                    game_code: other_key.game_code.clone(),
+                    deck: codec_deck(),
+                })
+                .await;
+            assert_projection(&guest.state().await.value, &other_key, PlayerId(1));
+            assert_projection(&host.state().await.value, &other_key, PlayerId(0));
+            assert_ne!(other_key, table.key);
+            peer.send(&ClientMessage::SpectatorJoin {
+                game_code: other_key.game_code.clone(),
+            })
+            .await;
+            assert_projection(
+                &peer.state().await.value,
+                &other_key,
+                crate::SPECTATOR_PLAYER_ID,
+            );
+            assert_projection(&peer.resync().await.value, &table.key, PlayerId(0));
+            let built = table
+                .app
+                .context
+                .socket_hooks
+                .arm_resync(ResyncPoint::Built);
+            peer.send(&ClientMessage::ResyncState).await;
+            built.entered.notified().await;
+            table
+                .app
+                .connections
+                .lock()
+                .await
+                .get_mut(&table.key.game_code)
+                .unwrap()
+                .remove(&PlayerId(0));
+            built.release.notify_one();
+            let public = peer.state().await;
+            assert_eq!(public.kind, Some(state_codec::FrameKind::Full));
+            assert_projection(&public.value, &other_key, crate::SPECTATOR_PLAYER_ID);
+            let session = crate::lock_session(&table.app.sessions, &other_key.game_code)
+                .await
+                .unwrap();
+            let reference =
+                serde_json::to_value(crate::build_resync_state_message(&session, None).unwrap())
+                    .unwrap();
+            assert_eq!(
+                public.value, reference,
+                "different-game spectator fallback is structural parity"
+            );
+            drop(session);
+            peer.baseline = None;
+            assert_projection(
+                &peer.resync().await.value,
+                &other_key,
+                crate::SPECTATOR_PLAYER_ID,
+            );
+        })
+        .await;
+        table.server.abort();
+        outcome.expect("sequential cross-game leases and selected attachment authority");
+    });
+}
+
+#[test]
+fn codec_prestart_and_builder_provenance() {
+    run_async_test(|| async {
+        let table = NativeTable::new().await;
+        let outcome = tokio::time::timeout(Duration::from_secs(20), async {
+            let (key, mut host) = codec_create(&table, 4).await;
+            let mut joiner =
+                codec_hello(&table.url, false, Some(serde_json::json!(["StateCodecV1"]))).await;
+            joiner
+                .send(&ClientMessage::JoinGame {
+                    game_code: key.game_code.clone(),
+                    deck: codec_deck(),
+                })
+                .await;
+            let prestart = joiner.state().await;
+            assert_eq!(prestart.value["type"], "StateUpdate");
+            assert_eq!(prestart.kind, Some(state_codec::FrameKind::Full));
+            assert_projection(&prestart.value, &key, PlayerId(1));
+            let recovered = joiner.resync().await;
+            assert_projection(&recovered.value, &key, PlayerId(1));
+            assert_eq!(
+                recovered.value["data"]["legal_actions"],
+                serde_json::json!([])
+            );
+            host.resync().await;
+            // Draft attachment, direct start, broadcast and reconnect all consume
+            // this same session-bound builder; their broader lifecycle is phase 3.
+            let session = crate::lock_session(&table.app.sessions, &table.key.game_code)
+                .await
+                .unwrap();
+            let decision = crate::DecisionSnapshot::from_state(&session.state);
+            for player in [PlayerId(0), PlayerId(1), PlayerId(3)] {
+                let message = crate::build_game_started_message(
+                    &session,
+                    &decision,
+                    player,
+                    None,
+                    Vec::new(),
+                );
+                assert_projection(&serde_json::to_value(message).unwrap(), &table.key, player);
+            }
+            let spectator = crate::build_spectator_game_started_message(&session).unwrap();
+            assert_projection(
+                &serde_json::to_value(spectator).unwrap(),
+                &table.key,
+                crate::SPECTATOR_PLAYER_ID,
+            );
+        })
+        .await;
+        table.server.abort();
+        outcome.expect("all native producer builders carry runtime/viewer provenance");
     });
 }
