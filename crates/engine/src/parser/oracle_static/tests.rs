@@ -25553,6 +25553,94 @@ fn static_chosen_type_pump() {
     }
 }
 
+/// CR 611.3a + CR 205.3m + CR 607.2d: a subject qualifier between "All creatures"
+/// and the predicate verb restricts which creatures the continuous effect applies
+/// to, so it must reach `affected` instead of being dropped by the "all creatures "
+/// dispatch arm (phase-rs/phase#9566, Engineered Plague).
+#[test]
+fn all_creatures_subject_qualifier_composes_through_shared_subject_authority() {
+    let minus_one = vec![
+        ContinuousModification::AddPower { value: -1 },
+        ContinuousModification::AddToughness { value: -1 },
+    ];
+    let cases = [
+        (
+            "All creatures of the chosen type get -1/-1.",
+            TargetFilter::Typed(
+                TypedFilter::creature().properties(vec![FilterProp::IsChosenCreatureType]),
+            ),
+            minus_one.clone(),
+        ),
+        (
+            "All creatures of the chosen color get +1/+1.",
+            TargetFilter::Typed(
+                TypedFilter::creature().properties(vec![FilterProp::IsChosenColor]),
+            ),
+            vec![
+                ContinuousModification::AddPower { value: 1 },
+                ContinuousModification::AddToughness { value: 1 },
+            ],
+        ),
+        (
+            "All creatures of the chosen type your opponents control get -1/-1.",
+            TargetFilter::Typed(
+                TypedFilter::creature()
+                    .controller(ControllerRef::Opponent)
+                    .properties(vec![FilterProp::IsChosenCreatureType]),
+            ),
+            minus_one,
+        ),
+    ];
+    for (text, expected_affected, expected_modifications) in cases {
+        let def = parse_static_line(text).unwrap_or_else(|| panic!("{text:?} must parse"));
+        // Reach guard: the line was parsed as a continuous effect with the
+        // expected predicate, so the subject assertion below is not vacuous.
+        assert_eq!(def.mode, StaticMode::Continuous, "{text:?}");
+        assert_eq!(def.modifications, expected_modifications, "{text:?}");
+        assert_eq!(def.affected, Some(expected_affected), "{text:?}");
+    }
+}
+
+/// Predicate-led "All creatures <verb> ..." lines have no subject qualifier and
+/// keep the bare all-creatures subject (Shiv: head verb plus a second verb inside
+/// the quoted ability; Humility: head verb "lose").
+#[test]
+fn all_creatures_predicate_led_lines_keep_bare_subject() {
+    let bare = Some(TargetFilter::Typed(TypedFilter::creature()));
+    for text in [
+        "All creatures have \"{R}: This creature gets +1/+0 until end of turn.\"",
+        "All creatures lose all abilities and have base power and toughness 1/1.",
+    ] {
+        let def = parse_static_line(text).unwrap_or_else(|| panic!("{text:?} must parse"));
+        assert_eq!(def.mode, StaticMode::Continuous, "{text:?}");
+        assert!(!def.modifications.is_empty(), "{text:?}");
+        assert_eq!(def.affected, bare, "{text:?}");
+    }
+}
+
+/// An unrecognized subject qualifier must never be silently dropped: falling back
+/// to the bare creature filter would apply the effect to every creature.
+#[test]
+fn all_creatures_unrecognized_qualifier_is_not_dropped() {
+    let bare = Some(TargetFilter::Typed(TypedFilter::creature()));
+    if let Some(def) =
+        parse_static_line("All creatures with art by the artist of your choice get +2/+2.")
+    {
+        assert_ne!(def.affected, bare, "qualifier was dropped: {def:?}");
+    }
+
+    // Reach guard: a recognized qualifier on the same arm composes into the
+    // filter, so the arm is reached and the subject/predicate split works; the
+    // negative above is not a vacuous decline.
+    let recognized = parse_static_line("All creatures of the chosen type get -1/-1.").unwrap();
+    assert_eq!(
+        recognized.affected,
+        Some(TargetFilter::Typed(
+            TypedFilter::creature().properties(vec![FilterProp::IsChosenCreatureType])
+        ))
+    );
+}
+
 #[test]
 fn parser_shape_arcane_adaptation_chosen_type_applies_to_creatures_you_control() {
     let def = parse_static_line(

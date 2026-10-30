@@ -32,6 +32,7 @@ mod ajani_nacatl_pariah_sacrifice_outlet_6018;
 mod ajani_nacatl_pariah_transform;
 mod akroan_horse;
 mod alchemists_gift_pump_modal_keyword_choice;
+mod all_creatures_chosen_type_static_9566;
 mod all_player_library_wheel;
 mod alternative_cost_defiler_offers;
 mod ambitious_augmenter;

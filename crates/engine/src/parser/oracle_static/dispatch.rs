@@ -1587,8 +1587,10 @@ pub(crate) fn parse_static_line_inner(
     // player"; Curse of Hospitality) — so it is parsed as one `alt` in
     // `parse_attacking_defender_scope` rather than a dispatch arm per scope. Must
     // precede the generic "all creatures " branch below, which would otherwise
-    // consume the "all creatures " prefix and leave a subject continuation that
-    // `parse_continuous_gets_has` (which expects a verb) can't parse.
+    // consume the "all creatures " prefix and resolve the subject without the
+    // typed defending-player restriction (`parse_continuous_gets_has` extracts
+    // modifications without requiring a leading verb, so a non-verb-led
+    // continuation is not rejected there).
     if let Some((rest, defender)) = parse_attacking_defender_scope(&tp) {
         let filter =
             TargetFilter::Typed(
@@ -1615,7 +1617,7 @@ pub(crate) fn parse_static_line_inner(
         }
     }
 
-    // --- "All creatures get/have ..." ---
+    // --- "All creatures [<qualifier>] get/have ..." ---
     if let Some(rest) = nom_tag_tp(&tp, "all creatures ") {
         // CR 105.2 + CR 613.1f: "All creatures are [color] and <keyword|pump>"
         // (Onakke Catacomb: "... are black and have deathtouch") is a color-
@@ -1627,12 +1629,35 @@ pub(crate) fn parse_static_line_inner(
         if let Some(def) = parse_all_subject_are_color(&tp, &text) {
             return Some(def);
         }
-        if let Some(def) = parse_continuous_gets_has(
-            rest.original,
-            TargetFilter::Typed(TypedFilter::creature()),
-            &text,
-        ) {
-            return Some(def);
+        // CR 611.3a + CR 205.3m + CR 607.2d: a subject qualifier between "All
+        // creatures" and the predicate verb ("All creatures of the chosen type get
+        // -1/-1", Engineered Plague) restricts which creatures the effect applies
+        // to, so the whole subject routes through the shared subject authority
+        // `parse_continuous_subject_filter`. An unrecognized qualifier declines rather
+        // than falling back to the bare creature filter, which would apply the
+        // effect to every creature. Predicate-led ("All creatures get +1/+1") and
+        // verbless lines keep the bare all-creatures subject.
+        match nom_primitives::scan_split_at_phrase(rest.lower, parse_continuous_predicate_verb) {
+            Some((qualifier, _)) if !qualifier.is_empty() => {
+                let subject_len = tp.lower.len() - rest.lower.len() + qualifier.len();
+                let (subject, predicate) = tp.split_at(subject_len);
+                if let Some(affected) = parse_continuous_subject_filter(subject.original) {
+                    if let Some(def) =
+                        parse_continuous_gets_has(predicate.original, affected, &text)
+                    {
+                        return Some(def);
+                    }
+                }
+            }
+            _ => {
+                if let Some(def) = parse_continuous_gets_has(
+                    rest.original,
+                    TargetFilter::Typed(TypedFilter::creature()),
+                    &text,
+                ) {
+                    return Some(def);
+                }
+            }
         }
     }
 
