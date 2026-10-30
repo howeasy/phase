@@ -764,7 +764,7 @@ async fn response_timeout(deadline: Option<tokio::time::Instant>) {
     }
 }
 
-/// One delivered projection plus, outside this owner, at most one prepared candidate.
+/// Per-connection application encoder. `Codec` retains at most one delivered projection; the single prepared candidate stays outside this owner until a successful flush commits it.
 enum ConnectionEncoder {
     Legacy,
     Codec(DeliveredState),
