@@ -25596,13 +25596,17 @@ fn all_creatures_shiv_and_humility_keep_bare_subject_shape() {
 }
 
 /// SHAPE — synthetic rejection case, not a supported-card claim.
-/// No printed static ability in the pinned MTGJSON corpus exhibits this
-/// duration-free artist-qualified shape. The nearest printed card is
-/// Graphic Violence, whose complete Oracle text is:
+/// No printed static ability in the pinned MTGJSON corpus begins
+/// "All creatures with art by". The nearest printed static is Drawn Together:
+/// "As this enchantment enters, choose an artist.
+/// Creatures with art by the chosen artist get +2/+2."
+/// Its subject lacks "All", so it does not reach this dispatch arm.
+/// The nearest printed "All creatures with art by" line is the instant
+/// Graphic Violence:
 /// "All creatures with art by the artist of your choice get +2/+2 and gain
 /// trample until end of turn."
-/// Graphic Violence is an instant; CR 611.2a + CR 611.2c govern its resolving
-/// continuous effect. This test does not claim to implement that effect.
+/// CR 611.2a + CR 611.2c govern Graphic Violence's resolving continuous
+/// effect. This test does not claim to implement either card.
 /// Retain this synthetic static input to guard the changed arm against
 /// discarding a subject it cannot recognize and substituting all creatures.
 /// The printed positive control is Engineered Plague:

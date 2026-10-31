@@ -1584,6 +1584,9 @@ pub(crate) fn parse_static_line_inner(
     // "Creatures attacking your opponents have double strike."
     // Curse of Hospitality:
     // "Creatures attacking enchanted player have trample."
+    // Watchdog: "As long as this creature is untapped, all creatures attacking
+    // you get -1/-0." — the "all creatures attacking" form that must reach this
+    // typed defending-player scope before the generic all-creatures arm below.
     // Oracle lines verified in MTGJSON. This dedicated subject parser precedes
     // the generic all-creatures subject dispatch below.
     if let Some((rest, defender)) = parse_attacking_defender_scope(&tp) {
