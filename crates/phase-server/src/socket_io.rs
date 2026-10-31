@@ -16,6 +16,14 @@
 //!
 //! A confirmed ControlLane selection switches Legacy to Codec once, at the
 //! next FIFO encoding boundary. Compression remains independently negotiated.
+//!
+//! Sent-byte telemetry is independent of baseline commit: immutable prepared
+//! classification and final payload length travel to the writer, which counts
+//! each successful operation before attempting its acknowledgement. It includes
+//! raw/gzip prefixes and explicit controls, not framing or automatic protocol
+//! Pongs emitted by tungstenite's read path. Peer-close completion accounts the
+//! declared echo payload without sending a duplicate Close. Failed operations
+//! and tail-close cleanup never contribute, even if cleanup flushes buffers.
 
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -31,6 +39,7 @@ use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
 use tracing::warn;
 
+use crate::metrics::{ServerMetrics, WsFrameType};
 use crate::socket_control::{CloseOrigin, Control, ControlLane, Encoding, Liveness};
 use crate::socket_disconnect::{Cause, Death, Disconnect};
 use crate::socket_ingress::{Admission, IngressBudget, MAX_COMMANDS};
@@ -75,6 +84,7 @@ struct PendingWrite {
     operation: Option<WriteOperation>,
     acknowledgement: Option<oneshot::Sender<Result<(), String>>>,
     payload_bytes: usize,
+    frame_type: WsFrameType,
     metrics: Arc<PendingMetrics>,
     #[cfg(test)]
     flush_gate: Option<Arc<crate::socket_test_hooks::BootstrapGate>>,
@@ -83,10 +93,16 @@ struct PendingWrite {
 impl PendingWrite {
     fn new(
         frame: Message,
+        frame_type: WsFrameType,
         acknowledgement: Option<oneshot::Sender<Result<(), String>>>,
         metrics: &Arc<PendingMetrics>,
     ) -> Self {
-        Self::from_operation(WriteOperation::Frame(frame), acknowledgement, metrics)
+        Self::from_operation(
+            WriteOperation::Frame(frame),
+            frame_type,
+            acknowledgement,
+            metrics,
+        )
     }
 
     #[cfg(test)]
@@ -100,9 +116,12 @@ impl PendingWrite {
 
     fn from_operation(
         operation: WriteOperation,
+        frame_type: WsFrameType,
         acknowledgement: Option<oneshot::Sender<Result<(), String>>>,
         metrics: &Arc<PendingMetrics>,
     ) -> Self {
+        // Final framed payload length is measured once, shared by backlog
+        // occupancy and successful-operation accounting; Drop only drains backlog.
         let payload_bytes = match &operation {
             WriteOperation::Frame(Message::Text(text)) => text.len(),
             WriteOperation::Frame(
@@ -121,6 +140,7 @@ impl PendingWrite {
             operation: Some(operation),
             acknowledgement,
             payload_bytes,
+            frame_type,
             metrics: metrics.clone(),
             #[cfg(test)]
             flush_gate: None,
@@ -340,6 +360,7 @@ pub(crate) fn start(
     let executor = config.executor;
     let connection = NEXT_CONNECTION.fetch_add(1, Ordering::Relaxed);
     let (sink, stream) = socket.split();
+    let sent_metrics = config.metrics.clone();
     let death = Death::new(config.metrics, connection);
     let liveness = Liveness::default();
     let metrics = Arc::new(PendingMetrics::default());
@@ -435,7 +456,11 @@ pub(crate) fn start(
                     }
                 };
                 connection_encoder = outcome.encoder;
-                let PreparedApplication { frame, candidate } = match outcome.prepared {
+                let PreparedApplication {
+                    frame,
+                    frame_type,
+                    candidate,
+                } = match outcome.prepared {
                     Ok(prepared) => prepared,
                     Err(EncodingFailure::Serialization(error)) => {
                         // Preserve the old mailbox's serialization-error policy:
@@ -450,7 +475,7 @@ pub(crate) fn start(
                     }
                 };
                 let (flushed, mut completion) = oneshot::channel();
-                let pending = PendingWrite::new(frame, Some(flushed), &metrics);
+                let pending = PendingWrite::new(frame, frame_type, Some(flushed), &metrics);
                 #[cfg(test)]
                 let pending = pending.with_flush_gate(flush_gate);
                 if application.send(pending).await.is_err() {
@@ -483,6 +508,7 @@ pub(crate) fn start(
         death.clone(),
         metrics,
         liveness,
+        sent_metrics,
     ));
 
     (
@@ -505,6 +531,7 @@ async fn write_socket<S>(
     death: Death,
     metrics: Arc<PendingMetrics>,
     liveness: Liveness,
+    sent_metrics: Arc<ServerMetrics>,
 ) where
     S: Sink<Message, Error = axum::Error> + Unpin,
 {
@@ -535,7 +562,12 @@ async fn write_socket<S>(
         };
         let mut pending = match next {
             NextWrite::Application(pending) => pending,
-            NextWrite::Ping => PendingWrite::new(Message::Ping(Vec::new().into()), None, &metrics),
+            NextWrite::Ping => PendingWrite::new(
+                Message::Ping(Vec::new().into()),
+                WsFrameType::Control,
+                None,
+                &metrics,
+            ),
             NextWrite::Control(control) => match pending_control(control, &metrics).await {
                 Ok(pending) => pending,
                 Err(error) => {
@@ -584,6 +616,11 @@ async fn write_socket<S>(
                 }
             }
         };
+        if result.is_ok() {
+            // Account the completed writer operation, not queue occupancy or
+            // codec commit. A dropped acknowledgement receiver cannot undo it.
+            sent_metrics.record_ws_sent_payload_bytes(pending.frame_type, pending.payload_bytes);
+        }
         liveness.write_finished((server_ping && result.is_ok()).then_some(started));
         let failed = result.is_err();
         if let Err(error) = &result {
@@ -627,7 +664,12 @@ async fn pending_control(
             WriteOperation::Frame(wire::encode_json_message(json, envelope).await?)
         }
     };
-    Ok(PendingWrite::from_operation(operation, None, metrics))
+    Ok(PendingWrite::from_operation(
+        operation,
+        WsFrameType::Control,
+        None,
+        metrics,
+    ))
 }
 
 async fn read_socket<S>(
@@ -801,6 +843,7 @@ struct Baseline {
 
 struct PreparedApplication {
     frame: Message,
+    frame_type: WsFrameType,
     candidate: Option<Baseline>,
 }
 
@@ -826,6 +869,11 @@ impl ConnectionEncoder {
             crate::socket_mailbox::StateEncoding::Resync(permit) => Some(permit),
         };
         let is_server_hello = matches!(&envelope.message, ServerMessage::ServerHello { .. });
+        let legacy_frame_type = match &envelope.message {
+            ServerMessage::GameStarted { .. } => WsFrameType::GameStarted,
+            ServerMessage::StateUpdate { .. } => WsFrameType::StateUpdate,
+            _ => WsFrameType::Other,
+        };
         let projected = match self {
             Self::Legacy => None,
             Self::Codec(delivered) => match &envelope.message {
@@ -861,7 +909,7 @@ impl ConnectionEncoder {
                 EncodingFailure::Serialization(error)
             }
         })?;
-        let (json, candidate) = match projected {
+        let (json, candidate, frame_type) = match projected {
             Some((delivered, full_key, viewer, revision)) => {
                 let state = WireState::from_json(json.as_bytes())
                     .map_err(|error| EncodingFailure::Transport(error.to_string()))?
@@ -876,14 +924,18 @@ impl ConnectionEncoder {
                 });
                 let frame = state_codec::encode(baseline.map(|baseline| &baseline.state), &state)
                     .map_err(|error| EncodingFailure::Transport(error.to_string()))?;
+                let frame_type = match frame.kind() {
+                    state_codec::FrameKind::Full => WsFrameType::Full,
+                    state_codec::FrameKind::Delta => WsFrameType::Delta,
+                };
                 let bytes = frame
                     .to_bytes()
                     .map_err(|error| EncodingFailure::Transport(error.to_string()))?;
                 let json = String::from_utf8(bytes)
                     .map_err(|error| EncodingFailure::Transport(error.to_string()))?;
-                (json, Some((full_key.clone(), viewer, state)))
+                (json, Some((full_key.clone(), viewer, state)), frame_type)
             }
-            None => (json, None),
+            None => (json, None, legacy_frame_type),
         };
         let frame = wire::encode_json_message_sync(
             json,
@@ -893,6 +945,7 @@ impl ConnectionEncoder {
         drop(resync);
         Ok(PreparedApplication {
             frame,
+            frame_type,
             candidate: candidate.map(|(full_key, viewer, state)| Baseline {
                 full_key,
                 viewer,
@@ -1181,7 +1234,9 @@ mod codec_tests {
         .await
         .unwrap();
         *encoder = outcome.encoder;
-        let PreparedApplication { frame, candidate } = outcome.prepared.unwrap();
+        let PreparedApplication {
+            frame, candidate, ..
+        } = outcome.prepared.unwrap();
         assert!(
             candidate.is_some(),
             "valid projected state prepares authority"
@@ -1795,12 +1850,541 @@ mod codec_tests {
             FrameKind::Full
         );
     }
+
+    #[tokio::test]
+    async fn ws_sent_payload_classifies_prepared_frames() {
+        for encoding in [Encoding::Plain, Encoding::GzipEnvelope] {
+            let raw = raw_state(12);
+            let large = raw_state(4096);
+            let empty = raw_state(0);
+            let sent = Arc::new(ServerMetrics::default());
+            let backlog = Arc::new(PendingMetrics::default());
+            let death = Death::new(sent.clone(), 0);
+            let (application, rx) = mpsc::channel(1);
+            let sink = Box::pin(futures_util::sink::unfold((), |(), _| async {
+                Ok::<_, axum::Error>(())
+            }));
+            let writer = tokio::spawn(write_socket(
+                sink,
+                rx,
+                ControlLane::default(),
+                death.clone(),
+                backlog.clone(),
+                Liveness::default(),
+                sent.clone(),
+            ));
+            let mut totals = [0_u64; 6];
+            for codec in [false, true] {
+                let mut encoder = if codec {
+                    ConnectionEncoder::codec()
+                } else {
+                    ConnectionEncoder::Legacy
+                };
+                let mut reference_baseline = None;
+                let messages = [
+                    (
+                        projected_started(&raw, PlayerId(0)),
+                        WsFrameType::GameStarted,
+                        FrameKind::Full,
+                        false,
+                    ),
+                    (
+                        projected_update(&raw, PlayerId(0), 101, vec![]),
+                        WsFrameType::StateUpdate,
+                        FrameKind::Full,
+                        false,
+                    ),
+                    (
+                        projected_update(&raw, PlayerId(0), 102, vec![]),
+                        WsFrameType::StateUpdate,
+                        FrameKind::Delta,
+                        false,
+                    ),
+                    (
+                        projected_update(&raw, PlayerId(0), 102, vec![]),
+                        WsFrameType::StateUpdate,
+                        FrameKind::Full,
+                        true,
+                    ),
+                    (
+                        projected_update(&raw, PlayerId(0), 103, vec![]),
+                        WsFrameType::StateUpdate,
+                        FrameKind::Delta,
+                        false,
+                    ),
+                    (
+                        projected_started(&large, PlayerId(0)),
+                        WsFrameType::GameStarted,
+                        FrameKind::Full,
+                        false,
+                    ),
+                    (
+                        projected_update(&large, PlayerId(0), 200, vec![]),
+                        WsFrameType::StateUpdate,
+                        FrameKind::Full,
+                        false,
+                    ),
+                    (
+                        projected_update(&large, PlayerId(0), 201, vec![]),
+                        WsFrameType::StateUpdate,
+                        FrameKind::Delta,
+                        false,
+                    ),
+                    (
+                        projected_update(&empty, PlayerId(0), 202, vec![]),
+                        WsFrameType::StateUpdate,
+                        FrameKind::Full,
+                        false,
+                    ),
+                    (
+                        ServerMessage::error("ordinary error"),
+                        WsFrameType::Other,
+                        FrameKind::Full,
+                        false,
+                    ),
+                    (
+                        ServerMessage::Pong { timestamp: 42 },
+                        WsFrameType::Other,
+                        FrameKind::Full,
+                        false,
+                    ),
+                    (
+                        ServerMessage::ActionFailed {
+                            message: "quota refusal".into(),
+                        },
+                        WsFrameType::Other,
+                        FrameKind::Full,
+                        false,
+                    ),
+                    (
+                        ServerMessage::AuthoritativeStateExport {
+                            state: serde_json::to_string(&raw).unwrap(),
+                        },
+                        WsFrameType::Other,
+                        FrameKind::Full,
+                        false,
+                    ),
+                ];
+                for (message, legacy_class, kind, resync) in messages {
+                    let is_started = matches!(&message, ServerMessage::GameStarted { .. });
+                    let is_state = matches!(
+                        &message,
+                        ServerMessage::GameStarted { .. } | ServerMessage::StateUpdate { .. }
+                    );
+                    let mut envelope = envelope(message, None);
+                    let serialized = serde_json::to_string(&envelope).unwrap();
+                    let (reference_json, class) = if codec && is_state {
+                        let state = wire_state(&envelope);
+                        let base = if is_started || resync {
+                            None
+                        } else {
+                            reference_baseline.as_ref()
+                        };
+                        let reference = state_codec::encode(base, &state).unwrap();
+                        assert_eq!(reference.kind(), kind, "codec-alone exact pair premise");
+                        let class = match kind {
+                            FrameKind::Full => WsFrameType::Full,
+                            FrameKind::Delta => WsFrameType::Delta,
+                        };
+                        reference_baseline = Some(state);
+                        (
+                            String::from_utf8(reference.to_bytes().unwrap()).unwrap(),
+                            class,
+                        )
+                    } else {
+                        (serialized, legacy_class)
+                    };
+                    let reference = wire::encode_json_message_sync(
+                        reference_json,
+                        encoding == Encoding::GzipEnvelope,
+                    )
+                    .unwrap();
+                    let expected_bytes = match &reference {
+                        Message::Text(text) => text.len(),
+                        Message::Binary(bytes) => {
+                            if is_state {
+                                assert_eq!(bytes[0], 1);
+                            }
+                            bytes.len()
+                        }
+                        other => panic!("application reference: {other:?}"),
+                    };
+                    assert!(expected_bytes > 0);
+                    let (sender, _mailbox) = crate::socket_mailbox::channel();
+                    if resync {
+                        envelope.state_encoding = crate::socket_mailbox::StateEncoding::Resync(
+                            sender.try_admit_resync().unwrap(),
+                        );
+                    }
+                    let prepared = encoder.prepare(envelope, encoding).unwrap();
+                    assert_eq!(
+                        prepared.frame, reference,
+                        "same-Envelope independent framing"
+                    );
+                    let (ack, completion) = oneshot::channel();
+                    application
+                        .send(PendingWrite::new(
+                            prepared.frame,
+                            prepared.frame_type,
+                            Some(ack),
+                            &backlog,
+                        ))
+                        .await
+                        .unwrap();
+                    completion.await.unwrap().unwrap();
+                    encoder.commit(prepared.candidate);
+                    totals[class.index()] += expected_bytes as u64;
+                    assert_eq!(
+                        WsFrameType::ALL.map(|kind| sent.ws_sent_payload_bytes(kind)),
+                        totals
+                    );
+                    println!("P4-3 {encoding:?} codec={codec} resync={resync} class={class:?} payload={expected_bytes}");
+                }
+            }
+            death.record(Cause::ApplicationEnd);
+            writer.await.unwrap();
+            assert_eq!(backlog.payload_bytes.load(Ordering::Relaxed), 0);
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::socket_control::RESPONSE_TIMEOUT;
+
+    /// Distinguish accepting a frame from completing its flush.
+    struct FlushSink {
+        started: mpsc::UnboundedSender<Message>,
+        reached: Option<oneshot::Sender<()>>,
+        release: Option<oneshot::Receiver<bool>>,
+        ready_error: bool,
+    }
+
+    impl Sink<Message> for FlushSink {
+        type Error = axum::Error;
+
+        fn poll_ready(
+            self: std::pin::Pin<&mut Self>,
+            _: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Result<(), Self::Error>> {
+            if self.ready_error {
+                return std::task::Poll::Ready(Err(axum::Error::new(std::io::Error::other(
+                    "fixture closed sink",
+                ))));
+            }
+            std::task::Poll::Ready(Ok(()))
+        }
+
+        fn start_send(self: std::pin::Pin<&mut Self>, frame: Message) -> Result<(), Self::Error> {
+            self.started.send(frame).unwrap();
+            Ok(())
+        }
+
+        fn poll_flush(
+            mut self: std::pin::Pin<&mut Self>,
+            cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Result<(), Self::Error>> {
+            if let Some(reached) = self.reached.take() {
+                reached.send(()).unwrap();
+            }
+            if let Some(release) = &mut self.release {
+                use std::future::Future;
+                let success = std::task::ready!(std::pin::Pin::new(release).poll(cx)).unwrap();
+                self.release = None;
+                if !success {
+                    return std::task::Poll::Ready(Err(axum::Error::new(std::io::Error::other(
+                        "fixture flush failed",
+                    ))));
+                }
+            }
+            std::task::Poll::Ready(Ok(()))
+        }
+
+        fn poll_close(
+            self: std::pin::Pin<&mut Self>,
+            cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Result<(), Self::Error>> {
+            self.poll_flush(cx)
+        }
+    }
+
+    #[tokio::test]
+    async fn ws_sent_payload_control_failed_flush_is_excluded() {
+        for success in [true, false] {
+            let (started, mut frames) = mpsc::unbounded_channel();
+            let (reached, flushing) = oneshot::channel();
+            let (release, blocked) = oneshot::channel();
+            let sink = FlushSink {
+                started,
+                reached: Some(reached),
+                release: Some(blocked),
+                ready_error: false,
+            };
+            let sent = Arc::new(ServerMetrics::default());
+            let backlog = Arc::new(PendingMetrics::default());
+            let death = Death::new(sent.clone(), 0);
+            let (_application, rx) = mpsc::channel(1);
+            let control = ControlLane::default();
+            control.native_pong(axum::body::Bytes::from_static(&[19, 77, 5]));
+            let writer = tokio::spawn(write_socket(
+                sink,
+                rx,
+                control.clone(),
+                death.clone(),
+                backlog.clone(),
+                Liveness::default(),
+                sent.clone(),
+            ));
+            assert!(
+                matches!(frames.recv().await, Some(Message::Pong(bytes)) if bytes.as_ref() == [19, 77, 5])
+            );
+            flushing.await.unwrap();
+            assert_eq!(sent.ws_sent_payload_bytes(WsFrameType::Control), 0);
+            release.send(success).unwrap();
+            if success {
+                control.close(None, CloseOrigin::Server, || {
+                    death.record(Cause::ApplicationEnd)
+                });
+            }
+            writer.await.unwrap();
+            assert_eq!(
+                sent.ws_sent_payload_bytes(WsFrameType::Control),
+                if success { 3 } else { 0 }
+            );
+            assert_eq!(backlog.payload_bytes.load(Ordering::Relaxed), 0);
+            println!(
+                "P4-8 native Pong start_send=3, poll_flush reached, success={success}, count={}",
+                if success { 3 } else { 0 }
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn ws_sent_payload_counts_only_completed_writes() {
+        let (started, mut frames) = mpsc::unbounded_channel();
+        let (reached, flushing) = oneshot::channel();
+        let (release, blocked) = oneshot::channel();
+        let sink = FlushSink {
+            started,
+            reached: Some(reached),
+            release: Some(blocked),
+            ready_error: false,
+        };
+        let sent = Arc::new(ServerMetrics::default());
+        let backlog = Arc::new(PendingMetrics::default());
+        let death = Death::new(sent.clone(), 0);
+        let (application, rx) = mpsc::channel(1);
+        let writer = tokio::spawn(write_socket(
+            sink,
+            rx,
+            ControlLane::default(),
+            death.clone(),
+            backlog.clone(),
+            Liveness::default(),
+            sent.clone(),
+        ));
+        let (ack, completion) = oneshot::channel();
+        application
+            .send(PendingWrite::new(
+                Message::text("é".repeat(80)),
+                WsFrameType::Other,
+                Some(ack),
+                &backlog,
+            ))
+            .await
+            .unwrap();
+        assert!(matches!(frames.recv().await, Some(Message::Text(text)) if text.len() == 160));
+        flushing.await.unwrap();
+        assert_eq!(sent.ws_sent_payload_bytes(WsFrameType::Other), 0);
+        release.send(true).unwrap();
+        completion.await.unwrap().unwrap();
+        for payload in [vec![7; 257], Vec::new()] {
+            let (ack, completion) = oneshot::channel();
+            application
+                .send(PendingWrite::new(
+                    Message::Binary(payload.into()),
+                    WsFrameType::Full,
+                    Some(ack),
+                    &backlog,
+                ))
+                .await
+                .unwrap();
+            completion.await.unwrap().unwrap();
+        }
+        death.record(Cause::ApplicationEnd);
+        writer.await.unwrap();
+        assert_eq!(sent.ws_sent_payload_bytes(WsFrameType::Other), 160);
+        assert_eq!(sent.ws_sent_payload_bytes(WsFrameType::Full), 257);
+        assert_eq!(backlog.frames.load(Ordering::Relaxed), 0);
+        assert_eq!(backlog.payload_bytes.load(Ordering::Relaxed), 0);
+        println!("P4-1: preflush=0; completed UTF-8=160, binary=257, empty=0; backlog=0");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn ws_sent_payload_failed_flush_is_excluded() {
+        #[derive(Debug, Clone, Copy)]
+        enum Failure {
+            Flush,
+            Ready,
+            Timeout,
+        }
+        for failure in [Failure::Flush, Failure::Ready, Failure::Timeout] {
+            let (started, mut frames) = mpsc::unbounded_channel();
+            let (reached, flushing) = oneshot::channel();
+            let (release, blocked) = oneshot::channel();
+            let sink = FlushSink {
+                started,
+                reached: Some(reached),
+                release: Some(blocked),
+                ready_error: matches!(failure, Failure::Ready),
+            };
+            let sent = Arc::new(ServerMetrics::default());
+            let backlog = Arc::new(PendingMetrics::default());
+            let death = Death::new(sent.clone(), 0);
+            let (application, rx) = mpsc::channel(1);
+            let writer = tokio::spawn(write_socket(
+                sink,
+                rx,
+                ControlLane::default(),
+                death.clone(),
+                backlog.clone(),
+                Liveness::default(),
+                sent.clone(),
+            ));
+            let (ack, completion) = oneshot::channel();
+            application
+                .send(PendingWrite::new(
+                    Message::text("é".repeat(80)),
+                    WsFrameType::Other,
+                    Some(ack),
+                    &backlog,
+                ))
+                .await
+                .unwrap();
+            if !matches!(failure, Failure::Ready) {
+                assert!(
+                    matches!(frames.recv().await, Some(Message::Text(text)) if text.len() == 160)
+                );
+                flushing.await.unwrap();
+                application
+                    .send(PendingWrite::new(
+                        Message::Binary(vec![9; 257].into()),
+                        WsFrameType::Full,
+                        None,
+                        &backlog,
+                    ))
+                    .await
+                    .unwrap();
+                assert_eq!(sent.ws_sent_payload_bytes(WsFrameType::Other), 0);
+            }
+            match failure {
+                Failure::Flush => release.send(false).unwrap(),
+                Failure::Ready => release.send(true).unwrap(),
+                Failure::Timeout => {
+                    death.record(Cause::ReadEof);
+                    // Retain the pending flush until the shutdown deadline.
+                    completion.await.unwrap().unwrap_err();
+                    writer.await.unwrap();
+                    drop(release);
+                    assert_eq!(sent.ws_sent_payload_bytes(WsFrameType::Other), 0);
+                    assert_eq!(sent.ws_sent_payload_bytes(WsFrameType::Full), 0);
+                    assert_eq!(backlog.payload_bytes.load(Ordering::Relaxed), 0);
+                    println!(
+                        "P4-2 {failure:?}: start_send=160, poll_flush reached, queued=257, count=0"
+                    );
+                    continue;
+                }
+            }
+            completion.await.unwrap().unwrap_err();
+            writer.await.unwrap();
+            assert_eq!(sent.ws_sent_payload_bytes(WsFrameType::Other), 0);
+            assert_eq!(sent.ws_sent_payload_bytes(WsFrameType::Full), 0);
+            assert_eq!(backlog.frames.load(Ordering::Relaxed), 0);
+            assert_eq!(backlog.payload_bytes.load(Ordering::Relaxed), 0);
+            if matches!(failure, Failure::Ready) {
+                assert!(
+                    frames.try_recv().is_err(),
+                    "closed sink never accepts a frame"
+                );
+            }
+            println!("P4-2 {failure:?}: completed=Err, sent=0, backlog=0");
+        }
+    }
+
+    #[tokio::test]
+    async fn ws_sent_payload_ack_lifetime_boundary_receipt() {
+        for complete in [false, true] {
+            let (started, mut frames) = mpsc::unbounded_channel();
+            let (reached, flushing) = oneshot::channel();
+            let (release, blocked) = oneshot::channel();
+            let sink = FlushSink {
+                started,
+                reached: Some(reached),
+                release: Some(blocked),
+                ready_error: false,
+            };
+            let (application, application_rx) = mpsc::channel(1);
+            let metrics = Arc::new(PendingMetrics::default());
+            let sent = Arc::new(ServerMetrics::default());
+            let death = Death::new(sent.clone(), 0);
+            let writer = tokio::spawn(write_socket(
+                sink,
+                application_rx,
+                ControlLane::default(),
+                death.clone(),
+                metrics.clone(),
+                Liveness::default(),
+                sent.clone(),
+            ));
+            let (ack, completion) = oneshot::channel();
+            application
+                .send(PendingWrite::new(
+                    Message::text("é".repeat(80)),
+                    WsFrameType::Other,
+                    Some(ack),
+                    &metrics,
+                ))
+                .await
+                .unwrap();
+            assert!(matches!(frames.recv().await, Some(Message::Text(text)) if text.len() == 160));
+            flushing.await.unwrap();
+            assert_eq!(metrics.payload_bytes.load(Ordering::Relaxed), 160);
+            assert_eq!(sent.ws_sent_payload_bytes(WsFrameType::Other), 0);
+            drop(completion);
+            if complete {
+                release.send(true).unwrap();
+                // A later acknowledged application frame fences the first
+                // successful flush even though its notification was abandoned.
+                let (ack, completion) = oneshot::channel();
+                application
+                    .send(PendingWrite::new(
+                        Message::text("fence"),
+                        WsFrameType::Other,
+                        Some(ack),
+                        &metrics,
+                    ))
+                    .await
+                    .unwrap();
+                completion.await.unwrap().unwrap();
+                death.record(Cause::ApplicationEnd);
+                writer.await.unwrap();
+                println!("G1 complete=true: start_send=160, poll_flush reached, dropped receiver, later ack=Ok");
+            } else {
+                writer.abort();
+                assert!(writer.await.unwrap_err().is_cancelled());
+                drop(release);
+                println!("G1 complete=false: start_send=160, poll_flush reached, aborted/joined before success");
+            }
+            drop(application);
+            assert_eq!(metrics.frames.load(Ordering::Relaxed), 0);
+            assert_eq!(metrics.payload_bytes.load(Ordering::Relaxed), 0);
+            assert_eq!(
+                sent.ws_sent_payload_bytes(WsFrameType::Other),
+                if complete { 165 } else { 0 }
+            );
+        }
+    }
 
     #[tokio::test]
     async fn priority_control_waits_for_current_write_then_overtakes_unsent_frames() {
@@ -1820,7 +2404,8 @@ mod tests {
         ));
         let (application, application_rx) = mpsc::channel(1);
         let control = ControlLane::default();
-        let death = Death::new(Arc::default(), 0);
+        let sent = Arc::new(ServerMetrics::default());
+        let death = Death::new(sent.clone(), 0);
         let metrics = Arc::new(PendingMetrics::default());
         let writer = tokio::spawn(write_socket(
             sink,
@@ -1829,16 +2414,30 @@ mod tests {
             death.clone(),
             metrics.clone(),
             Liveness::default(),
+            sent.clone(),
         ));
         application
-            .send(PendingWrite::new(Message::text("first"), None, &metrics))
+            .send(PendingWrite::new(
+                Message::text("first"),
+                WsFrameType::Other,
+                None,
+                &metrics,
+            ))
             .await
             .unwrap();
         writing.await.unwrap();
         application
-            .send(PendingWrite::new(Message::text("second"), None, &metrics))
+            .send(PendingWrite::new(
+                Message::text("second"),
+                WsFrameType::Other,
+                None,
+                &metrics,
+            ))
             .await
             .unwrap();
+        control.native_pong(axum::body::Bytes::from_static(&[1; 125]));
+        control.application_pong(1, None);
+        control.application_pong(42, Some(WireFormat::GzipEnvelopeV1));
         control.native_pong(axum::body::Bytes::from_static(&[42]));
         assert!(
             matches!(writes.try_recv(), Err(mpsc::error::TryRecvError::Empty)),
@@ -1849,9 +2448,27 @@ mod tests {
         assert!(
             matches!(writes.recv().await, Some(Message::Pong(bytes)) if bytes.as_ref() == [42])
         );
+        let expected_heartbeat = wire::encode_json_message_sync(
+            serde_json::to_string(&ServerMessage::Pong { timestamp: 42 }).unwrap(),
+            true,
+        )
+        .unwrap();
+        let heartbeat_bytes = match &expected_heartbeat {
+            Message::Binary(bytes) => {
+                assert_eq!(bytes[0], 0, "small heartbeat includes raw prefix");
+                bytes.len()
+            }
+            other => panic!("raw heartbeat reference: {other:?}"),
+        };
+        assert_eq!(writes.recv().await.unwrap(), expected_heartbeat);
         assert!(matches!(writes.recv().await, Some(Message::Text(text)) if text == "second"));
         death.record(Cause::ApplicationEnd);
         writer.await.unwrap();
+        assert_eq!(sent.ws_sent_payload_bytes(WsFrameType::Other), 11);
+        assert_eq!(
+            sent.ws_sent_payload_bytes(WsFrameType::Control),
+            1 + heartbeat_bytes as u64
+        );
     }
 
     #[tokio::test(start_paused = true)]
@@ -1876,9 +2493,15 @@ mod tests {
             death.clone(),
             metrics.clone(),
             Liveness::default(),
+            Arc::default(),
         ));
         application
-            .send(PendingWrite::new(Message::text("blocked"), None, &metrics))
+            .send(PendingWrite::new(
+                Message::text("blocked"),
+                WsFrameType::Other,
+                None,
+                &metrics,
+            ))
             .await
             .unwrap();
         writing.await.unwrap();
@@ -1902,7 +2525,8 @@ mod tests {
         ));
         let (_application, application_rx) = mpsc::channel(1);
         let control = ControlLane::default();
-        let death = Death::new(Arc::default(), 0);
+        let sent = Arc::new(ServerMetrics::default());
+        let death = Death::new(sent.clone(), 0);
         let writer = tokio::spawn(write_socket(
             sink,
             application_rx,
@@ -1910,6 +2534,7 @@ mod tests {
             death.clone(),
             Arc::default(),
             Liveness::default(),
+            sent.clone(),
         ));
         control.native_pong(axum::body::Bytes::new());
         assert!(matches!(writes.recv().await, Some(Message::Pong(_))));
@@ -1928,6 +2553,11 @@ mod tests {
         ));
         death.record(Cause::ApplicationEnd);
         writer.await.unwrap();
+        assert_eq!(
+            sent.ws_sent_payload_bytes(WsFrameType::Control),
+            0,
+            "empty Ping/Pong payloads are zero bytes"
+        );
     }
 
     #[tokio::test(start_paused = true)]
@@ -1953,9 +2583,15 @@ mod tests {
             death.clone(),
             metrics.clone(),
             Liveness::default(),
+            Arc::default(),
         ));
         application
-            .send(PendingWrite::new(Message::text("blocked"), None, &metrics))
+            .send(PendingWrite::new(
+                Message::text("blocked"),
+                WsFrameType::Other,
+                None,
+                &metrics,
+            ))
             .await
             .unwrap();
         writing.await.unwrap();
@@ -2061,6 +2697,7 @@ mod tests {
             death.clone(),
             metrics.clone(),
             liveness,
+            counters.clone(),
         ));
         assert!(matches!(writes.recv().await, Some(Message::Ping(_))));
         let first_flush = tokio::time::Instant::now();
@@ -2069,7 +2706,12 @@ mod tests {
             tokio::time::advance(Duration::from_secs(1)).await;
             if next_application.is_some_and(|next| next <= tokio::time::Instant::now()) {
                 application
-                    .send(PendingWrite::new(Message::text("state"), None, &metrics))
+                    .send(PendingWrite::new(
+                        Message::text("state"),
+                        WsFrameType::Other,
+                        None,
+                        &metrics,
+                    ))
                     .await
                     .unwrap();
                 next_application =
@@ -2169,10 +2811,12 @@ mod tests {
             death.clone(),
             Arc::default(),
             liveness.clone(),
+            Arc::default(),
         ));
         application
             .send(PendingWrite::new(
                 Message::text("slow state frame"),
+                WsFrameType::Other,
                 None,
                 &Arc::default(),
             ))
@@ -2212,6 +2856,114 @@ mod socket_tests {
     use server_core::protocol::ClientMessage;
     use tokio_tungstenite::tungstenite::Message as WsMessage;
 
+    #[tokio::test]
+    async fn ws_sent_payload_native_control_boundary_receipt() {
+        use axum::extract::{ws::WebSocketUpgrade, State};
+        use axum::routing::get;
+        use std::num::NonZeroUsize;
+
+        type Handoff = mpsc::UnboundedSender<(
+            NegotiatedSocket,
+            mpsc::Receiver<Received<Message>>,
+            SocketTasks,
+            Arc<ServerMetrics>,
+        )>;
+        async fn upgrade(
+            ws: WebSocketUpgrade,
+            State(handoff): State<Handoff>,
+        ) -> axum::response::Response {
+            ws.on_upgrade(move |socket| async move {
+                let (replies, messages) = crate::socket_mailbox::channel();
+                let sent = Arc::new(ServerMetrics::default());
+                let (facade, incoming, tasks) = start(
+                    socket,
+                    messages,
+                    SocketConfig {
+                        replies,
+                        metrics: sent.clone(),
+                        executor: crate::game_executor::GameExecutor::new(NonZeroUsize::MIN),
+                        hooks: crate::socket_test_hooks::Hooks::default(),
+                    },
+                );
+                assert!(handoff.send((facade, incoming, tasks, sent)).is_ok());
+            })
+        }
+        let (handoff, mut accepted) = mpsc::unbounded_channel();
+        let app = axum::Router::new()
+            .route("/ws", get(upgrade))
+            .with_state(handoff);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let result = tokio::time::timeout(Duration::from_secs(5), async {
+            for peer_close in [true, false] {
+                let (mut socket, _) = tokio_tungstenite::connect_async(format!("ws://{address}/ws")).await.unwrap();
+                let (facade, _incoming, tasks, sent) = accepted.recv().await.unwrap();
+                socket.send(WsMessage::Ping(vec![19, 77, 5].into())).await.unwrap();
+                let mut pong_lengths = Vec::new();
+                loop {
+                    match socket.next().await.unwrap().unwrap() {
+                        WsMessage::Pong(bytes) => {
+                            assert_eq!(bytes.as_ref(), [19, 77, 5]);
+                            pong_lengths.push(bytes.len());
+                            break;
+                        }
+                        other => panic!("native Ping response: {other:?}"),
+                    }
+                }
+                // Explicit application-control response followed by ordinary
+                // FIFO traffic establishes reader/writer progress without sleep.
+                facade.enqueue_pong(123);
+                facade.enqueue_reply(ServerMessage::error("fence")).unwrap();
+                let mut heartbeat_bytes = None;
+                loop {
+                    match socket.next().await.unwrap().unwrap() {
+                        WsMessage::Pong(bytes) => pong_lengths.push(bytes.len()),
+                        WsMessage::Text(text) => {
+                            match serde_json::from_str::<ServerMessage>(&text).unwrap() {
+                                ServerMessage::Pong { timestamp: 123 } => heartbeat_bytes = Some(text.len()),
+                                ServerMessage::Error { message, .. } if message == "fence" => break,
+                                other => panic!("control progress: {other:?}"),
+                            }
+                        }
+                        other => panic!("control progress frame: {other:?}"),
+                    }
+                }
+                assert!(heartbeat_bytes.unwrap() > 0);
+                let reason = "terminé";
+                if peer_close {
+                    socket.send(WsMessage::Close(Some(tokio_tungstenite::tungstenite::protocol::CloseFrame {
+                        code: tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode::Normal,
+                        reason: reason.into(),
+                    }))).await.unwrap();
+                } else {
+                    facade.control.close(Some(CloseFrame { code: 1000, reason: reason.into() }),
+                        CloseOrigin::Server, || facade.death.record(Cause::ApplicationEnd));
+                }
+                let mut close_lengths = Vec::new();
+                while let Some(frame) = socket.next().await {
+                    match frame {
+                        Ok(WsMessage::Pong(bytes)) => pong_lengths.push(bytes.len()),
+                        Ok(WsMessage::Close(Some(close))) => {
+                            assert_eq!(close.reason.as_str(), reason);
+                            close_lengths.push(2 + close.reason.len());
+                            let _ = socket.flush().await;
+                        }
+                        Err(_) => break,
+                        other => panic!("teardown frame: {other:?}"),
+                    }
+                }
+                tasks.shutdown().await;
+                assert_eq!(close_lengths, [10]);
+                assert_eq!(sent.ws_sent_payload_bytes(WsFrameType::Control), 3 + heartbeat_bytes.unwrap() as u64 + 10);
+                println!("G0 completed writer Control=53; native wire Pong bytes={} (automatic replies excluded)", pong_lengths.iter().sum::<usize>());
+                println!("G0 peer_close={peer_close}: native Pong payloads={pong_lengths:?}, application heartbeat={}, Close payloads={close_lengths:?}; automatic Pong excluded; FinishPeerClose unchanged", heartbeat_bytes.unwrap());
+            }
+        }).await;
+        server.abort();
+        result.expect("native-control boundary did not complete");
+    }
+
     // Concurrent selected codec traffic must not alter the legacy SAME-Envelope
     // byte oracle. Both lanes exercise plain/gzip and completion removal; the
     // codec sibling independently reconstructs Full, Full, Delta per batch.
@@ -2227,6 +2979,7 @@ mod socket_tests {
             NegotiatedSocket,
             mpsc::Receiver<Received<Message>>,
             SocketTasks,
+            Arc<ServerMetrics>,
         )>;
         async fn upgrade(
             ws: WebSocketUpgrade,
@@ -2234,17 +2987,19 @@ mod socket_tests {
         ) -> axum::response::Response {
             ws.on_upgrade(move |socket| async move {
                 let (replies, messages) = crate::socket_mailbox::channel();
+                let sent = Arc::new(ServerMetrics::default());
                 let started = start(
                     socket,
                     messages,
                     SocketConfig {
                         replies,
-                        metrics: Arc::default(),
+                        metrics: sent.clone(),
                         executor: crate::game_executor::GameExecutor::new(NonZeroUsize::MIN),
                         hooks: crate::socket_test_hooks::Hooks::default(),
                     },
                 );
-                assert!(handoff.send(started).is_ok());
+                let (facade, incoming, tasks) = started;
+                assert!(handoff.send((facade, incoming, tasks, sent)).is_ok());
             })
         }
 
@@ -2259,15 +3014,25 @@ mod socket_tests {
             let (mut socket, _) = tokio_tungstenite::connect_async(format!("ws://{address}/ws"))
                 .await
                 .unwrap();
-            let (mut facade, _incoming, tasks) = accepted.recv().await.unwrap();
+            let (mut facade, _incoming, tasks, legacy_sent) = accepted.recv().await.unwrap();
             let raw = raw_state(12);
             let (mut codec_socket, _) =
                 tokio_tungstenite::connect_async(format!("ws://{address}/ws"))
                     .await
                     .unwrap();
-            let (mut codec_facade, _codec_incoming, codec_tasks) = accepted.recv().await.unwrap();
+            let (mut codec_facade, _codec_incoming, codec_tasks, codec_sent) =
+                accepted.recv().await.unwrap();
             codec_facade.set_state_codec(Some(StateCodec::StateCodecV1));
             let mut codec_baseline = None;
+            let mut legacy_totals = [0_u64; 6];
+            let mut codec_totals = [0_u64; 6];
+            fn payload_bytes(frame: &Message) -> u64 {
+                match frame {
+                    Message::Text(text) => text.len() as u64,
+                    Message::Binary(bytes) => bytes.len() as u64,
+                    other => panic!("application reference: {other:?}"),
+                }
+            }
             for encoding in [Encoding::Pending, Encoding::Plain, Encoding::GzipEnvelope] {
                 match encoding {
                     Encoding::Pending => {}
@@ -2342,6 +3107,12 @@ mod socket_tests {
                         (_, Message::Text(_), Encoding::Pending | Encoding::Plain) => {}
                         _ => panic!("unexpected legacy frame shape"),
                     }
+                    let class = match &envelope.message {
+                        ServerMessage::GameStarted { .. } => WsFrameType::GameStarted,
+                        ServerMessage::StateUpdate { .. } => WsFrameType::StateUpdate,
+                        _ => WsFrameType::Other,
+                    };
+                    legacy_totals[class.index()] += payload_bytes(&reference);
                     expected.push(reference);
                     facade
                         .enqueue_completion(envelope.message, envelope.command_id)
@@ -2380,25 +3151,32 @@ mod socket_tests {
                         }
                     }
                 }
-                for (bytes, kind) in codec_expected.into_iter().zip([
-                    state_codec::FrameKind::Full,
-                    state_codec::FrameKind::Full,
-                    state_codec::FrameKind::Delta,
-                ]) {
-                    let json = loop {
+                for (index, (bytes, kind)) in codec_expected
+                    .into_iter()
+                    .zip([
+                        state_codec::FrameKind::Full,
+                        state_codec::FrameKind::Full,
+                        state_codec::FrameKind::Delta,
+                    ])
+                    .enumerate()
+                {
+                    let previous_baseline = codec_baseline.clone();
+                    let (json, received_bytes) = loop {
                         match codec_socket.next().await.unwrap().unwrap() {
                             WsMessage::Text(text) => {
                                 assert_ne!(encoding, Encoding::GzipEnvelope);
-                                break text.to_string();
+                                let received_bytes = text.len() as u64;
+                                break (text.to_string(), received_bytes);
                             }
                             WsMessage::Binary(bytes) => {
                                 assert_eq!(encoding, Encoding::GzipEnvelope);
-                                break wire::decode_client_envelope(
-                                    bytes.to_vec(),
-                                    16 * 1024 * 1024,
-                                )
-                                .await
-                                .unwrap();
+                                let received_bytes = bytes.len() as u64;
+                                break (
+                                    wire::decode_client_envelope(bytes.to_vec(), 16 * 1024 * 1024)
+                                        .await
+                                        .unwrap(),
+                                    received_bytes,
+                                );
                             }
                             WsMessage::Ping(_) | WsMessage::Pong(_) => continue,
                             frame => panic!("live codec sibling: {frame:?}"),
@@ -2413,12 +3191,74 @@ mod socket_tests {
                     let recovered = state_codec::decode(codec_baseline.as_ref(), &frame).unwrap();
                     assert_eq!(recovered.as_bytes(), bytes, "complete exact codec Envelope");
                     codec_baseline = Some(recovered);
+                    let current = WireState::from_json(&bytes)
+                        .unwrap()
+                        .with_revision(if index == 0 { 100 } else { 101 });
+                    let reference_frame = state_codec::encode(
+                        if index == 0 {
+                            None
+                        } else {
+                            previous_baseline.as_ref()
+                        },
+                        &current,
+                    )
+                    .unwrap();
+                    assert_eq!(reference_frame.kind(), kind, "codec-alone exact input pair");
+                    let reference = wire::encode_json_message_sync(
+                        String::from_utf8(reference_frame.to_bytes().unwrap()).unwrap(),
+                        encoding == Encoding::GzipEnvelope,
+                    )
+                    .unwrap();
+                    assert_eq!(payload_bytes(&reference), received_bytes);
+                    let class = match kind {
+                        state_codec::FrameKind::Full => WsFrameType::Full,
+                        state_codec::FrameKind::Delta => WsFrameType::Delta,
+                    };
+                    codec_totals[class.index()] += received_bytes;
+                }
+            }
+            // A later application FIFO frame, not a control Pong, fences each
+            // measured stream before counters are observed.
+            for (facade, client, totals) in [
+                (&facade, &mut socket, &mut legacy_totals),
+                (&codec_facade, &mut codec_socket, &mut codec_totals),
+            ] {
+                let fence = envelope(ServerMessage::Pong { timestamp: 100 }, None);
+                let reference =
+                    wire::encode_json_message_sync(serde_json::to_string(&fence).unwrap(), true)
+                        .unwrap();
+                totals[WsFrameType::Other.index()] += payload_bytes(&reference);
+                facade
+                    .enqueue_completion(fence.message, fence.command_id)
+                    .unwrap();
+                let actual = loop {
+                    match client.next().await.unwrap().unwrap() {
+                        WsMessage::Ping(_) | WsMessage::Pong(_) => continue,
+                        frame => break frame,
+                    }
+                };
+                match (reference, actual) {
+                    (Message::Binary(expected), WsMessage::Binary(actual)) => {
+                        assert_eq!(actual, expected)
+                    }
+                    other => panic!("FIFO fence framing: {other:?}"),
                 }
             }
             socket.close(None).await.unwrap();
             tasks.shutdown().await;
             codec_socket.close(None).await.unwrap();
             codec_tasks.shutdown().await;
+            assert_eq!(
+                WsFrameType::ALL.map(|kind| legacy_sent.ws_sent_payload_bytes(kind)),
+                legacy_totals
+            );
+            assert_eq!(
+                WsFrameType::ALL.map(|kind| codec_sent.ws_sent_payload_bytes(kind)),
+                codec_totals
+            );
+            println!(
+                "P4-4 SAME-Envelope live totals: legacy={legacy_totals:?}, codec={codec_totals:?}"
+            );
             // Exercise fatal provenance on the actual selected start/encoder
             // path, with a successful projected sibling before EACH fault.
             #[derive(Clone, Copy)]
@@ -2438,7 +3278,7 @@ mod socket_tests {
                         tokio_tungstenite::connect_async(format!("ws://{address}/ws"))
                             .await
                             .unwrap();
-                    let (facade, _incoming, tasks) = accepted.recv().await.unwrap();
+                    let (facade, _incoming, tasks, _sent) = accepted.recv().await.unwrap();
                     facade.set_state_codec(Some(StateCodec::StateCodecV1));
                     facade.enqueue_reply(valid.clone()).unwrap();
                     let json = loop {

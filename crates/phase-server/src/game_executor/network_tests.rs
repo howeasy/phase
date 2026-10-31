@@ -227,22 +227,29 @@ struct CodecReply {
     value: serde_json::Value,
     kind: Option<state_codec::FrameKind>,
     text: bool,
+    /// Complete received payload before raw/gzip envelope decoding.
+    payload_bytes: usize,
 }
 
 impl CodecPeer {
     async fn next(&mut self) -> CodecReply {
         use futures_util::StreamExt;
         use tokio_tungstenite::tungstenite::Message;
-        let (json, text) = loop {
+        let (json, text, payload_bytes) = loop {
             match self.socket.next().await.unwrap().unwrap() {
-                Message::Text(text) => break (text.to_string(), true),
+                Message::Text(text) => {
+                    let payload_bytes = text.len();
+                    break (text.to_string(), true, payload_bytes);
+                }
                 Message::Binary(bytes) => {
                     assert!(self.gzip, "plain peer must receive text");
+                    let payload_bytes = bytes.len();
                     break (
                         crate::wire::decode_client_envelope(bytes.to_vec(), 16 * 1024 * 1024)
                             .await
                             .unwrap(),
                         false,
+                        payload_bytes,
                     );
                 }
                 Message::Ping(_) | Message::Pong(_) => continue,
@@ -260,6 +267,7 @@ impl CodecPeer {
                     value,
                     kind: Some(frame.kind()),
                     text,
+                    payload_bytes,
                 }
             }
             _ => {
@@ -270,6 +278,7 @@ impl CodecPeer {
                     value,
                     kind: None,
                     text,
+                    payload_bytes,
                 }
             }
         }
@@ -3192,6 +3201,66 @@ async fn lifecycle_publication(
     (references, revision)
 }
 
+/// One spectator, no AI or connected seats: real publication/transport and HTTP
+/// collection, not command-driven full-game or resource acceptance.
+#[test]
+fn ws_sent_payload_negotiated_full_delta_totals() {
+    run_async_test(|| async {
+        use state_codec::FrameKind;
+        for gzip in [false, true] {
+            let table = NativeTable::new().await;
+            let outcome = tokio::time::timeout(Duration::from_secs(30), async {
+                table.keep_all().await;
+                let mut peer = codec_hello(&table.url, gzip, Some(serde_json::json!(["StateCodecV1"]))).await;
+                peer.send(&ClientMessage::SpectatorJoin { game_code: table.key.game_code.clone() }).await;
+                let bootstrap = peer.state().await;
+                assert_eq!(bootstrap.kind, Some(FrameKind::Full));
+                assert_projection(&bootstrap.value, &table.key, crate::SPECTATOR_PLAYER_ID);
+                assert!(bootstrap.payload_bytes > 0);
+                let mut full = bootstrap.payload_bytes as u64;
+                let mut delta = 0_u64;
+                println!("P4-5 gzip={gzip}: bootstrap Full payload={}", bootstrap.payload_bytes);
+                for expected in [FrameKind::Full, FrameKind::Delta] {
+                    let before = peer.baseline.clone().unwrap();
+                    let (references, _) = lifecycle_publication(&table, &table.key, |_| {}).await;
+                    let reply = peer.state().await;
+                    assert_eq!(state_codec::encode(Some(&before), peer.baseline.as_ref().unwrap()).unwrap().kind(), expected, "codec-alone exact pair premise");
+                    assert_eq!(reply.kind, Some(expected));
+                    assert_eq!(&reply.value, references.last().unwrap());
+                    assert!(reply.payload_bytes > 0);
+                    match expected { FrameKind::Full => full += reply.payload_bytes as u64, FrameKind::Delta => delta += reply.payload_bytes as u64 }
+                    println!("P4-5 gzip={gzip}: ordinary {expected:?} payload={}", reply.payload_bytes);
+                }
+                let recovery = peer.resync().await;
+                full += recovery.payload_bytes as u64;
+                let before = peer.baseline.clone().unwrap();
+                lifecycle_publication(&table, &table.key, |_| {}).await;
+                let reply = peer.state().await;
+                assert_eq!(state_codec::encode(Some(&before), peer.baseline.as_ref().unwrap()).unwrap().kind(), FrameKind::Delta);
+                assert_eq!(reply.kind, Some(FrameKind::Delta));
+                delta += reply.payload_bytes as u64;
+                peer.fence(false).await;
+                let url = format!("http://{}/metrics", table.url.strip_prefix("ws://").unwrap().strip_suffix("/ws").unwrap());
+                for _ in 0..2 {
+                    let body = reqwest::get(&url).await.unwrap().error_for_status().unwrap().text().await.unwrap();
+                    for (label, expected) in [("full", full), ("delta", delta), ("state_update", 0), ("game_started", 0)] {
+                        let sample = format!("phase_ws_sent_payload_bytes_total{{frame_type=\"{label}\"}} {expected}");
+                        assert_eq!(body.lines().filter(|line| *line == sample).count(), 1, "{sample}\n{body}");
+                    }
+                    assert_eq!(body.lines().filter(|line| line.starts_with("phase_ws_sent_payload_bytes_total{")).count(), 6);
+                    for label in ["full", "delta", "state_update", "game_started", "other", "control"] {
+                        let prefix = format!("phase_ws_sent_payload_bytes_total{{frame_type=\"{label}\"}} ");
+                        assert_eq!(body.lines().filter(|line| line.starts_with(&prefix)).count(), 1);
+                    }
+                }
+                println!("P4-5 gzip={gzip}: HTTP full={full} delta={delta}, legacy=0; two scrapes after FIFO fence");
+            }).await;
+            table.server.abort();
+            outcome.expect("negotiated state bytes must equal the public metrics scrape");
+        }
+    });
+}
+
 #[test]
 fn codec_lifecycle_visibility_revocation_delta() {
     run_async_test(|| async {
@@ -4089,6 +4158,10 @@ fn codec_lifecycle_spectator_switch_discards_captured_publication() {
             table.keep_all().await;
             let mut spectator = codec_spectator(&table, false).await;
             let (other_key, mut other_peers) = lifecycle_second_game(&table).await;
+            spectator.fence(false).await;
+            for peer in &mut other_peers {
+                peer.fence(true).await;
+            }
             let session = crate::lock_session(&table.app.sessions, &table.key.game_code)
                 .await
                 .unwrap();
@@ -4131,8 +4204,25 @@ fn codec_lifecycle_spectator_switch_discards_captured_publication() {
             let bootstrap = spectator.state().await;
             assert_eq!(bootstrap.kind, Some(state_codec::FrameKind::Full));
             assert_projection(&bootstrap.value, &other_key, crate::SPECTATOR_PLAYER_ID);
+            spectator.fence(false).await;
+            for peer in &mut other_peers {
+                peer.fence(false).await;
+            }
+            let state_totals = || {
+                use crate::metrics::WsFrameType;
+                [WsFrameType::Full, WsFrameType::Delta]
+                    .map(|kind| table.app.context.metrics.ws_sent_payload_bytes(kind))
+            };
+            let before_discard = state_totals();
             publisher.finish(&table.app.context.game_executor).await;
             drop(lease);
+            spectator.fence(false).await;
+            assert_eq!(
+                state_totals(),
+                before_discard,
+                "staged A frame discarded before writer"
+            );
+            println!("P4-6 staged A=1, quiet state totals before/after discard={before_discard:?}");
             for expected in [state_codec::FrameKind::Full, state_codec::FrameKind::Delta] {
                 let baseline = spectator.baseline.clone().unwrap();
                 let (_, _, references) =
