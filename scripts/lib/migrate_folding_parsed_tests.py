@@ -1,0 +1,483 @@
+#!/usr/bin/env python3
+"""Standalone folding migration contracts; deliberately not a Gate H dependency."""
+from __future__ import annotations
+
+import importlib.util
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+import unittest
+from collections import Counter
+from pathlib import Path
+from unittest.mock import patch
+
+ROOT = Path(__file__).resolve().parents[2]
+SCRIPT = Path(os.environ.get("FOLDING_MIGRATION_SCRIPT", ROOT / "scripts/migrate-folding-parsed.py"))
+SPEC = importlib.util.spec_from_file_location("folding_migration", SCRIPT)
+migration = importlib.util.module_from_spec(SPEC)
+SPEC.loader.exec_module(migration)
+rd = migration.rd
+P = rd.SCOPE + "/probe.rs"
+F = "parse_type_phrase_folding"
+W = migration.WAIVER_PATH
+COMPANION = f"\nfn companion(i: &str) {{ let (companion, _) = {F}(i); consume(companion); }}\n"
+
+
+class MigrationTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        (self.root / rd.SCOPE).mkdir(parents=True)
+        shutil.copyfile(ROOT / "rust-toolchain.toml", self.root / "rust-toolchain.toml")
+
+    def contract(self, before, expected, legacy=1, waivers=1, path=P):
+        """J1 runs real snapshot classifiers, with independent debt expectations."""
+        hits = rd.find_discards(path, before.splitlines())
+        self.assertEqual(sum(h.symbol in rd.FOLDING_HELPERS for h in hits), legacy)
+        self.assertGreater(legacy, 0, "tuple-era production reach guard")
+        plan = migration.plan_source(path, before)
+        self.assertFalse(plan.unsupported, plan.unsupported)
+        self.assertEqual(plan.rendered, expected)
+        self.assertGreater(plan.calls, 0)
+        second = migration.plan_source(path, expected)
+        self.assertFalse(second.unsupported, second.unsupported)
+        self.assertEqual(second.rendered, expected)
+        self.assertFalse(second.edits)
+        for output in (expected, migration.format_source(self.root, path, expected)):
+            origins = rd.parsed_returning_helpers([output])
+            self.assertEqual(rd.find_disposition_violations(path, output, origins), [])
+            after_hits = rd.find_discards(path, output.splitlines())
+            self.assertEqual(sum(h.family == "unaudited-waiver" for h in after_hits), waivers)
+            self.assertEqual(Counter(h.family for h in hits if h.symbol not in rd.FOLDING_HELPERS
+                                     and h.family != "unaudited-waiver"),
+                             Counter(h.family for h in after_hits if h.family != "unaudited-waiver"))
+            formatted_again = migration.plan_source(path, output)
+            self.assertFalse(formatted_again.unsupported, formatted_again.unsupported)
+            self.assertFalse(formatted_again.edits)
+        return plan
+
+    def test_existing_dispositions_preserve_target_and_default_debt(self):
+        before = (f"fn f() {{ let (v, rest) = {F}(i).with_rest(); "
+                  f"let old = {F}(j).waive({W}); "
+                  "let (target, _) = parse_target(i); let default = filter.unwrap_or(TargetFilter::Any); }"
+                  + COMPANION)
+        expected = before.replace(f"let (companion, _) = {F}(i);",
+                                  f"let companion = {F}(i).waive({W});")
+        self.contract(before, expected, waivers=2)
+
+    def test_family_discard_and_retention(self):
+        for helper in sorted(rd.FOLDING_HELPERS):
+            for residue in ("_", "_unused"):
+                with self.subTest(helper=helper, residue=residue):
+                    self.contract(f"fn f() {{ let (mut value, {residue}) = {helper}(side_effect(i)); use_value(value); }}",
+                                  f"fn f() {{ let mut value = {helper}(side_effect(i)).waive({W}); use_value(value); }}")
+            before = f"fn f() {{ let (value, rest) = {helper}(i); consume(value, rest); }}" + COMPANION
+            expected = before.replace(f"{helper}(i);", f"{helper}(i).with_rest();", 1).replace(
+                f"let (companion, _) = {F}(i);", f"let companion = {F}(i).waive({W});")
+            self.contract(before, expected)
+
+    def test_typed_wrapped_and_refutable_patterns(self):
+        for wrapper in ("", "Some", "Ok"):
+            wrap = lambda s: f"{wrapper}({s})" if wrapper else s
+            for prefix, suffix in (("let ", ";"), ("let ", " else { return; };"),
+                                   ("if let ", " { consume(value); }")):
+                before = "fn f() { " + prefix + wrap("(value, _)") + " = " + wrap(F + "(i)") + suffix + " }"
+                expected = "fn f() { " + prefix + wrap("value") + " = " + wrap(F + f"(i).waive({W})") + suffix + " }"
+                self.contract(before, expected)
+        self.contract(f"fn f() {{ let (value, _): (Filter, &str) = {F}(i); }}",
+                      f"fn f() {{ let value: Filter = {F}(i).waive({W}); }}")
+
+    def test_lazy_multiline_projections(self):
+        before = f"fn f() {{ let value = cached.unwrap_or_else(|| {{ crate::parser::oracle_target::{F}(\n    text,\n).0 }}); }}"
+        self.contract(before, before.replace(".0", f".waive({W})"))
+        before = f"fn f() {{ let rest = ({F}(i)).1; consume(rest); }}" + COMPANION
+        expected = before.replace(f"{F}(i)).1", f"{F}(i).with_rest()).1").replace(
+            f"let (companion, _) = {F}(i);", f"let companion = {F}(i).waive({W});")
+        self.contract(before, expected)
+
+    def test_whole_tuple_assertions_both_operands(self):
+        for args in (f'{F}(i), (Filter::Any, "")', f'(Filter::Any, ""), {F}(i)'):
+            before = f'fn f() {{ assert_eq!(\n{args},\n "message {{}}", i); }}' + COMPANION
+            expected = before.replace(F + "(i)", F + "(i).with_rest()", 1).replace(
+                f"let (companion, _) = {F}(i);", f"let companion = {F}(i).waive({W});")
+            self.contract(before, expected)
+
+    def test_one_waiver_before_match(self):
+        before = f"fn f() {{ match {F}(side_effect(i)) {{ (Filter::Any, _) => first(), (other, _tail) if accepts(&other) => second(other), }} }}"
+        expected = f"fn f() {{ match {F}(side_effect(i)).waive({W}) {{ Filter::Any => first(), other if accepts(&other) => second(other), }} }}"
+        self.contract(before, expected, legacy=2)
+        before = f"fn f() {{ match {F}(i) {{ (Filter::Any, _) | (Filter::SelfRef, _) => first(), (other, _) => second(other), }} }}"
+        expected = f"fn f() {{ match {F}(i).waive({W}) {{ Filter::Any | Filter::SelfRef => first(), other => second(other), }} }}"
+        self.contract(before, expected, legacy=3)
+
+    def test_context_and_mixed_branch_tails(self):
+        for expr in (f"ctx.with_player_antecedents(|s| {F}(i))",
+                     f"ctx.with_player_scope(scope, |s| {{ observe(); {F}(i) }})",
+                     f"ctx.with_player_antecedents(|s| -> (Filter, &str) {{ {F}(i) }})",
+                     f"match grammar {{ Legacy => {F}(i), Strict => {{ let (r, f) = strict(i)?; (f, r) }} }}",
+                     f"if legacy {{ {F}(i) }} else {{ strict(i) }}"):
+            before = f"fn f() {{ let (value, rest) = {expr}; consume(value, rest); }}" + COMPANION
+            expected = before.replace(F + "(i)", F + "(i).with_rest()", 1).replace(
+                f"let (companion, _) = {F}(i);", f"let companion = {F}(i).waive({W});")
+            self.contract(before, expected)
+        before = f"fn f() {{ let (value, _) = ctx.with_player_antecedents(|s| -> (Filter, &str) {{ {F}(i) }}); }}"
+        expected = f"fn f() {{ let value = ctx.with_player_antecedents(|s| -> Filter {{ {F}(i).waive({W}) }}); }}"
+        self.contract(before, expected)
+
+    def test_debug_observation_and_collision(self):
+        for helper in (F, "parse_mass_type_union"):
+            before = (f"fn f() {{\n    let parsed_value = already();\n    let (value, _rem) = {helper}(i);\n"
+                      "    #[cfg(debug_assertions)]\n    assert_no_compound_remainder(_rem, i);\n    consume(value);\n}")
+            expected = (f"fn f() {{\n    let parsed_value = already();\n    let parsed_value_2 = {helper}(i);\n"
+                        "    #[cfg(debug_assertions)]\n    assert_no_compound_remainder(parsed_value_2.remainder(), i);\n"
+                        f"    let value = parsed_value_2.waive({W});\n    consume(value);\n}}")
+            self.contract(before, expected)
+            self.assertNotIn("debug_assert!", expected)
+
+    def test_enclosing_tuple_return_disposal_and_alias(self):
+        for expr in (F + "(i)", "{ observe(); " + F + "(i) }", "ctx.with_player_antecedents(|s| " + F + "(i))"):
+            before = f"fn f(i: &str) -> (Filter, &str) {{ {expr} }}" + COMPANION
+            expected = before.replace(F + "(i)", F + "(i).with_rest()", 1).replace(
+                f"let (companion, _) = {F}(i);", f"let companion = {F}(i).waive({W});")
+            self.contract(before, expected)
+        for expr in (f"drop({F}(i));", f"let _ = {F}(i);", f"{F}(i);"):
+            self.contract("fn f() { " + expr + " }", "fn f() { " + expr.replace(F + "(i)", F + f"(i).waive({W})") + " }")
+        before = f"use crate::parser::oracle_target::{{{F} as folding}};\nfn f() {{ let (v, _) = folding(i); }}"
+        self.contract(before, before.replace("let (v, _) = folding(i)", f"let v = folding(i).waive({W})"))
+
+    def test_lexical_controls_and_test_scope(self):
+        literal = 'let text = "é fake parse_type_phrase_folding(i).0 \\\n  more parse_mass_type_union(i)"; /* nested /* helper */ end */ '
+        before = "fn f() { " + literal + f"let (v, _) = {F}(i); }}"
+        expected = before.replace(f"let (v, _) = {F}(i)", f"let v = {F}(i).waive({W})")
+        self.contract(before, expected)
+        before = f"#[cfg(test)] mod tests {{ fn f() {{ let (v, _) = {F}(i); }} }}" + COMPANION
+        expected = before.replace(f"let (v, _) = {F}(i)", f"let v = {F}(i).waive({W})").replace(
+            f"let (companion, _) = {F}(i);", f"let companion = {F}(i).waive({W});")
+        self.contract(before, expected)
+        self.assertNotIn("use ", expected)
+
+    def test_pure_tree_planning_and_overlap_refusal(self):
+        before = {P: f"fn f() {{ let (v, _) = {F}(i); }}"}
+        expected = {P: f"fn f() {{ let v = {F}(i).waive({W}); }}"}
+        plan = migration.plan_tree(before)
+        self.assertFalse(plan.unsupported, plan.unsupported)
+        self.assertEqual(plan.rendered, expected)
+        self.assertEqual(before[P], f"fn f() {{ let (v, _) = {F}(i); }}")
+        with self.assertRaisesRegex(ValueError, "overlap"):
+            migration.render_edits("abcd", (migration.Edit(0, 3, "x", "probe"),
+                                             migration.Edit(2, 4, "y", "probe")))
+        self.contract(before[P], expected[P])
+
+    def test_shadowed_underscore_is_not_a_read(self):
+        before = (f"fn f() {{ let (value, _rest) = {F}(i); "
+                  f"let (colored, _rest) = {F}(j); consume(value, colored); }}")
+        expected = (f"fn f() {{ let value = {F}(i).waive({W}); "
+                    f"let colored = {F}(j).waive({W}); consume(value, colored); }}")
+        self.contract(before, expected, legacy=2, waivers=2)
+
+    def test_used_underscore_remainder_retains_debug_and_runtime_reads(self):
+        before = (
+            "fn f() {\n"
+            "    let (parsed_target, _rem) = parse_mass_type_union(rest, ctx);\n"
+            "    #[cfg(debug_assertions)]\n"
+            "    assert_no_compound_remainder(_rem, text);\n"
+            "    let target = if filter_targets_stack(&parsed_target) {\n"
+            "        constrain_filter_to_stack(parsed_target)\n"
+            "    } else { parsed_target };\n"
+            "    let (origin, target) = compose_exile_graveyard_origin_and_target(\n"
+            "        origin, target, rest, _rem, ctx, EffectScope::All,\n"
+            "    );\n"
+            "    consume(origin, target);\n"
+            "}")
+        expected = (
+            "fn f() {\n"
+            "    let (parsed_target, rem) = parse_mass_type_union(rest, ctx).with_rest();\n"
+            "    #[cfg(debug_assertions)]\n"
+            "    assert_no_compound_remainder(rem, text);\n"
+            "    let target = if filter_targets_stack(&parsed_target) {\n"
+            "        constrain_filter_to_stack(parsed_target)\n"
+            "    } else { parsed_target };\n"
+            "    let (origin, target) = compose_exile_graveyard_origin_and_target(\n"
+            "        origin, target, rest, rem, ctx, EffectScope::All,\n"
+            "    );\n"
+            "    consume(origin, target);\n"
+            "}")
+        self.contract(before, expected, waivers=0)
+        self.assertNotIn(".waive(", expected)
+        self.assertNotIn(".remainder()", expected)
+
+    def test_used_underscore_remainder_runtime_only_and_shadow_scope(self):
+        before = (f"fn f() {{ let (mut value, _tail) = {F}(i); "
+                  "consume(value, _tail); { let _tail = other(); consume(_tail); } "
+                  f"let (other, _tail) = {F}(j); consume(other); }}")
+        expected = (f"fn f() {{ let (mut value, tail) = {F}(i).with_rest(); "
+                    "consume(value, tail); { let _tail = other(); consume(_tail); } "
+                    f"let other = {F}(j).waive({W}); consume(other); }}")
+        self.contract(before, expected, legacy=2)
+        self.contract(f"fn f() {{ let (v, _unused) = {F}(i); consume(v); }}",
+                      f"fn f() {{ let v = {F}(i).waive({W}); consume(v); }}")
+
+    def test_used_underscore_remainder_name_collision_refuses(self):
+        for prefix, pattern, body in (
+                ("let tail = previous(); ", "(value, _tail)", "consume(value, _tail, tail);"),
+                ("", "(tail, _tail)", "consume(tail, _tail);"),
+                ("", "(value, _tail)", "let tail = later(); consume(value, _tail, tail);"),
+                ("", "(value, _tail)", "{ let tail = nested(); consume(_tail, tail); }")):
+            before = f"fn f() {{ {prefix}let {pattern} = {F}(i); {body} }}"
+            with self.subTest(before=before):
+                plan = migration.plan_source(P, before)
+                self.assertTrue(plan.unsupported)
+                self.assertEqual(plan.rendered, before)
+                self.assertTrue(any("collision" in error for error in plan.unsupported))
+        for source in (
+                f"fn f(tail: &str) {{ let (value, _tail) = {F}(i); consume(_tail); }}",
+                f"fn f() {{ let tail = outer(); if ready() {{ let (value, _tail) = {F}(i); consume(_tail); }} }}",
+                f"fn f() {{ ctx.with_player_antecedents(|tail| {{ let (value, _tail) = {F}(i); consume(_tail); }}); }}",
+                f"fn f() {{ for tail in tails {{ let (value, _tail) = {F}(i); consume(_tail); }} }}",
+                f"fn f() {{ match input {{ Some(tail) => {{ let (value, _tail) = {F}(i); consume(_tail); }}, _ => (), }} }}"):
+            with self.subTest(source=source):
+                plan = migration.plan_source(P, source)
+                self.assertTrue(plan.unsupported)
+                self.assertEqual(plan.rendered, source)
+                self.assertTrue(any("collision" in error for error in plan.unsupported))
+
+    def test_refuse_discard_flow_with_unknown_tuple_branch(self):
+        for expression in (f"if legacy {{ {F}(i) }} else {{ strict(i) }}",
+                           f"match grammar {{ Legacy => {F}(i), Strict => strict(i) }}"):
+            for source in (f"fn f() {{ let (v, _) = {expression}; }}",
+                           f"fn f() {{ let v = ({expression}).0; }}"):
+                with self.subTest(source=source):
+                    plan = migration.plan_source(P, source)
+                    self.assertTrue(plan.unsupported)
+                    self.assertEqual(plan.rendered, source)
+
+    def test_refuse_unknown_flows_patterns_and_references(self):
+        cases = (f"fn f() {{ macro_capture!({F}(i)); }}",
+                 f"fn f() {{ let alias = {F}; }}",
+                 f"fn f() {{ let (ref v, _) = {F}(i); }}",
+                 f"fn f() {{ let (v, _tail) = {F}(i); consume(_tail); let tail = other(); }}",
+                 f"fn f() {{ consume({F}(i)); }}",
+                 f"fn f() {{ let pair = {F}(i); consume(pair.0); }}",
+                 f"fn f() {{ match {F}(i) {{ (v, rest) => consume(rest), (_, _) => (), }} }}",
+                 f"fn f() {{ let {F} = other; let (v, _) = {F}(i); }}",
+                 f"fn f() {{ {F}(i).waive(reason); }}",
+                 f"fn f() {{ {F}(i).with_rest().0; }}",
+                 f"fn f() {{ let (v, _) = {F}(i); ")
+        for source in cases:
+            with self.subTest(source=source):
+                plan = migration.plan_source(P, source)
+                self.assertTrue(plan.unsupported)
+                self.assertEqual(plan.rendered, source)
+                self.assertRegex(plan.unsupported[0], r"probe.rs:\d+:\d+:")
+
+
+class TreeTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        (self.root / rd.SCOPE).mkdir(parents=True)
+        shutil.copyfile(ROOT / "rust-toolchain.toml", self.root / "rust-toolchain.toml")
+
+    def put(self, path, source):
+        dest = self.root / path
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(source.encode())
+        return dest
+
+    def cli(self, mode):
+        return subprocess.run([sys.executable, "-B", str(SCRIPT),
+                               mode, "--root", str(self.root)], capture_output=True, text=True)
+
+    def joint(self, original, rendered, legacy, waivers):
+        before = rd.production_sources(self.root, False, original)
+        self.assertEqual(sum(h.symbol in rd.FOLDING_HELPERS for p, s in before.items()
+                             for h in rd.find_discards(p, s.splitlines())), legacy)
+        self.assertGreater(legacy, 0)
+        origins = rd.parsed_returning_helpers(rendered.values())
+        for p, s in rendered.items():
+            self.assertEqual(rd.find_disposition_violations(p, s, origins), [])
+        prod = rd.production_sources(self.root, False, rendered)
+        self.assertEqual(sum(h.family == "unaudited-waiver" for p, s in prod.items()
+                             for h in rd.find_discards(p, s.splitlines())), waivers)
+
+    def test_apply_replay_and_second_run(self):
+        source = f"fn f(i: &str) {{ let (v, _) = {F}(i); consume(v); }}\n"
+        dest = self.put(P, source)
+        check = self.cli("--check")
+        self.assertEqual(check.returncode, 1, check.stderr)
+        self.assertIn("classified_calls=1", check.stderr)
+        replay = self.cli("--replay")
+        self.assertEqual(replay.returncode, 0, replay.stderr)
+        self.assertEqual(dest.read_text(), source)
+        applied_patch = subprocess.run(["git", "apply", "-"], input=replay.stdout,
+                                       cwd=self.root, capture_output=True, text=True)
+        self.assertEqual(applied_patch.returncode, 0, applied_patch.stderr)
+        replay_bytes = dest.read_bytes()
+        self.joint({P: source}, {P: replay_bytes.decode()}, 1, 1)
+        dest.write_bytes(source.encode())
+        apply = self.cli("--apply")
+        self.assertEqual(apply.returncode, 0, apply.stderr)
+        self.assertEqual(dest.read_bytes(), replay_bytes)
+        self.joint({P: source}, {P: dest.read_text()}, 1, 1)
+        self.assertEqual(self.cli("--apply").returncode, 0)
+        self.assertEqual(dest.read_bytes(), replay_bytes)
+        self.assertEqual(self.cli("--check").returncode, 0)
+        replay2 = self.cli("--replay")
+        self.assertEqual((replay2.returncode, replay2.stdout), (0, ""))
+
+    def test_replay_without_original_final_newline(self):
+        original = f"fn f() {{ let (v, _) = {F}(i); }}"
+        dest = self.put(P, original)
+        replay = self.cli("--replay")
+        self.assertEqual(replay.returncode, 0, replay.stderr)
+        applied = subprocess.run(["git", "apply", "-"], input=replay.stdout, cwd=self.root,
+                                 capture_output=True, text=True)
+        self.assertEqual(applied.returncode, 0, applied.stderr)
+        self.joint({P: original}, {P: dest.read_text()}, 1, 1)
+        self.assertEqual(self.cli("--check").returncode, 0)
+
+    def test_debug_observations_in_separate_files(self):
+        for path, helper in ((P, F), (rd.SCOPE + "/mass.rs", "parse_mass_type_union")):
+            self.put(path, f"fn f() {{ let (value, _rem) = {helper}(i);\n"
+                     "#[cfg(debug_assertions)]\nassert_no_compound_remainder(_rem, i);\n"
+                     "consume(value); }\n")
+        plan = migration.prepare_tree(self.root)
+        self.assertFalse(plan.unsupported, plan.unsupported)
+        self.assertEqual(len(plan.changed), 2)
+        self.joint(plan.originals, plan.rendered, 2, 2)
+        for source in plan.rendered.values():
+            self.assertIn("#[cfg(debug_assertions)]", source)
+            self.assertLess(source.index(".remainder()"), source.index(".waive("))
+            self.assertNotIn("debug_assert!", source)
+
+    def test_complete_synthetic_cutover_fixpoint(self):
+        producer = (
+            f"fn {F}(i: &str) -> Parsed<'_, Filter> {{ parse_type_phrase_folding_with_ctx(i) }}\n"
+            "fn parse_type_phrase_folding_with_ctx(i: &str) -> Parsed<'_, Filter> { Parsed::new(Filter::Any, i) }\n"
+            "fn read_type_union_leg(i: &str) -> Parsed<'_, Filter> { match grammar { "
+            "Legacy => parse_type_phrase_folding(i), Strict => { let (value, rest) = parse_target(i); "
+            "Parsed::new(value, rest) } } }\n"
+            "fn fold_type_union(i: &str) -> Parsed<'_, Filter> { "
+            "let (value, rest) = read_type_union_leg(i).with_rest(); Parsed::new(value, rest) }\n"
+            "fn parse_filter_phrase_union(i: &str) -> Parsed<'_, Filter> { fold_type_union(i) }\n"
+            "fn parse_mass_type_union(i: &str) -> Parsed<'_, Filter> { fold_type_union(i) }\n")
+        manual = migration.plan_source(P, producer)
+        self.assertFalse(manual.unsupported, manual.unsupported)
+        self.assertEqual(manual.rendered, producer)
+        self.assertEqual(manual.counts["definition"], 6)
+        types = ("pub struct Parsed<'a, T> { value: T, rest: &'a str }\n"
+                 "pub enum ResidueWaiver { Unaudited }\n"
+                 "impl<'a, T> Parsed<'a, T> { fn with_rest(self) -> (T, &'a str) { (self.value, self.rest) } }\n")
+        self.put(rd.SCOPE + "/parsed.rs", types)
+        self.put(rd.SCOPE + "/mod.rs", "mod parsed; mod probe;\n")
+        old = producer + f"fn f() {{ let (v, _) = {F}(i); consume(v); }}\n"
+        self.put(P, old)
+        result = migration.prepare_tree(self.root)
+        self.assertFalse(result.unsupported, result.unsupported)
+        self.assertTrue(result.changed)
+        self.assertIn(producer.splitlines()[0].split("{")[0].strip(), result.rendered[P])
+        self.joint(result.originals, result.rendered, 1, 1)
+        for path, source in result.rendered.items():
+            self.put(path, source)
+        second = migration.prepare_tree(self.root)
+        self.assertFalse(second.unsupported, second.unsupported)
+        self.assertFalse(second.changed)
+        self.joint(result.originals, second.rendered, 1, 1)
+
+    def test_whole_tree_refusal_in_both_orders(self):
+        for bad, good in (("a.rs", "z.rs"), ("z.rs", "a.rs")):
+            self.put(rd.SCOPE + "/" + good, f"fn f() {{ let (v, _) = {F}(i); }}")
+            self.put(rd.SCOPE + "/" + bad, f"fn f() {{ capture!({F}(i)); }}")
+            originals = {p: p.read_bytes() for p in self.root.rglob("*.rs")}
+            result = self.cli("--apply")
+            self.assertEqual(result.returncode, 2, result.stderr)
+            self.assertEqual(originals, {p: p.read_bytes() for p in originals})
+
+    def test_external_string_continuation_and_executable_reach(self):
+        self.put(P, f"fn f() {{ let (v, _) = {F}(i); }}")
+        outside = "crates/engine/tests/integration/continued.rs"
+        literal = 'fn f() { let text = "fake parse_type_phrase_folding(i) \\\n  parse_mass_type_union(i)"; }'
+        external = self.put(outside, literal)
+        self.assertEqual(self.cli("--check").returncode, 1)
+        success = migration.prepare_tree(self.root)
+        self.assertFalse(success.unsupported, success.unsupported)
+        self.joint(success.originals, success.rendered, 1, 1)
+        external.write_text(literal[:-1] + f" let (v, _) = {F}(i); }}")
+        result = self.cli("--apply")
+        self.assertEqual(result.returncode, 2)
+        self.assertIn(outside, result.stderr)
+        self.assertIn("external", result.stderr)
+
+    def test_formatter_failure_changed_input_and_install_rollback(self):
+        dest = self.put(P, f"fn f() {{ let (v, _) = {F}(i); }}")
+        source = dest.read_bytes()
+        with patch.object(migration, "format_source", side_effect=RuntimeError("formatter unavailable")):
+            result = migration.prepare_tree(self.root)
+        self.assertTrue(result.unsupported)
+        self.assertEqual(dest.read_bytes(), source)
+        result = migration.prepare_tree(self.root)
+        self.assertFalse(result.unsupported, result.unsupported)
+        dest.write_bytes(source + b"\n// concurrent\n")
+        with self.assertRaisesRegex(RuntimeError, "changed"):
+            migration.install(self.root, result)
+        self.assertEqual(dest.read_bytes(), source + b"\n// concurrent\n")
+        dest.write_bytes(source)
+        second_path = rd.SCOPE + "/z.rs"
+        self.put(second_path, f"fn z() {{ let (v, _) = {F}(i); }}")
+        result = migration.prepare_tree(self.root)
+        originals = {p: (self.root / p).read_bytes() for p in result.changed}
+        real_replace = migration.os.replace
+        calls = []
+        def fail_second(src, dst):
+            calls.append(dst)
+            if len(calls) == 2:
+                raise OSError("installation witness")
+            return real_replace(src, dst)
+        with patch.object(migration.os, "replace", side_effect=fail_second):
+            with self.assertRaisesRegex(RuntimeError, "installation"):
+                migration.install(self.root, result)
+        self.assertEqual(originals, {p: (self.root / p).read_bytes() for p in originals})
+
+    def test_empty_scope_is_not_readiness(self):
+        self.put(P, "fn unrelated() {}")
+        result = self.cli("--check")
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("empty", result.stderr)
+
+
+def mutation_check():
+    """Run every method against a removed planning stage in a throwaway copy."""
+    with tempfile.TemporaryDirectory(prefix="folding-mutant-") as directory:
+        root = Path(directory)
+        (root / "scripts/lib").mkdir(parents=True)
+        relative = "scripts/lib/detect-residue-discards.py"
+        shutil.copyfile(ROOT / relative, root / relative)
+        source = SCRIPT.read_text()
+        needle = "def plan_source(path, source):\n"
+        if source.count(needle) != 1:
+            raise AssertionError("mutation seam missing or ambiguous")
+        mutant = source.replace(needle, needle + "    return SourcePlan(source, (), Counter(), 1, ())\n")
+        destination = root / "scripts/migrate-folding-parsed.py"
+        destination.write_text(mutant)
+        environment = dict(os.environ, FOLDING_MIGRATION_SCRIPT=str(destination),
+                           PYTHONPATH=str(ROOT / "scripts") + os.pathsep + os.environ.get("PYTHONPATH", ""))
+        methods = [kind.__name__ + "." + name for kind in (MigrationTests, TreeTests)
+                   for name in unittest.defaultTestLoader.getTestCaseNames(kind)]
+        for method in methods:
+            result = subprocess.run([sys.executable, "-B", str(Path(__file__).resolve()), method],
+                                    capture_output=True, text=True, env=environment)
+            if result.returncode != 1 or "Ran 1 test" not in result.stderr:
+                raise AssertionError(f"nondiscriminating mutation: {method}\n{result.stdout}{result.stderr}")
+            print(f"mutation planning-stage-removed: {method}: rejected (exit 1)")
+        print(f"mutation planning-stage-removed: {len(methods)}/{len(methods)} methods rejected; temporary copy removed")
+
+
+if __name__ == "__main__":
+    if sys.argv[1:] == ["--mutations"]:
+        mutation_check()
+    else:
+        unittest.main()
