@@ -1332,6 +1332,42 @@ class DispositionTests(unittest.TestCase):
         result = self.run_cli(files)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
+    def test_b2_positive_positions_reject_other_identifier_occurrences(self):
+        for statement in (
+                "let g = |S { x: p }| p.waive(REASON);",
+                "for S { x: p } in values { p.waive(REASON); }",
+                "let ok = matches!(x, Some(p) if { p.waive(REASON); true });",
+                "macro_rules! m { ($p:expr) => { $p.waive(REASON) } }",
+                "consume(object.p);", "consume(module::p);",
+                "consume(stringify!(p));", "consume(concat!(p));",
+                "consume(concat_idents!(p));", "unknown!(p);"):
+            statement = statement.replace("REASON", self.REASON)
+            with self.subTest(statement=statement):
+                source = "fn f() { let p = Parsed::new(filter, i); " + statement + " }"
+                found = self.violations(source)
+                self.assertTrue(any(h.family == "unsupported-scope" and h.symbol == "p"
+                                    for h in found), found)
+                control = source.replace(statement, statement.replace("p", "q"))
+                self.assertEqual([(h.family, h.symbol) for h in self.violations(control)],
+                                 [("parsed-disposal", "p")])
+                self.assertEqual(self.violations(control[:-1]
+                    + f"p.waive({self.REASON}); }}"), [])
+        self.assertEqual(self.violations(
+            f"fn f() {{ let p = Parsed::new(filter, i); let q = p; q.waive({self.REASON}); }}"), [])
+
+    def test_b3_configuration_only_consumption_refuses(self):
+        for expression in (
+                "cfg!(test) && { p.waive(REASON); true }",
+                "!cfg!(debug_assertions) || { p.waive(REASON); true }",
+                "cfg!(debug_assertions).then(|| p.waive(REASON))"):
+            expression = expression.replace("REASON", self.REASON)
+            with self.subTest(expression=expression):
+                source = "fn f() { let p = Parsed::new(filter, i); let _ = " + expression + "; }"
+                self.assertTrue(any(h.family == "unsupported-scope" and h.symbol == "p"
+                                    for h in self.violations(source)), self.violations(source))
+                self.assertEqual(self.violations(
+                    f"fn f() {{ let p = Parsed::new(filter, i); let _ = p.waive({self.REASON}); }}"), [])
+
     def run_cli(self, files, mode="check"):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

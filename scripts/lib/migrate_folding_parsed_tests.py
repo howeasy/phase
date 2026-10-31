@@ -434,6 +434,21 @@ class MigrationTests(unittest.TestCase):
                                       f"let affected = {F}(&text).waive({W})")
         self.contract(before, expected, legacy=2, waivers=2)
 
+    def test_same_block_rebinding_survives_unrelated_statement_syntax(self):
+        before = (
+            "fn f() { use crate::types::{Filter, Kind}; "
+            f"let (first, _rest) = {F}(i); "
+            "let Some(value) = opt else { return; }; "
+            "let project = |x| S { x }; "
+            "macro_rules! helper { ($q:expr) => { $q } } "
+            "assert!(project(value).ready()); "
+            f"let (second, _rest) = {F}(j); consume(first, second); }}")
+        expected = before.replace(f"let (first, _rest) = {F}(i)",
+                                  f"let first = {F}(i).waive({W})").replace(
+                                      f"let (second, _rest) = {F}(j)",
+                                      f"let second = {F}(j).waive({W})")
+        self.contract(before, expected, legacy=2, waivers=2)
+
     def test_d1c_match_visibility_stops_at_plain_let_and_arm_boundary(self):
         for suffix in ('let _rest = other(); println!("{_rest}");',
                        'let _rest = other(); consume(_rest);'):
@@ -494,6 +509,64 @@ class MigrationTests(unittest.TestCase):
                 self.assertFalse(plan.edits)
                 control = before.replace("|c| -> (Filter, &str)", "|c|")
                 self.assertFalse(migration.plan_source(P, control).unsupported)
+
+    def test_b1_nonlocal_name_positions_refuse_without_renaming(self):
+        for expression in ("stringify!(_rest)", "concat!(_rest)", "concat_idents!(_rest)",
+                           "unknown!(_rest)", "object._rest", "module::_rest"):
+            before = f"fn f() {{ let (v, _rest) = {F}(i); consume(v, {expression}); }}"
+            with self.subTest(expression=expression):
+                plan = migration.plan_source(P, before)
+                self.assertTrue(any("unsupported-scope _rest" in error
+                                    for error in plan.unsupported), plan.unsupported)
+                self.assertEqual(plan.rendered, before)
+                self.assertFalse(plan.edits)
+                control = before.replace(expression, "inspect(_rest)")
+                retained = migration.plan_source(P, control)
+                self.assertFalse(retained.unsupported, retained.unsupported)
+                self.assertIn("inspect(rest)", retained.rendered)
+                self.assertIn(".with_rest()", retained.rendered)
+
+    def test_b2_positive_positions_refuse_patterns_and_macro_tokens(self):
+        for statement in (
+                "xs.iter().map(|S { name: _rest, .. }| _rest.len());",
+                "for S { x: _rest } in xs { consume(_rest); }",
+                "let ok = matches!(y, Some(_rest) if _rest.is_empty());",
+                "macro_rules! m { ($_rest:expr) => { $_rest.len() } }"):
+            for form in ("let", "match"):
+                before = (f"fn f() {{ let (v, _rest) = {F}(i); {statement} consume(v); }}"
+                          if form == "let" else
+                          f"fn f() {{ match {F}(i) {{ (v, _rest) => {{ {statement} consume(v); }} }} }}")
+                with self.subTest(statement=statement, form=form):
+                    plan = migration.plan_source(P, before)
+                    self.assertTrue(any("unsupported-scope _rest" in error
+                                        for error in plan.unsupported), plan.unsupported)
+                    self.assertEqual(plan.rendered, before)
+                    self.assertFalse(plan.edits)
+                    control = before.replace(statement, statement.replace("_rest", "other"))
+                    self.assertFalse(migration.plan_source(P, control).unsupported)
+        before = f"fn f() {{ let (v, _rest) = {F}(i); consume(v, _rest); }}"
+        self.contract(before, before.replace("(v, _rest)", "(v, rest)").replace(
+            F + "(i)", F + "(i).with_rest()").replace("consume(v, _rest)", "consume(v, rest)"),
+            waivers=0)
+
+    def test_b3_cfg_expression_chains_are_not_runtime_retention(self):
+        for statement in (
+                "let _ = cfg!(debug_assertions) && check(_rem, i);",
+                "cfg!(debug_assertions).then(|| check(_rem, i));",
+                "let ok = !cfg!(debug_assertions) || check(_rem, i);",
+                "let ok = cfg!(test) || check(_rem, i);"):
+            before = f"fn f() {{ let (v, _rem) = {F}(i); {statement} consume(v); }}"
+            with self.subTest(statement=statement):
+                plan = migration.plan_source(P, before)
+                self.assertTrue(any("unsupported debug-only remainder observation" in error
+                                    for error in plan.unsupported), plan.unsupported)
+                self.assertEqual(plan.rendered, before)
+                self.assertFalse(plan.edits)
+                control = before[:-1] + "consume(_rem); }"
+                retained = migration.plan_source(P, control)
+                self.assertFalse(retained.unsupported, retained.unsupported)
+                self.assertIn("consume(rem)", retained.rendered)
+                self.assertIn(".with_rest()", retained.rendered)
 
     def test_refuse_discard_flow_with_unknown_tuple_branch(self):
         for expression in (f"if legacy {{ {F}(i) }} else {{ strict(i) }}",
@@ -658,6 +731,14 @@ class TreeTests(unittest.TestCase):
              "unsupported debug-only remainder observation"),
             (f"drop(ctx.with_player_antecedents(|c| -> (Filter, &str) {{ {F}(i) }}));",
              "unsupported typed wrapper disposition"),
+            (f"let (v, _rest) = {F}(i); consume(v, stringify!(_rest));",
+             "unsupported-scope _rest"),
+            (f"let (v, _rest) = {F}(i); consume(v, object._rest);",
+             "unsupported-scope _rest"),
+            (f"let (v, _rest) = {F}(i); for S {{ x: _rest }} in xs {{}}",
+             "unsupported-scope _rest"),
+            (f"let (v, _rem) = {F}(i); let _ = cfg!(test) && check(_rem, i);",
+             "unsupported debug-only remainder observation"),
         )
         for bad, category in cases:
             for first, second in (("a.rs", "z.rs"), ("z.rs", "a.rs")):

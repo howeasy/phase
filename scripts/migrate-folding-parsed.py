@@ -4,6 +4,11 @@
 No Rust is written by --check or --replay. Producers are a declaration-bounded
 manual partition, never an entire-file exemption. Unknown consumers are errors.
 The permanent Gate H detector supplies the sole lexer/balanced-token authority.
+Underscore remainder names use that detector's positive local-position policy:
+plain lets and expression reads only; other occurrences refuse the whole tree.
+Field/path selectors and opaque macro tokens are never renamed. Configuration-
+only reads do not establish retention; only the registered debug observation has
+an accessor-and-waiver rewrite.
 """
 from __future__ import annotations
 
@@ -217,21 +222,10 @@ def plan_source(path, source):
         def uses(names, start, end):
             return [j for j in range(start, end) if v[j] in names]
 
-        binding_constructs = ex.binding_constructs()
-        plain_lets = {}
-        for token, value in enumerate(v):
-            if value != "let":
-                continue
-            equals = ex.end(token + 1, {"=", ";", "}"})
-            if v[equals:equals + 1] != ["="]:
-                continue
-            after = ex.initializer_end(equals + 1)
-            for at in range(token + 1, equals):
-                if binding_constructs.get(at) == "let":
-                    plain_lets[at] = (token, after)
+        plain_lets, local_reads, configured_reads = ex.local_positions()
 
         def remainder_reads(names, pattern_start, pattern_end, token, start, end, scope):
-            """Resolve only block-local plain lets; refuse other binder scopes."""
+            """Admit only T1 plain lets and T2 expression reads, function-wide."""
             if not names:
                 return []
             fn = owner(token)
@@ -242,13 +236,14 @@ def plan_source(path, source):
             reads = []
             for name in sorted(names):
                 visible_end = end
-                for at, kind in binding_constructs.items():
-                    if (not head <= at < function_end or v[at] != name
-                            or pattern_start <= at < pattern_end):
+                for at in uses({name}, head, function_end):
+                    if pattern_start <= at < pattern_end:
                         continue
-                    if kind != "let":
-                        reject(token, f"unsupported-scope {name}")
-                        return None
+                    if at not in plain_lets:
+                        if at not in local_reads:
+                            reject(token, f"unsupported-scope {name}")
+                            return None
+                        continue
                     declaration, after = plain_lets[at]
                     if declaration <= token:
                         continue
@@ -267,7 +262,7 @@ def plan_source(path, source):
                     reject(token, "unsupported implicit format-capture remainder read")
                     return None
                 reads.extend(j for j in uses({name}, start, visible_end)
-                             if j not in binding_constructs)
+                             if j in local_reads)
             return sorted(reads)
 
         def captured_literal(names, start, end):
@@ -280,6 +275,8 @@ def plan_source(path, source):
 
         def debug_read(token):
             """Configuration-only reads never establish runtime retention."""
+            if token in configured_reads:
+                return True
             for at, value in enumerate(v[:token]):
                 if (value == "#" and v[at + 1:at + 2] == ["["]
                         and v[at + 2:at + 3] in (["cfg"], ["cfg_attr"])):

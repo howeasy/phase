@@ -5,6 +5,10 @@ This is bounded syntactic enforcement, not linear typing or arbitrary dataflow.
 Production debt combines legacy helper/default discards and explicit Unaudited
 waivers. A separate all-code stream rejects disposition bypasses, including tests,
 independently of ceilings. Unknown disposition syntax fails closed.
+Tracked local names are admitted only as plain-let binders or whole expression
+operands (including method receivers). Same-name patterns, field/path selectors
+and opaque macro tokens fail as unsupported-scope, rather than proving disposal.
+Configuration guards apply to their statement/expression chain, not neighbors.
 Expression-with-block statement boundaries are shared by closure tails and
 comma-free match arms. Import aliases are lexical (module boundaries do not
 inherit them) and apply only to unqualified calls; qualified calls use the final
@@ -177,69 +181,198 @@ class Expressions:
                     self.aliases[self.scopes[i]][v[j + 2]] = (
                         v[j] if v[j] in HELPERS else None)
 
-    def binding_constructs(self):
-        """Conservative binding-token inventory, not a visibility/scope model.
+    def local_positions(self):
+        """Positive local-name positions, shared by the gate and transformer.
 
-        Only ordinary let shadowing is resolved by the disposition detector.
-        Other constructs sharing an origin name are refused function-wide.
-        Pattern/type tokens may overapproximate bindings; never infer reads
-        from a construct whose binding semantics we do not support.
+        Only plain-let patterns and expression operands are admitted. Opaque
+        syntax contributes no reads: an occurrence there must be refused by
+        the caller, not mistaken for evidence that the local was consumed.
         """
+        if hasattr(self, "_local_positions"):
+            return self._local_positions
         v = self.values
-        found = {}
+        plain_lets, reads, configured = {}, set(), set()
+        expression_macros = frozenset((
+            "print", "println", "eprint", "eprintln", "format", "format_args",
+            "format_args_nl", "write", "writeln", "assert", "assert_eq", "assert_ne",
+            "debug_assert", "debug_assert_eq", "debug_assert_ne", "panic",
+        ))
+        operators = frozenset(("+", "-", "*", "/", "%", "&", "|", "^",
+                               "!", "=", "<", ">", "?"))
 
-        def record(a, b, kind):
-            for at in range(a, b):
-                if re.fullmatch(r"[A-Za-z_]\w*", v[at]):
-                    found[at] = kind
+        def guarded(a, b):
+            # A nested block has its own statements. A cfg in one of them
+            # cannot configure a neighboring statement or its enclosing body.
+            while a < b:
+                if (v[a:a + 2] == ["cfg", "!"]
+                        or (v[a] == "#" and v[a + 1:a + 3] in (
+                            ["[", "cfg"], ["[", "cfg_attr"]))):
+                    return True
+                a = self.pairs[a] + 1 if v[a] == "{" else a + 1
+            return False
 
-        pattern_tokens = set()
-        for i, token in enumerate(v):
-            if token == "let":
-                equals = self.end(i + 1, {"=", ";", "}"})
-                if equals < len(v) and v[equals] == "=":
-                    end = self.initializer_end(equals + 1)
-                    conditional = i > 0 and v[i - 1] in ("if", "while", "&", "|")
-                    kind = ("conditional-let" if conditional else
-                            "let-else" if v[end:end + 1] == ["else"] else "let")
-                    pattern_end = self.end(i + 1, {":"}, equals)
-                    record(i + 1, pattern_end, kind)
-                    pattern_tokens.update(range(i + 1, pattern_end))
-            elif token == "match":
-                body = self.body_brace(i, len(v))
-                if body < len(v):
-                    for a, b in self.match_patterns(body + 1, self.pairs[body]):
-                        record(a, b, "match")
-                        pattern_tokens.update(range(a, b))
-            elif token == "for":
-                end = self.end(i + 1, {"in", ";", "{"})
-                if v[end:end + 1] == ["in"]:
-                    record(i + 1, end, "for")
-                    pattern_tokens.update(range(i + 1, end))
-            elif token == "fn":
-                end = self.end(i + 1, {"{", ";"})
-                record(i + 1, end, "fn")
-            elif token in ("const", "static", "mod", "type", "struct", "enum", "union"):
-                name = i + 1
-                if v[name:name + 1] == ["mut"]:
-                    name += 1
-                if name < len(v):
-                    record(name, name + 1, "item")
+        def expression(a, b, cfg=False):
+            cfg = cfg or guarded(a, b)
+            operand = True
+            while a < b:
+                token = v[a]
+                if operand and token in ("return", "break", "move"):
+                    a += 1
+                    continue
+                if operand and token in ("if", "while", "for", "match"):
+                    opened = self.body_brace(a, b)
+                    if opened == b:
+                        return
+                    if token == "for":
+                        start = self.end(a + 1, {"in"}, opened) + 1
+                    else:
+                        start = a + 1
+                    expression(start, opened, cfg)
+                    if token == "match":
+                        for p, _end in self.match_patterns(opened + 1, self.pairs[opened]):
+                            arrow = self.end(p, {"=>"}, self.pairs[opened])
+                            after = self.block_expression_end(arrow + 1, self.pairs[opened])
+                            if after is None:
+                                after = self.end(arrow + 1, {","}, self.pairs[opened])
+                            expression(arrow + 1, after, cfg)
+                    else:
+                        block(opened + 1, self.pairs[opened], cfg)
+                    a = self.pairs[opened] + 1
+                    if v[a:a + 1] == ["else"]:
+                        a += 1
+                        operand = True
+                    else:
+                        operand = False
+                    continue
+                if not operand and v[a:a + 2] == ["|", "|"]:
+                    a += 2
+                    operand = True
+                    continue
+                if operand and token == "|" and v[a:a + 2] != ["|", "|"]:
+                    # Closure parameters are never expression operands.
+                    close = self.end(a + 1, {"|", ";"}, b)
+                    if close == b or v[close] != "|":
+                        return
+                    expression(close + 1, b, cfg)
+                    return
+                if operand and v[a:a + 2] == ["|", "|"]:
+                    a += 2
+                    continue
+                if token in operators:
+                    operand = True
+                    a += 1
+                    continue
+                if token == "{" and operand:
+                    block(a + 1, self.pairs[a], cfg)
+                    a = self.pairs[a] + 1
+                    operand = False
+                    continue
+                if token in ("(", "["):
+                    for start, end in self.split(a + 1, self.pairs[a]):
+                        expression(start, end, cfg)
+                    a = self.pairs[a] + 1
+                    operand = False
+                    continue
+                if operand and re.fullmatch(r"\w+", token):
+                    if token in ("let", "fn", "const", "static", "mod", "type",
+                                 "struct", "enum", "union", "unsafe", "async"):
+                        return
+                    end = a + 1
+                    while end + 1 < b and v[end] == "::" and re.fullmatch(r"\w+", v[end + 1]):
+                        end += 2
+                    end = self.turbofish_end(end) or end
+                    if v[end:end + 1] == ["!"]:
+                        opened = end + 1
+                        if opened not in self.pairs:
+                            return
+                        if end == a + 1 and token in expression_macros:
+                            debug = token in ("debug_assert", "debug_assert_eq", "debug_assert_ne")
+                            for start, stop in self.split(opened + 1, self.pairs[opened]):
+                                expression(start, stop, cfg or debug)
+                        a = self.pairs[opened] + 1
+                    else:
+                        # A callee, field/path name or field receiver is not a
+                        # whole local operand. Method receivers are supported.
+                        following = v[end:end + 1]
+                        method = (v[end:end + 1] == ["."]
+                                  and v[end + 2:end + 3] == ["("])
+                        if (end == a + 1 and following != ["("]
+                                and (following != ["."] or method)):
+                            reads.add(a)
+                            if cfg:
+                                configured.add(a)
+                        a = end
+                    operand = False
+                    continue
+                if not operand and token == "." and a + 1 < b:
+                    a += 2  # selector names never enter the read set
+                    continue
+                return  # not an allowlisted expression position
 
-        # Scan every bar pair, including closures after => and struct fields.
-        # Match/let or-pattern bars are not closure delimiters.
-        i = 0
-        while i < len(v):
-            if v[i] != "|" or i in pattern_tokens:
-                i += 1
-                continue
-            close = self.end(i + 1, {"|", ";", "=>", "{", "}"})
-            if v[close:close + 1] == ["|"]:
-                record(i + 1, close, "closure")
-                i = close + 1
-            else:
-                i += 1
-        return found
+        def block(a, b, cfg=False):
+            while a < b:
+                if v[a] == ";":
+                    a += 1
+                    continue
+                local_cfg = cfg
+                while v[a:a + 2] == ["#", "["]:
+                    local_cfg = local_cfg or guarded(a, self.pairs[a + 1] + 1)
+                    a = self.pairs[a + 1] + 1
+                if a >= b:
+                    return
+                if v[a] == "fn":
+                    body = self.end(a + 1, {"{", ";"}, b)
+                    a = self.pairs[body] + 1 if v[body:body + 1] == ["{"] else body + 1
+                    continue
+                if v[a] == "let":
+                    equals = self.end(a + 1, {"=", ";"}, b)
+                    if equals == b or v[equals] != "=":
+                        return
+                    start = equals + 1
+                    tail = self.block_expression_end(start, b)
+                    after = self.end(tail if tail is not None else start, {";", "else"}, b)
+                    pattern_end = self.end(a + 1, {":"}, equals)
+                    # The supported plain-let grammar is identifiers, tuple
+                    # patterns and the existing Some/Ok wrappers, not structs.
+                    if (v[after:after + 1] != ["else"]
+                            and all(re.fullmatch(r"\w+", x) or x in ("(", ")", ",", "|")
+                                    for x in v[a + 1:pattern_end])):
+                        for at in range(a + 1, pattern_end):
+                            if re.fullmatch(r"[A-Za-z_]\w*", v[at]):
+                                plain_lets[at] = (a, after)
+                    expression(equals + 1, after, local_cfg)
+                    if v[after:after + 2] == ["else", "{"]:
+                        block(after + 2, self.pairs[after + 1], local_cfg)
+                        after = self.pairs[after + 1] + 1
+                else:
+                    after = self.block_expression_end(a, b)
+                    if after is None:
+                        tree = self.end(a, {"{", ";"}, b)
+                        if v[tree:tree + 1] == ["{"] and "!" in v[a:tree]:
+                            # A brace-delimited macro statement/item ends at
+                            # its token tree, even without a trailing semicolon.
+                            # Its contents remain opaque, never local reads.
+                            a = self.pairs[tree] + 1
+                            continue
+                    if after is None or (after < b and v[after] in operators | {".", "("}):
+                        after = self.end(a, {";"}, b)
+                    expression(a, after, local_cfg)
+                a = max(after, a + 1)
+
+        # Function signatures are deliberately excluded. Repeated names there
+        # are other occurrences, not plain-let bindings or local reads.
+        bodies = []
+        for at, token in enumerate(v):
+            if token == "fn":
+                body = self.end(at + 1, {"{", ";"})
+                if v[body:body + 1] == ["{"]:
+                    bodies.append(body)
+        for body in bodies:
+            block(body + 1, self.pairs[body])
+        if not bodies:
+            block(0, len(v))
+        self._local_positions = plain_lets, reads, configured
+        return self._local_positions
 
     def helper_name(self, token):
         name = self.values[token]
@@ -923,9 +1056,10 @@ def find_disposition_violations(relpath, source, parsed_helpers=None):
             if re.fullmatch(r"[A-Za-z_]\w*", v[at]):
                 declarations.setdefault((v[at], ex.scopes[i]), []).append((end, at))
 
-    # Refuse non-let rebinding rather than guessing closure/arm/loop visibility.
-    # Keep ordinary let declarations: shadow-and-consume initializers are legal.
-    binding_constructs = ex.binding_constructs() if "parsed" in kinds.values() else {}
+    # Both tools admit local reads by position, never by excluding a growing
+    # inventory of Rust binding constructs.
+    plain_lets, local_reads, configured_reads = (
+        ex.local_positions() if "parsed" in kinds.values() else ({}, set(), set()))
 
     def unsupported_scope(name, token):
         owner = function_owner(token)
@@ -934,8 +1068,11 @@ def find_disposition_violations(relpath, source, parsed_helpers=None):
         end = ex.pairs[owner]
         head = max(j for j in range(owner) if v[j] == "fn"
                    and ex.end(j + 1, {"{", ";"}) == owner)
-        return any(head <= at < end and v[at] == name and kind != "let"
-                   for at, kind in binding_constructs.items())
+        occurrences = [at for at in range(head, end) if v[at] == name]
+        if any(at not in plain_lets and at not in local_reads for at in occurrences):
+            return True
+        reads = [at for at in occurrences if at in local_reads]
+        return bool(reads and all(at in configured_reads for at in reads))
 
     def binding_at(name, token):
         scope = ex.scopes[token]
