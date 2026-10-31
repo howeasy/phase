@@ -1231,14 +1231,19 @@ class DispositionTests(unittest.TestCase):
                     self.assertTrue(self.violations(src))
             for body in (f"let p = ORIGIN; p.waive({self.REASON});",
                          "let p = ORIGIN; let (v, rest) = p.with_rest();",
-                         f"let p = ORIGIN; #[cfg(debug_assertions)] "
-                         f"assert!(p.remainder().is_empty()); p.waive({self.REASON});",
                          f"let p = ORIGIN; {{ let p = other; consume(p); }} "
-                         f"p.waive({self.REASON});",
-                         "let p = ORIGIN; let alias = p; let (v, rest) = alias.with_rest();"):
+                         f"p.waive({self.REASON});"):
                 src = declaration + "fn f() { " + body.replace("ORIGIN", origin) + " }"
                 with self.subTest(src=src):
                     self.assertEqual(self.violations(src), [])
+            for body in (
+                    f"let p = ORIGIN; #[cfg(debug_assertions)] "
+                    f"assert!(p.remainder().is_empty()); p.waive({self.REASON});",
+                    "let p = ORIGIN; let alias = p; let (v, rest) = alias.with_rest();"):
+                src = declaration + "fn f() { " + body.replace("ORIGIN", origin) + " }"
+                with self.subTest(refused=src):
+                    self.assertIn(("unsupported-scope", "p"),
+                                  [(h.family, h.symbol) for h in self.violations(src)])
         self.assertEqual(self.violations(
             "fn f() { let _ = parse_type_phrase_folding(i); }"), [])
         self.assertEqual([h.family for h in hits(
@@ -1260,7 +1265,11 @@ class DispositionTests(unittest.TestCase):
             with self.subTest(observation=observation):
                 source = ("fn f() { let p = Parsed::new(filter, i); " + observation
                           + f"let p = p.waive({self.REASON}); consume(p); }}")
-                self.assertEqual(self.violations(source), [])
+                if observation:
+                    self.assertIn(("unsupported-scope", "p"),
+                                  [(h.family, h.symbol) for h in self.violations(source)])
+                else:
+                    self.assertEqual(self.violations(source), [])
                 self.assertTrue(self.violations(source.replace(
                     f"p.waive({self.REASON})", "other")))
 
@@ -1352,8 +1361,8 @@ class DispositionTests(unittest.TestCase):
                                  [("parsed-disposal", "p")])
                 self.assertEqual(self.violations(control[:-1]
                     + f"p.waive({self.REASON}); }}"), [])
-        self.assertEqual(self.violations(
-            f"fn f() {{ let p = Parsed::new(filter, i); let q = p; q.waive({self.REASON}); }}"), [])
+        self.assertIn(("unsupported-scope", "p"), [(h.family, h.symbol) for h in self.violations(
+            f"fn f() {{ let p = Parsed::new(filter, i); let q = p; q.waive({self.REASON}); }}")])
 
     def test_b3_configuration_only_consumption_refuses(self):
         for expression in (
@@ -1441,6 +1450,106 @@ class DispositionTests(unittest.TestCase):
         src = ("fn parse_mass_type_union(i: &str) -> crate::parser::parsed::Parsed<'_, Filter> "
                "{ Parsed::new(filter, i) }\nfn f() { drop(parse_mass_type_union(i)); }")
         self.assertTrue(self.violations(src))
+
+
+class TinyGrammarTests(unittest.TestCase):
+    REASON = "ResidueWaiver::Unaudited"
+
+    def check_scope(self, statement, name="p"):
+        source = ("fn f() { let p = Parsed::new(filter, i); " + statement
+                  + f" p.waive({self.REASON}); }}")
+        found = rd.find_disposition_violations("crates/engine/src/parser/probe.rs", source)
+        self.assertIn(("unsupported-scope", name),
+                      [(h.family, h.symbol) for h in found], source)
+        control = f"fn f() {{ let p = Parsed::new(filter, i); p.waive({self.REASON}); }}"
+        self.assertEqual(rd.find_disposition_violations(
+            "crates/engine/src/parser/probe.rs", control), [])
+
+    def test_r4_f1_closure_after_block(self):
+        for block in ("match x { _ => {} }", "{}", "if c {}"):
+            with self.subTest(block=block):
+                self.check_scope("let n = observe(&p); apply(q, { " + block
+                                 + f" |p| p.waive({self.REASON}) }});")
+
+    def test_r4_f2_destructuring_assignees(self):
+        for assignee, value in (("[p]", "[other]"), ("(p, k)", "(other, k + n)")):
+            with self.subTest(assignee=assignee):
+                self.check_scope(f"let n = observe(&p); {assignee} = {value};")
+
+    def test_r4_f3_named_macro_label_and_width(self):
+        for literal in ("{:p$}", "{:.p$}", "{:>p$}"):
+            with self.subTest(literal=literal):
+                self.check_scope(f'println!("{literal}", value, p = 3);')
+
+    def test_r4_f4_cfg_block_operands(self):
+        for statement in (
+                "if { cfg!(test) } { p.waive(REASON); }",
+                "let _ = { cfg!(test) } && p.waive(REASON);",
+                "let _ = !{ cfg!(test) } || p.waive(REASON);"):
+            with self.subTest(statement=statement):
+                self.check_scope(statement.replace("REASON", self.REASON))
+
+    def test_r4_f5_macro_function_discovery(self):
+        self.check_scope("macro_rules! unused { () => { fn helper() { consume(p); } }; }")
+        self.check_scope("unused! { fn helper() {} }")
+
+    def test_r4_f6_cooked_escape_capture(self):
+        for literal in (r'"\u{7b}p}"', r'"\x7bp}"'):
+            with self.subTest(literal=literal):
+                self.check_scope(f"println!({literal});")
+
+    def test_r4_f7_raw_disposition_identifiers(self):
+        for name, arguments in (("with_rest", ""), ("waive", self.REASON)):
+            for origin in ("", "let p = Parsed::new(filter, i);"):
+                with self.subTest(name=name, origin=origin):
+                    source = f"fn f() {{ {origin} p.r#{name}({arguments}); }}"
+                    found = rd.find_disposition_violations(
+                        "crates/engine/src/parser/probe.rs", source)
+                    self.assertTrue(any(h.family == "unsupported-scope" for h in found), found)
+        self.assertEqual(rd.find_disposition_violations(
+            "crates/engine/src/parser/probe.rs",
+            f"fn f() {{ p.waive({self.REASON}); }}"), [])
+
+    def test_r4_occurrence_position_battery(self):
+        for statement in (
+                "p = other;", "p += other;", "[p] = [other];",
+                "(p, k) = (other, k);", 'println!("{}", p = 3);',
+                'println!("{:p$}", value);', 'println!("{:.p$}", value);',
+                "let g = |p| p;", "for p in values {}", "match x { Some(p) => (), _ => () }",
+                "if let Some(p) = x {}", "let S { field: p } = x;",
+                "consume(object.p);", "consume(module::p);",
+                "{ consume(p); }", "let g = || consume(p);", "println!(p);",
+                "#[cfg(test)] p.waive(ResidueWaiver::Unaudited);",
+                "let _ = { #[cfg(test)] observe(); true } && consume(p);",
+                "if { cfg!(test) } { consume(p); }", "consume(r#p);",
+                r'println!("\u{7b}p}");'):
+            with self.subTest(statement=statement):
+                self.check_scope(statement)
+
+    def test_visible_format_literals_only(self):
+        origin = "let p = Parsed::new(filter, i);"
+        for body in (
+                r'scan_contains(tp.lower, "doesn\u{2019}t untap during"); ' + origin,
+                origin + r' scan_contains(tp.lower, "doesn\u{2019}t untap during");',
+                r'println!("\u{7b}p}"); ' + origin,
+                origin + r' assert_eq!("\u{2019}", expected);',
+                origin + r' println!("{}", "\u{2019}");'):
+            with self.subTest(body=body):
+                source = "fn f() { " + body + f"p.waive({self.REASON}); }}"
+                self.assertEqual(rd.find_disposition_violations(
+                    "crates/engine/src/parser/probe.rs", source), [])
+        self.check_scope(r'println!("\u{7b}p}");')
+
+    def test_test_module_configuration_is_ambient(self):
+        for function_attribute in ("", "#[cfg(debug_assertions)]"):
+            source = ("#[cfg(test)] mod tests { " + function_attribute
+                      + f"fn f() {{ let p = Parsed::new(filter, i); p.waive({self.REASON}); }} }}")
+            found = rd.find_disposition_violations("crates/engine/src/parser/probe.rs", source)
+            if function_attribute:
+                self.assertIn(("unsupported-scope", "p"), [(h.family, h.symbol) for h in found])
+            else:
+                self.assertEqual(found, [])
+
 
 
 if __name__ == "__main__":

@@ -4,15 +4,17 @@
 No Rust is written by --check or --replay. Producers are a declaration-bounded
 manual partition, never an entire-file exemption. Unknown consumers are errors.
 The permanent Gate H detector supplies the sole lexer/balanced-token authority.
-Underscore remainder names use that detector's positive local-position policy:
-plain lets and expression reads only; other occurrences refuse the whole tree.
-Field/path selectors and opaque macro tokens are never renamed. Configuration-
-only reads do not establish retention; only the registered debug observation has
-an accessor-and-waiver rewrite.
+Tracked-name acceptance is the shared G-T1/G-T2a/G-T2b/G-T3 table in the detector's
+module docstring. Remainders admit only whole top-level call arguments in their
+binder's own block and the exact debug observation. Every other occurrence,
+including nested blocks/closures/macros, raw identifiers, captures/width refs,
+cooked unicode/hex escapes in visible format arguments and configuration-only reads,
+refuses the whole tree. Ambient test-module configuration is not a read guard.
 """
 from __future__ import annotations
 
 import argparse
+from bisect import bisect_left
 from collections import Counter
 import difflib
 import importlib.util
@@ -76,6 +78,11 @@ def plan_source(path, source):
     errors = []
     edits = []
     calls = {}
+    # Outside-parser sources are a closed-family reference sweep, not a general
+    # Rust syntax/disposition gate. A local alias requires a named family import.
+    if (not str(path).startswith(rd.SCOPE + "/")
+            and not any(name in source for name in rd.FOLDING_HELPERS)):
+        return SourcePlan(source, (), counts, 0, ())
     try:
         stream = rd.all_code_stream(source)
         ex = rd.Expressions(stream)
@@ -115,17 +122,9 @@ def plan_source(path, source):
             if token == "use" and v[i + 1:i + 2] != ["<"]:
                 end = ex.end(i + 1, {";"})
                 imports.update(range(i, min(end + 1, len(v))))
-        functions = []
-        producers = []
-        for i, token in enumerate(v[:-1]):
-            if token != "fn":
-                continue
-            body = ex.end(i + 2, {"{", ";"})
-            if body < len(v) and v[body] == "{":
-                end = ex.pairs[body]
-                functions.append((i, body, end))
-                if v[i + 1] in rd.FOLDING_HELPERS:
-                    producers.append((i, end))
+        functions = ex.functions()
+        producers = [(head, end) for head, _body, end in functions
+                     if v[head + 1] in rd.FOLDING_HELPERS]
 
         def producer(token):
             return any(a <= token <= b for a, b in producers)
@@ -219,15 +218,27 @@ def plan_source(path, source):
         def discarded_names(a, b):
             return {x for x in v[a:b] if x.startswith("_") and x != "_"}
 
-        def uses(names, start, end):
-            return [j for j in range(start, end) if v[j] in names]
+        occurrence_positions = {}
 
-        plain_lets, local_reads, configured_reads = ex.local_positions()
+        def uses(names, start, end):
+            found = []
+            for name in names:
+                if name not in occurrence_positions:
+                    occurrence_positions[name] = [j for j, value in enumerate(v) if value == name]
+                positions = occurrence_positions[name]
+                found.extend(positions[bisect_left(positions, start):bisect_left(positions, end)])
+            return sorted(found)
+
+        plain_lets = local_reads = configured_reads = None
 
         def remainder_reads(names, pattern_start, pattern_end, token, start, end, scope):
-            """Admit only T1 plain lets and T2 expression reads, function-wide."""
+            """Apply the shared tiny grammar, with block-only let visibility."""
             if not names:
                 return []
+            nonlocal plain_lets, local_reads, configured_reads
+            if plain_lets is None:
+                plain_lets, _parsed_reads, configured_reads = ex.local_positions()
+                local_reads = ex.remainder_positions
             fn = owner(token)
             if fn is None:
                 reject(token, "unsupported remainder binding outside function")
@@ -240,9 +251,6 @@ def plan_source(path, source):
                     if pattern_start <= at < pattern_end:
                         continue
                     if at not in plain_lets:
-                        if at not in local_reads:
-                            reject(token, f"unsupported-scope {name}")
-                            return None
                         continue
                     declaration, after = plain_lets[at]
                     if declaration <= token:
@@ -258,51 +266,35 @@ def plan_source(path, source):
                         if parent == scope:
                             reject(token, f"unsupported-scope {name}")
                             return None
-                if captured_literal({name}, start, visible_end):
-                    reject(token, "unsupported implicit format-capture remainder read")
+                for at in uses({name}, head, function_end):
+                    if pattern_start <= at < pattern_end or at in plain_lets:
+                        continue
+                    if (start <= at < visible_end and at in configured_reads
+                            and at not in ex.observation_positions):
+                        reject(token, "unsupported debug-only remainder observation")
+                        return None
+                    if at not in local_reads:
+                        reject(token, f"unsupported-scope {name}")
+                        return None
+                hazard = ex.local_hazard(source, name, head, function_end, start, visible_end)
+                if hazard:
+                    reject(token, "unsupported implicit format-capture remainder read"
+                           if hazard == "literal" else f"unsupported-scope {name}")
                     return None
-                reads.extend(j for j in uses({name}, start, visible_end)
-                             if j in local_reads)
+                if any(at not in plain_lets for at in range(pattern_start, pattern_end)
+                       if v[at] in names):
+                    reject(token, f"unsupported-scope {name}")
+                    return None
+                for at in uses({name}, start, visible_end):
+                    if at in local_reads:
+                        if ex.scopes[at] != scope:
+                            reject(token, f"unsupported-scope {name}")
+                            return None
+                        reads.append(at)
             return sorted(reads)
 
-        def captured_literal(names, start, end):
-            """Refuse implicit format reads; doubled braces are literal text."""
-            a, b = offset(start), offset(end)
-            for match in re.finditer(r"\{\{|\}\}|\{([A-Za-z_]\w*)", source[a:b]):
-                if (match[1] in names and stream[a + match.start()] == " "):
-                    return True
-            return False
-
         def debug_read(token):
-            """Configuration-only reads never establish runtime retention."""
-            if token in configured_reads:
-                return True
-            for at, value in enumerate(v[:token]):
-                if (value == "#" and v[at + 1:at + 2] == ["["]
-                        and v[at + 2:at + 3] in (["cfg"], ["cfg_attr"])):
-                    body = ex.pairs[at + 1] + 1
-                    while v[body:body + 2] == ["#", "["]:
-                        body = ex.pairs[body + 1] + 1
-                    after = ex.block_expression_end(body, len(v))
-                    if after is None:
-                        boundary = ex.end(body, {";", "{"})
-                        after = (ex.pairs[boundary] + 1
-                                 if v[boundary:boundary + 1] == ["{"]
-                                 else boundary)
-                    if at <= token < after:
-                        return True
-                if value in ("if", "while", "match", "for"):
-                    body = ex.body_brace(at, len(v))
-                    if any(v[j:j + 2] == ["cfg", "!"] for j in range(at + 1, body)):
-                        after = ex.block_expression_end(at, len(v))
-                        if after is not None and at <= token < after:
-                            return True
-                if (value in ("debug_assert", "debug_assert_eq", "debug_assert_ne")
-                        and v[at + 1:at + 2] == ["!"]):
-                    opened = at + 2
-                    if opened in ex.pairs and opened < token < ex.pairs[opened]:
-                        return True
-            return False
+            return token in configured_reads
 
         def residue_binding(start, end):
             """Locate the single residue identifier through known tuple wrappers."""
@@ -381,14 +373,16 @@ def plan_source(path, source):
             return False
 
         typed_rewrites = set()
+        typed_closure_headers = [j for j in range(1, len(v) - 1)
+                                 if v[j:j + 2] == ["-", ">"] and v[j - 1] == "|"]
 
         def closure_types(ids, rewrite=True):
             # A discarded typed forwarding closure must return the value, not
             # its old tuple. Retained closures keep the original return type.
             for key in ids:
-                for j in range(calls[key][0]):
-                    if v[j:j + 2] != ["-", ">"] or j == 0 or v[j - 1] != "|":
-                        continue
+                for j in typed_closure_headers:
+                    if j >= calls[key][0]:
+                        break
                     body = ex.end(j + 2, {"{"})
                     if body < len(v) and body < key < ex.pairs[body]:
                         if not rewrite:
