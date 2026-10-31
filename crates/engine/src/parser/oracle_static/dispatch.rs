@@ -1648,7 +1648,7 @@ pub(crate) fn parse_static_line_inner(
                     }
                 }
             }
-            _ => {
+            Some(_) | None => {
                 if let Some(def) = parse_continuous_gets_has(
                     rest.original,
                     TargetFilter::Typed(TypedFilter::creature()),
