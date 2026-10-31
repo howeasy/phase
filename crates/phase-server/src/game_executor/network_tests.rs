@@ -2,6 +2,8 @@
 //! Codec peers retain an independent receiver baseline. Resync race tests use
 //! instance-scoped gates and ordinary application FIFO fences, never sleeps or
 //! heartbeat replies, to establish completion and publication ownership.
+//! Seat recovery parity includes actual elimination and recorded turn-rewind
+//! metadata, with non-empty reference guards before structural comparison.
 
 use std::num::NonZeroUsize;
 use std::sync::Arc;
@@ -302,15 +304,12 @@ impl CodecPeer {
         }
     }
 
-    async fn denial(&mut self) {
+    async fn denial(&mut self, expected: &str) {
         loop {
             let reply = self.next().await;
             match reply.value["type"].as_str().unwrap() {
                 "Error" => {
-                    assert_eq!(
-                        reply.value["data"]["message"],
-                        crate::FULL_SOCKET_AUTHORITY_REJECTION,
-                    );
+                    assert_eq!(reply.value["data"]["message"], expected);
                     break;
                 }
                 "StateUpdate" | "GameStarted" => {
@@ -649,6 +648,105 @@ fn codec_player_resync_full_then_delta() {
 }
 
 #[test]
+fn codec_player_resync_preserves_elimination_and_rewinds() {
+    run_async_test(|| async {
+        let table = NativeTable::new().await;
+        let outcome = tokio::time::timeout(Duration::from_secs(20), async {
+            table.keep_all().await;
+            let session = crate::lock_session(&table.app.sessions, &table.key.game_code)
+                .await
+                .unwrap();
+            let (lease, ()) = table
+                .app
+                .context
+                .game_executor
+                .with_session(session, |session| {
+                    // Match the existing SingleUser takeback fixture: stamp the
+                    // deployment policy, then capture a real action's boundary.
+                    session.hosting = server_core::session::HostingMode::SingleUser;
+                    let starting_turn = session.state.turn_number;
+                    for _ in 0..400 {
+                        if session.state.turn_number > starting_turn {
+                            return;
+                        }
+                        assert!(matches!(
+                            session.state.waiting_for,
+                            engine::types::game_state::WaitingFor::Priority { .. }
+                        ));
+                        let actor = server_core::acting_players(&session.state)[0];
+                        let token = session.player_tokens[usize::from(actor.0)].clone();
+                        session
+                            .handle_action_with_card_db_outcome(
+                                &token,
+                                GameAction::PassPriority,
+                                None,
+                            )
+                            .expect("pass priority through the real turn-boundary capture path");
+                        session.advance_state_revision();
+                    }
+                    panic!("fixture never reached the next turn");
+                })
+                .await;
+            drop(lease);
+
+            let viewer = PlayerId(0);
+            let eliminated = PlayerId(2);
+            let mut peer = codec_seat(&table, viewer, false).await;
+            let mut conceding = codec_seat(&table, eliminated, false).await;
+            peer.fence(true).await;
+            conceding.fence(true).await;
+            conceding.send(&ClientMessage::Concede).await;
+            let publication = peer.state().await;
+            assert_eq!(
+                publication.value["data"]["eliminated_players"],
+                serde_json::json!([eliminated]),
+                "the real concession must publish before recovery"
+            );
+            peer.fence(false).await;
+            conceding.fence(true).await;
+
+            let (reference, state_before, revision) = resync_reference(&table, Some(viewer)).await;
+            assert!(
+                !reference["data"]["eliminated_players"]
+                    .as_array()
+                    .unwrap()
+                    .is_empty(),
+                "reach guard: the independent reference must contain an eliminated seat"
+            );
+            assert!(
+                !reference["data"]["rewind_targets"]
+                    .as_array()
+                    .unwrap()
+                    .is_empty(),
+                "reach guard: SingleUser action transitions must record a turn boundary"
+            );
+            peer.baseline = None;
+            let recovered = peer.resync().await;
+            assert_projection(&recovered.value, &table.key, viewer);
+            assert_eq!(
+                recovered.value["data"]["eliminated_players"],
+                reference["data"]["eliminated_players"],
+                "recovered Full must preserve eliminated seats"
+            );
+            assert_eq!(
+                recovered.value["data"]["rewind_targets"], reference["data"]["rewind_targets"],
+                "recovered Full must preserve recorded rewind targets"
+            );
+            assert_eq!(
+                recovered.value, reference,
+                "resync must match the independent ordinary publication builders"
+            );
+            let (_, state_after, after_revision) = resync_reference(&table, Some(viewer)).await;
+            assert_eq!(state_after, state_before);
+            assert_eq!(after_revision, revision);
+        })
+        .await;
+        table.server.abort();
+        outcome.expect("seat recovery preserves elimination and rewind metadata");
+    });
+}
+
+#[test]
 fn codec_spectator_resync_authority() {
     run_async_test(|| async {
         use crate::socket_test_hooks::ResyncPoint;
@@ -735,7 +833,7 @@ fn codec_spectator_resync_authority() {
                 .remove(&table.key.game_code)
                 .unwrap();
             built.release.notify_one();
-            peer.denial().await;
+            peer.denial(crate::FULL_SOCKET_AUTHORITY_REJECTION).await;
             peer.fence(false).await;
             {
                 let mut session = crate::lock_session(&table.app.sessions, &table.key.game_code)
@@ -781,7 +879,9 @@ fn codec_resync_rejects_stale_routes() {
             let mut unattached =
                 codec_hello(&table.url, false, Some(serde_json::json!(["StateCodecV1"]))).await;
             unattached.send(&ClientMessage::ResyncState).await;
-            unattached.denial().await;
+            unattached
+                .denial(crate::FULL_SOCKET_AUTHORITY_REJECTION)
+                .await;
             unattached.fence(false).await;
             // A denied request must release admission so this socket can recover after attach.
             unattached
@@ -809,13 +909,17 @@ fn codec_resync_rejects_stale_routes() {
                 players.insert(PlayerId(0), replacement);
             }
             built.release.notify_one();
-            unattached.denial().await;
+            unattached
+                .denial(crate::FULL_SOCKET_AUTHORITY_REJECTION)
+                .await;
             unattached.fence(false).await;
             other.fence(true).await;
             let mut current = codec_seat(&table, PlayerId(0), false).await;
             current.resync().await;
             unattached.send(&ClientMessage::ResyncState).await;
-            unattached.denial().await;
+            unattached
+                .denial(crate::FULL_SOCKET_AUTHORITY_REJECTION)
+                .await;
             unattached.fence(false).await;
             // A current channel is insufficient when its token no longer resolves
             // to that seat in the SAME session.
@@ -826,7 +930,7 @@ fn codec_resync_rejects_stale_routes() {
                 session.player_tokens.swap(0, 1);
             }
             current.send(&ClientMessage::ResyncState).await;
-            current.denial().await;
+            current.denial(crate::FULL_SOCKET_AUTHORITY_REJECTION).await;
             current.fence(false).await;
             {
                 let mut session = crate::lock_session(&table.app.sessions, &table.key.game_code)
@@ -842,7 +946,7 @@ fn codec_resync_rejects_stale_routes() {
                 .await
                 .remove_game(&table.key.game_code));
             current.send(&ClientMessage::ResyncState).await;
-            current.denial().await;
+            current.denial(crate::FULL_SOCKET_AUTHORITY_REJECTION).await;
             current.fence(false).await;
         })
         .await;
@@ -901,7 +1005,7 @@ fn codec_resync_rejects_session_removed_after_build() {
                 };
                 assert!(route_present && !route.is_closed());
                 built.release.notify_one();
-                peer.denial().await;
+                peer.denial(crate::FULL_SOCKET_AUTHORITY_REJECTION).await;
                 peer.fence(false).await;
 
                 // The same denied socket can attach to a current game and
@@ -1116,7 +1220,14 @@ fn codec_lobby_only_rejects_resync() {
             let mut peer =
                 codec_hello(&url, false, Some(serde_json::json!(["StateCodecV1"]))).await;
             peer.send(&ClientMessage::ResyncState).await;
-            peer.denial().await;
+            peer.denial(
+                crate::reject_if_disabled(
+                    &ClientMessage::ResyncState,
+                    crate::ServerMode::LobbyOnly,
+                )
+                .unwrap(),
+            )
+            .await;
             peer.fence(false).await;
         })
         .await;
