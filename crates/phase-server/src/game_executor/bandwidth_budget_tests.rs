@@ -1684,7 +1684,9 @@ fn resource_pass(
 
 fn production_resource_runs(repetitions: usize) {
     use crate::socket_control::Encoding;
-    assert!(!cfg!(debug_assertions), "run cargo test --locked --profile server-release -p phase-server --bin phase-server production_encoder_resource_acceptance -- --ignored --nocapture --test-threads=1");
+    if cfg!(debug_assertions) {
+        panic!("run cargo test --locked --profile server-release -p phase-server --bin phase-server production_encoder_resource_acceptance -- --ignored --nocapture --test-threads=1");
+    }
     assert!(
         std::env::var_os(UPDATE_ENV_VAR).is_none(),
         "never rebaseline resource acceptance"

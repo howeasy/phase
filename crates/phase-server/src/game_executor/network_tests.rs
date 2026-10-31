@@ -5020,7 +5020,9 @@ async fn run_complete_socket_game(
 #[test]
 #[ignore = "optimized native full-game acceptance; run explicitly with --profile server-release"]
 fn codec_complete_game_absent() {
-    assert!(!cfg!(debug_assertions), "use --profile server-release");
+    if cfg!(debug_assertions) {
+        panic!("use --profile server-release");
+    }
     run_async_test(|| async {
         for player_count in [2, 4] {
             for gzip in [false, true] {
@@ -5033,7 +5035,9 @@ fn codec_complete_game_absent() {
 #[test]
 #[ignore = "optimized native full-game acceptance; run explicitly with --profile server-release"]
 fn codec_complete_game_unknown() {
-    assert!(!cfg!(debug_assertions), "use --profile server-release");
+    if cfg!(debug_assertions) {
+        panic!("use --profile server-release");
+    }
     run_async_test(|| async {
         for player_count in [2, 4] {
             for gzip in [false, true] {
@@ -5046,7 +5050,9 @@ fn codec_complete_game_unknown() {
 #[test]
 #[ignore = "optimized native full-game acceptance; run explicitly with --profile server-release"]
 fn codec_complete_game_negotiated() {
-    assert!(!cfg!(debug_assertions), "use --profile server-release");
+    if cfg!(debug_assertions) {
+        panic!("use --profile server-release");
+    }
     run_async_test(|| async {
         for player_count in [2, 4] {
             for gzip in [false, true] {
@@ -5059,7 +5065,9 @@ fn codec_complete_game_negotiated() {
 #[test]
 #[ignore = "optimized native full-game acceptance; run explicitly with --profile server-release"]
 fn codec_complete_game_mixed() {
-    assert!(!cfg!(debug_assertions), "use --profile server-release");
+    if cfg!(debug_assertions) {
+        panic!("use --profile server-release");
+    }
     run_async_test(|| async {
         for player_count in [2, 4] {
             for gzip in [false, true] {
