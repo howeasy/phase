@@ -306,7 +306,13 @@ impl CodecPeer {
         loop {
             let reply = self.next().await;
             match reply.value["type"].as_str().unwrap() {
-                "Error" => break,
+                "Error" => {
+                    assert_eq!(
+                        reply.value["data"]["message"],
+                        crate::FULL_SOCKET_AUTHORITY_REJECTION,
+                    );
+                    break;
+                }
                 "StateUpdate" | "GameStarted" => {
                     panic!("denied route disclosed state: {}", reply.value)
                 }
@@ -459,6 +465,42 @@ async fn current_action(table: &NativeTable) -> (PlayerId, GameAction) {
     (actor, action)
 }
 
+/// Compose the ordinary publication builders independently of the resync path.
+fn state_update_reference(session: &GameSession, viewer: Option<PlayerId>) -> serde_json::Value {
+    let key = &session.full_runtime.as_ref().unwrap().key;
+    let message = match viewer {
+        Some(player) => {
+            let decision = session
+                .game_started
+                .then(|| crate::DecisionSnapshot::from_state(&session.state));
+            let source = super::StateUpdateSource {
+                revision: session.state_revision,
+                state: &session.state,
+                events: &[],
+                log_entries: &[],
+                decision: decision.as_ref().map(Into::into),
+            };
+            source.guard().unwrap();
+            crate::build_state_update_message(
+                &source,
+                key,
+                player,
+                session.rewind_options(),
+                &session.state.eliminated_players,
+            )
+        }
+        None => crate::build_spectator_state_update_message(
+            key,
+            &session.state,
+            &[],
+            &[],
+            session.state_revision,
+        )
+        .unwrap(),
+    };
+    serde_json::to_value(message).unwrap()
+}
+
 async fn resync_reference(
     table: &NativeTable,
     viewer: Option<PlayerId>,
@@ -468,8 +510,7 @@ async fn resync_reference(
         .unwrap();
     let revision = session.state_revision;
     let state = serde_json::to_value(&session.state).unwrap();
-    let reference =
-        serde_json::to_value(crate::build_resync_state_message(&session, viewer).unwrap()).unwrap();
+    let reference = state_update_reference(&session, viewer);
     (reference, state, revision)
 }
 
@@ -578,6 +619,10 @@ fn codec_player_resync_full_then_delta() {
                 "separately built envelopes compared structurally"
             );
             assert_projection(&recovered.value, &table.key, actor);
+            assert!(!recovered.value["data"]["legal_actions"]
+                .as_array()
+                .unwrap()
+                .is_empty());
             let (_, state_after, after_revision) = resync_reference(&table, Some(actor)).await;
             assert_eq!(state_after, state_before);
             assert_eq!(after_revision, revision);
@@ -656,13 +701,25 @@ fn codec_spectator_resync_authority() {
             assert!(public.value.get("command_id").is_none());
             assert_eq!(public.value["data"]["events"], serde_json::json!([]));
             assert_eq!(public.value["data"]["log_entries"], serde_json::json!([]));
-            // Stale seat before build also falls back; it does not disclose hand data.
+            // A stale seat route still builds, is rejected at its final fence, and falls back to the spectator view without disclosing hand data.
             peer.baseline = None;
             assert_projection(
                 &peer.resync().await.value,
                 &table.key,
                 crate::SPECTATOR_PLAYER_ID,
             );
+            // Invalidate the token before projection so Built belongs to the
+            // spectator attempt, not the rejected seat attempt above.
+            {
+                let mut session = crate::lock_session(&table.app.sessions, &table.key.game_code)
+                    .await
+                    .unwrap();
+                session.player_tokens.swap(0, 1);
+                assert_ne!(
+                    session.player_for_token(&table.tokens[0]),
+                    Some(PlayerId(0))
+                );
+            }
             let built = table
                 .app
                 .context
@@ -680,6 +737,12 @@ fn codec_spectator_resync_authority() {
             built.release.notify_one();
             peer.denial().await;
             peer.fence(false).await;
+            {
+                let mut session = crate::lock_session(&table.app.sessions, &table.key.game_code)
+                    .await
+                    .unwrap();
+                session.player_tokens.swap(0, 1);
+            }
             table
                 .app
                 .game_spectators
@@ -785,6 +848,95 @@ fn codec_resync_rejects_stale_routes() {
         .await;
         table.server.abort();
         outcome.expect("stale routes cannot disclose projected state");
+    });
+}
+
+#[test]
+fn codec_resync_rejects_session_removed_after_build() {
+    run_async_test(|| async {
+        use crate::socket_test_hooks::ResyncPoint;
+        for viewer in [Some(PlayerId(0)), None] {
+            let table = NativeTable::new().await;
+            let outcome = tokio::time::timeout(Duration::from_secs(20), async {
+                table.keep_all().await;
+                let mut peer = match viewer {
+                    Some(player) => codec_seat(&table, player, false).await,
+                    None => codec_spectator(&table, false).await,
+                };
+                let audience = viewer.unwrap_or(crate::SPECTATOR_PLAYER_ID);
+                assert_projection(&peer.resync().await.value, &table.key, audience);
+                peer.fence(false).await;
+                let route = match viewer {
+                    Some(player) => {
+                        table.app.connections.lock().await[&table.key.game_code][&player].clone()
+                    }
+                    None => table.app.game_spectators.lock().await[&table.key.game_code][0].clone(),
+                };
+                let built = table
+                    .app
+                    .context
+                    .socket_hooks
+                    .arm_resync(ResyncPoint::Built);
+                peer.send(&ClientMessage::ResyncState).await;
+                built.entered.notified().await;
+                assert_eq!(
+                    built.snapshot.lock().as_ref().map(|(key, _)| key),
+                    Some(&table.key),
+                );
+                // Retirement does not need the retained publication lease and
+                // deliberately leaves the authorized route itself untouched.
+                assert!(table
+                    .app
+                    .sessions
+                    .lock()
+                    .await
+                    .remove_game(&table.key.game_code));
+                let route_present = match viewer {
+                    Some(player) => table.app.connections.lock().await[&table.key.game_code]
+                        [&player]
+                        .same_channel(&route),
+                    None => table.app.game_spectators.lock().await[&table.key.game_code]
+                        .iter()
+                        .any(|sender| sender.same_channel(&route)),
+                };
+                assert!(route_present && !route.is_closed());
+                built.release.notify_one();
+                peer.denial().await;
+                peer.fence(false).await;
+
+                // The same denied socket can attach to a current game and
+                // recover, proving both the final fence and admission release.
+                let (recovery_key, mut host) = codec_create(&table, 2).await;
+                let mut guest =
+                    codec_hello(&table.url, false, Some(serde_json::json!(["StateCodecV1"]))).await;
+                guest
+                    .send(&ClientMessage::JoinGame {
+                        game_code: recovery_key.game_code.clone(),
+                        deck: codec_deck(),
+                    })
+                    .await;
+                assert_projection(&guest.state().await.value, &recovery_key, PlayerId(1));
+                assert_projection(&host.state().await.value, &recovery_key, PlayerId(0));
+                peer.send(&ClientMessage::SpectatorJoin {
+                    game_code: recovery_key.game_code.clone(),
+                })
+                .await;
+                assert_projection(
+                    &peer.state().await.value,
+                    &recovery_key,
+                    crate::SPECTATOR_PLAYER_ID,
+                );
+                assert_projection(
+                    &peer.resync().await.value,
+                    &recovery_key,
+                    crate::SPECTATOR_PLAYER_ID,
+                );
+                peer.fence(false).await;
+            })
+            .await;
+            table.server.abort();
+            outcome.expect("removed registry attachment cannot publish after projection");
+        }
     });
 }
 
@@ -2801,9 +2953,7 @@ fn codec_dual_attachment_cross_game_authority() {
             let session = crate::lock_session(&table.app.sessions, &other_key.game_code)
                 .await
                 .unwrap();
-            let reference =
-                serde_json::to_value(crate::build_resync_state_message(&session, None).unwrap())
-                    .unwrap();
+            let reference = state_update_reference(&session, None);
             assert_eq!(
                 public.value, reference,
                 "different-game spectator fallback is structural parity"

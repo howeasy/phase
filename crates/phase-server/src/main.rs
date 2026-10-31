@@ -9738,8 +9738,8 @@ fn build_resync_state_message(
     }
 }
 
-/// Retain the publication lease from projection through the final route-fenced
-/// enqueue. A rejected seat releases its lease before spectator authorization.
+/// Retain the publication lease through registry- and route-fenced enqueue.
+/// A rejected seat releases every guard before spectator authorization.
 async fn handle_resync_state(
     state: &SharedState,
     connections: &SharedConnections,
@@ -9791,10 +9791,15 @@ async fn handle_resync_state(
             .await;
         let mut message = Some(message);
         let mut discarded = None;
-        let binding_current = session
-            .full_runtime
-            .as_ref()
-            .is_some_and(|runtime| runtime.key == key)
+        let registry = state.lock().await;
+        let registered = registry
+            .session(code)
+            .is_some_and(|handle| Arc::ptr_eq(&handle, OwnedMutexGuard::mutex(&session)));
+        let binding_current = registered
+            && session
+                .full_runtime
+                .as_ref()
+                .is_some_and(|runtime| runtime.key == key)
             && !tx.is_closed();
         let sent = match player {
             Some(player) => {
@@ -9803,7 +9808,7 @@ async fn handle_resync_state(
                     && full_seat_matches_session(&session, identity)
                     && full_sender_matches(&routes, code, player, tx)
                 {
-                    // The route guard AND the same session lease span send.
+                    // Session, registry, and route guards all span send.
                     Some(tx.send_resync(
                         message.take().expect("owned projection"),
                         permit.take().expect("owned admission"),
@@ -9829,7 +9834,8 @@ async fn handle_resync_state(
                 }
             }
         };
-        // Route guards are gone, but this exact session lease remains held.
+        drop(registry);
+        // Registry and route guards are gone; the exact session lease remains.
         if matches!(sent, Some(Ok(()))) {
             #[cfg(test)]
             context
@@ -9921,17 +9927,18 @@ async fn handle_client_message(
             unreachable!("the independent decoder consumes handshake and heartbeat frames");
         }
         ClientMessage::ResyncState => {
-            if socket.state_codec() != Some(StateCodec::StateCodecV1) || resync.is_none() {
+            let (Some(StateCodec::StateCodecV1), Some(permit)) = (socket.state_codec(), resync)
+            else {
                 let _ = socket.enqueue_reply(ServerMessage::error("State codec is not negotiated"));
                 return;
-            }
+            };
             handle_resync_state(
                 state,
                 connections,
                 game_spectators,
                 identity,
                 tx,
-                resync.expect("admitted resync"),
+                permit,
                 context,
             )
             .await;

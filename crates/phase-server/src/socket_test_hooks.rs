@@ -21,7 +21,7 @@ pub(crate) struct Hooks {
     quota_flush: Arc<Mutex<Option<Arc<BootstrapGate>>>>,
     parser_work: Arc<Mutex<Option<Arc<ParserWork>>>>,
     hello_accept: Arc<Mutex<Option<Arc<BootstrapGate>>>>,
-    resync: Arc<Mutex<[Option<Arc<BootstrapGate>>; 5]>>,
+    resync: Arc<Mutex<ResyncGates>>,
 }
 
 /// One connection's real parser calls, with a frozen quota window so wire tests
@@ -146,13 +146,33 @@ impl ParserWork {
 }
 
 #[derive(Clone, Copy)]
-#[repr(usize)]
 pub(crate) enum ResyncPoint {
     Dispatch,
     Built,
     Enqueued,
     ActionPreflight,
     Encoding,
+}
+
+#[derive(Default)]
+struct ResyncGates {
+    dispatch: Option<Arc<BootstrapGate>>,
+    built: Option<Arc<BootstrapGate>>,
+    enqueued: Option<Arc<BootstrapGate>>,
+    action_preflight: Option<Arc<BootstrapGate>>,
+    encoding: Option<Arc<BootstrapGate>>,
+}
+
+impl ResyncGates {
+    fn slot(&mut self, point: ResyncPoint) -> &mut Option<Arc<BootstrapGate>> {
+        match point {
+            ResyncPoint::Dispatch => &mut self.dispatch,
+            ResyncPoint::Built => &mut self.built,
+            ResyncPoint::Enqueued => &mut self.enqueued,
+            ResyncPoint::ActionPreflight => &mut self.action_preflight,
+            ResyncPoint::Encoding => &mut self.encoding,
+        }
+    }
 }
 
 #[derive(Debug, Default)]
@@ -165,7 +185,7 @@ pub(crate) struct BootstrapGate {
 impl Hooks {
     pub(crate) fn arm_resync(&self, point: ResyncPoint) -> Arc<BootstrapGate> {
         let gate = Arc::new(BootstrapGate::default());
-        self.resync.lock()[point as usize] = Some(gate.clone());
+        *self.resync.lock().slot(point) = Some(gate.clone());
         gate
     }
 
@@ -174,7 +194,7 @@ impl Hooks {
         point: ResyncPoint,
         snapshot: Option<(server_core::FullSessionKey, u64)>,
     ) {
-        let gate = self.resync.lock()[point as usize].take();
+        let gate = self.resync.lock().slot(point).take();
         if let Some(gate) = gate {
             *gate.snapshot.lock() = snapshot;
             gate.entered.notify_one();
