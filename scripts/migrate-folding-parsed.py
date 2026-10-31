@@ -9,7 +9,10 @@ module docstring. Remainders admit only whole top-level call arguments in their
 binder's own block and the exact debug observation. Every other occurrence,
 including nested blocks/closures/macros, raw identifiers, captures/width refs,
 cooked unicode/hex escapes in visible format arguments and configuration-only reads,
-refuses the whole tree. Ambient test-module configuration is not a read guard.
+refuses the whole tree. Capture checks decode every visible literal regardless of
+macro name; renames also check captures of the new name and enclosing closure
+parameters for every expression-body shape. Ambient test-module configuration
+is not a read guard.
 """
 from __future__ import annotations
 
@@ -318,7 +321,7 @@ def plan_source(path, source):
                     return None
             return None
 
-        def rename_collision(name, declaration, scope_end):
+        def rename_collision(name, declaration, scope_end, visible_start, old_name):
             """Refuse capture by local/outer bindings or existing name references."""
             scope = ex.scopes[declaration]
             # Include nested scopes: a new name there could capture a renamed
@@ -327,6 +330,12 @@ def plan_source(path, source):
                 return True
             fn = owner(declaration)
             if fn and name in v[fn[0]:fn[1]]:
+                return True
+            visible_end = min(
+                (after for at, (binding, after) in plain_lets.items()
+                 if v[at] == old_name and binding > declaration
+                 and ex.scopes[binding] == scope), default=scope_end)
+            if fn and ex.local_hazard(source, name, fn[0], fn[2], visible_start, visible_end):
                 return True
             ancestors = set()
             parent = ex.parents[scope]
@@ -339,8 +348,13 @@ def plan_source(path, source):
                     body = close + 1
                     if v[body:body + 2] == ["-", ">"]:
                         body = ex.end(body + 2, {"{"}, declaration)
-                    if (close < declaration and body < declaration and v[body] == "{"
-                            and declaration < ex.pairs[body] and name in v[token + 1:close]):
+                    # Bound the whole closure expression by its containing
+                    # delimiter, not by a presumed brace body.
+                    limit = min((b for a, b in ex.pairs.items()
+                                 if a < token < b), default=len(v))
+                    extent = ex.end(body, {";", ","}, limit)
+                    if (close < declaration and body < declaration < extent
+                            and name in v[token + 1:close]):
                         return True
                 if v[token] == "for":
                     body = ex.body_brace(token, len(v))
@@ -503,7 +517,7 @@ def plan_source(path, source):
                         continue
                     retained_name = v[residue].lstrip("_")
                     if (re.fullmatch(r"[A-Za-z]\w*", retained_name) is None
-                            or rename_collision(retained_name, i, scope_end)):
+                            or rename_collision(retained_name, i, scope_end, end, v[residue])):
                         actions.update((key, "refused") for key in ids)
                         reject(i, f"remainder rename collision or invalid identifier: {retained_name}")
                         continue

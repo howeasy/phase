@@ -939,6 +939,132 @@ class TinyGrammarTests(unittest.TestCase):
                 self.assertIn("consume(rest)", result.rendered)
 
 
+class RoundFiveTests(unittest.TestCase):
+    MACROS = (
+        "println", "print", "eprintln", "format", "write", "writeln", "panic",
+        "assert", "assert_eq", "debug_assert", "tracing::debug", "tracing::warn",
+        "log::info", "anyhow", "bail", "report", "unknown",
+    )
+
+    def refusal(self, source, category):
+        plan = migration.plan_source(P, source)
+        self.assertTrue(any(category in error for error in plan.unsupported), plan.unsupported)
+        self.assertEqual((plan.rendered, plan.edits), (source, ()))
+
+    @staticmethod
+    def message(macro, literal):
+        prefix = ("out, " if macro in ("write", "writeln") else
+                  "left, right, " if macro == "assert_eq" else
+                  "ready, " if macro in ("assert", "debug_assert") else "")
+        return f"{macro}!({prefix}{literal});"
+
+    def test_r5_all_macro_capture_spellings(self):
+        literals = (
+            '"{_rest}"', '"{:>_rest$}"', r'"\u{7b}_rest}"',
+            '"{\\\n        _rest}"', 'r#"{_rest:?}"#',
+        )
+        for macro in self.MACROS:
+            for literal in literals:
+                with self.subTest(macro=macro, literal=literal):
+                    source = (f"fn f() {{ let (v, _rest) = {F}(i); "
+                              + self.message(macro, literal) + "consume(v); }")
+                    self.refusal(source, "unsupported implicit format-capture remainder read")
+        for literal in ('"no capture"', '"{{_rest}}"', 'r#"{{_rest}}"#'):
+            for macro in self.MACROS:
+                with self.subTest(control=literal, macro=macro):
+                    source = (f"fn f() {{ let (v, _rest) = {F}(i); "
+                              + self.message(macro, literal) + "consume(v); }")
+                    plan = migration.plan_source(P, source)
+                    self.assertFalse(plan.unsupported, plan.unsupported)
+                    self.assertIn(f".waive({W})", plan.rendered)
+
+    def test_r5_literals_are_checked_without_macros(self):
+        for literal in (
+                '"{_rest}"', '"{_rest:?}"', '"{:_rest$}"', '"{:._rest$}"',
+                '"{:>_rest$}"', r'"\x7b_rest}"', r'"\u{7b}_rest}"',
+                '"{\\\n \t\r\n_rest}"', 'r#"{_rest}"#',
+                r'"\n\r\t\\\0\'\"{_rest}"', r'"{_re\u{73}t}"',
+                r'"{:_re\x73t$}"'):
+            with self.subTest(literal=literal):
+                self.refusal(
+                    f"fn f() {{ let (v, _rest) = {F}(i); consume({literal}); consume(v); }}",
+                    "unsupported implicit format-capture remainder read")
+        for statement in (
+                r'scan_contains(tp.lower, "doesn\u{2019}t untap during");',
+                r'consume(r"\u{7b}_rest}");', r'consume("\x7b\x7b_rest}}");',
+                'consume("{{_rest}}");'):
+            with self.subTest(control=statement):
+                plan = migration.plan_source(
+                    P, f"fn f() {{ let (v, _rest) = {F}(i); {statement} consume(v, _rest); }}")
+                self.assertFalse(plan.unsupported, plan.unsupported)
+                self.assertIn("consume(v, rest)", plan.rendered)
+
+    def test_r5_alias_and_mixed_runtime_capture_repros(self):
+        for prefix, statement in (
+                ("use std::println as report; ", 'report!("{_rest}");'),
+                ("", 'consume(rest); tracing::debug!("residue {_rest:?}");')):
+            with self.subTest(statement=statement):
+                self.refusal(
+                    prefix + f"fn f() {{ let (v, _rest) = {F}(i); {statement} consume(v); }}",
+                    "unsupported implicit format-capture remainder read")
+
+    def test_r5_unknown_macro_cooked_message_refuses(self):
+        for macro in ("tracing::debug", "tracing::warn", "log::info",
+                      "anyhow", "bail", "report", "unknown"):
+            for literal in (r'"\u{2019}"', r'"\x61"'):
+                with self.subTest(macro=macro, literal=literal):
+                    self.refusal(
+                        f"fn f() {{ let (v, _rest) = {F}(i); "
+                        + self.message(macro, literal) + " consume(v); }",
+                        "unsupported implicit format-capture remainder read")
+
+    def test_r5_rename_checks_decoded_new_name_captures(self):
+        for literal in ('"{rest}"', '"{:rest$}"', '"{:.rest$}"', '"{:>rest$}"',
+                        r'"\u{7b}rest}"', '"{\\\n    rest}"', 'r#"{rest:?}"#'):
+            with self.subTest(literal=literal):
+                self.refusal(
+                    f"fn f() {{ let (v, _rest) = {F}(i); consume(_rest); "
+                    f"consume({literal}); consume(v); }}", "remainder rename collision")
+        source = (f'fn f() {{ let (v, _rest) = {F}(i); consume(_rest); '
+                  'consume("{{rest}}"); consume(v); }')
+        self.assertFalse(migration.plan_source(P, source).unsupported)
+
+    def test_r5_closure_parameters_all_body_shapes(self):
+        inner = f"let (v, _rest) = {F}(i); consume(_rest); consume(v);"
+        for body in (
+                "{ " + inner + " }",
+                "match i { _ => { " + inner + " } }",
+                "if ready { " + inner + " } else {}",
+                "loop { " + inner + " break; }",
+                "consume({ " + inner + " () })"):
+            with self.subTest(body=body):
+                self.refusal(f"fn f() {{ let g = |rest: &str| {body}; }}",
+                             "remainder rename collision")
+                control = migration.plan_source(P, f"fn f() {{ let g = |other: &str| {body}; }}")
+                self.assertFalse(control.unsupported, control.unsupported)
+                self.assertIn("consume(rest)", control.rendered)
+
+    def test_r5_implicit_capture_refusal_is_transactional(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            parser = root / rd.SCOPE
+            parser.mkdir(parents=True)
+            files = {
+                parser / "a.rs": f"fn f() {{ let (v, _) = {F}(i); consume(v); }}",
+                parser / "z.rs": (f"fn f() {{ let (v, _rest) = {F}(i); "
+                                  'tracing::debug!("{_rest}"); consume(v); }'),
+            }
+            for path, source in files.items():
+                path.write_text(source)
+            result = subprocess.run(
+                [sys.executable, "-B", str(SCRIPT), "--apply", "--root", str(root)],
+                capture_output=True, text=True)
+            self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+            self.assertIn("unsupported implicit format-capture remainder read", result.stderr)
+            for path, source in files.items():
+                self.assertEqual(path.read_text(), source)
+
+
 
 if __name__ == "__main__":
     unittest.main()

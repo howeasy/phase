@@ -1552,5 +1552,61 @@ class TinyGrammarTests(unittest.TestCase):
 
 
 
+class RoundFiveTests(unittest.TestCase):
+    REASON = "ResidueWaiver::Unaudited"
+    PATH = "crates/engine/src/parser/probe.rs"
+
+    def test_r5_ownerless_and_macro_binders_refuse(self):
+        origins = (
+            "let p = Parsed::new(filter, i);",
+            "let p = parse_type_phrase_folding(i);",
+            "let p: Parsed<'_, Filter> = obtain();",
+        )
+        declaration = ("fn parse_type_phrase_folding(i: &str) -> Parsed<'_, Filter> "
+                       "{ Parsed::new(filter, i) }\n")
+        wrappers = (
+            "my_tests! { fn t() { BODY } }",
+            "my_tests!(fn t() { BODY });",
+            "fn t() { unknown! { BODY } }",
+            "fn t() { unknown!(BODY); }",
+            "const VALUE: Filter = { BODY Filter::Any };",
+            "static VALUE: Filter = { BODY Filter::Any };",
+            "BODY",
+        )
+        for origin in origins:
+            for wrapper in wrappers:
+                for assignment in ("", "[p] = [other];"):
+                    with self.subTest(origin=origin, wrapper=wrapper, assignment=assignment):
+                        body = origin + assignment + f"p.waive({self.REASON});"
+                        source = declaration + wrapper.replace("BODY", body)
+                        found = rd.find_disposition_violations(self.PATH, source)
+                        self.assertIn(("unsupported-scope", "p"),
+                                      [(h.family, h.symbol) for h in found], source)
+            control = declaration + f"fn t() {{ {origin} p.waive({self.REASON}); }}"
+            self.assertEqual(rd.find_disposition_violations(self.PATH, control), [])
+
+    def test_r5_decoded_literals_independent_of_macro(self):
+        for statement in (
+                'tracing::debug!("{p}");', 'report!("{p:?}");',
+                'unknown!("{:>p$}");', 'consume("{:.p$}");',
+                'consume(r#"{p}"#);', 'println!("{\\\n        p}");',
+                r'tracing::debug!("\u{7b}p}");', r'consume("\x7bp}");',
+                r'unknown!("\u{2019}");', r'report!("\x61");'):
+            with self.subTest(statement=statement):
+                source = ("fn f() { let p = Parsed::new(filter, i); " + statement
+                          + f"p.waive({self.REASON}); }}")
+                found = rd.find_disposition_violations(self.PATH, source)
+                self.assertIn(("unsupported-scope", "p"),
+                              [(h.family, h.symbol) for h in found], source)
+        for statement in (
+                'consume("{{p}}");', 'unknown!("no capture");',
+                r'consume(r"\u{7b}p}");',
+                r'scan_contains(tp.lower, "doesn\u{2019}t untap during");'):
+            with self.subTest(control=statement):
+                source = ("fn f() { let p = Parsed::new(filter, i); " + statement
+                          + f"p.waive({self.REASON}); }}")
+                self.assertEqual(rd.find_disposition_violations(self.PATH, source), [])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

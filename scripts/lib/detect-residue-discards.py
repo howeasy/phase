@@ -10,18 +10,20 @@ own block level only:
   G-T1: plain `let [mut] N = ORIGIN;` or `let ([mut] V, [mut] N) = F(...);`.
         Sequential/sibling plain lets keep lexical block visibility.
   G-T2a (Parsed): statement/let initializer starting `N.waive(...)`,
-        `N.with_rest(...)` or `N.remainder(...)`; return/function tail accepts
+        `N.with_rest(...)` or `N.remainder(...)`; return/binder-block tail accepts
         only waive/with_rest. No argument, alias, nested-block or closure reads.
   G-T2b (remainder): N is a whole top-level argument of one path/method call,
-        itself a complete statement or plain-let initializer. No cfg, macro,
-        closure, block, tuple, array or struct within that argument list.
+        itself a complete statement or plain-let initializer. `break(N);` and
+        call-argument tuples after `>` also count as real reads. No cfg, macro,
+        closure, block, array or struct within that argument list.
   G-T3: exact `#[cfg(debug_assertions)] assert_no_compound_remainder(N, E);`;
         the generated Parsed observation substitutes `N.remainder()` for N.
 All other occurrences refuse. Macro trees are opaque to function discovery;
 N or fn/let tokens in one refuse the enclosing function. Raw identifiers naming
-N/dispositions/ResidueWaiver, implicit captures/width references, and cooked
-unicode/hex escapes in visible format-string macro arguments refuse. cfg anywhere in a containing
-statement/operand/header marks that read configuration-only (except G-T3).
+N/dispositions/ResidueWaiver, implicit captures/width references in any decoded
+visible literal, and cooked unicode/hex escapes in visible format-string macro
+arguments refuse. cfg anywhere in a containing statement/operand/header marks
+that read configuration-only (except G-T3). Ownerless/macro-contained binders refuse.
 Real tuple-era inventory: 92 discard bindings, 485 retained bindings, one runtime
 underscore argument (imperative.rs), one G-T3 observation (counter.rs). Tuple
 patterns contain identifiers with optional mut, no ref/type-ascribed remainders.
@@ -138,6 +140,30 @@ def follows_expression_prefix(values, start):
     return (start >= 3 and values[start - 3] == "break"
             and values[start - 2] == "'"
             and re.fullmatch(r"\w+", values[start - 1]) is not None)
+
+
+def decoded_literal(literal, raw):
+    """Decode Rust string escapes; raw string contents are already their value."""
+    quote = literal.index('"')
+    if raw:
+        hashes = len(literal) - len(literal.rstrip("#"))
+        return literal[quote + 1:len(literal) - hashes - 1]
+    content = literal[quote + 1:-1]
+    escapes = {"n": "\n", "r": "\r", "t": "\t", "\\": "\\", "0": "\0",
+               "'": "'", '"': '"'}
+
+    def decode(match):
+        escape = match[0][1:]
+        if escape.startswith(("\n", "\r\n")):
+            return ""
+        if escape.startswith("x"):
+            return chr(int(escape[1:], 16))
+        if escape.startswith("u{"):
+            return chr(int(escape[2:-1].replace("_", ""), 16))
+        return escapes[escape]
+
+    return re.sub(r"\\(?:\r?\n[ \t\r\n]*|x[0-9a-fA-F]{2}|u\{[0-9a-fA-F_]+\}|.)",
+                  decode, content, flags=re.DOTALL)
 
 
 class Expressions:
@@ -430,14 +456,16 @@ class Expressions:
                 code, _state = strip_noncode(prefix, states[line], preserve_columns=True)
                 if code.endswith("LEXICAL_SENTINEL"):
                     if not match.group().startswith("'"):
-                        self._literals.append((match.start(), match.end(), match.group(),
-                                               match.group("hashes") is not None))
+                        literal = match.group()
+                        raw = match.group("hashes") is not None
+                        self._literals.append((match.start(), match.end(), literal, raw,
+                                               decoded_literal(literal, raw)))
                     cursor = match.end()
                 else:
                     cursor = match.start() + 1
         if not hasattr(self, "_format_literals"):
-            # Only the message/format argument formats captures: comparison
-            # operands, writer handles and later formatting values are data.
+            # Known expression-list macros have a specific message argument.
+            # Unknown/aliased macros conservatively use their first literal.
             message_args = {
                 "print": 0, "println": 0, "eprint": 0, "eprintln": 0,
                 "format": 0, "format_args": 0, "format_args_nl": 0,
@@ -449,7 +477,7 @@ class Expressions:
             self._format_literals = []
             literal_starts = [literal[0] for literal in self._literals]
             for at, token in enumerate(v):
-                if token != "!" or not at or v[at - 1] not in message_args:
+                if token != "!" or not at:
                     continue
                 opened = at + 1
                 if opened not in self.pairs or v[opened] not in ("(", "[", "{"):
@@ -458,11 +486,13 @@ class Expressions:
                 cursor, start, argument = opened + 1, self.offsets[opened] + 1, 0
                 while True:
                     comma = self.end(cursor, {","}, close)
-                    if argument == message_args[v[at - 1]]:
+                    if v[at - 1] not in message_args or argument == message_args[v[at - 1]]:
                         index = bisect_right(literal_starts, start - 1)
                         if index < len(self._literals) and self._literals[index][0] < self.offsets[comma]:
                             self._format_literals.append(self._literals[index])
-                        break
+                            break
+                        if v[at - 1] in message_args:
+                            break
                     if comma == close:
                         break
                     cursor, start = comma + 1, self.offsets[comma] + 1
@@ -470,12 +500,15 @@ class Expressions:
         a = self.offsets[head if visible_start is None else visible_start]
         limit = end if visible_end is None else visible_end
         b = self.offsets[limit] if limit < len(v) else len(source)
-        for start, _stop, literal, raw in self._format_literals:
+        for start, _stop, literal, raw, _decoded in self._format_literals:
             if not a <= start < b:
                 continue
             if not raw and ("\\u{" in literal or "\\x" in literal):
                 return "literal"
-            for match in re.finditer(r"\{\{|\}\}|\{([^{}]*)", literal):
+        for start, _stop, _literal, _raw, decoded in self._literals:
+            if not a <= start < b:
+                continue
+            for match in re.finditer(r"\{\{|\}\}|\{([^{}]*)", decoded):
                 content = match[1]
                 if content is not None and (re.match(r"\b" + re.escape(name) + r"\b", content)
                         or re.search(r"\b" + re.escape(name) + r"\$", content)):
@@ -1110,6 +1143,22 @@ def find_disposition_violations(relpath, source, parsed_helpers=None):
         kinds[i] = "parsed"
         sites[i] = i
 
+    # A Parsed type annotation establishes origin even for an opaque initializer.
+    for i, token in enumerate(v):
+        if token != "let":
+            continue
+        equals = ex.end(i + 1, {"=", ";", "}"})
+        annotation = ex.end(i + 1, {":"}, equals)
+        if (equals >= len(v) or v[equals] != "=" or annotation == equals
+                or "Parsed" not in v[annotation + 1:equals]):
+            continue
+        end = ex.initializer_end(equals + 1)
+        if ex.result_leaves(equals + 1, end, leaves):
+            continue
+        leaves[equals + 1, end] = equals
+        kinds[equals] = "parsed"
+        sites[equals] = i + 1
+
     if not kinds:
         return sorted(errors.values())  # No origin/extraction needs local flow analysis.
 
@@ -1176,8 +1225,8 @@ def find_disposition_violations(relpath, source, parsed_helpers=None):
 
     def unsupported_scope(name, token):
         owner = function_owner(token)
-        if owner is None:
-            return False
+        if owner is None or any(a < token < b for a, b in ex.macro_token_trees()):
+            return True
         end = ex.pairs[owner]
         head = next(head for head, body, _end in ex.functions() if body == owner)
         scope = ex.scopes[token]
