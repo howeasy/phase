@@ -2901,15 +2901,12 @@ mod socket_tests {
                 let (facade, _incoming, tasks, sent) = accepted.recv().await.unwrap();
                 socket.send(WsMessage::Ping(vec![19, 77, 5].into())).await.unwrap();
                 let mut pong_lengths = Vec::new();
-                loop {
-                    match socket.next().await.unwrap().unwrap() {
-                        WsMessage::Pong(bytes) => {
-                            assert_eq!(bytes.as_ref(), [19, 77, 5]);
-                            pong_lengths.push(bytes.len());
-                            break;
-                        }
-                        other => panic!("native Ping response: {other:?}"),
+                match socket.next().await.unwrap().unwrap() {
+                    WsMessage::Pong(bytes) => {
+                        assert_eq!(bytes.as_ref(), [19, 77, 5]);
+                        pong_lengths.push(bytes.len());
                     }
+                    other => panic!("native Ping response: {other:?}"),
                 }
                 // Explicit application-control response followed by ordinary
                 // FIFO traffic establishes reader/writer progress without sleep.
