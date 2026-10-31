@@ -327,7 +327,7 @@ impl CodecPeer {
         assert_eq!(reply.value["type"], "StateUpdate");
         assert!(reply.value.get("command_id").is_none());
         assert_eq!(reply.value["data"]["events"], serde_json::json!([]));
-        assert_eq!(reply.value["data"]["log_entries"], serde_json::json!([]));
+        assert!(reply.value["data"].get("log_entries").is_none());
         reply
     }
 }
@@ -429,19 +429,18 @@ async fn codec_spectator(table: &NativeTable, gzip: bool) -> CodecPeer {
 }
 
 fn assert_projection(value: &serde_json::Value, key: &FullSessionKey, viewer: PlayerId) {
-    let message: ServerMessage = serde_json::from_value(value.clone()).unwrap();
-    match message {
-        ServerMessage::GameStarted {
-            full_key, state, ..
-        }
-        | ServerMessage::StateUpdate {
-            full_key, state, ..
-        } => {
-            assert_eq!(full_key.as_ref(), Some(key));
-            assert_eq!(state.viewer_projection, Some(viewer));
-        }
-        other => panic!("not projected state: {other:?}"),
+    match value["type"].as_str() {
+        Some("GameStarted" | "StateUpdate") => {}
+        _ => panic!("not projected state: {:?}", value["type"]),
     }
+    assert_eq!(
+        value["data"]["full_key"],
+        serde_json::to_value(key).unwrap()
+    );
+    assert_eq!(
+        value["data"]["state"]["viewer_projection"],
+        serde_json::to_value(viewer).unwrap()
+    );
 }
 
 async fn current_action(table: &NativeTable) -> (PlayerId, GameAction) {
@@ -669,19 +668,21 @@ fn codec_player_resync_preserves_elimination_and_rewinds() {
                         if session.state.turn_number > starting_turn {
                             return;
                         }
-                        assert!(matches!(
-                            session.state.waiting_for,
-                            engine::types::game_state::WaitingFor::Priority { .. }
-                        ));
+                        // Cleanup can require discarding before the next turn.
+                        // Follow the engine's decision instead of assuming priority.
+                        let decision = crate::DecisionSnapshot::from_state(&session.state);
+                        let action = decision
+                            .legal_actions
+                            .iter()
+                            .find(|action| matches!(action, GameAction::PassPriority))
+                            .or_else(|| decision.legal_actions.first())
+                            .expect("engine-supplied action to reach the next turn")
+                            .clone();
                         let actor = server_core::acting_players(&session.state)[0];
                         let token = session.player_tokens[usize::from(actor.0)].clone();
                         session
-                            .handle_action_with_card_db_outcome(
-                                &token,
-                                GameAction::PassPriority,
-                                None,
-                            )
-                            .expect("pass priority through the real turn-boundary capture path");
+                            .handle_action_with_card_db_outcome(&token, action, None)
+                            .expect("drive the real turn-boundary capture path");
                         session.advance_state_revision();
                     }
                     panic!("fixture never reached the next turn");
@@ -792,13 +793,10 @@ fn codec_spectator_resync_authority() {
                 "spectator structural projection parity"
             );
             assert_eq!(public.value["data"]["legal_actions"], serde_json::json!([]));
-            assert_eq!(
-                public.value["data"]["rewind_targets"],
-                serde_json::json!([])
-            );
+            assert!(public.value["data"].get("rewind_targets").is_none());
             assert!(public.value.get("command_id").is_none());
             assert_eq!(public.value["data"]["events"], serde_json::json!([]));
-            assert_eq!(public.value["data"]["log_entries"], serde_json::json!([]));
+            assert!(public.value["data"].get("log_entries").is_none());
             // A stale seat route still builds, is rejected at its final fence, and falls back to the spectator view without disclosing hand data.
             peer.baseline = None;
             assert_projection(
