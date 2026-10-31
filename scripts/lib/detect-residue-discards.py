@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """Gate H: selected helper-result discard syntax, with reviewed per-file ceilings.
 
-This is not a proof that unread Oracle text cannot be dropped. Named ignored
-remainders are conservative obligations; defaults freeze syntax, not semantic
-loss. Same-file deletion/addition can fit under a ceiling. No arbitrary dataflow,
-unwrap_or_else, future Parsed API, or waiver enforcement is claimed here.
+This is bounded syntactic enforcement, not linear typing or arbitrary dataflow.
+Production debt combines legacy helper/default discards and explicit Unaudited
+waivers. A separate all-code stream rejects disposition bypasses, including tests,
+independently of ceilings. Unknown disposition syntax fails closed.
 Expression-with-block statement boundaries are shared by closure tails and
 comma-free match arms. Import aliases are lexical (module boundaries do not
 inherit them) and apply only to unqualified calls; qualified calls use the final
@@ -59,16 +59,17 @@ from zone_authority_census import (
 
 SCOPE = "crates/engine/src/parser"
 LEDGER = "scripts/residue-ratchet.txt"
-# `fold_type_union` / `parse_filter_phrase_union` (issue #10364) are union-fold
-# wrappers over the readers below and return the same `(filter, remainder)`
-# shape, so a discard at one of their call sites loses text exactly as a discard
-# at a bare `parse_type_phrase_folding` does. They are counted for that reason:
-# routing a site through the wrapper must not remove it from this ledger.
-HELPERS = frozenset(("parse_target", "parse_target_with_ctx", "parse_target_with_syntax",
-                     "parse_target_disjunction", "parse_target_with_disjunctive_restriction",
-                     "parse_fight_target", "parse_type_phrase_folding",
-                     "parse_type_phrase_folding_with_ctx", "fold_type_union",
-                     "parse_filter_phrase_union"))
+# Closed folding boundary; shared with the separately invoked migration tool.
+FOLDING_HELPERS = frozenset((
+    "parse_type_phrase_folding", "parse_type_phrase_folding_with_ctx",
+    "read_type_union_leg", "fold_type_union", "parse_filter_phrase_union",
+    "parse_mass_type_union",
+))
+HELPERS = FOLDING_HELPERS | frozenset((
+    "parse_target", "parse_target_with_ctx", "parse_target_with_syntax",
+    "parse_target_disjunction", "parse_target_with_disjunctive_restriction",
+    "parse_fight_target",
+))
 # ParseContext methods verified to return `f(...)` unchanged (context.rs).
 # Values are total argument counts; only the last argument is the closure.
 RESULT_WRAPPERS = {"with_player_antecedents": 1, "with_player_scope": 2}
@@ -81,6 +82,26 @@ class Hit(NamedTuple):
     line: int
     family: str
     symbol: str
+
+class Violation(NamedTuple):
+    path: str
+    line: int
+    column: int
+    family: str
+    symbol: str
+
+
+def all_code_stream(source):
+    """Original-source character coordinates, including CRLF and test code."""
+    state = ScanState()
+    codes = []
+    for line in source.splitlines(keepends=True):
+        code, state = strip_noncode(line, state, preserve_columns=True)
+        codes.append(code)
+    if state != ScanState():
+        raise CensusError("unterminated comment or literal")
+    return "".join(codes)
+
 
 
 def production_stream(relpath, lines):
@@ -405,25 +426,8 @@ class Expressions:
 
     def wrapper_origin(self, name, opened, end):
         """Follow the registered wrapper's final closure result."""
-        v = self.values
-        args = self.split(opened + 1, end - 1)
-        wrapper_args = RESULT_WRAPPERS[name]
-        if len(args) >= wrapper_args:
-            # Return-type commas can split the last closure into several ranges.
-            a, b = args[wrapper_args - 1][0], args[-1][1]
-            closure = a + (a < b and v[a] == "move")
-            if closure < b and v[closure] == "|":
-                close = self.end(closure + 1, {"|"}, b)
-                if close < b:
-                    body = close + 1
-                    if v[body:body + 2] == ["-", ">"]:
-                        # Stop at the balanced body, not at generic/function arrows.
-                        body = self.end(body + 2, {"{"}, b)
-                        if body < b and self.pairs[body] == b - 1:
-                            return self.origin(body, b)
-                    elif len(args) == wrapper_args:
-                        return self.origin(body, b)
-        return None
+        body = self.wrapper_body(name, opened, end)
+        return self.origin(*body) if body else None
 
     def origin(self, start, end):
         """Return (helper token index, symbol) only for a helper RESULT.
@@ -531,6 +535,390 @@ class Expressions:
             # confuse alternatives inside the filter component with tuple arms.
             if len(self.split(start + 1, end - 1)) == 1:
                 yield from self.discard_patterns(start + 1, end - 1, arity)
+    def initializer_end(self, start):
+        """A full let RHS, without swallowing an if-let body or let-else."""
+        after = self.block_expression_end(start, len(self.values))
+        return self.end(after if after is not None else start, {";", "{", "}", "else"})
+
+    def wrapper_body(self, name, opened, end):
+        """The registered closure result range, with optional return type."""
+        v = self.values
+        args = self.split(opened + 1, end - 1)
+        count = RESULT_WRAPPERS[name]
+        if len(args) < count:
+            return None
+        a, b = args[count - 1][0], args[-1][1]
+        a += a < b and v[a] == "move"
+        if a >= b or v[a] != "|":
+            return None
+        close = self.end(a + 1, {"|"}, b)
+        if close == b:
+            return None
+        body = close + 1
+        if v[body:body + 2] == ["-", ">"]:
+            body = self.end(body + 2, {"{"}, b)
+            return (body, b) if body < b and self.pairs[body] == b - 1 else None
+        return (body, b) if len(args) == count else None
+
+    def result_leaves(self, start, end, leaves):
+        """Propagate bounded expression tails to their immediate consumer.
+
+        `leaves` maps exact token ranges to caller-owned identities. Never follow
+        arbitrary arguments, closures or methods as result-forwarding operations.
+        """
+        v = self.values
+        if (start, end) in leaves:
+            return {leaves[start, end]}
+        if start >= end:
+            return set()
+        if v[end - 1] == "?":
+            return self.result_leaves(start, end - 1, leaves)
+        if v[start] == "(" and self.pairs[start] == end - 1:
+            return self.result_leaves(start + 1, end - 1, leaves)
+        if v[start] == "{" and self.pairs[start] == end - 1:
+            return self.result_leaves(*self.block_tail(start + 1, end - 1), leaves)
+        if v[start] == "if":
+            opened = self.body_brace(start, end)
+            if opened >= end:
+                return set()
+            close = self.pairs[opened]
+            found = self.result_leaves(opened, close + 1, leaves)
+            if close + 1 < end and v[close + 1] == "else":
+                found |= self.result_leaves(close + 2, end, leaves)
+            return found
+        if v[start] == "match":
+            opened = self.body_brace(start, end)
+            if opened >= end or self.pairs[opened] != end - 1:
+                return set()
+            found = set()
+            for a, _b in self.match_patterns(opened + 1, end - 1):
+                arrow = self.end(a, {"=>"}, end - 1)
+                body = arrow + 1
+                after = self.block_expression_end(body, end - 1)
+                if after is None or (after < end - 1 and v[after] in (".", "?", "(")):
+                    after = self.end(body, {","}, end - 1)
+                found |= self.result_leaves(body, after, leaves)
+            return found
+        if v[end - 1] != ")":
+            return set()
+        opened = self.pairs[end - 1]
+        if opened <= start:
+            return set()
+        generic = self.turbofish_start(opened)
+        callee = opened - 1 if generic is None else generic - 1
+        name = v[callee]
+        if (name in RESULT_WRAPPERS and callee > start and v[callee - 1] == "."
+                and self.postfix_receiver(start, callee - 1)):
+            body = self.wrapper_body(name, opened, end)
+            return self.result_leaves(*body, leaves) if body else set()
+        args = self.split(opened + 1, end - 1)
+        if v[start:opened] in (["Some"], ["Ok"]) and len(args) == 1:
+            return self.result_leaves(*args[0], leaves)
+        return set()
+
+    def retains_residue(self, start, end):
+        """Every alternative must destructure a named, non-underscore residue."""
+        v = self.values
+        alternatives = [(a, b) for a, b in self.split(start, end, "|") if a < b]
+        if len(alternatives) > 1:
+            return all(self.retains_residue(a, b) for a, b in alternatives)
+        if start >= end:
+            return False
+        if v[start] in ("Some", "Ok") and start + 1 < end and v[start + 1] == "(":
+            args = self.split(start + 2, end - 1)
+            return len(args) == 1 and self.retains_residue(*args[0])
+        if v[start] == "(" and self.pairs[start] == end - 1:
+            parts = self.split(start + 1, end - 1)
+            if len(parts) == 1:
+                return self.retains_residue(*parts[0])
+            residue = 1
+            rest = next((j for j, (a, b) in enumerate(parts)
+                         if v[a:b] == [".", "."]), None)
+            if rest is not None:
+                suffix = len(parts) - rest - 1
+                if rest <= residue < 2 - suffix:
+                    return False
+                if residue >= 2 - suffix:
+                    residue = rest + 1 + residue - (2 - suffix)
+            if len(parts) > residue:
+                a, b = parts[residue]
+                while a < b and v[a] in ("ref", "mut"):
+                    a += 1
+                return (b == a + 1 and re.fullmatch(r"[A-Za-z]\w*", v[a]) is not None)
+        return False
+
+
+class Disposition(NamedTuple):
+    token: int
+    start: int
+    end: int
+    name: str
+    receiver: tuple[int, int] | None
+    error: str | None
+
+
+def dispositions(ex):
+    """Recognize method calls and the deliberately supported bare Parsed UFCS."""
+    v = ex.values
+    for i, name in enumerate(v):
+        if name not in ("with_rest", "waive") or i == 0:
+            continue
+        method = v[i - 1] == "." and (i < 2 or v[i - 2] != ".")
+        ufcs = v[i - 1] == "::"
+        if not method and not ufcs:
+            continue
+        # A use item is a reference, not an extracted disposition operation.
+        before = i - 1
+        while before >= 0 and v[before] not in (";", "{", "}"):
+            if v[before] == "use":
+                break
+            before -= 1
+        if before >= 0 and v[before] == "use":
+            continue
+        opened = ex.turbofish_end(i + 1) if i + 1 < len(v) else None
+        if opened is None:
+            opened = i + 1
+        if opened >= len(v) or v[opened] != "(":
+            yield Disposition(i, i, i + 1, name, None, "indirect-disposition")
+            continue
+        end = ex.pairs[opened] + 1
+        args = ex.split(opened + 1, end - 1)
+        error = None
+        if method:
+            start = ex.receiver_start(i - 1)
+            if i >= 2 and v[i - 2] == "}":
+                start = ex.pairs[i - 2]
+            receiver = (start, i - 1)
+        else:
+            start = ex.receiver_start(i + 1)
+            # Only Parsed::op(value, ...) is supported, not trait/qualified UFCS.
+            if v[start:i] != ["Parsed", "::"]:
+                error = "unsupported-disposition-ufcs"
+            receiver = args.pop(0) if args else None
+        expected = 1 if name == "waive" else 0
+        if len(args) != expected:
+            error = "invalid-disposition-arguments"
+        elif name == "waive":
+            a, b = args[0]
+            reason = v[a:b]
+            if (len(reason) < 3 or reason[-3:] != ["ResidueWaiver", "::", "Unaudited"]
+                    or len(reason) % 2 != 1
+                    or any(x != "::" for x in reason[1::2])
+                    or any(re.fullmatch(r"\w+", x) is None for x in reason[::2])):
+                error = "unsupported-waiver-reason"
+        yield Disposition(i, start, end, name, receiver, error)
+
+
+def parsed_returning_helpers(sources):
+    """Declaration origins from the complete selected snapshot, not debt files."""
+    found = set()
+    for source in sources:
+        ex = Expressions(all_code_stream(source))
+        v = ex.values
+        for i in range(len(v) - 2):
+            if v[i] == "fn" and v[i + 1] in FOLDING_HELPERS:
+                body = ex.end(i + 2, {"{", ";"})
+                signature = v[i + 2:body]
+                arrow = next((j for j in range(len(signature) - 1)
+                              if signature[j:j + 2] == ["-", ">"]), None)
+                output = signature[arrow + 2:] if arrow is not None else []
+                # A type path ends before generic arguments, never at a nested
+                # Parsed inside another return type such as Option<Parsed<...>>.
+                type_end = next((j for j, token in enumerate(output)
+                                 if token != "::" and re.fullmatch(r"\w+", token) is None),
+                                len(output))
+                if output[:type_end] and output[type_end - 1] == "Parsed":
+                    found.add(v[i + 1])
+    return frozenset(found)
+
+
+def find_disposition_violations(relpath, source, parsed_helpers=None):
+    """All executable parser code; errors never enter ceiling accounting."""
+    if not isinstance(source, str):
+        source = "\n".join(source)
+    stream = all_code_stream(source)
+    ex = Expressions(stream)
+    v = ex.values
+    ops = list(dispositions(ex))
+    parsed_helpers = (parsed_returning_helpers([source]) if parsed_helpers is None
+                      else parsed_helpers)
+    errors = {}
+    newlines = [m.start() for m in re.finditer("\n", source)]
+
+    def reject(token, category):
+        offset = ex.offsets[token]
+        line = bisect_right(newlines, offset)
+        column = offset - (newlines[line - 1] if line else -1)
+        errors.setdefault(token, Violation(relpath, line + 1, column, category, v[token]))
+
+    leaves = {}
+    kinds = {}
+    sites = {}
+    consumed = set()
+    receivers = []
+    for op in ops:
+        if op.error:
+            reject(op.token, op.error)
+        if op.receiver:
+            receivers.append(op.receiver)
+        if op.name == "with_rest" and not op.error:
+            key = op.token
+            end = op.end
+            leaves[op.start, end] = key
+            kinds[key] = "tuple"
+            sites[key] = key
+
+    # Constructor and Parsed-returning family calls establish origin. A
+    # qualified unrelated enum variant named Parsed does not.
+    for i, name in enumerate(v):
+        if i + 1 >= len(v) or v[i + 1] != "(" or (i and v[i - 1] == "fn"):
+            continue
+        constructor = name == "new" and v[max(0, i - 2):i] == ["Parsed", "::"]
+        helper = ex.helper_name(i) in parsed_helpers and (i == 0 or v[i - 1] != ".")
+        if not constructor and not helper:
+            continue
+        start = ex.receiver_start(i + 1)
+        end = ex.pairs[i + 1] + 1
+        leaves[start, end] = i
+        kinds[i] = "parsed"
+        sites[i] = i
+
+    def flowing(a, b):
+        return ex.result_leaves(a, b, leaves)
+
+    # Tuple projections can have grouped/block receivers. The residue projection
+    # must itself reach a named consumer; a bare `.1;` still discards it.
+    for i, token in enumerate(v[:-1]):
+        if token == "." and v[i + 1] in ("0", "1"):
+            start = ex.pairs[i - 1] if i and v[i - 1] == "}" else ex.receiver_start(i)
+            for key in flowing(start, i):
+                if kinds[key] == "tuple":
+                    if v[i + 1] == "0":
+                        reject(sites[key], "with-rest-bypass")
+                        consumed.add(key)
+                    else:
+                        kinds[key] = "residue"
+                        leaves[start, i + 2] = key
+
+    function_ranges = []
+    for i, token in enumerate(v):
+        if token == "fn":
+            opened = ex.end(i + 1, {"{", ";"})
+            if opened < len(v) and v[opened] == "{":
+                signature = v[i:opened]
+                tuple_output = any(signature[j:j + 3] == ["-", ">", "("]
+                                   for j in range(len(signature) - 2))
+                function_ranges.append((opened, ex.pairs[opened], tuple_output))
+
+    def tuple_return(token):
+        owners = [(a, is_tuple) for a, b, is_tuple in function_ranges if a <= token < b]
+        return bool(owners and max(owners)[1])
+
+    def function_owner(token):
+        return max((a for a, b, _is_tuple in function_ranges if a <= token < b),
+                   default=None)
+
+    def accept_or_reject(ids, allowed):
+        for key in ids:
+            consumed.add(key)
+            if not allowed(key):
+                reject(sites[key], "parsed-disposal" if kinds[key] == "parsed"
+                       else "with-rest-bypass")
+
+    # Bindings carry Parsed origins within lexical scope. Tuple storage is
+    # intentionally not tracked: it is already a forbidden bypass at extraction.
+    bindings = {}
+    binding_tokens = set()
+    for i, token in enumerate(v):
+        if token != "let":
+            continue
+        equals = ex.end(i + 1, {"=", ";", "}"})
+        if equals >= len(v) or v[equals] != "=":
+            continue
+        end = ex.initializer_end(equals + 1)
+        pattern_end = ex.end(i + 1, {":"}, equals)
+        a = i + 1
+        while a < pattern_end and v[a] in ("mut", "ref"):
+            a += 1
+        named = (pattern_end == a + 1 and re.fullmatch(r"[A-Za-z]\w*", v[a]) is not None)
+        ids = flowing(equals + 1, end)
+        binding_tokens.update(range(i + 1, equals))
+        for key in ids:
+            if kinds[key] == "parsed" and named:
+                consumed.add(key)  # ownership transfers to the new local
+                alias = a
+                kinds[alias] = "parsed"
+                sites[alias] = a
+                bindings[alias] = (v[a], ex.scopes[i], end)
+                # Install only reads dominated by this binding and in its scope.
+                for j in range(end, len(v)):
+                    scope = ex.scopes[j]
+                    while scope is not None and scope != ex.scopes[i]:
+                        scope = ex.parents[scope]
+                    if (scope is not None and v[j] == v[a]
+                            and function_owner(j) == function_owner(i)):
+                        leaves[j, j + 1] = alias
+            else:
+                accept_or_reject({key}, lambda k: (
+                    ex.retains_residue(i + 1, pattern_end) if kinds[k] == "tuple"
+                    else named and kinds[k] == "residue"))
+
+    # Resolve lexical shadowing for local reads, including nested scopes. The
+    # preceding binding pass installs potential reads; the nearest declaration
+    # decides which local is actually referenced.
+    for (a, b), key in list(leaves.items()):
+        if b != a + 1 or key not in bindings:
+            continue
+        name, _scope, _end = bindings[key]
+        scope = ex.scopes[a]
+        while scope is not None:
+            declarations = [j for j in binding_tokens if v[j] == name
+                            and ex.scopes[j] == scope and j < a]
+            if declarations:
+                nearest = max(declarations)
+                if nearest not in bindings:
+                    leaves.pop((a, b), None)
+                else:
+                    leaves[a, b] = nearest
+                break
+            scope = ex.parents[scope]
+
+    for a, b in receivers:
+        accept_or_reject(flowing(a, b), lambda k: kinds[k] == "parsed")
+    for i, token in enumerate(v):
+        if token == "match":
+            opened = ex.body_brace(i, len(v))
+            ids = flowing(i + 1, opened)
+            if opened < len(v):
+                patterns = list(ex.match_patterns(opened + 1, ex.pairs[opened]))
+                accept_or_reject(ids, lambda k: kinds[k] == "tuple" and all(
+                    ex.retains_residue(a, b) for a, b in patterns))
+        if token in ("assert_eq", "assert_ne") and v[i + 1:i + 3] == ["!", "("]:
+            opened = i + 2
+            for a, b in ex.split(opened + 1, ex.pairs[opened])[:2]:
+                accept_or_reject(flowing(a, b), lambda k: kinds[k] != "parsed")
+        if token == "return":
+            end = ex.end(i + 1, {";", "}"})
+            accept_or_reject(flowing(i + 1, end), lambda k: (
+                kinds[k] == "parsed" or tuple_return(i)))
+        if token == "fn":
+            opened = ex.end(i + 1, {"{", ";"})
+            if opened < len(v) and v[opened] == "{":
+                tail = ex.block_tail(opened + 1, ex.pairs[opened])
+                accept_or_reject(flowing(*tail), lambda k: (
+                    kinds[k] == "parsed" or tuple_return(opened)))
+        # Mutation of an origin local is ambiguous rather than an escape hatch.
+        if token == "=" and i and i - 1 not in binding_tokens and v[i - 1] != "=":
+            ids = flowing(i - 1, i)
+            for key in ids:
+                reject(sites[key], "ambiguous-parsed-reassignment")
+
+    for key in kinds:
+        if key not in consumed:
+            reject(sites[key], "parsed-disposal" if kinds[key] == "parsed"
+                   else "with-rest-bypass")
+    return sorted(errors.values())
+
 
 
 def find_discards(relpath, lines):
@@ -636,6 +1024,10 @@ def find_discards(relpath, lines):
             arg = v[args[0][0]:args[0][1]] if len(args) == 1 else []
             if len(arg) == 3 and arg[:2] == ["TargetFilter", "::"] and arg[2] in ("SelfRef", "Any"):
                 hits[i] = Hit(relpath, ex.lines[i], "default", "TargetFilter::" + arg[2])
+    for op in dispositions(ex):
+        if op.name == "waive" and not op.error:
+            hits[("waiver", op.token)] = Hit(relpath, ex.lines[op.token],
+                                           "unaudited-waiver", "waive")
     return sorted(hits.values())
 
 
@@ -646,7 +1038,7 @@ def git(root, *args):
 def read_snapshot(root, path, index):
     if index:
         return git(root, "show", ":" + path).decode("utf-8")
-    return (root / path).read_text(encoding="utf-8")
+    return (root / path).read_bytes().decode("utf-8")
 
 
 def scan_file(path, operation, lines):
@@ -729,7 +1121,8 @@ def module_edges(path, lines):
     return edges, inner_test
 
 
-def production_sources(root, index):
+def parser_sources(root, index):
+    """One snapshot authority shared by production debt and all-code violations."""
     if index:
         paths = [p.decode() for p in git(root, "ls-files", "-z", "--", SCOPE).split(b"\0") if p]
     else:
@@ -737,12 +1130,20 @@ def production_sources(root, index):
         if not scope.is_dir():
             raise ValueError(f"missing parser root: {scope}")
         paths = [p.relative_to(root).as_posix() for p in scope.rglob("*.rs")]
+    sources = {p: read_snapshot(root, p, index) for p in sorted(paths)
+               if p.endswith(".rs") and "snapshots" not in PurePosixPath(p).parts}
+    if not sources:
+        raise ValueError("empty parser scope; cannot establish a zero-obligation baseline")
+    return sources
+
+
+def production_sources(root, index, sources=None):
+    sources = parser_sources(root, index) if sources is None else sources
+
     def is_test_file(path):
         name = PurePosixPath(path).name
         return name == "tests.rs" or name.endswith("_tests.rs")
 
-    sources = {p: read_snapshot(root, p, index) for p in sorted(paths)
-               if p.endswith(".rs") and "snapshots" not in PurePosixPath(p).parts}
     if not any(not is_test_file(p) for p in sources):
         raise ValueError("empty parser scope; cannot establish a zero-obligation baseline")
     edges = {}
@@ -806,13 +1207,22 @@ def main():
     parser.add_argument("--index", action="store_true")
     args = parser.parse_args()
     try:
-        sources = production_sources(args.root, args.index)
+        all_sources = parser_sources(args.root, args.index)
+        sources = production_sources(args.root, args.index, all_sources)
         if not sources:
             raise ValueError("empty production parser scope")
         found = [h for p, text in sources.items()
                  for h in scan_file(p, find_discards, text.splitlines())]
         counts = Counter(h.path for h in found)
+        parsed_helpers = parsed_returning_helpers(all_sources.values())
+        violations = [h for p, text in all_sources.items()
+                      for h in scan_file(p, lambda path, src: find_disposition_violations(
+                          path, src, parsed_helpers), text)]
+        for h in violations:
+            print(f"Gate H FAIL: {h.path}:{h.line}:{h.column}: {h.family} {h.symbol}")
         if args.baseline:
+            if violations:
+                return 1  # Never print a usable baseline that forgives bypasses.
             for path, count in sorted(counts.items()):
                 print(f"{path} {count}")
         elif args.list:
@@ -822,9 +1232,13 @@ def main():
                   f"snapshot {'index' if args.index else 'worktree'}")
             for family, count in sorted(Counter(h.family for h in found).items()):
                 print(f"FAMILY {family} {count}")
+            print(f"VIOLATIONS {len(violations)}; files scanned {len(all_sources)}; "
+                  f"snapshot {'index' if args.index else 'worktree'}")
+            if violations:
+                return 1
         else:
             ceilings = parse_ledger(read_snapshot(args.root, LEDGER, args.index))
-            failed = False
+            failed = bool(violations)
             for path in sorted(counts.keys() | ceilings.keys()):
                 actual, ceiling = counts[path], ceilings.get(path, 0)
                 if actual > ceiling:
@@ -839,7 +1253,7 @@ def main():
                           + (" (entry can be deleted)" if actual == 0 else ""))
             if failed:
                 return 1
-            print(f"Gate H PASS (residue: {len(found)} legacy obligations, ceiling {sum(ceilings.values())}; "
+            print(f"Gate H PASS (residue: {len(found)} mixed obligations, ceiling {sum(ceilings.values())}; "
                   f"files scanned {len(sources)}; snapshot {'index' if args.index else 'worktree'})")
     except (ValueError, OSError, CensusError, subprocess.CalledProcessError) as error:
         print(f"Gate H FAIL: {error}", file=sys.stderr)

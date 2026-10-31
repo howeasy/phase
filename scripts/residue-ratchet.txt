@@ -1,16 +1,25 @@
-# Gate H slice-1 residue syntax ceiling ledger.
+# Gate H mixed residue syntax ceiling ledger.
 # Baseline revision: 03e2ad44ebcd7eb29cd5fb5f2d9c66a1e2123484
 # Extraction: python3 -B scripts/lib/detect-residue-discards.py --baseline
-# Review: --list; 128 obligations = 101 residue bindings + 18 projections
+# Historical baseline review: --list; 128 obligations = 101 residue bindings + 18 projections
 # + 9 exact unwrap_or(TargetFilter::SelfRef|Any) defaults, across 22 files.
 # Counted helpers: parse_target, parse_target_with_ctx, parse_target_with_syntax,
 # parse_target_disjunction, parse_target_with_disjunctive_restriction,
-# parse_fight_target, parse_type_phrase_folding, parse_type_phrase_folding_with_ctx.
+# parse_fight_target. The complete folding family is parse_type_phrase_folding,
+# parse_type_phrase_folding_with_ctx, read_type_union_leg, fold_type_union,
+# parse_filter_phrase_union, parse_mass_type_union.
 # Also counted: whole-result drops (zero at baseline), reviewed context wrappers,
 # qualified/aliased calls, and syntax-helper .2 projections. Nom (rest, ())
 # helpers are NOT this helper family; their second-component drops are excluded.
 # _name bindings include debug-asserted remainders: conservative syntax risks,
 # not claims that every site loses text. Defaults likewise freeze syntax only.
+# Mixed accounting counts each explicit .waive(ResidueWaiver::Unaudited) once,
+# including supported Parsed::waive UFCS. Test-only waivers are excluded from
+# production ceilings; test-only .with_rest() bypasses are still hard failures.
+# All-code disposition violations cannot be forgiven by ceiling headroom.
+# Unmigrated target-family and exact-default obligations remain independent.
+# Phase-1 complete-family registration changes no numeric ceiling; the existing
+# cost-file headroom is not a phase-1 burn-down or transferable debt allowance.
 # Distinct match-arm alternatives count separately, including parenthesized and
 # leading-| forms: splitting an arm preserves its obligation count. Mixed arms
 # count only discarding alternatives. Overlapping recognizers count once.

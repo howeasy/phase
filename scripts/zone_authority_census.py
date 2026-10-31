@@ -299,7 +299,7 @@ def _consume_string(line: str, i: int) -> tuple[int, bool]:
     return m.end(), True
 
 
-def strip_noncode(line: str, state: ScanState) -> tuple[str, ScanState]:
+def strip_noncode(line: str, state: ScanState, *, preserve_columns: bool = False) -> tuple[str, ScanState]:
     """Return (code, state_for_the_next_line).
 
     Strings and comments are removed before ANY brace counting or pattern
@@ -317,6 +317,9 @@ def strip_noncode(line: str, state: ScanState) -> tuple[str, ScanState]:
     mishandles either does not just miss a hit: it starts a comment that eats the
     file, leaks a brace into the counter, or opens a skip region that eats the
     production code after it.
+    Opt-in preserve_columns blanks removed characters without moving surviving
+    tokens. CR/LF and Python Unicode-character positions remain source-exact;
+    the default emission and carried state remain unchanged for census callers.
     """
     # Fast path. 4 lines in 5 hold no comment and no literal, and for those the
     # scanner has nothing to do -- so it should ALLOCATE nothing: no char list,
@@ -337,6 +340,14 @@ def strip_noncode(line: str, state: ScanState) -> tuple[str, ScanState]:
     raw_hashes = state.raw_hashes
     in_string = state.in_string
     append = out.append
+    if preserve_columns:
+        emitted = 0
+
+        def append(text):
+            nonlocal emitted
+            out.append(re.sub(r"[^\r\n]", " ", line[emitted:i]))
+            out.append(text)
+            emitted = i + len(text)
 
     while i < n:
         if raw_hashes is not None:
@@ -438,6 +449,8 @@ def strip_noncode(line: str, state: ScanState) -> tuple[str, ScanState]:
         # one character and let the next slice pick up the rest of the token.
         append(ch)
         i += 1
+    if preserve_columns:
+        out.append(re.sub(r"[^\r\n]", " ", line[emitted:]))
 
     return "".join(out), ScanState(block_depth, raw_hashes, in_string)
 

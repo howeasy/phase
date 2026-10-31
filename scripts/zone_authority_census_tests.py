@@ -24,6 +24,8 @@ import unittest
 
 from zone_authority_census import (
     CensusError,
+    ScanState,
+    strip_noncode,
     TEST_SUPPORT_FILES,
     iter_production_lines,
     test_support_modules,
@@ -578,6 +580,40 @@ class HardGateTests(unittest.TestCase):
 
 
 class LegacyDefaultTests(unittest.TestCase):
+    def test_default_code_and_carried_state_are_unchanged(self):
+        sequences = (
+            (("a /* outer /* inner", " */ tail */ b"),
+             ("a ", " b"), (ScanState(2), ScanState())),
+            (('let s = br##"{ #[cfg(test)]', '}"##; after();'),
+             ("let s = ", "; after();"), (ScanState(raw_hashes=2), ScanState())),
+            (('let s = c"{ // \\' , '#[cfg(test)] }"; after();'),
+             ("let s = ", "; after();"), (ScanState(in_string=True), ScanState())),
+            (("let s: &'a str = \"x\"; let c = '}'; after();",),
+             ("let s: &'a str = ; let c = ; after();",), (ScanState(),)),
+            (('a /* nested /* c */ end */ b"str" c"str" r"x" br"x" cr"x"; after();',),
+             ("a      ; after();",), (ScanState(),)),
+        )
+        for lines, expected_code, expected_states in sequences:
+            state = ScanState()
+            for line, code, next_state in zip(lines, expected_code, expected_states):
+                with self.subTest(line=line):
+                    actual, state = strip_noncode(line, state)
+                    self.assertEqual(actual, code)
+                    self.assertEqual(state, next_state)
+
+    def test_cr733_attributed_mutations_preserve_default_membership(self):
+        src = ('fn before() { self.hand.push_back(before); }\n'
+               '#[cfg(test)]\nfn hidden() { self.hand.push_back(hidden); }\n'
+               '#[cfg(test)]\nmod tests {\nfn t() { self.hand.push_back(inline); }\n}\n'
+               'fn after() {\nlet s = r#"{ #[cfg(test)]\n'
+               '} fake"#;\nself.hand.push_back(after);\n}')
+        for opt_in in (False, True):
+            code = code_of(src, skip_cfg_test_items=opt_in)
+            self.assertIn("self.hand.push_back(before)", code)
+            self.assertIn("self.hand.push_back(after)", code)
+            self.assertNotIn("self.hand.push_back(inline)", code)
+            self.assertEqual("self.hand.push_back(hidden)" in code, not opt_in)
+
     def test_default_retains_test_attributed_function_for_existing_censuses(self):
         src = "#[cfg(test)]\nfn hidden() { add_to_zone(test_field); }\nfn witness() { add_to_zone(production); }"
         code = code_of(src)
@@ -670,6 +706,32 @@ fn witness() { add_to_zone(production); }
         code = code_of(src, skip_cfg_test_items=True)
         self.assertNotIn("add_to_zone(hidden)", code)
         self.assertIn("add_to_zone(production)", code)
+
+class ColumnPreservationTests(unittest.TestCase):
+    def test_opt_in_preserves_original_character_coordinates(self):
+        sources = (
+            'let é = "prefix"; /* gap */ parse_type_phrase_folding(i);\r\n',
+            'let s = br##"{ fake\n} /* fake */"##; p.with_rest().0;\n',
+            'let s = c"fake \\\n} #[cfg(test)]"; p.with_rest().0;\n',
+            "/* nested /* x */\nend */ let x: &'a str = i; p.with_rest().0;\n",
+            "let c = '}'; let s = cr\"fake\"; p.with_rest().0; // fake\n",
+        )
+        for source in sources:
+            state = ScanState()
+            output = []
+            for line in source.splitlines(keepends=True):
+                code, state = strip_noncode(line, state, preserve_columns=True)
+                self.assertEqual(len(code), len(line))
+                self.assertEqual([i for i, ch in enumerate(code) if ch in "\r\n"],
+                                 [i for i, ch in enumerate(line) if ch in "\r\n"])
+                output.append(code)
+            actual = "".join(output)
+            token = "parse_type_phrase_folding" if "parse_type_phrase_folding" in source else "with_rest"
+            with self.subTest(source=source):
+                self.assertEqual(actual.index(token), source.index(token))
+                self.assertNotIn("fake", actual)
+                self.assertEqual(state, ScanState())
+
 
 
 if __name__ == "__main__":

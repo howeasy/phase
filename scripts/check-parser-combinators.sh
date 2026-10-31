@@ -189,7 +189,9 @@ if [ "$arch_fail" -ne 0 ]; then
 fi
 printf 'Gate G PASS (router/grant architecture: strict router vs permissive grant boundary intact)\n'
 
-# (H) Selected helper-result discard syntax: whole-tree, snapshot-owned ceiling.
+# (H) Snapshot-owned production mixed debt: legacy helper/default discards plus
+# explicit Unaudited waivers. All executable parser code (including tests) also
+# has zero-tolerance disposition enforcement, independent of ceiling headroom.
 # Use the executing tooling; never execute arbitrary staged detector code.
 RESIDUE_DETECTOR="$SCRIPT_DIR/lib/detect-residue-discards.py"
 RESIDUE_TESTS="$SCRIPT_DIR/lib/detect_residue_discards_tests.py"

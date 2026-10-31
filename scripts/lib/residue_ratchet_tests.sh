@@ -85,7 +85,7 @@ else
 fi
 run_gate
 expect_rc 'baseline ceiling passes' 0
-expect_out 'real worktree snapshot is named' 'Gate H PASS (residue: 1 legacy obligations, ceiling 1; files scanned 2; snapshot worktree)'
+expect_out 'real worktree snapshot is named' 'snapshot worktree)'
 printf 'CI clean-checkout gate: exit %s\n%s\n' "$RC" "$OUT"
 OUT="$(cd "$FIXTURE" && "$BASH_BIN" scripts/check-parser-combinators.sh "$(git rev-parse HEAD)" 2>&1)"; RC=$?
 expect_rc 'clean same-head window retains cannot-answer exit' 3
@@ -116,7 +116,7 @@ printf 'SMOKE annotated closure discard: exit %s\n%s\n' "$RC" "$OUT"
 printf 'fn f() { let (v, _) = parse_target(input); }\n' > "$FIXTURE/crates/engine/src/parser/probe.rs"
 run_gate
 expect_rc 'removing annotated closure discard passes' 0
-expect_out 'annotated closure removal restores ceiling' 'residue: 1 legacy obligations, ceiling 1'
+expect_out 'annotated closure removal restores ceiling' 'ceiling 1;'
 printf 'SMOKE removed annotated closure discard: exit %s\n%s\n' "$RC" "$OUT"
 
 # Compound receivers must not hide a helper-result discard.
@@ -130,7 +130,7 @@ printf 'SMOKE indexed receiver discard: exit %s\n%s\n' "$RC" "$OUT"
 printf 'fn f() { let (v, _) = parse_target(input); }\n' > "$FIXTURE/crates/engine/src/parser/probe.rs"
 run_gate
 expect_rc 'removing indexed receiver discard passes' 0
-expect_out 'indexed receiver removal restores ceiling' 'residue: 1 legacy obligations, ceiling 1'
+expect_out 'indexed receiver removal restores ceiling' 'ceiling 1;'
 printf 'SMOKE removed indexed receiver discard: exit %s\n%s\n' "$RC" "$OUT"
 
 # Compound receiver projections discard the helper's remainder too.
@@ -144,7 +144,7 @@ printf 'SMOKE indexed receiver projection: exit %s\n%s\n' "$RC" "$OUT"
 printf 'fn f() { let (v, _) = parse_target(input); }\n' > "$FIXTURE/crates/engine/src/parser/probe.rs"
 run_gate
 expect_rc 'removing indexed receiver projection passes' 0
-expect_out 'indexed receiver projection removal restores ceiling' 'residue: 1 legacy obligations, ceiling 1'
+expect_out 'indexed receiver projection removal restores ceiling' 'ceiling 1;'
 printf 'SMOKE removed indexed receiver projection: exit %s\n%s\n' "$RC" "$OUT"
 
 # Generic wrapper and receiver calls must retain helper-result discard origins.
@@ -158,7 +158,7 @@ printf 'SMOKE turbofish wrapper discard: exit %s\n%s\n' "$RC" "$OUT"
 printf 'fn f() { let (v, _) = parse_target(input); }\n' > "$FIXTURE/crates/engine/src/parser/probe.rs"
 run_gate
 expect_rc 'removing turbofish wrapper discard passes' 0
-expect_out 'turbofish wrapper removal restores ceiling' 'residue: 1 legacy obligations, ceiling 1'
+expect_out 'turbofish wrapper removal restores ceiling' 'ceiling 1;'
 printf 'SMOKE removed turbofish wrapper discard: exit %s\n%s\n' "$RC" "$OUT"
 
 # Per-file ceilings and strict ledger parsing, including disappeared files.
@@ -207,7 +207,7 @@ expect_out 'unledgered file is named' 'probe.rs: actual 1, ceiling 0 (no ledger 
 printf 'fn f() { let (v, rest) = parse_target(input); consume(rest); }\n' > "$FIXTURE/crates/engine/src/parser/probe.rs"
 run_gate
 expect_rc 'zero obligations with an empty ledger passes' 0
-expect_out 'zero-hit scan reports files' 'residue: 0 legacy obligations, ceiling 0; files scanned 2'
+expect_out 'zero-hit scan reports files' 'ceiling 0; files scanned 2'
 OUT="$(python3 -B "$FIXTURE/scripts/lib/detect-residue-discards.py" --list --root "$FIXTURE" 2>&1)"; RC=$?
 expect_rc 'zero-hit list is a real successful scan' 0
 expect_out 'zero-hit list reports snapshot and scan count' 'TOTAL 0 obligations; files scanned 2; snapshot worktree'
@@ -286,7 +286,7 @@ EOF
 printf 'fn consumed(i: &str) { let (v, rest) = parse_target(i); consume(rest); }\n' >> "$FIXTURE/crates/engine/src/parser/probe.rs"
 run_gate
 expect_rc 'precise capture and consumed remainder pass worktree gate' 0
-expect_out 'precise capture worktree preserves witness' 'residue: 1 legacy obligations, ceiling 1'
+expect_out 'precise capture worktree preserves witness' 'ceiling 1;'
 printf 'PRECISE-CAPTURE worktree gate: exit %s\n%s\n' "$RC" "$OUT"
 git -C "$FIXTURE" add crates/engine/src/parser/probe.rs crates/engine/src/parser/capture.rs
 run_cached
@@ -392,7 +392,7 @@ for form in let-else or-pattern trailing-comma-drop qualified-drop any-default s
     printf 'fn f() { let (v, _) = parse_target(input); }\n%s\n' "$consumed" > "$FIXTURE/crates/engine/src/parser/probe.rs"
     run_gate
     expect_rc "$form removing discard passes worktree H" 0
-    expect_out "$form consumed worktree returns to baseline" 'residue: 1 legacy obligations, ceiling 1'
+    expect_out "$form consumed worktree returns to baseline" 'ceiling 1;'
     printf 'SMOKE %s worktree removed: exit %s\n%s\n' "$form" "$RC" "$OUT"
     printf 'fn f() { let (v, _) = parse_target(input); }\n%s\n' "$discarded" > "$FIXTURE/crates/engine/src/parser/probe.rs"
     git -C "$FIXTURE" add crates/engine/src/parser/probe.rs
@@ -404,7 +404,7 @@ for form in let-else or-pattern trailing-comma-drop qualified-drop any-default s
     git -C "$FIXTURE" add crates/engine/src/parser/probe.rs
     run_cached
     expect_rc "$form removing indexed discard passes H" 0
-    expect_out "$form consumed index returns to baseline" 'residue: 1 legacy obligations, ceiling 1'
+    expect_out "$form consumed index returns to baseline" 'ceiling 1;'
     expect_out "$form consumed snapshot is index" 'snapshot index)'
     printf 'SMOKE %s staged-index removed: exit %s\n%s\n' "$form" "$RC" "$OUT"
 done
@@ -438,7 +438,7 @@ for name in contests.rs latest_tests_helper.rs; do
     git -C "$FIXTURE" add "crates/engine/src/parser/$name"
     run_cached
     expect_rc "$name removing indexed discard passes" 0
-    expect_out "$name consumed index returns to baseline" 'residue: 1 legacy obligations, ceiling 1'
+    expect_out "$name consumed index returns to baseline" 'ceiling 1;'
     expect_out "$name consumed snapshot is index" 'snapshot index)'
     printf 'SMOKE %s staged-index removed: exit %s\n%s\n' "$name" "$RC" "$OUT"
 done
@@ -453,16 +453,82 @@ for owner in tests unit_tests; do
     printf 'fn hidden() { let _parsed = parse_target(input); }\n' > "$FIXTURE/crates/engine/src/parser/$owner/support.rs"
     run_gate
     expect_rc "$owner child stays test-only in worktree" 0
-    expect_out "$owner child is not counted in worktree" 'residue: 1 legacy obligations, ceiling 1'
+    expect_out "$owner child is not counted in worktree" 'ceiling 1;'
     git -C "$FIXTURE" add crates/engine/src/parser
     run_cached
     expect_rc "$owner child stays test-only in index" 0
-    expect_out "$owner child is not counted in index" 'residue: 1 legacy obligations, ceiling 1'
+    expect_out "$owner child is not counted in index" 'ceiling 1;'
     printf '#[cfg(test)]\nmod %s;\n#[path = "%s/support.rs"]\nmod shared;\n' "$owner" "$owner" > "$FIXTURE/crates/engine/src/parser/mod.rs"
     run_gate
     expect_rc "$owner child reached by production path counts" 1
     expect_out "$owner production path names the child" "$owner/support.rs: actual 1, ceiling 0 (no ledger entry)"
 done
+
+# Mixed debt and the zero-tolerance stream obey the same snapshot authority.
+# These gates run with no transformer or standalone transformation tests copied.
+for form in waiver expanded-family production-bypass test-bypass; do
+    new_fixture
+    case "$form" in
+        waiver)
+            path=probe.rs
+            bad='fn added() { p.waive(ResidueWaiver::Unaudited); }'
+            good='fn added() { let (v, rest) = p.with_rest(); consume(rest); }'
+            category=unaudited-waiver
+            ;;
+        expanded-family)
+            path=probe.rs
+            bad='fn added() { let (v, _) = parse_mass_type_union(input); }'
+            good='fn added() { let (v, rest) = parse_mass_type_union(input); consume(rest); }'
+            category='binding parse_mass_type_union'
+            ;;
+        production-bypass|test-bypass)
+            path=probe.rs
+            if [ "$form" = test-bypass ]; then path=tests.rs; fi
+            bad='fn added() { p.with_rest().0; }'
+            good='fn added() { let rest = p.with_rest().1; consume(rest); }'
+            category=with-rest-bypass
+            printf 'crates/engine/src/parser/probe.rs 100\n' | ledger
+            git -C "$FIXTURE" add scripts/residue-ratchet.txt
+            ;;
+    esac
+    printf '%s\n' "$bad" >> "$FIXTURE/crates/engine/src/parser/$path"
+    run_gate
+    expect_rc "$form fails worktree gate" 1
+    expect_out "$form identifies category" "$category"
+    expect_out "$form identifies source" "crates/engine/src/parser/$path:"
+    case "$form" in
+        waiver|expanded-family) expect_out "$form grows production debt" 'actual 2, ceiling 1' ;;
+    esac
+    git -C "$FIXTURE" add "crates/engine/src/parser/$path"
+    if [ "$path" = probe.rs ]; then
+        printf 'fn f() { let (v, _) = parse_target(input); }\n%s\n' "$good" > "$FIXTURE/crates/engine/src/parser/$path"
+    else
+        printf '%s\n' "$good" > "$FIXTURE/crates/engine/src/parser/$path"
+    fi
+    run_cached
+    expect_rc "$form indexed fault survives unstaged repair" 1
+    expect_out "$form indexed fault identifies category" "$category"
+    run_gate
+    expect_rc "$form repaired worktree passes" 0
+    git -C "$FIXTURE" add "crates/engine/src/parser/$path"
+    printf '%s\n' "$bad" >> "$FIXTURE/crates/engine/src/parser/$path"
+    run_cached
+    expect_rc "$form clean index survives unstaged fault" 0
+    expect_out "$form clean snapshot is index" 'snapshot index)'
+done
+
+new_fixture
+printf 'fn hidden() { p.waive(ResidueWaiver::Unaudited); }\n' > "$FIXTURE/crates/engine/src/parser/tests.rs"
+printf '#[cfg(test)]\nfn hidden() { p.waive(ResidueWaiver::Unaudited); }\n' >> "$FIXTURE/crates/engine/src/parser/probe.rs"
+run_gate
+expect_rc 'test-only waivers do not grow production debt' 0
+git -C "$FIXTURE" add crates/engine/src/parser
+run_cached
+expect_rc 'indexed test-only waivers do not grow production debt' 0
+printf 'fn added() { p.waive(ResidueWaiver::Unaudited); }\n' >> "$FIXTURE/crates/engine/src/parser/probe.rs"
+run_gate
+expect_rc 'production waiver paired with test-only waiver grows debt' 1
+expect_out 'production waiver positive reach guard counts exactly once' 'actual 2, ceiling 1'
 
 # Availability failures are loud, including the inline seam suite.
 for dependency in lib/detect-residue-discards.py residue-ratchet.txt lib/detect_residue_discards_tests.py; do

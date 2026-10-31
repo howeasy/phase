@@ -6,6 +6,8 @@ import importlib.util
 import tempfile
 import unittest
 from pathlib import Path
+import subprocess
+import sys
 from contextlib import redirect_stderr
 from io import StringIO
 from unittest.mock import patch
@@ -1107,6 +1109,214 @@ class DiscardTests(unittest.TestCase):
             sources = rd.production_sources(root, False)
             found = [h for path, text in sources.items() for h in rd.find_discards(path, text.splitlines())]
             self.assertEqual(sorted(Path(h.path).name for h in found), ["production.rs", "retained.rs"])
+
+
+class DispositionTests(unittest.TestCase):
+    REASON = "crate::parser::parsed::ResidueWaiver::Unaudited"
+    FAMILY = ("parse_type_phrase_folding", "parse_type_phrase_folding_with_ctx",
+              "read_type_union_leg", "fold_type_union", "parse_filter_phrase_union",
+              "parse_mass_type_union")
+
+    def violations(self, src):
+        return rd.find_disposition_violations("crates/engine/src/parser/probe.rs", src)
+
+    def test_g1_complete_family_registration(self):
+        for helper in self.FAMILY:
+            for expr in (f"{helper}(i)", f"crate::target::{helper}(i)",
+                         f"ctx.with_player_scope(scope, |s| {{ {helper}(i, s) }})"):
+                with self.subTest(expr=expr):
+                    self.assertEqual([(h.family, h.symbol) for h in hits(
+                        f"let (v, _) = {expr};")], [("binding", helper)])
+            with self.subTest(alias=helper):
+                self.assertEqual([h.symbol for h in hits(
+                    f"use crate::target::{helper} as read;\nlet (v, _) = read(i);")], [helper])
+        self.assertEqual(hits("let (rest, _) = parse_target_demonstrative_subject(i)?;"), [])
+
+    def test_g2_waivers_count_once_independent_of_receiver(self):
+        for receiver in ("p", "(p)", "{ p }", "Parsed::new(f(), i)",
+                         "parse_type_phrase_folding(i)"):
+            for expr in (f"{receiver}.waive(\n{self.REASON},\n)",
+                         f"Parsed::waive({receiver}, {self.REASON},)"):
+                for template in ("EXPR;", "let _ = EXPR;", "drop(EXPR);", "let v = EXPR;"):
+                    src = template.replace("EXPR", expr)
+                    with self.subTest(src=src):
+                        self.assertEqual([(h.family, h.symbol) for h in hits(src)],
+                                         [("unaudited-waiver", "waive")])
+                        self.assertEqual(self.violations(src), [])
+        mixed = ("let (v, _) = parse_target(i); x.unwrap_or(TargetFilter::Any);"
+                 f"p.waive({self.REASON});")
+        self.assertCountEqual([h.family for h in hits(mixed)],
+                              ["binding", "default", "unaudited-waiver"])
+        self.assertEqual(hits('let waive = 1; // p.waive(reason)\n'
+                              'let text = "p.waive(reason)";'), [])
+
+    def test_g2_invalid_reasons_and_indirect_dispositions_fail_closed(self):
+        for expr in ("p.waive(reason)", "p.waive(Unaudited)",
+                     "p.waive(Reason::Unaudited)", "p.waive(ResidueWaiver::Other)",
+                     "Parsed::waive(p, reason)", "<Parsed as Trait>::waive(p, reason)",
+                     "crate::Parsed::waive(p, ResidueWaiver::Unaudited)",
+                     "let method = Parsed::waive;", "let method = p.with_rest;",
+                     "let method = Parsed::with_rest;", "p.with_rest(unexpected)"):
+            with self.subTest(expr=expr):
+                self.assertTrue(self.violations(expr + ";"))
+        self.assertEqual(self.violations(
+            "let with_rest = 1; consume(with_rest); use thing::with_rest;"
+            "let value = unrelated::Parsed; with_rest(); let range = ..with_rest();"), [])
+
+    def test_g3_expression_tail_retention_pairs(self):
+        contexts = (
+            "EXPR", "(EXPR)", "{ observe(); EXPR }",
+            "match mode { Legacy => EXPR, Strict => strict(i) }",
+            "match mode { Legacy => { observe(); EXPR } Strict => strict(i) }",
+            "if cond { EXPR } else { strict(i) }",
+            "if cond { strict(i) } else { EXPR }",
+            "ctx.with_player_antecedents(|s| EXPR)",
+            "ctx.with_player_scope(scope, |s| { observe(); EXPR })",
+            "ctx.with_player_antecedents(|s| -> (Filter, &str) { EXPR })",
+            "{ match mode { Legacy => ctx.with_player_scope(scope, |s| "
+            "{ if cond { EXPR } else { strict(i) } }), Strict => strict(i) } }",
+        )
+        for context in contexts:
+            for residue in ("rest", "_", "_rest"):
+                src = "let (v, " + residue + ") = " + context.replace(
+                    "EXPR", "p.with_rest()") + "; consume(v);"
+                with self.subTest(src=src):
+                    self.assertEqual(len(self.violations(src)), 0 if residue == "rest" else 1)
+
+    def test_g3_tuple_consumers_and_discard_siblings(self):
+        legal = ("let rest = p.with_rest().1;",
+                 "let (v, rest) = Parsed::with_rest(p);",
+                 "let rest = (p.with_rest()).1;",
+                 "let rest = { p.with_rest() }.1;",
+                 "let (v, rest, ..) = p.with_rest();",
+                 "if let Some((v, rest)) = Some(p.with_rest()) {}",
+                 "let Some((v, rest)) = Some(p.with_rest()) else { return; };",
+                 "match p.with_rest() { (A, rest) | (B, rest) if keep(rest) => (), }",
+                 "assert_eq!(p.with_rest(), (v, i));",
+                 "assert_eq!((v, i), p.with_rest(), message);",
+                 "fn enclosing() -> (Filter, &str) { p.with_rest() }",
+                 "fn enclosing() -> (Filter, &str) { return p.with_rest(); }")
+        illegal = ("p.with_rest().0;", "let _ = p.with_rest();",
+                   "(p.with_rest()).0;", "drop((p.with_rest()).1);",
+                   "let _unused = p.with_rest();", "let (v, ..) = p.with_rest();",
+                   "if let Some((v, _)) = Some(p.with_rest()) {}",
+                   "let Some((v, _)) = Some(p.with_rest()) else { return; };",
+                   "match p.with_rest() { (A, rest) | (B, _) if keep() => (), }",
+                   "drop(p.with_rest());", "p.with_rest();",
+                   "let pair = p.with_rest(); pair.0;",
+                   "let pair = p.with_rest(); let (v, _) = pair;",
+                   "unknown(p.with_rest());",
+                   "unregistered(|s| p.with_rest());")
+        for src in legal:
+            with self.subTest(legal=src):
+                self.assertEqual(self.violations(src), [])
+        for src in illegal:
+            with self.subTest(illegal=src):
+                self.assertTrue(self.violations(src))
+
+    def test_g4_parsed_origin_disposal_aliases_and_observation(self):
+        declaration = ("fn parse_type_phrase_folding(i: &str) -> Parsed<'_, Filter> "
+                       "{ Parsed::new(filter, i) }\n")
+        for origin in ("Parsed::new(filter, i)", "parse_type_phrase_folding(i)",
+                       "ctx.with_player_antecedents(|s| parse_type_phrase_folding(i))"):
+            for body in ("let _ = ORIGIN;", "drop(ORIGIN);", "ORIGIN;",
+                         "let p = ORIGIN;", "let p = ORIGIN; let alias = (p); drop(alias);",
+                         "let p = ORIGIN; { let q = p; }",
+                         "let mut p = ORIGIN; p = other;",
+                         "let p = ORIGIN; let p = other;",
+                         f"let p = ORIGIN; fn inner(p: Parsed<'_, Filter>) "
+                         f"{{ p.waive({self.REASON}); }}"):
+                src = declaration + "fn f() { " + body.replace("ORIGIN", origin) + " }"
+                with self.subTest(src=src):
+                    self.assertTrue(self.violations(src))
+            for body in (f"let p = ORIGIN; p.waive({self.REASON});",
+                         "let p = ORIGIN; let (v, rest) = p.with_rest();",
+                         f"let p = ORIGIN; #[cfg(debug_assertions)] "
+                         f"assert!(p.remainder().is_empty()); p.waive({self.REASON});",
+                         f"let p = ORIGIN; {{ let p = other; consume(p); }} "
+                         f"p.waive({self.REASON});",
+                         "let p = ORIGIN; let alias = p; let (v, rest) = alias.with_rest();"):
+                src = declaration + "fn f() { " + body.replace("ORIGIN", origin) + " }"
+                with self.subTest(src=src):
+                    self.assertEqual(self.violations(src), [])
+        self.assertEqual(self.violations(
+            "fn f() { let _ = parse_type_phrase_folding(i); }"), [])
+        self.assertEqual([h.family for h in hits(
+            "fn f() { let _ = parse_type_phrase_folding(i); }")], ["whole-result"])
+
+    def run_cli(self, files, mode="check"):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for name, text in files.items():
+                path = root / rd.SCOPE / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(text.encode("utf-8"))
+            (root / "scripts").mkdir()
+            (root / rd.LEDGER).write_text(f"{rd.SCOPE}/production.rs 100\n")
+            # No transformer files are copied or imported.
+            return subprocess.run([sys.executable, "-B", str(Path(rd.__file__)),
+                                   "--" + mode, "--root", str(root)],
+                                  text=True, capture_output=True)
+
+    def test_g5_exact_original_column_and_legal_control(self):
+        files = {"production.rs": "fn f() { let (v, _) = parse_target(i); }\n",
+                 "tests.rs": "fn witness(p: Parsed<'_, Filter>) {\n"
+                             "    /* gap */ p.with_rest().0;\n}\n"}
+        for mode in ("list", "check", "baseline"):
+            result = self.run_cli(files, mode)
+            with self.subTest(mode=mode):
+                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                self.assertIn(f"{rd.SCOPE}/tests.rs:2:17", result.stdout + result.stderr)
+                self.assertIn("with-rest-bypass", result.stdout + result.stderr)
+                if mode == "baseline":
+                    self.assertNotIn(f"{rd.SCOPE}/production.rs 1", result.stdout)
+        files["tests.rs"] = files["tests.rs"].replace(
+            "p.with_rest().0;", "let rest = p.with_rest().1;")
+        result = self.run_cli(files)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_g5_unicode_continuation_and_original_columns(self):
+        src = ('fn f() {\r\nlet é = "p.with_rest().0"; /* gap */ p.with_rest().0;\r\n'
+               'let s = "fake \\\r\np.with_rest().0"; p.with_rest().0;\r\n}')
+        found = self.violations(src)
+        self.assertEqual([(v.line, v.column) for v in found], [(2, 40), (4, 21)])
+
+    def test_g5_all_code_discovery_and_waiver_exclusion(self):
+        waiver = f"fn f() {{ p.waive({self.REASON}); }}\n"
+        files = {"mod.rs": '#[cfg(test)]\nmod support;\n#[cfg(test)]\nmod tests;\n'
+                           '#[path = "tests/shared.rs"]\nmod shared;\n',
+                 "production.rs": waiver,
+                 "tests.rs": "mod child;\n" + waiver,
+                 "tests/child.rs": waiver,
+                 "tests/shared.rs": "fn keep() {}",
+                 "unit_tests.rs": waiver, "support.rs": waiver,
+                 "inner.rs": "#![cfg(test)]\n" + waiver,
+                 "contests.rs": "fn keep() {}"}
+        result = self.run_cli(files, "list")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("TOTAL 1 obligations", result.stdout)
+        for name in ("tests.rs", "tests/child.rs", "unit_tests.rs", "support.rs",
+                     "inner.rs", "tests/shared.rs", "contests.rs"):
+            changed = dict(files)
+            changed[name] += "fn bad() { p.with_rest().0; }\n"
+            result = self.run_cli(changed)
+            with self.subTest(name=name):
+                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                self.assertIn(f"{rd.SCOPE}/{name}:", result.stdout + result.stderr)
+                self.assertIn("with-rest-bypass", result.stdout + result.stderr)
+
+    def test_g4_snapshot_wide_parsed_declarations(self):
+        result = self.run_cli({
+            "production.rs": "fn f() { drop(parse_type_phrase_folding(i)); }",
+            "producer.rs": "fn parse_type_phrase_folding(i: &str) -> Parsed<'_, Filter> "
+                           "{ Parsed::new(filter, i) }"})
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("parsed-disposal", result.stdout + result.stderr)
+
+    def test_g4_qualified_parsed_return_declaration(self):
+        src = ("fn parse_mass_type_union(i: &str) -> crate::parser::parsed::Parsed<'_, Filter> "
+               "{ Parsed::new(filter, i) }\nfn f() { drop(parse_mass_type_union(i)); }")
+        self.assertTrue(self.violations(src))
 
 
 if __name__ == "__main__":
