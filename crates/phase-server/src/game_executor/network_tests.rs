@@ -4377,6 +4377,51 @@ fn codec_lifecycle_mixed_views_and_completion() {
                 let session = crate::lock_session(&table.app.sessions, &table.key.game_code)
                     .await
                     .unwrap();
+                // All opening decisions are complete. Require a single post-action
+                // actor so wrong-audience checks cannot pass in a simultaneous decision.
+                // Derive authority from live state, not the command submitter or builder.
+                let post_action_actors = server_core::acting_players(&session.state);
+                assert_eq!(post_action_actors.len(), 1, "single-actor audience fixture");
+                let acting_reply = &replies[usize::from(post_action_actors[0].0)];
+                assert!(
+                    !acting_reply.value["data"]["legal_actions"]
+                        .as_array()
+                        .unwrap()
+                        .is_empty(),
+                    "delivered post-action actor has legal actions"
+                );
+                for (seat, reply) in replies.iter().enumerate() {
+                    assert_eq!(
+                        reply.value["data"]["state_revision"], session.state_revision,
+                        "seat {seat} audience matches the resulting authoritative state"
+                    );
+                    if post_action_actors.contains(&PlayerId(seat as u8)) {
+                        continue;
+                    }
+                    assert!(
+                        reply.value["data"]["legal_actions"]
+                            .as_array()
+                            .unwrap()
+                            .is_empty(),
+                        "non-acting seat {seat} must not receive legal actions"
+                    );
+                    assert_eq!(
+                        reply.value["data"]["auto_pass_recommended"], false,
+                        "non-acting seat {seat} must not receive an auto-pass recommendation"
+                    );
+                    for key in [
+                        "end_continuous_effect_offers",
+                        "mana_payment_shortcut_actions",
+                        "spell_costs",
+                        "legal_actions_by_object",
+                        "activation_block_reasons",
+                    ] {
+                        assert!(
+                            reply.value["data"].get(key).is_none(),
+                            "non-acting seat {seat} must omit {key}"
+                        );
+                    }
+                }
                 let id = session.state.players[0].hand[0];
                 let object_key = id.0.to_string();
                 assert_eq!(
