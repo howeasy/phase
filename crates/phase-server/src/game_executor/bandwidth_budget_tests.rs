@@ -124,8 +124,8 @@
 //!
 //! One optimized smoke on Linux x86_64, Intel Core i5-12400T, rustc
 //! 1.97.0-nightly (0febdbab2 2026-04-18), 187 publications/recipient, measured:
-//! These are single-run observations, not the pending three-run acceptance
-//! report, deployment predictions, tolerances or timing/savings targets.
+//! These are single-run smoke observations, distinct from the three-run acceptance
+//! report, and are not deployment predictions, tolerances or timing/savings targets.
 //!
 //! | Lane | Encoding | Six-owner payload bytes | Full / Delta | Mean prepare Full / Delta (us) |
 //! | --- | --- | ---: | ---: | ---: |
