@@ -1660,5 +1660,72 @@ class RoundSixTests(unittest.TestCase):
                     self.assertIn("unsupported-scope", [h.family for h in found], found)
 
 
+class RoundSevenTests(unittest.TestCase):
+    PATH = "crates/engine/src/parser/probe.rs"
+    DECLARATIONS = (
+        "fn parse_type_phrase_folding(i: &str) -> Parsed<'_, Filter> "
+        "{ Parsed::new(filter, i) }\n"
+        "fn parse_type_phrase_folding_with_ctx(i: &str, ctx: &Ctx) -> Parsed<'_, Filter> "
+        "{ Parsed::new(filter, i) }\n")
+
+    def test_raw_constructor_disposal_and_macro_origin(self):
+        for constructor in ("Parsed::new", "Parsed::r#new",
+                            "crate::Parsed::<Filter>::r#new"):
+            for template, category in (
+                    ("fn f() { let _ = EXPR; }", "parsed-disposal"),
+                    ("fn f() { discard! { return EXPR } }", "unsupported-scope")):
+                with self.subTest(constructor=constructor, template=template):
+                    source = template.replace("EXPR", constructor + "(filter, i)")
+                    found = rd.find_disposition_violations(self.PATH, source)
+                    self.assertIn(category, [h.family for h in found], found)
+            source = f"fn f() {{ {constructor}(filter, i).waive(ResidueWaiver::Unaudited); }}"
+            self.assertEqual(rd.find_disposition_violations(self.PATH, source), [])
+
+    def test_raw_dispositions_and_macro_names_refuse(self):
+        for method, arguments in (("with_rest", ""), ("waive", "ResidueWaiver::Unaudited"),
+                                  ("remainder", "")):
+            source = f"fn f() {{ p.r#{method}({arguments}); }}"
+            found = rd.find_disposition_violations(self.PATH, source)
+            self.assertIn("unsupported-scope", [h.family for h in found], found)
+        for name in ("d", "r#d"):
+            source = ("fn f() { macro_rules! " + name
+                      + " { () => { fn g() -> Parsed<'a, Filter> "
+                      "{ return Parsed::new(filter, i); } }; } }")
+            found = rd.find_disposition_violations(self.PATH, source)
+            self.assertIn("unsupported-scope", [h.family for h in found], found)
+
+    def test_nested_returns_do_not_consume_function_results(self):
+        for statement in (
+                "xs.iter().map(|x| { return parse_type_phrase_folding(x); }).count();",
+                "let _ = ctx.with_player_antecedents(|scoped| "
+                "{ return parse_type_phrase_folding_with_ctx(rest, scoped); });",
+                "let _ = (move || { return Parsed::new(f, i); })();",
+                "let _fut = async { return parse_type_phrase_folding(i); };",
+                "let _fut = async move { return parse_type_phrase_folding(i); };",
+                "let g = (|| { return parse_type_phrase_folding(i).with_rest(); })().0;",
+                "let g = async move || { return parse_type_phrase_folding(i); };",
+                "let g = |x: &str| -> Parsed<'_, Filter> "
+                "{ if ready { return parse_type_phrase_folding(x); } unreachable!() };"):
+            with self.subTest(statement=statement):
+                source = self.DECLARATIONS + "fn p(i: &str) -> (A, B) { " + statement + " (a, b) }"
+                found = rd.find_disposition_violations(self.PATH, source)
+                self.assertIn("unsupported-scope", [h.family for h in found], found)
+                tail = source.replace("return ", "").replace("; }", " }")
+                self.assertTrue(rd.find_disposition_violations(self.PATH, tail), tail)
+        for body in ("return parse_type_phrase_folding(i);",
+                     "if ready { return parse_type_phrase_folding(i); } parse_type_phrase_folding(i)"):
+            source = self.DECLARATIONS + "fn p(i: &str) -> Parsed<'_, Filter> { " + body + " }"
+            self.assertEqual(rd.find_disposition_violations(self.PATH, source), [])
+        source = "fn p() -> (A, B) { return p.with_rest(); }"
+        self.assertEqual(rd.find_disposition_violations(self.PATH, source), [])
+
+    def test_macro_return_cannot_consume_nonorigin_with_rest(self):
+        source = "fn f() -> (A, B) { m! { return p.with_rest() } }"
+        found = rd.find_disposition_violations(self.PATH, source)
+        self.assertIn("with-rest-bypass", [h.family for h in found], found)
+        control = "fn f() -> (A, B) { return p.with_rest(); }"
+        self.assertEqual(rd.find_disposition_violations(self.PATH, control), [])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

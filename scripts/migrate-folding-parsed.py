@@ -12,6 +12,7 @@ identifiers, captures/width refs, cooked unicode/hex escapes in visible format
 arguments and configuration-only reads. Capture checks decode every visible
 literal regardless of macro name. Ambient test-module configuration is not a
 read guard.
+Known limits and accepted/refused source shapes: see the Gate H module docstring.
 """
 from __future__ import annotations
 
@@ -546,7 +547,10 @@ def plan_source(path, source):
                 end = ex.end(i + 1, {";", "}"})
                 ids = flowing(i + 1, end)
                 fn = owner(i)
-                if ids and fn and any(v[j:j + 3] == ["-", ">", "("] for j in range(fn[0], fn[1])):
+                if ids and not ex.return_in_function_body(i):
+                    reject(i, "unsupported family result consumer")
+                    actions.update((key, "refused") for key in ids)
+                elif ids and fn and any(v[j:j + 3] == ["-", ">", "("] for j in range(fn[0], fn[1])):
                     assign(ids, "retain", "tuple-return")
             if token == ";":
                 start = i - 1

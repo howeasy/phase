@@ -4,7 +4,7 @@
 This is bounded syntactic enforcement, not linear typing or arbitrary dataflow.
 Production debt combines legacy helper/default discards and explicit Unaudited
 waivers. A separate all-code stream rejects disposition bypasses, including tests,
-independently of ceilings. Unknown disposition syntax fails closed.
+independently of ceilings. Recognised unsupported disposition syntax fails closed.
 Tracked-name grammar (shared with migrate-folding-parsed.py), at the binder's
 own block level only:
   G-T1: plain `let [mut] N = ORIGIN;` or `let ([mut] V, [mut] N) = F(...);`.
@@ -60,6 +60,18 @@ Semicolon-terminated bare statement blocks discard helper tails, not header
 blocks or let initializers (which retain their binding classification).
 Discovery excludes exactly tests.rs and *_tests.rs, snapshots, and modules
 proven test-only; a filename merely containing `tests` remains production.
+
+Known limits: this is bounded SYNTACTIC enforcement over tokens, not a Rust
+parser. Unusual macro forms, raw identifiers beyond those recognised, constructs
+built by macros, and closures/async blocks absent from the tree are refused where
+recognised and otherwise fail open. Review-found shapes: plain-let shadowing,
+qualified/turbofish constructors (including r#new), direct fn returns and named
+tuple retention are accepted; raw disposition methods, macro-hosted/ownerless
+origins, closure/async returns, ambiguous tracked-name reads, implicit captures,
+cooked-escape format messages, configuration-only reads and non-forwarding typed
+closures are refused. macro_rules! raw names are recognised as opaque macro trees.
+Compiler must_use diagnostics, clippy, tests and the byte-identical export are
+the backstop, not a guarantee supplied by this scanner.
 
 --list reports each path:line family symbol and scan totals; --baseline prints
 sorted ledger rows (never writes); --check validates scripts/residue-ratchet.txt.
@@ -237,7 +249,7 @@ class Expressions:
                 if v[i] == "!":
                     opened = i + 1
                     if i and v[i - 1] == "macro_rules":
-                        opened += 1  # macro_rules! name { ... }
+                        opened += 3 if v[opened:opened + 2] == ["r", "#"] else 1
                     if opened in self.pairs and v[opened] in ("(", "[", "{"):
                         self._macro_trees.append((opened, self.pairs[opened]))
                         i = self.pairs[opened]
@@ -257,6 +269,47 @@ class Expressions:
                 if v[body:body + 1] == ["{"]:
                     self._functions.append((i, body, self.pairs[body]))
         return self._functions
+
+    def return_in_function_body(self, token):
+        """A return belongs to the nearest fn, not an intervening closure/async."""
+        owner = max((body for _head, body, end in self.functions() if body < token < end),
+                    default=None)
+        if owner is None:
+            return False
+        if not hasattr(self, "_return_bodies"):
+            v = self.values
+            self._return_bodies = []
+            opaque = {i for a, b in self.macro_token_trees() for i in range(a, b + 1)}
+            for i, value in enumerate(v):
+                if i in opaque:
+                    continue
+                body = None
+                if value == "async":
+                    opened = i + 1
+                    opened += v[opened:opened + 1] == ["move"]
+                    if v[opened:opened + 1] == ["{"]:
+                        body = opened
+                elif value == "|" and (i == 0 or v[i - 1] in (
+                        "=", "(", "[", ",", "{", "}", ";", "=>", ":", "return",
+                        "move", "async")):
+                    close = self.end(i + 1, {"|", ";"})
+                    if v[close:close + 1] == ["|"]:
+                        body = close + 1
+                        if v[body:body + 2] == ["-", ">"]:
+                            body = self.end(body + 2, {"{", ";"})
+                if body is None or body >= len(v):
+                    continue
+                limit = min((b for a, b in self.pairs.items() if a < body < b),
+                            default=len(v))
+                end = self.block_expression_end(body, limit)
+                if end is None:
+                    end = self.end(body, {",", ";"}, limit)
+                self._return_bodies.append((body, end))
+        return not any(owner < body <= token < end for body, end in self._return_bodies)
+
+    def identifier_start(self, token):
+        """Keep raw path-segment prefixes in ranges without moving coordinates."""
+        return token - 2 if token >= 2 and self.values[token - 2:token] == ["r", "#"] else token
 
     def local_positions(self):
         """Construct G-T1/T2a/T2b/T3 positions; never parse general expressions."""
@@ -725,7 +778,7 @@ class Expressions:
                         or self.turbofish_start(start) is not None):
                     break
             elif re.fullmatch(r"\w+", token):
-                start -= 1
+                start = self.identifier_start(start - 1)
                 if (start > 0 and v[start - 1] in ("::", ".")
                         and not (v[start - 1] == "." and start > 1
                                  and v[start - 2] == ".")):
@@ -1125,13 +1178,14 @@ def find_disposition_violations(relpath, source, parsed_helpers=None):
         opened = ex.turbofish_end(opened) or opened
         if opened >= len(v) or v[opened] != "(":
             continue
-        type_end = i - 1
+        segment = ex.identifier_start(i)
+        type_end = segment - 1
         generic = ex.turbofish_start(type_end)
-        type_name = generic - 1 if generic is not None else i - 2
-        constructor = (name == "new" and i >= 2 and v[i - 1] == "::"
+        type_name = generic - 1 if generic is not None else segment - 2
+        constructor = (name == "new" and segment >= 2 and v[segment - 1] == "::"
                        and type_name >= 0 and v[type_name] == "Parsed")
-        if (name == "new" and i >= 2 and v[i - 1] == "::"
-                and v[i - 2] == ">" and generic is None):
+        if (name == "new" and segment >= 2 and v[segment - 1] == "::"
+                and v[segment - 2] == ">" and generic is None):
             # Qualified-type syntax is outside the supported path/turbofish
             # grammar. Do not let a bracketed Parsed constructor disappear.
             boundary = max((j for j in range(i) if v[j] in ("=", ";", "{", "}")),
@@ -1330,8 +1384,12 @@ def find_disposition_violations(relpath, source, parsed_helpers=None):
                 accept_or_reject(flowing(a, b), lambda k: kinds[k] != "parsed")
         if token == "return":
             end = ex.end(i + 1, {";", "}"})
-            accept_or_reject(flowing(i + 1, end), lambda k: (
-                kinds[k] == "parsed" or tuple_return(i)))
+            ids = flowing(i + 1, end)
+            if ids and not ex.return_in_function_body(i):
+                for key in ids:
+                    reject(sites[key], "unsupported-scope")
+            else:
+                accept_or_reject(ids, lambda k: kinds[k] == "parsed" or tuple_return(i))
         if token == "fn":
             opened = ex.end(i + 1, {"{", ";"})
             if opened < len(v) and v[opened] == "{":

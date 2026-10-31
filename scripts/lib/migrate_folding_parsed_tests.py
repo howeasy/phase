@@ -1016,5 +1016,41 @@ class RoundFiveTests(unittest.TestCase):
 
 
 
+class RoundSevenTests(unittest.TestCase):
+    def test_nested_returns_are_not_tuple_function_returns(self):
+        for statement in (
+                f"xs.iter().map(|x| {{ return {F}(x); }}).count();",
+                "let _ = ctx.with_player_antecedents(|scoped| "
+                "{ return parse_type_phrase_folding_with_ctx(rest, scoped); });",
+                f"let g = (move || {{ return {F}(i); }})().0;",
+                f"let _fut = async {{ return {F}(i); }};",
+                f"let _fut = async move {{ return {F}(i); }};",
+                f"let g = async move || {{ return {F}(i); }};",
+                f"let g = |x: &str| -> (A, B) {{ if ready {{ return {F}(x); }} (a, b) }};"):
+            with self.subTest(statement=statement):
+                source = "fn p(i: &str) -> (A, B) { " + statement + " (g, b) }"
+                plan = migration.plan_source(P, source)
+                self.assertTrue(any("unsupported family result consumer" in error
+                                    for error in plan.unsupported), plan.unsupported)
+                self.assertEqual((plan.rendered, plan.edits), (source, ()))
+                tail = source.replace("return ", "").replace("; }", " }")
+                tail_plan = migration.plan_source(P, tail)
+                if "with_player_antecedents" in statement:
+                    self.assertEqual(tail_plan.unsupported, ())
+                    self.assertIn(f".waive({W})", tail_plan.rendered)
+                else:
+                    self.assertTrue(tail_plan.unsupported, tail)
+
+    def test_direct_function_return_still_extracts_tuple(self):
+        for body in (f"return {F}(i);",
+                     f"if ready {{ return {F}(i); }} {F}(j)"):
+            source = "fn p(i: &str) -> (A, B) { " + body + " }"
+            plan = migration.plan_source(P, source)
+            self.assertEqual(plan.unsupported, ())
+            expected = source.replace(F + "(i)", F + "(i).with_rest()").replace(
+                F + "(j)", F + "(j).with_rest()")
+            self.assertEqual(plan.rendered, expected)
+
+
 if __name__ == "__main__":
     unittest.main()
