@@ -11823,9 +11823,9 @@ pub(super) fn parse_exile_ast(
         // one `ChangeZoneAll { Or[…] }` instead of fragmenting the trailing
         // "all B"/"all C" legs into verb-less sub-abilities (Everything Comes to
         // Dust). Union legs span card types (205.2a) and subtypes (205.3a).
-        let (parsed_target, _rem) = parse_mass_type_union(rest, ctx);
+        let (parsed_target, rem) = parse_mass_type_union(rest, ctx);
         #[cfg(debug_assertions)]
-        assert_no_compound_remainder(_rem, text);
+        assert_no_compound_remainder(rem, text);
         // CR 109.2b + CR 701.13a: "exile all spells" must scope to the stack, but
         // the bare word "spell" can appear deep inside a relative clause ("a
         // creature that convoked this spell", Everything Comes to Dust) where it
@@ -11847,7 +11847,7 @@ pub(super) fn parse_exile_ast(
             origin,
             target,
             rest,
-            _rem,
+            rem,
             ctx,
             EffectScope::All,
         );
