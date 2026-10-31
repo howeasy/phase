@@ -8,7 +8,18 @@
 //! complete projected Envelopes, including independent mixed-client histories.
 //! Visibility revocation deliberately arranges only its public-reveal premise;
 //! real zone cleanup/finalization and same-socket publication must deliver Delta.
-//! These are transport smoke tests, not complete-game or resource measurements.
+//! Default tests are bounded lifecycle smokes. Ignored `codec_complete_game_*`
+//! tests instead finish 60-land games by natural empty-library losses, driving
+//! engine-provided opening/cleanup/pass choices over actual sockets (no AI,
+//! concessions, truncated libraries or injected terminal state). They cover
+//! absent/unknown/negotiated/mixed capabilities, two/four seats, plain/gzip,
+//! two spectators, recipient-local recovery, fresh reconnect epochs, exact final
+//! projections and all-epoch state-byte totals from the public metrics handler.
+//! Run explicitly with `cargo test --locked --profile server-release -p phase-server
+//! --bin phase-server game_executor::network_tests::codec_complete_game_
+//! -- --ignored --nocapture --test-threads=1`.
+//! The separate resource module reuses a completed live game's six terminal
+//! projections; land-only completion is not a representative combat workload.
 
 use std::num::NonZeroUsize;
 use std::sync::Arc;
@@ -74,6 +85,11 @@ impl NativeTable {
     }
 
     async fn with_executor(game_executor: GameExecutor) -> Self {
+        Self::with_player_count(game_executor, 4).await
+    }
+
+    async fn with_player_count(game_executor: GameExecutor, player_count: u8) -> Self {
+        assert!((2..=4).contains(&player_count));
         let context = crate::ServerContext {
             game_executor,
             ..Default::default()
@@ -98,21 +114,21 @@ impl NativeTable {
                     Some(DeckChoice::DeckList(Box::new(names.clone()))),
                     "host".to_string(),
                     None,
-                    4,
+                    player_count,
                     Default::default(),
                     Some(FormatConfig::free_for_all()),
                     None,
                 )
                 .unwrap();
             let session = manager.session_exclusive(&code).unwrap();
-            let mut tokens = Vec::with_capacity(4);
+            let mut tokens = Vec::with_capacity(usize::from(player_count));
             tokens.push(token);
-            for name in ["guest-one", "guest-two", "guest-three"] {
+            for seat in 1..player_count {
                 let (token, _) = session
                     .join_with_reservation(
                         deck.clone(),
                         Some(DeckChoice::DeckList(Box::new(names.clone()))),
-                        name.to_string(),
+                        format!("guest-{seat}"),
                         None,
                     )
                     .unwrap();
@@ -221,6 +237,9 @@ struct CodecPeer {
     socket: ClientSocket,
     baseline: Option<state_codec::WireState>,
     gzip: bool,
+    /// Opt-in complete-game bookkeeping; old focused fixtures remain unchanged.
+    observation: Option<StateReceipts>,
+    pacing: Option<std::collections::VecDeque<tokio::time::Instant>>,
 }
 
 struct CodecReply {
@@ -229,6 +248,31 @@ struct CodecReply {
     text: bool,
     /// Complete received payload before raw/gzip envelope decoding.
     payload_bytes: usize,
+}
+
+#[derive(Debug, Default)]
+struct StateReceipts {
+    /// full, delta, state_update, game_started; actual received payload bytes.
+    bytes: [u64; 4],
+    frames: [usize; 4],
+}
+
+impl StateReceipts {
+    fn record(&mut self, reply: &CodecReply) {
+        let slot = match reply.kind {
+            Some(state_codec::FrameKind::Full) => Some(0),
+            Some(state_codec::FrameKind::Delta) => Some(1),
+            None => match reply.value["type"].as_str().unwrap() {
+                "StateUpdate" => Some(2),
+                "GameStarted" => Some(3),
+                _ => None,
+            },
+        };
+        if let Some(slot) = slot {
+            self.bytes[slot] += reply.payload_bytes as u64;
+            self.frames[slot] += 1;
+        }
+    }
 }
 
 impl CodecPeer {
@@ -257,7 +301,7 @@ impl CodecPeer {
             }
         };
         let value: serde_json::Value = serde_json::from_str(&json).unwrap();
-        match value["type"].as_str().unwrap() {
+        let reply = match value["type"].as_str().unwrap() {
             "Full" | "Delta" => {
                 let frame = state_codec::Frame::from_bytes(json.as_bytes()).unwrap();
                 let decoded = state_codec::decode(self.baseline.as_ref(), &frame).unwrap();
@@ -281,10 +325,31 @@ impl CodecPeer {
                     payload_bytes,
                 }
             }
+        };
+        if let Some(observation) = &mut self.observation {
+            observation.record(&reply);
         }
+        reply
     }
 
     async fn send(&mut self, message: &ClientMessage) {
+        if let Some(sends) = &mut self.pacing {
+            let window = Duration::from_secs(crate::RATE_LIMIT_WINDOW_SECS);
+            loop {
+                let now = tokio::time::Instant::now();
+                while sends
+                    .front()
+                    .is_some_and(|sent| now.duration_since(*sent) >= window)
+                {
+                    sends.pop_front();
+                }
+                if sends.len() < 20 {
+                    sends.push_back(now);
+                    break;
+                }
+                tokio::time::sleep_until(*sends.front().unwrap() + window).await;
+            }
+        }
         send_test_message(&mut self.socket, message, self.gzip).await;
     }
 
@@ -355,6 +420,8 @@ async fn codec_hello(url: &str, gzip: bool, offers: Option<serde_json::Value>) -
         socket,
         baseline: None,
         gzip,
+        observation: None,
+        pacing: None,
     };
     let initial = peer.next().await;
     assert!(initial.text, "initial ServerHello must be text");
@@ -4565,4 +4632,444 @@ fn codec_lifecycle_mixed_views_and_completion() {
             "mixed recipient-local histories, complete projections and one-shot completion",
         );
     });
+}
+
+#[derive(Clone, Copy, Debug)]
+enum CapabilityCase {
+    Absent,
+    UnknownOnly,
+    Codec,
+    Mixed,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum Audience {
+    Seat(PlayerId),
+    Spectator,
+}
+
+impl CapabilityCase {
+    fn recipient(self, index: usize, seats: u8) -> Self {
+        match self {
+            Self::Absent | Self::UnknownOnly | Self::Codec => self,
+            Self::Mixed => {
+                if index == 0 {
+                    Self::Absent
+                } else if index == usize::from(seats) || (seats == 4 && index == 1) {
+                    Self::UnknownOnly
+                } else {
+                    Self::Codec
+                }
+            }
+        }
+    }
+
+    fn offers(self) -> Option<serde_json::Value> {
+        match self {
+            Self::Absent => None,
+            Self::UnknownOnly => Some(serde_json::json!(["FutureStateCodec"])),
+            Self::Codec => Some(serde_json::json!(["StateCodecV1"])),
+            Self::Mixed => unreachable!("resolve the recipient before negotiation"),
+        }
+    }
+}
+
+async fn complete_peer(
+    table: &NativeTable,
+    audience: Audience,
+    capability: CapabilityCase,
+    gzip: bool,
+) -> CodecPeer {
+    let mut peer = codec_hello(&table.url, gzip, capability.offers()).await;
+    peer.observation = Some(StateReceipts::default());
+    // Include hello in the real ingress window, even though it carries no state.
+    peer.pacing = Some(std::collections::VecDeque::from([
+        tokio::time::Instant::now(),
+    ]));
+    let viewer = match audience {
+        Audience::Seat(player) => {
+            peer.send(&ClientMessage::Reconnect {
+                game_code: table.key.game_code.clone(),
+                player_token: table.tokens[usize::from(player.0)].clone(),
+                full_key: table.key.clone(),
+            })
+            .await;
+            player
+        }
+        Audience::Spectator => {
+            peer.send(&ClientMessage::SpectatorJoin {
+                game_code: table.key.game_code.clone(),
+            })
+            .await;
+            crate::SPECTATOR_PLAYER_ID
+        }
+    };
+    let bootstrap = peer.state().await;
+    assert_eq!(bootstrap.value["type"], "GameStarted");
+    assert_eq!(
+        bootstrap.kind,
+        matches!(capability, CapabilityCase::Codec).then_some(state_codec::FrameKind::Full)
+    );
+    assert_projection(&bootstrap.value, &table.key, viewer);
+    // Observe any legitimate StateUpdate bootstrap through the same decoder.
+    peer.fence(true).await;
+    peer
+}
+
+fn receipt_epoch(
+    peer: &mut CodecPeer,
+    capability: CapabilityCase,
+    index: usize,
+    epoch: usize,
+) -> StateReceipts {
+    let receipt = peer.observation.take().unwrap();
+    match capability {
+        CapabilityCase::Codec => {
+            assert!(
+                receipt.frames[0] > 0 && receipt.frames[1] > 0,
+                "Full and ordinary Delta in every epoch"
+            );
+            println!("P5 recipient={index} epoch={epoch} frames={:?} payload_bytes={:?} delta_ratio={:.6}",
+                receipt.frames, receipt.bytes, receipt.frames[1] as f64 / (receipt.frames[0] + receipt.frames[1]) as f64);
+        }
+        CapabilityCase::Absent | CapabilityCase::UnknownOnly => {
+            assert_eq!(&receipt.frames[..2], &[0, 0]);
+            assert!(receipt.frames[2] > 0 && receipt.frames[3] > 0);
+            println!(
+                "P5 recipient={index} epoch={epoch} frames={:?} payload_bytes={:?} legacy",
+                receipt.frames, receipt.bytes
+            );
+        }
+        CapabilityCase::Mixed => unreachable!("recipient capability is concrete"),
+    }
+    receipt
+}
+
+/// Every decision is an engine-provided action sent over a real socket. The
+/// retained session is final authority even after production retires its key.
+async fn run_complete_socket_game(
+    player_count: u8,
+    capability: CapabilityCase,
+    gzip: bool,
+) -> Vec<crate::socket_mailbox::Envelope> {
+    use engine::types::game_state::WaitingFor;
+    use std::time::Instant;
+
+    let table =
+        NativeTable::with_player_count(GameExecutor::new(NonZeroUsize::MIN), player_count).await;
+    let retained = table
+        .app
+        .sessions
+        .lock()
+        .await
+        .session(&table.key.game_code)
+        .unwrap();
+    let started = Instant::now();
+    let outcome = tokio::time::timeout(Duration::from_secs(15 * 60), async {
+        let mut peers = Vec::new();
+        let audiences: Vec<_> = (0..player_count).map(|seat| Audience::Seat(PlayerId(seat)))
+            .chain([Audience::Spectator, Audience::Spectator]).collect();
+        let capabilities: Vec<_> = (0..audiences.len()).map(|index| capability.recipient(index, player_count)).collect();
+        for (audience, capability) in audiences.iter().zip(&capabilities) {
+            peers.push(complete_peer(&table, *audience, *capability, gzip).await);
+        }
+        let recovery_seat = capabilities.iter().take(usize::from(player_count))
+            .position(|case| matches!(case, CapabilityCase::Codec)).unwrap_or(0);
+        let recovery_spectator = capabilities.iter().enumerate().skip(usize::from(player_count))
+            .find(|(_, case)| matches!(case, CapabilityCase::Codec)).map(|(index, _)| index).unwrap_or(usize::from(player_count));
+        let recovery_slots = [recovery_seat, recovery_spectator];
+        let mut retired = Vec::new();
+        let mut after_resync = None;
+        let mut after_reconnect = None;
+        for peer in &mut peers {
+            peer.fence(true).await;
+        }
+        let initial = retained.lock().await;
+        let libraries: Vec<_> = initial.state.players.iter().map(|p| p.library.len()).collect();
+        let starting_actors = server_core::acting_players(&initial.state);
+        println!("P5 G1 start case={capability:?} gzip={gzip} seats={player_count} libraries={libraries:?} actors={starting_actors:?}");
+        assert!(initial.ai_seats.is_empty());
+        drop(initial);
+        let mut actions = 0_usize;
+        let mut keeps = 0_usize;
+        let mut cleanups = 0_usize;
+        let mut state_bytes = 0_usize;
+        let mut last_turn = 0;
+        let mut eliminated = Vec::new();
+        loop {
+            let session = retained.lock().await;
+            assert!(actions < 20_000, "action cap: {:?}", session.state.waiting_for);
+            assert!(session.state.turn_number <= 256, "turn cap");
+            let actor = server_core::acting_players(&session.state)[0];
+            let decision = crate::DecisionSnapshot::from_state(&session.state);
+            let action = decision
+                .legal_actions
+                .iter()
+                .find(|action| matches!(action, GameAction::PassPriority))
+                .or_else(|| {
+                    decision.legal_actions.iter().find(|action| match action {
+                        GameAction::MulliganDecision { choice } => *choice == MulliganChoice::Keep,
+                        GameAction::SelectCards { .. } => {
+                            matches!(session.state.waiting_for, WaitingFor::DiscardToHandSize { .. })
+                        }
+                        GameAction::DeclareAttackers { attacks, .. } => attacks.is_empty(),
+                        GameAction::DeclareBlockers { assignments } => assignments.is_empty(),
+                        _ => false,
+                    })
+                })
+                .unwrap_or_else(|| panic!(
+                    "unexpected prompt {:?}, legal={:?}",
+                    session.state.waiting_for, decision.legal_actions
+                ))
+                .clone();
+            assert!(!matches!(action, GameAction::Concede { .. }));
+            keeps += usize::from(matches!(action, GameAction::MulliganDecision { .. }));
+            // CR 514.1: Discard to maximum hand size using the legal cleanup choice.
+            cleanups += usize::from(matches!(action, GameAction::SelectCards { .. }));
+            let mut predicted = session.state.clone();
+            let result = engine::game::engine::apply(&mut predicted, actor, action.clone()).unwrap();
+            drop(session);
+            let slot = usize::from(actor.0);
+            peers[slot].send(&ClientMessage::Action { action }).await;
+            let replies = futures_util::future::join_all(peers.iter_mut().map(CodecPeer::state)).await;
+            actions += 1;
+            let session = retained.lock().await;
+            let decision = crate::DecisionSnapshot::from_state(&session.state);
+            let source = super::StateUpdateSource {
+                revision: session.state_revision,
+                state: &session.state,
+                events: &result.events,
+                log_entries: &result.log_entries,
+                decision: Some((&decision).into()),
+            };
+            let mut projected = Vec::with_capacity(peers.len());
+            for (index, reply) in replies.iter().enumerate() {
+                assert_eq!(reply.kind.is_some(), matches!(capabilities[index], CapabilityCase::Codec));
+                assert_eq!(reply.value["type"], "StateUpdate");
+                let reference = if index < usize::from(player_count) {
+                    crate::build_state_update_message(
+                        &source,
+                        &table.key,
+                        PlayerId(index as u8),
+                        session.rewind_options(),
+                        &session.state.eliminated_players,
+                    )
+                } else {
+                    crate::build_spectator_state_update_message(
+                        &table.key,
+                        &session.state,
+                        &result.events,
+                        &result.log_entries,
+                        session.state_revision,
+                    )
+                    .unwrap()
+                };
+                assert_eq!(
+                    reply.value,
+                    serde_json::to_value(&reference).unwrap(),
+                    "complete ordinary Envelope recipient={index} action={actions}"
+                );
+                state_bytes += reply.payload_bytes;
+                projected.push(crate::socket_mailbox::Envelope {
+                    message: reference,
+                    command_id: None,
+                    quota_refusal: None,
+                    state_encoding: crate::socket_mailbox::StateEncoding::Automatic,
+                });
+            }
+            if session.state.turn_number != last_turn
+                || session.state.eliminated_players != eliminated
+            {
+                last_turn = session.state.turn_number;
+                eliminated = session.state.eliminated_players.clone();
+                println!(
+                    "P5 G1 progress seats={player_count} turn={last_turn} actions={actions} elapsed={:.3}s libraries={:?} eliminated={eliminated:?} state_update_payload_bytes={state_bytes}",
+                    started.elapsed().as_secs_f64(),
+                    session.state.players.iter().map(|p| p.library.len()).collect::<Vec<_>>(),
+                );
+            }
+            if let WaitingFor::GameOver { winner } = session.state.waiting_for {
+                // CR 104.3c + CR 704.5b: Empty-library draws eliminate players.
+                // CR 104.2a: The sole remaining player wins immediately.
+                let winner = winner.expect("natural decking must leave a winner");
+                assert!(winner.0 < player_count);
+                assert!(!session.state.eliminated_players.contains(&winner));
+                assert_eq!(session.state.eliminated_players.len(), usize::from(player_count - 1));
+                assert_eq!(keeps, usize::from(player_count));
+                assert!(cleanups > 0);
+                assert!(last_turn > 1);
+                assert!(session.state.players.iter().zip(&libraries).any(|(p, initial)| p.library.len() < *initial));
+                let revision = session.state_revision;
+                drop(session);
+                for peer in peers.iter_mut().take(usize::from(player_count)) {
+                    loop {
+                        let reply = peer.next().await;
+                        match reply.value["type"].as_str().unwrap() {
+                            "TerminalResult" => {
+                                let delivery = &reply.value["data"]["delivery"];
+                                assert_eq!(delivery["key"], serde_json::to_value(&table.key).unwrap());
+                                assert_eq!(delivery["terminalRevision"], revision);
+                                assert_eq!(delivery["display"]["winner"], serde_json::to_value(winner).unwrap());
+                                break;
+                            }
+                            "Error" | "ActionFailed" | "ActionRejected" => panic!("{}", reply.value),
+                            _ => {}
+                        }
+                    }
+                }
+                for peer in &mut peers {
+                    peer.fence(false).await;
+                }
+                assert!(table.app.sessions.lock().await.session(&table.key.game_code).is_none());
+                assert!(actions > 52, "two ordinary updates after both recovery windows");
+                let mut bytes = [0_u64; 4];
+                for (index, peer) in peers.iter_mut().enumerate() {
+                    let epoch = usize::from(recovery_slots.contains(&index));
+                    retired.push(receipt_epoch(peer, capabilities[index], index, epoch));
+                }
+                for receipt in &retired {
+                    for (sum, value) in bytes.iter_mut().zip(receipt.bytes) {
+                        *sum += value;
+                    }
+                }
+                let url = format!("http://{}/metrics", table.url.strip_prefix("ws://").unwrap().strip_suffix("/ws").unwrap());
+                let body = reqwest::get(url).await.unwrap().error_for_status().unwrap().text().await.unwrap();
+                for (label, expected) in ["full", "delta", "state_update", "game_started"].into_iter().zip(bytes) {
+                    let sample = format!("phase_ws_sent_payload_bytes_total{{frame_type=\"{label}\"}} {expected}");
+                    assert_eq!(body.lines().filter(|line| *line == sample).count(), 1, "{sample}\n{body}");
+                }
+                assert_eq!(body.lines().filter(|line| line.starts_with("phase_ws_sent_payload_bytes_total{")).count(), 6);
+                for label in ["full", "delta", "state_update", "game_started", "other", "control"] {
+                    let prefix = format!("phase_ws_sent_payload_bytes_total{{frame_type=\"{label}\"}} ");
+                    assert_eq!(body.lines().filter(|line| line.starts_with(&prefix)).count(), 1);
+                }
+                println!(
+                    "P5 G1/G2/G3 terminal case={capability:?} gzip={gzip} seats={player_count} turn={last_turn} actions={actions} keeps={keeps} cleanups={cleanups} elapsed={:.3}s winner={winner:?} eliminated={eliminated:?} all_epoch_state_payload_bytes={bytes:?}; no concessions, all recipient Envelopes exact; metrics exact",
+                    started.elapsed().as_secs_f64(),
+                );
+                break projected;
+            }
+            drop(session);
+            if actions == 24 {
+                let mut counts = Vec::new();
+                for index in recovery_slots {
+                    if matches!(capabilities[index], CapabilityCase::Codec) {
+                        assert!(peers[index].observation.as_ref().unwrap().frames[1] > 0);
+                        peers[index].baseline = None;
+                        let recovered = peers[index].resync().await;
+                        let session = retained.lock().await;
+                        let reference = state_update_reference(&session, match audiences[index] {
+                            Audience::Seat(player) => Some(player),
+                            Audience::Spectator => None,
+                        });
+                        assert_eq!(recovered.value, reference, "same-revision authorized resync");
+                        counts.push((index, peers[index].observation.as_ref().unwrap().frames[1]));
+                    }
+                }
+                for peer in &mut peers { peer.fence(false).await; }
+                after_resync = Some(counts);
+            }
+            if actions == 26 {
+                for (index, before) in after_resync.take().unwrap() {
+                    assert!(peers[index].observation.as_ref().unwrap().frames[1] > before, "ordinary Delta after resync");
+                    println!("P5 G3 resync recipient={index}: Full from None then ordinary Delta");
+                }
+            }
+            if actions == 48 {
+                for peer in &mut peers { peer.fence(false).await; }
+                for index in recovery_slots {
+                    retired.push(receipt_epoch(&mut peers[index], capabilities[index], index, 0));
+                    peers[index].socket.close(None).await.unwrap();
+                    peers[index] = complete_peer(&table, audiences[index], capabilities[index], gzip).await;
+                }
+                for peer in &mut peers { peer.fence(true).await; }
+                after_reconnect = Some(recovery_slots.map(|index| (index, peers[index].observation.as_ref().unwrap().frames[1])));
+            }
+            if actions == 52 {
+                for (index, before) in after_reconnect.take().unwrap() {
+                    if matches!(capabilities[index], CapabilityCase::Codec) {
+                        assert!(peers[index].observation.as_ref().unwrap().frames[1] > before, "ordinary Delta after fresh reconnect, no resync");
+                    } else {
+                        assert!(peers[index].observation.as_ref().unwrap().frames[2] >= 2);
+                    }
+                    println!("P5 G3 reconnect recipient={index}: fresh bootstrap then ordinary updates");
+                }
+            }
+        }
+    })
+    .await;
+    if outcome.is_err() {
+        let session = retained.lock().await;
+        eprintln!(
+            "P5 G1 timeout seats={player_count} elapsed={:?} turn={} prompt={:?} libraries={:?}",
+            started.elapsed(),
+            session.state.turn_number,
+            session.state.waiting_for,
+            session
+                .state
+                .players
+                .iter()
+                .map(|p| p.library.len())
+                .collect::<Vec<_>>()
+        );
+    }
+    table.server.abort();
+    outcome.expect("natural terminal premise must finish within the unchanged caps")
+}
+
+#[test]
+#[ignore = "optimized native full-game acceptance; run explicitly with --profile server-release"]
+fn codec_complete_game_absent() {
+    assert!(!cfg!(debug_assertions), "use --profile server-release");
+    run_async_test(|| async {
+        for player_count in [2, 4] {
+            for gzip in [false, true] {
+                run_complete_socket_game(player_count, CapabilityCase::Absent, gzip).await;
+            }
+        }
+    });
+}
+
+#[test]
+#[ignore = "optimized native full-game acceptance; run explicitly with --profile server-release"]
+fn codec_complete_game_unknown() {
+    assert!(!cfg!(debug_assertions), "use --profile server-release");
+    run_async_test(|| async {
+        for player_count in [2, 4] {
+            for gzip in [false, true] {
+                run_complete_socket_game(player_count, CapabilityCase::UnknownOnly, gzip).await;
+            }
+        }
+    });
+}
+
+#[test]
+#[ignore = "optimized native full-game acceptance; run explicitly with --profile server-release"]
+fn codec_complete_game_negotiated() {
+    assert!(!cfg!(debug_assertions), "use --profile server-release");
+    run_async_test(|| async {
+        for player_count in [2, 4] {
+            for gzip in [false, true] {
+                run_complete_socket_game(player_count, CapabilityCase::Codec, gzip).await;
+            }
+        }
+    });
+}
+
+#[test]
+#[ignore = "optimized native full-game acceptance; run explicitly with --profile server-release"]
+fn codec_complete_game_mixed() {
+    assert!(!cfg!(debug_assertions), "use --profile server-release");
+    run_async_test(|| async {
+        for player_count in [2, 4] {
+            for gzip in [false, true] {
+                run_complete_socket_game(player_count, CapabilityCase::Mixed, gzip).await;
+            }
+        }
+    });
+}
+
+/// Resource setup reuses the proven live game, not the nonterminal budget round.
+pub(super) async fn completed_terminal_envelopes() -> Vec<crate::socket_mailbox::Envelope> {
+    run_complete_socket_game(4, CapabilityCase::Mixed, false).await
 }

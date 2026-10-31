@@ -24,6 +24,11 @@
 //! Pongs emitted by tungstenite's read path. Peer-close completion accounts the
 //! declared echo payload without sending a duplicate Close. Failed operations
 //! and tail-close cleanup never contribute, even if cleanup flushes buffers.
+//!
+//! cfg(test) resource_probe exposes opaque owned preparation/delivery tokens,
+//! synchronous prepare/commit durations and numeric indexed-memory observations.
+//! It uses the real writer acknowledgement with a collecting Sink; it adds no
+//! production API, state field, encoding policy or instrumentation.
 
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -4335,6 +4340,146 @@ mod transport_fixup_tests {
             let result = tokio::time::timeout(Duration::from_secs(10), scenario).await;
             server.abort();
             result.expect("decoded commands must receive an owned refusal");
+        }
+    }
+}
+
+/// Test-only production encoder access. CPU and indexed-memory observations use
+/// different owners; the collecting sink measures harness wait, not network RTT.
+#[cfg(test)]
+pub(crate) mod resource_probe {
+    use super::*;
+    use state_codec::BaselineMemoryUsage;
+
+    pub(crate) struct Owner {
+        encoder: ConnectionEncoder,
+        application: mpsc::Sender<PendingWrite>,
+        received: mpsc::UnboundedReceiver<Message>,
+        backlog: Arc<PendingMetrics>,
+        death: Death,
+        writer: JoinHandle<()>,
+    }
+
+    /// Non-Clone transaction: no sender baseline can escape to seed a receiver.
+    pub(crate) struct Prepared(PreparedApplication);
+
+    pub(crate) struct Delivery {
+        pub(crate) frame: Message,
+        pub(crate) queue_flush: Duration,
+        pub(crate) commit: Duration,
+    }
+
+    impl Owner {
+        pub(crate) fn legacy() -> Self {
+            Self::new(ConnectionEncoder::Legacy)
+        }
+
+        pub(crate) fn codec() -> Self {
+            Self::new(ConnectionEncoder::codec())
+        }
+
+        fn new(encoder: ConnectionEncoder) -> Self {
+            let sent = Arc::new(ServerMetrics::default());
+            let backlog = Arc::new(PendingMetrics::default());
+            let death = Death::new(sent.clone(), 0);
+            let (application, rx) = mpsc::channel(1);
+            let (collected, received) = mpsc::unbounded_channel();
+            let sink = Box::pin(futures_util::sink::unfold(
+                collected,
+                |collected, frame| async move {
+                    collected.send(frame).unwrap();
+                    Ok::<_, axum::Error>(collected)
+                },
+            ));
+            let writer = tokio::spawn(write_socket(
+                sink,
+                rx,
+                ControlLane::default(),
+                death.clone(),
+                backlog.clone(),
+                Liveness::default(),
+                sent,
+            ));
+            Self {
+                encoder,
+                application,
+                received,
+                backlog,
+                death,
+                writer,
+            }
+        }
+
+        pub(crate) fn prepare(
+            &self,
+            envelope: crate::socket_mailbox::Envelope,
+            encoding: Encoding,
+        ) -> (Prepared, Duration) {
+            let started = Instant::now();
+            let prepared = self.encoder.prepare(envelope, encoding);
+            let elapsed = started.elapsed();
+            (Prepared(prepared.expect("production preparation")), elapsed)
+        }
+
+        /// The estimator initializes lazy caches. Only accounting owners call it.
+        pub(crate) fn memory(&self) -> Option<BaselineMemoryUsage> {
+            match &self.encoder {
+                ConnectionEncoder::Legacy => None,
+                ConnectionEncoder::Codec(delivered) => delivered
+                    .baseline
+                    .as_ref()
+                    .map(|baseline| baseline.state.baseline_memory_usage()),
+            }
+        }
+
+        pub(crate) async fn deliver(&mut self, prepared: Prepared) -> Delivery {
+            let PreparedApplication {
+                frame,
+                frame_type,
+                candidate,
+            } = prepared.0;
+            let (ack, completion) = oneshot::channel();
+            let pending = PendingWrite::new(frame, frame_type, Some(ack), &self.backlog);
+            let started = Instant::now();
+            self.application.send(pending).await.unwrap();
+            completion
+                .await
+                .unwrap()
+                .expect("real writer flush acknowledgement");
+            let queue_flush = started.elapsed();
+            let started = Instant::now();
+            self.encoder.commit(candidate);
+            let commit = started.elapsed();
+            let frame = self.received.recv().await.unwrap();
+            Delivery {
+                frame,
+                queue_flush,
+                commit,
+            }
+        }
+    }
+
+    impl Drop for Owner {
+        fn drop(&mut self) {
+            self.death.record(Cause::ApplicationEnd);
+            self.writer.abort();
+        }
+    }
+
+    impl Prepared {
+        pub(crate) fn frame_type(&self) -> WsFrameType {
+            self.0.frame_type
+        }
+
+        pub(crate) fn frame(&self) -> &Message {
+            &self.0.frame
+        }
+
+        pub(crate) fn memory(&self) -> Option<BaselineMemoryUsage> {
+            self.0
+                .candidate
+                .as_ref()
+                .map(|baseline| baseline.state.baseline_memory_usage())
         }
     }
 }
