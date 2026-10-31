@@ -2212,6 +2212,9 @@ mod socket_tests {
     use server_core::protocol::ClientMessage;
     use tokio_tungstenite::tungstenite::Message as WsMessage;
 
+    // Concurrent selected codec traffic must not alter the legacy SAME-Envelope
+    // byte oracle. Both lanes exercise plain/gzip and completion removal; the
+    // codec sibling independently reconstructs Full, Full, Delta per batch.
     #[tokio::test]
     async fn live_legacy_encoder_preserves_envelope_bytes() {
         use super::codec_tests::{envelope, projected_started, projected_update, raw_state};
@@ -2258,6 +2261,13 @@ mod socket_tests {
                 .unwrap();
             let (mut facade, _incoming, tasks) = accepted.recv().await.unwrap();
             let raw = raw_state(12);
+            let (mut codec_socket, _) =
+                tokio_tungstenite::connect_async(format!("ws://{address}/ws"))
+                    .await
+                    .unwrap();
+            let (mut codec_facade, _codec_incoming, codec_tasks) = accepted.recv().await.unwrap();
+            codec_facade.set_state_codec(Some(StateCodec::StateCodecV1));
+            let mut codec_baseline = None;
             for encoding in [Encoding::Pending, Encoding::Plain, Encoding::GzipEnvelope] {
                 match encoding {
                     Encoding::Pending => {}
@@ -2266,6 +2276,19 @@ mod socket_tests {
                         facade.set_wire_format(Some(WireFormat::GzipEnvelopeV1))
                     }
                 }
+                codec_facade.set_wire_format(
+                    (encoding == Encoding::GzipEnvelope).then_some(WireFormat::GzipEnvelopeV1),
+                );
+                let mut codec_batch = [
+                    envelope(projected_started(&raw, PlayerId(1)), Some(CommandId(46))),
+                    envelope(
+                        projected_update(&raw, PlayerId(1), 101, Vec::new()),
+                        Some(CommandId(47)),
+                    ),
+                    envelope(projected_update(&raw, PlayerId(1), 101, Vec::new()), None),
+                ]
+                .into_iter();
+                let mut codec_expected = Vec::new();
                 let batch = [
                     envelope(projected_started(&raw, PlayerId(0)), Some(CommandId(36))),
                     envelope(
@@ -2323,6 +2346,14 @@ mod socket_tests {
                     facade
                         .enqueue_completion(envelope.message, envelope.command_id)
                         .unwrap();
+                    // Interleave separate projected recipients while both real
+                    // writers are live; legacy's oracle is still SAME Envelope.
+                    if let Some(envelope) = codec_batch.next() {
+                        codec_expected.push(serde_json::to_vec(&envelope).unwrap());
+                        codec_facade
+                            .enqueue_completion(envelope.message, envelope.command_id)
+                            .unwrap();
+                    }
                 }
                 // Fully receive this batch before changing the encoding selection:
                 // start samples control.encoding() at encode time, not enqueue time.
@@ -2349,9 +2380,45 @@ mod socket_tests {
                         }
                     }
                 }
+                for (bytes, kind) in codec_expected.into_iter().zip([
+                    state_codec::FrameKind::Full,
+                    state_codec::FrameKind::Full,
+                    state_codec::FrameKind::Delta,
+                ]) {
+                    let json = loop {
+                        match codec_socket.next().await.unwrap().unwrap() {
+                            WsMessage::Text(text) => {
+                                assert_ne!(encoding, Encoding::GzipEnvelope);
+                                break text.to_string();
+                            }
+                            WsMessage::Binary(bytes) => {
+                                assert_eq!(encoding, Encoding::GzipEnvelope);
+                                break wire::decode_client_envelope(
+                                    bytes.to_vec(),
+                                    16 * 1024 * 1024,
+                                )
+                                .await
+                                .unwrap();
+                            }
+                            WsMessage::Ping(_) | WsMessage::Pong(_) => continue,
+                            frame => panic!("live codec sibling: {frame:?}"),
+                        }
+                    };
+                    let frame = state_codec::Frame::from_bytes(json.as_bytes()).unwrap();
+                    assert_eq!(
+                        frame.kind(),
+                        kind,
+                        "concurrent codec selection/metadata removal"
+                    );
+                    let recovered = state_codec::decode(codec_baseline.as_ref(), &frame).unwrap();
+                    assert_eq!(recovered.as_bytes(), bytes, "complete exact codec Envelope");
+                    codec_baseline = Some(recovered);
+                }
             }
             socket.close(None).await.unwrap();
             tasks.shutdown().await;
+            codec_socket.close(None).await.unwrap();
+            codec_tasks.shutdown().await;
             // Exercise fatal provenance on the actual selected start/encoder
             // path, with a successful projected sibling before EACH fault.
             #[derive(Clone, Copy)]

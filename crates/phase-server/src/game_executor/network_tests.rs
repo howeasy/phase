@@ -4,6 +4,11 @@
 //! heartbeat replies, to establish completion and publication ownership.
 //! Seat recovery parity includes actual elimination and recorded turn-rewind
 //! metadata, with non-empty reference guards before structural comparison.
+//! Lifecycle coverage follows real reconnect/join/action/takeback routes and
+//! complete projected Envelopes, including independent mixed-client histories.
+//! Visibility revocation deliberately arranges only its public-reveal premise;
+//! real zone cleanup/finalization and same-socket publication must deliver Delta.
+//! These are transport smoke tests, not complete-game or resource measurements.
 
 use std::num::NonZeroUsize;
 use std::sync::Arc;
@@ -258,7 +263,8 @@ impl CodecPeer {
                 }
             }
             _ => {
-                // Also validate the ordinary typed protocol, not just its tag.
+                // Keep typed validation on original legacy text: sorted Values
+                // place data before the adjacent tag and buffer integer-keyed maps.
                 let _: ServerMessage = serde_json::from_str(&json).unwrap();
                 CodecReply {
                     value,
@@ -3132,5 +3138,1296 @@ fn codec_prestart_and_builder_provenance() {
         .await;
         table.server.abort();
         outcome.expect("all native producer builders carry runtime/viewer provenance");
+    });
+}
+
+/// Controlled ordinary publication for projection fixtures, not gameplay dispatch.
+/// Keep the session publication lease through mutation, references and delivery.
+async fn lifecycle_publication(
+    table: &NativeTable,
+    key: &FullSessionKey,
+    mutate: impl FnOnce(&mut GameSession) + Send + 'static,
+) -> (Vec<serde_json::Value>, u64) {
+    let session = crate::lock_session(&table.app.sessions, &key.game_code)
+        .await
+        .unwrap();
+    let mut publisher = super::StateUpdatePublisher::capture(
+        &table.app.connections,
+        Some(&table.app.game_spectators),
+        key.clone(),
+        session.player_count,
+        session.state.eliminated_players.clone(),
+        session.rewind_options(),
+    )
+    .await;
+    let (lease, (publisher, references, revision)) = table
+        .app
+        .context
+        .game_executor
+        .with_session(session, move |session| {
+            mutate(session);
+            engine::game::public_state::bump_state_revision(&mut session.state);
+            engine::game::public_state::mark_public_state_all_dirty(&mut session.state);
+            engine::game::public_state::finalize_public_state(&mut session.state);
+            session.advance_state_revision();
+            let mut references: Vec<_> = (0..session.player_count)
+                .map(|seat| state_update_reference(session, Some(PlayerId(seat))))
+                .collect();
+            references.push(state_update_reference(session, None));
+            let decision = crate::DecisionSnapshot::from_state(&session.state);
+            let source = super::StateUpdateSource {
+                revision: session.state_revision,
+                state: &session.state,
+                events: &[],
+                log_entries: &[],
+                decision: Some((&decision).into()),
+            };
+            source.guard().unwrap();
+            publisher.publish(&source);
+            (publisher, references, session.state_revision)
+        })
+        .await;
+    publisher.finish(&table.app.context.game_executor).await;
+    drop(lease);
+    (references, revision)
+}
+
+#[test]
+fn codec_lifecycle_visibility_revocation_delta() {
+    run_async_test(|| async {
+        use engine::types::zones::Zone;
+        let table = NativeTable::new().await;
+        let outcome = tokio::time::timeout(Duration::from_secs(30), async {
+            table.keep_all().await;
+            let viewer = PlayerId(0);
+            let owner = PlayerId(1);
+            let mut peer = codec_seat(&table, viewer, false).await;
+            let mut owner_peer = codec_seat(&table, owner, false).await;
+            peer.fence(true).await;
+            owner_peer.fence(true).await;
+            let session = crate::lock_session(&table.app.sessions, &table.key.game_code)
+                .await
+                .unwrap();
+            let id = session.state.players[usize::from(owner.0)].hand[0];
+            let identity = session.state.objects[&id].name.clone();
+            assert_eq!(session.state.objects[&id].owner, owner);
+            assert_eq!(session.state.objects[&id].zone, Zone::Hand);
+            assert_ne!(owner, viewer);
+            assert!(!session.state.debug_mode);
+            assert!(session.state.active_full_turn_control.is_none());
+            assert!(session.state.active_combat_phase_control.is_none());
+            assert!(!session.state.private_look_ids.contains(&id));
+            assert!(!session.state.revealed_cards.contains(&id));
+            assert!(!session.state.public_revealed_cards.contains(&id));
+            assert!(!session.state.holds_stack_bound_reveal(id));
+            assert!(!session.state.viewer_knows_card_identity(viewer, id));
+            let object_key = id.0.to_string();
+            let hidden_before = state_update_reference(&session, Some(viewer));
+            assert_eq!(
+                hidden_before["data"]["state"]["objects"][&object_key]["id"],
+                id.0
+            );
+            // GameObject serde omits false display visibility; absence is the
+            // exact hidden wire representation, not JSON null or false.
+            assert!(hidden_before["data"]["state"]["objects"][&object_key]
+                .get("display_visible_to_viewer")
+                .is_none());
+            assert_ne!(
+                hidden_before["data"]["state"]["objects"][&object_key]["name"],
+                identity
+            );
+            drop(session);
+
+            // Arrange ONLY the public reveal precondition. This is not a
+            // command-produced reveal/bounce: revocation below uses real engine
+            // zone placement, finalization, projection and ordinary publication.
+            let (visible, visible_revision) =
+                lifecycle_publication(&table, &table.key, move |session| {
+                    session.state.public_revealed_cards.insert(id);
+                })
+                .await;
+            let visible_frame = peer.state().await;
+            let visible_owner = owner_peer.state().await;
+            assert_eq!(visible_frame.value["type"], "StateUpdate");
+            assert_eq!(visible_frame.kind, Some(state_codec::FrameKind::Full));
+            assert_projection(&visible_frame.value, &table.key, viewer);
+            assert_eq!(visible_frame.value, visible[usize::from(viewer.0)]);
+            assert_eq!(visible_owner.value, visible[usize::from(owner.0)]);
+            for reference in [&visible_frame.value, &visible_owner.value] {
+                let object = &reference["data"]["state"]["objects"][&object_key];
+                assert_eq!(object["name"], identity);
+                assert_eq!(object["display_visible_to_viewer"], true);
+            }
+            let baseline = peer.baseline.clone().unwrap();
+
+            // CR 400.7: each real zone exit revokes prior-occurrence disclosure.
+            // CR 400.2: a returned opponent hand card has hidden identity.
+            let (hidden, hidden_revision) =
+                lifecycle_publication(&table, &table.key, move |session| {
+                    let mut move_events = Vec::new();
+                    engine::game::zones::move_to_zone(
+                        &mut session.state,
+                        id,
+                        Zone::Library,
+                        &mut move_events,
+                    );
+                    assert!(session.state.players[usize::from(owner.0)]
+                        .library
+                        .contains(&id));
+                    assert!(!session.state.players[usize::from(owner.0)]
+                        .hand
+                        .contains(&id));
+                    engine::game::zones::move_to_zone(
+                        &mut session.state,
+                        id,
+                        Zone::Hand,
+                        &mut move_events,
+                    );
+                    assert!(!move_events.is_empty());
+                    assert!(session.state.players[usize::from(owner.0)]
+                        .hand
+                        .contains(&id));
+                    assert!(!session.state.players[usize::from(owner.0)]
+                        .library
+                        .contains(&id));
+                    assert_eq!(session.state.objects[&id].zone, Zone::Hand);
+                    assert!(!session.state.public_revealed_cards.contains(&id));
+                    assert!(!session.state.viewer_knows_card_identity(viewer, id));
+                    // Deliberately publish EMPTY events, matching the reference;
+                    // shared land names cannot prove object-specific filtering.
+                })
+                .await;
+            let hidden_frame = peer.state().await;
+            let hidden_owner = owner_peer.state().await;
+            assert_eq!(hidden_owner.value, hidden[usize::from(owner.0)]);
+            let owner_object = &hidden_owner.value["data"]["state"]["objects"][&object_key];
+            assert_eq!(owner_object["name"], identity);
+            assert_eq!(owner_object["display_visible_to_viewer"], true);
+            let hidden_object =
+                &hidden[usize::from(viewer.0)]["data"]["state"]["objects"][&object_key];
+            assert_eq!(
+                hidden_object["id"], id.0,
+                "hidden object is retained, not removed"
+            );
+            assert_eq!(
+                hidden_object["name"].as_str().unwrap(),
+                hidden_before["data"]["state"]["objects"][&object_key]["name"]
+                    .as_str()
+                    .unwrap()
+            );
+            assert!(hidden_object.get("display_visible_to_viewer").is_none());
+            assert_ne!(hidden_object["name"], identity);
+            let candidate = peer.baseline.as_ref().unwrap();
+            let selection = state_codec::encode(Some(&baseline), candidate)
+                .unwrap()
+                .kind();
+            eprintln!(
+                "F receipt: id={id:?} owner={owner:?} viewer={viewer:?} identity={identity:?} \
+                 memberships=Hand->Library->Hand public_marker=false authorities=public-only->none \
+                 finalized_revisions={visible_revision}->{hidden_revision} \
+                 viewer=visible->hidden owner=visible codec_alone={selection:?} delivered={:?}",
+                hidden_frame.kind
+            );
+            assert!(hidden_revision > visible_revision);
+            assert_eq!(selection, state_codec::FrameKind::Delta);
+            assert_eq!(hidden_frame.kind, Some(state_codec::FrameKind::Delta));
+            assert_projection(&hidden_frame.value, &table.key, viewer);
+            assert_eq!(hidden_frame.value, hidden[usize::from(viewer.0)]);
+            assert_eq!(
+                hidden_frame.value["data"]["state"]["objects"][&object_key],
+                *hidden_object
+            );
+            peer.fence(false).await;
+            owner_peer.fence(false).await;
+        })
+        .await;
+        table.server.abort();
+        outcome.expect("F production projection and same-viewer delivered Delta premise");
+    });
+}
+
+#[test]
+fn codec_lifecycle_spectator_dual_attachment_cross_game() {
+    run_async_test(|| async {
+        let table = NativeTable::new().await;
+        let outcome = tokio::time::timeout(Duration::from_secs(30), async {
+            table.keep_all().await;
+            let mut peer = codec_seat(&table, PlayerId(0), false).await;
+            let (other_key, mut host) = codec_create(&table, 2).await;
+            let mut guest =
+                codec_hello(&table.url, false, Some(serde_json::json!(["StateCodecV1"]))).await;
+            guest
+                .send(&ClientMessage::JoinGame {
+                    game_code: other_key.game_code.clone(),
+                    deck: codec_deck(),
+                })
+                .await;
+            assert_eq!(guest.state().await.value["type"], "GameStarted");
+            assert_eq!(host.state().await.value["type"], "GameStarted");
+            peer.send(&ClientMessage::SpectatorJoin {
+                game_code: other_key.game_code.clone(),
+            })
+            .await;
+            let bootstrap = peer.state().await;
+            assert_eq!(bootstrap.kind, Some(state_codec::FrameKind::Full));
+            assert_projection(&bootstrap.value, &other_key, crate::SPECTATOR_PLAYER_ID);
+            assert!(
+                table.app.connections.lock().await[&table.key.game_code].contains_key(&PlayerId(0))
+            );
+            assert_eq!(
+                table.app.game_spectators.lock().await[&other_key.game_code].len(),
+                1
+            );
+            let mut sequence = Vec::new();
+            for (key, viewer, expected) in [
+                (&table.key, PlayerId(0), state_codec::FrameKind::Full),
+                (&table.key, PlayerId(0), state_codec::FrameKind::Delta),
+                (
+                    &other_key,
+                    crate::SPECTATOR_PLAYER_ID,
+                    state_codec::FrameKind::Full,
+                ),
+                (
+                    &other_key,
+                    crate::SPECTATOR_PLAYER_ID,
+                    state_codec::FrameKind::Delta,
+                ),
+            ] {
+                let baseline = peer.baseline.clone().unwrap();
+                let (references, revision) = lifecycle_publication(&table, key, |_| {}).await;
+                let reply = peer.state().await;
+                let selection =
+                    state_codec::encode(Some(&baseline), peer.baseline.as_ref().unwrap())
+                        .unwrap()
+                        .kind();
+                sequence.push((
+                    key.game_code.clone(),
+                    viewer,
+                    revision,
+                    reply.kind,
+                    selection,
+                ));
+                eprintln!("cross-game receipt: {sequence:?}");
+                assert_projection(&reply.value, key, viewer);
+                let reference = if viewer == crate::SPECTATOR_PLAYER_ID {
+                    references.last().unwrap()
+                } else {
+                    &references[usize::from(viewer.0)]
+                };
+                assert_eq!(&reply.value, reference);
+                if expected == state_codec::FrameKind::Delta {
+                    assert_eq!(selection, expected, "exact consecutive same-view pair");
+                }
+                assert_eq!(reply.kind, Some(expected), "{sequence:?}");
+            }
+            peer.fence(false).await;
+        })
+        .await;
+        table.server.abort();
+        outcome.expect("cross-game A,A,B,B ordinary publications with both routes intact");
+    });
+}
+
+#[test]
+fn codec_lifecycle_ai_burst_preserves_every_revision() {
+    run_async_test(|| async {
+        let table = NativeTable::new().await;
+        let outcome = tokio::time::timeout(Duration::from_secs(30), async {
+            // Reconnect itself runs AI. Attach BOTH humans before enabling it.
+            let mut host = codec_seat(&table, PlayerId(0), false).await;
+            let mut pending = codec_seat(&table, PlayerId(3), true).await;
+            let mut spectator = codec_spectator(&table, false).await;
+            let mut legacy = codec_hello(&table.url, false, None).await;
+            legacy
+                .send(&ClientMessage::SpectatorJoin {
+                    game_code: table.key.game_code.clone(),
+                })
+                .await;
+            assert_eq!(legacy.state().await.kind, None);
+            host.fence(true).await;
+            pending.fence(true).await;
+            spectator.fence(true).await;
+            pending.resync().await;
+            spectator.resync().await;
+            let session = crate::lock_session(&table.app.sessions, &table.key.game_code)
+                .await
+                .unwrap();
+            let (lease, initial_revision) = table
+                .app
+                .context
+                .game_executor
+                .with_session(session, |session| {
+                    enable_ai(session, [PlayerId(1), PlayerId(2)]);
+                    session.state_revision
+                })
+                .await;
+            drop(lease);
+            let gate = table.app.context.game_executor.arm_historical_publication();
+            host.send(&ClientMessage::Action {
+                action: GameAction::MulliganDecision {
+                    choice: MulliganChoice::Keep,
+                },
+            })
+            .await;
+            gate.entered.notified().await;
+            gate.release.notify_one();
+            let mut revisions = Vec::new();
+            let mut selections = Vec::new();
+            let (final_frame, final_legacy) = loop {
+                let baseline = pending.baseline.clone().unwrap();
+                let reply = pending.state().await;
+                let selection =
+                    state_codec::encode(Some(&baseline), pending.baseline.as_ref().unwrap())
+                        .unwrap()
+                        .kind();
+                let revision = reply.value["data"]["state_revision"].as_u64().unwrap();
+                revisions.push(revision);
+                selections.push((selection, reply.kind));
+                let spectator_baseline = spectator.baseline.clone().unwrap();
+                let public = spectator.state().await;
+                let public_selection = state_codec::encode(
+                    Some(&spectator_baseline),
+                    spectator.baseline.as_ref().unwrap(),
+                )
+                .unwrap()
+                .kind();
+                let old_public = legacy.state().await;
+                assert_eq!(old_public.kind, None);
+                assert_eq!(public.value, old_public.value);
+                assert_eq!(public.value["data"]["state_revision"], revision);
+                assert_eq!(public.kind, Some(public_selection));
+                assert_projection(&reply.value, &table.key, PlayerId(3));
+                assert_eq!(revision, initial_revision + revisions.len() as u64);
+                assert_eq!(reply.kind, Some(selection));
+                if !reply.value["data"]["legal_actions"]
+                    .as_array()
+                    .unwrap()
+                    .is_empty()
+                {
+                    break (reply, old_public);
+                }
+                assert_eq!(reply.value["data"]["auto_pass_recommended"], false);
+                for key in [
+                    "end_continuous_effect_offers",
+                    "mana_payment_shortcut_actions",
+                    "spell_costs",
+                    "legal_actions_by_object",
+                    "activation_block_reasons",
+                ] {
+                    assert!(reply.value["data"].get(key).is_none(), "intermediate {key}");
+                }
+                assert!(
+                    revisions.len() < 128,
+                    "AI never reached pending human: {}",
+                    reply.value
+                );
+            };
+            let session = crate::lock_session(&table.app.sessions, &table.key.game_code)
+                .await
+                .unwrap();
+            eprintln!(
+                "AI receipt: human=PlayerId(0) action=Keep AI=[1,2] \
+                 revisions={initial_revision}->{revisions:?} selections={selections:?} \
+                 waiting_for={:?} final_legal_actions={}",
+                session.state.waiting_for, final_frame.value["data"]["legal_actions"]
+            );
+            assert_eq!(session.state_revision, *revisions.last().unwrap());
+            assert!(revisions.len() >= 3, "human plus >1 actual AI transition");
+            assert!(
+                selections
+                    .windows(2)
+                    .any(|pair| pair.iter().all(|entry| *entry
+                        == (
+                            state_codec::FrameKind::Delta,
+                            Some(state_codec::FrameKind::Delta)
+                        ))),
+                "two consecutive exact eligible/delivered Delta pairs: {selections:?}"
+            );
+            assert!(!final_frame.value["data"]["legal_actions"]
+                .as_array()
+                .unwrap()
+                .is_empty());
+            // Independent legacy delivery supplies the actual final batch
+            // inputs; live canonical state and decision supply projection.
+            // This is transport parity, not an independent AI/rules oracle.
+            let events: Vec<engine::types::events::GameEvent> =
+                serde_json::from_value(final_legacy.value["data"]["events"].clone()).unwrap();
+            let logs: Vec<engine::types::log::GameLogEntry> = serde_json::from_value(
+                final_legacy.value["data"]
+                    .get("log_entries")
+                    .cloned()
+                    .unwrap_or_else(|| serde_json::json!([])),
+            )
+            .unwrap();
+            let decision = crate::DecisionSnapshot::from_state(&session.state);
+            let source = super::StateUpdateSource {
+                revision: session.state_revision,
+                state: &session.state,
+                events: &events,
+                log_entries: &logs,
+                decision: Some((&decision).into()),
+            };
+            let expected = crate::build_state_update_message(
+                &source,
+                &table.key,
+                PlayerId(3),
+                session.rewind_options(),
+                &session.state.eliminated_players,
+            );
+            assert_eq!(final_frame.value, serde_json::to_value(expected).unwrap());
+            drop(session);
+            pending.fence(false).await;
+            spectator.fence(false).await;
+            legacy.fence(false).await;
+        })
+        .await;
+        table.server.abort();
+        outcome.expect("AI burst premise and final pending-human decision");
+    });
+}
+
+#[test]
+fn codec_lifecycle_approved_takeback_is_automatic() {
+    run_async_test(|| async {
+        let table = NativeTable::new().await;
+        let outcome = tokio::time::timeout(Duration::from_secs(30), async {
+            table.keep_all().await;
+            let mut peers = Vec::new();
+            for seat in 0..4 {
+                peers.push(codec_seat(&table, PlayerId(seat), false).await);
+            }
+            for peer in &mut peers {
+                peer.fence(true).await;
+            }
+            let (actor, action) = current_action(&table).await;
+            let (before, before_state, _) = resync_reference(&table, Some(actor)).await;
+            peers[usize::from(actor.0)]
+                .send(&ClientMessage::Action {
+                    action: action.clone(),
+                })
+                .await;
+            for peer in &mut peers {
+                peer.state().await;
+            }
+            let session = crate::lock_session(&table.app.sessions, &table.key.game_code)
+                .await
+                .unwrap();
+            assert_eq!(session.hosting, server_core::session::HostingMode::Shared);
+            let (requester, recorded_before) = session.takeback_history.back().unwrap();
+            let requester = *requester;
+            assert_eq!(
+                requester, actor,
+                "requester comes from actual recorded action"
+            );
+            assert_eq!(
+                serde_json::to_value(&recorded_before.players).unwrap(),
+                before_state["players"]
+            );
+            let voters = session.human_seats();
+            let preapproval_revision = session.state_revision;
+            drop(session);
+            let baseline = peers[usize::from(requester.0)].baseline.clone().unwrap();
+            peers[usize::from(requester.0)]
+                .send(&ClientMessage::RequestTakeback(None))
+                .await;
+            for peer in &mut peers {
+                let prompt = peer.next().await;
+                assert_eq!(
+                    prompt.value["type"], "TakebackRequested",
+                    "{}",
+                    prompt.value
+                );
+                assert_eq!(prompt.value["data"]["requester"], requester.0);
+            }
+            let session = crate::lock_session(&table.app.sessions, &table.key.game_code)
+                .await
+                .unwrap();
+            let pending = session.pending_takeback.as_ref().unwrap();
+            assert_eq!(pending.requested_by, requester);
+            assert_eq!(pending.approvals.len(), 1);
+            assert!(pending.approvals.contains(&requester));
+            drop(session);
+            let approvals: Vec<_> = voters.iter().copied().filter(|p| *p != requester).collect();
+            for (index, voter) in approvals.iter().enumerate() {
+                peers[usize::from(voter.0)]
+                    .send(&ClientMessage::RespondTakeback { approve: true })
+                    .await;
+                if index + 1 != approvals.len() {
+                    peers[usize::from(voter.0)].fence(false).await;
+                    let session = crate::lock_session(&table.app.sessions, &table.key.game_code)
+                        .await
+                        .unwrap();
+                    assert_eq!(
+                        session.pending_takeback.as_ref().unwrap().approvals.len(),
+                        index + 2
+                    );
+                }
+            }
+            let mut approved_frames = Vec::new();
+            for peer in &mut peers {
+                let approved = peer.state().await;
+                let resolved = peer.next().await;
+                assert_eq!(resolved.value["type"], "TakebackResolved");
+                assert_eq!(resolved.value["data"]["approved"], true);
+                approved_frames.push(approved);
+            }
+            let approved = &approved_frames[usize::from(requester.0)];
+            let selection = state_codec::encode(
+                Some(&baseline),
+                peers[usize::from(requester.0)].baseline.as_ref().unwrap(),
+            )
+            .unwrap()
+            .kind();
+            let session = crate::lock_session(&table.app.sessions, &table.key.game_code)
+                .await
+                .unwrap();
+            eprintln!(
+                "takeback receipt: recorded_action={action:?} requester={requester:?} \
+                 voters={voters:?} approvals={approvals:?} pending_then_resolved={} \
+                 revisions={preapproval_revision}->{} codec_alone={selection:?} delivered={:?}",
+                session.pending_takeback.is_none(),
+                session.state_revision,
+                approved.kind
+            );
+            assert!(session.pending_takeback.is_none());
+            assert!(session.state_revision > preapproval_revision);
+            assert_eq!(selection, state_codec::FrameKind::Delta);
+            assert_eq!(approved.kind, Some(state_codec::FrameKind::Delta));
+            for (seat, reply) in approved_frames.iter().enumerate() {
+                assert_eq!(
+                    reply.value,
+                    state_update_reference(&session, Some(PlayerId(seat as u8)))
+                );
+                assert!(reply.value.get("command_id").is_none());
+                assert_eq!(reply.value["data"]["events"], serde_json::json!([]));
+                assert!(reply.value["data"].get("log_entries").is_none());
+            }
+            for field in [
+                "phase",
+                "priority_player",
+                "active_player",
+                "turn_number",
+                "waiting_for",
+            ] {
+                assert_eq!(
+                    approved.value["data"]["state"].get(field).unwrap(),
+                    before["data"]["state"].get(field).unwrap(),
+                    "restored {field}"
+                );
+            }
+            drop(session);
+            let (actor, action) = current_action(&table).await;
+            peers[usize::from(actor.0)]
+                .send(&ClientMessage::Action { action })
+                .await;
+            for peer in &mut peers {
+                let baseline = peer.baseline.clone().unwrap();
+                let next = peer.state().await;
+                let selection =
+                    state_codec::encode(Some(&baseline), peer.baseline.as_ref().unwrap())
+                        .unwrap()
+                        .kind();
+                assert_eq!(selection, state_codec::FrameKind::Delta);
+                assert_eq!(next.kind, Some(state_codec::FrameKind::Delta));
+                peer.fence(false).await;
+            }
+        })
+        .await;
+        table.server.abort();
+        outcome.expect("actual unanimous approved takeback uses automatic monotonic Delta");
+    });
+}
+
+async fn lifecycle_seats(table: &NativeTable, gzip: bool) -> Vec<CodecPeer> {
+    let mut peers = Vec::new();
+    for seat in 0..4 {
+        peers.push(codec_seat(table, PlayerId(seat), gzip).await);
+    }
+    for peer in &mut peers {
+        peer.fence(true).await;
+    }
+    peers
+}
+
+/// Predict only the engine's event/log inputs on a throwaway canonical clone;
+/// the command, mutation, routes and delivered snapshots remain production.
+/// References use the resulting live state and the ordinary decision builder,
+/// not resync's empty-event approximation.
+async fn lifecycle_action(
+    table: &NativeTable,
+    key: &FullSessionKey,
+    peers: &mut [CodecPeer],
+    command_id: Option<u64>,
+) -> (PlayerId, Vec<CodecReply>, Vec<serde_json::Value>) {
+    let session = crate::lock_session(&table.app.sessions, &key.game_code)
+        .await
+        .unwrap();
+    let (lease, (actor, action, events, logs)) = table
+        .app
+        .context
+        .game_executor
+        .with_session(session, |session| {
+            assert!(session.ai_seats.is_empty());
+            let actor = server_core::acting_players(&session.state)[0];
+            let decision = crate::DecisionSnapshot::from_state(&session.state);
+            let action = decision
+                .legal_actions
+                .iter()
+                .find(|action| matches!(action, GameAction::PassPriority))
+                .or_else(|| decision.legal_actions.first())
+                .unwrap()
+                .clone();
+            let mut predicted = session.state.clone();
+            let result =
+                engine::game::engine::apply(&mut predicted, actor, action.clone()).unwrap();
+            (actor, action, result.events, result.log_entries)
+        })
+        .await;
+    drop(lease);
+    if let Some(id) = command_id {
+        send_command_frame(&mut peers[usize::from(actor.0)].socket, &action, id).await;
+    } else {
+        peers[usize::from(actor.0)]
+            .send(&ClientMessage::Action { action })
+            .await;
+    }
+    let mut replies = Vec::new();
+    for peer in peers.iter_mut() {
+        let baseline = peer.baseline.clone();
+        let reply = peer.state().await;
+        if let Some(kind) = reply.kind {
+            let selection = state_codec::encode(baseline.as_ref(), peer.baseline.as_ref().unwrap())
+                .unwrap()
+                .kind();
+            assert_eq!(kind, selection, "exact ordinary pair selection");
+        }
+        replies.push(reply);
+    }
+    let session = crate::lock_session(&table.app.sessions, &key.game_code)
+        .await
+        .unwrap();
+    let (lease, references) = table
+        .app
+        .context
+        .game_executor
+        .with_session(session, move |session| {
+            let decision = crate::DecisionSnapshot::from_state(&session.state);
+            let source = super::StateUpdateSource {
+                revision: session.state_revision,
+                state: &session.state,
+                events: &events,
+                log_entries: &logs,
+                decision: Some((&decision).into()),
+            };
+            let mut references = Vec::new();
+            for seat in 0..session.player_count {
+                let message = crate::build_state_update_message(
+                    &source,
+                    &session.full_runtime.as_ref().unwrap().key,
+                    PlayerId(seat),
+                    session.rewind_options(),
+                    &session.state.eliminated_players,
+                );
+                let mut value = serde_json::to_value(message).unwrap();
+                if actor == PlayerId(seat) {
+                    if let Some(id) = command_id {
+                        value["command_id"] = id.into();
+                    }
+                }
+                references.push(value);
+            }
+            references.push(
+                serde_json::to_value(
+                    crate::build_spectator_state_update_message(
+                        &session.full_runtime.as_ref().unwrap().key,
+                        &session.state,
+                        &events,
+                        &logs,
+                        session.state_revision,
+                    )
+                    .unwrap(),
+                )
+                .unwrap(),
+            );
+            references
+        })
+        .await;
+    drop(lease);
+    for (seat, reply) in replies.iter().enumerate() {
+        assert_eq!(
+            reply.value, references[seat],
+            "complete seat {seat} ordinary Envelope"
+        );
+    }
+    (actor, replies, references)
+}
+
+#[test]
+fn codec_lifecycle_player_reconnect_full_then_delta() {
+    run_async_test(|| async {
+        for gzip in [false, true] {
+            let table = NativeTable::new().await;
+            let outcome = tokio::time::timeout(Duration::from_secs(30), async {
+                table.keep_all().await;
+                let mut peers = lifecycle_seats(&table, gzip).await;
+                let (_, first, _) = lifecycle_action(&table, &table.key, &mut peers, None).await;
+                assert!(first
+                    .iter()
+                    .all(|reply| reply.kind == Some(state_codec::FrameKind::Full)));
+                let (_, second, _) = lifecycle_action(&table, &table.key, &mut peers, None).await;
+                assert!(second
+                    .iter()
+                    .all(|reply| reply.kind == Some(state_codec::FrameKind::Delta)));
+                let (returning, _) = current_action(&table).await;
+                let slot = usize::from(returning.0);
+                peers[slot].socket.close(None).await.unwrap();
+                let mut fresh =
+                    codec_hello(&table.url, gzip, Some(serde_json::json!(["StateCodecV1"]))).await;
+                assert!(fresh.baseline.is_none());
+                fresh
+                    .send(&ClientMessage::Reconnect {
+                        game_code: table.key.game_code.clone(),
+                        player_token: table.tokens[slot].clone(),
+                        full_key: table.key.clone(),
+                    })
+                    .await;
+                let bootstrap = fresh.state().await;
+                assert_eq!(bootstrap.kind, Some(state_codec::FrameKind::Full));
+                assert_eq!(bootstrap.value["type"], "GameStarted");
+                assert_projection(&bootstrap.value, &table.key, returning);
+                assert!(!bootstrap.value["data"]["legal_actions"]
+                    .as_array()
+                    .unwrap()
+                    .is_empty());
+                let session = crate::lock_session(&table.app.sessions, &table.key.game_code)
+                    .await
+                    .unwrap();
+                let decision = crate::DecisionSnapshot::from_state(&session.state);
+                assert_eq!(
+                    bootstrap.value,
+                    serde_json::to_value(crate::build_game_started_message(
+                        &session,
+                        &decision,
+                        returning,
+                        None,
+                        Vec::new(),
+                    ))
+                    .unwrap()
+                );
+                drop(session);
+                peers[slot] = fresh;
+                for (seat, peer) in peers.iter_mut().enumerate() {
+                    peer.fence(seat != slot).await;
+                }
+                let (_, first, _) = lifecycle_action(&table, &table.key, &mut peers, None).await;
+                assert_eq!(first[slot].kind, Some(state_codec::FrameKind::Full));
+                let (_, second, _) = lifecycle_action(&table, &table.key, &mut peers, None).await;
+                assert_eq!(second[slot].kind, Some(state_codec::FrameKind::Delta));
+                for peer in &mut peers {
+                    peer.fence(false).await;
+                }
+            })
+            .await;
+            table.server.abort();
+            outcome.expect("fresh reconnect bootstrap then ordinary Full/Delta without resync");
+        }
+    });
+}
+
+#[test]
+fn codec_lifecycle_replaced_socket_is_fenced() {
+    run_async_test(|| async {
+        let table = NativeTable::new().await;
+        let outcome = tokio::time::timeout(Duration::from_secs(30), async {
+            table.keep_all().await;
+            let mut peers = lifecycle_seats(&table, false).await;
+            lifecycle_action(&table, &table.key, &mut peers, None).await;
+            let (_, old_frames, _) = lifecycle_action(&table, &table.key, &mut peers, None).await;
+            assert_eq!(old_frames[0].kind, Some(state_codec::FrameKind::Delta));
+            let old_sender =
+                table.app.connections.lock().await[&table.key.game_code][&PlayerId(0)].clone();
+            let replacement = codec_seat(&table, PlayerId(0), false).await;
+            let new_sender =
+                table.app.connections.lock().await[&table.key.game_code][&PlayerId(0)].clone();
+            assert!(!old_sender.same_channel(&new_sender));
+            let mut old = std::mem::replace(&mut peers[0], replacement);
+            for (seat, peer) in peers.iter_mut().enumerate() {
+                peer.fence(seat != 0).await;
+            }
+            // Replacement can announce PlayerCount on the old socket. Drain
+            // ordinary controls, while forbidding any post-cutover state.
+            old.fence(false).await;
+            send_command_frame(&mut old.socket, &GameAction::PassPriority, 8301).await;
+            let denied = loop {
+                let reply = old.next().await;
+                match reply.value["type"].as_str().unwrap() {
+                    "ActionFailed" => break reply,
+                    "StateUpdate" | "GameStarted" | "Error" | "ActionRejected" => panic!(
+                        "stale action disclosed state or changed failure class: {}",
+                        reply.value
+                    ),
+                    // SubscribeLobby also emits ordinary tournament controls
+                    // after its LobbyUpdate delimiter.
+                    _ => {}
+                }
+            };
+            assert_eq!(denied.value["type"], "ActionFailed");
+            assert_eq!(
+                denied.value["data"]["message"],
+                crate::FULL_SOCKET_AUTHORITY_REJECTION
+            );
+            assert_eq!(denied.value["command_id"], 8301);
+            old.send(&ClientMessage::ResyncState).await;
+            old.denial(crate::FULL_SOCKET_AUTHORITY_REJECTION).await;
+            lifecycle_action(&table, &table.key, &mut peers, None).await;
+            let (_, continuing, _) = lifecycle_action(&table, &table.key, &mut peers, None).await;
+            assert_eq!(continuing[0].kind, Some(state_codec::FrameKind::Delta));
+            // lifecycle_action acquired the publication lease after all sends;
+            // only now is this local FIFO a no-stale-publication proof.
+            old.fence(false).await;
+        })
+        .await;
+        table.server.abort();
+        outcome.expect("replacement owns the route; stale command and resync disclose no state");
+    });
+}
+
+async fn lifecycle_second_game(table: &NativeTable) -> (FullSessionKey, Vec<CodecPeer>) {
+    let (key, mut host) = codec_create(table, 2).await;
+    let mut guest = codec_hello(&table.url, false, Some(serde_json::json!(["StateCodecV1"]))).await;
+    guest
+        .send(&ClientMessage::JoinGame {
+            game_code: key.game_code.clone(),
+            deck: codec_deck(),
+        })
+        .await;
+    assert_eq!(guest.state().await.value["type"], "GameStarted");
+    assert_eq!(host.state().await.value["type"], "GameStarted");
+    (key, vec![host, guest])
+}
+
+#[test]
+fn codec_lifecycle_spectator_join_and_switch() {
+    run_async_test(|| async {
+        let table = NativeTable::new().await;
+        let outcome = tokio::time::timeout(Duration::from_secs(30), async {
+            table.keep_all().await;
+            let mut peers = lifecycle_seats(&table, false).await;
+            let mut spectator = codec_spectator(&table, true).await;
+            for expected in [state_codec::FrameKind::Full, state_codec::FrameKind::Delta] {
+                let baseline = spectator.baseline.clone().unwrap();
+                let (_, seats, references) =
+                    lifecycle_action(&table, &table.key, &mut peers, None).await;
+                let public = spectator.state().await;
+                assert_eq!(public.kind, Some(expected));
+                assert_eq!(
+                    state_codec::encode(Some(&baseline), spectator.baseline.as_ref().unwrap())
+                        .unwrap()
+                        .kind(),
+                    expected
+                );
+                assert_eq!(&public.value, references.last().unwrap());
+                assert!(seats.iter().all(|reply| reply.kind == Some(expected)));
+                let session = crate::lock_session(&table.app.sessions, &table.key.game_code)
+                    .await
+                    .unwrap();
+                let id = session.state.players[0].hand[0];
+                let object_key = id.0.to_string();
+                assert_eq!(
+                    seats[0].value["data"]["state"]["objects"][&object_key]["name"],
+                    session.state.objects[&id].name
+                );
+                assert_eq!(
+                    seats[0].value["data"]["state"]["objects"][&object_key]
+                        ["display_visible_to_viewer"],
+                    true
+                );
+                assert!(public.value["data"]["state"]["objects"][&object_key]
+                    .get("display_visible_to_viewer")
+                    .is_none());
+                assert_eq!(public.value["data"]["legal_actions"], serde_json::json!([]));
+            }
+            let (other_key, mut other_peers) = lifecycle_second_game(&table).await;
+            assert_ne!(other_key, table.key);
+            spectator
+                .send(&ClientMessage::SpectatorJoin {
+                    game_code: other_key.game_code.clone(),
+                })
+                .await;
+            let bootstrap = spectator.state().await;
+            assert_eq!(bootstrap.value["type"], "GameStarted");
+            assert_eq!(bootstrap.kind, Some(state_codec::FrameKind::Full));
+            assert_projection(&bootstrap.value, &other_key, crate::SPECTATOR_PLAYER_ID);
+            for expected in [state_codec::FrameKind::Full, state_codec::FrameKind::Delta] {
+                let baseline = spectator.baseline.clone().unwrap();
+                let (_, _, references) =
+                    lifecycle_action(&table, &other_key, &mut other_peers, None).await;
+                let public = spectator.state().await;
+                assert_eq!(public.kind, Some(expected));
+                assert_eq!(
+                    state_codec::encode(Some(&baseline), spectator.baseline.as_ref().unwrap())
+                        .unwrap()
+                        .kind(),
+                    expected
+                );
+                assert_projection(&public.value, &other_key, crate::SPECTATOR_PLAYER_ID);
+                assert_eq!(&public.value, references.last().unwrap());
+            }
+            spectator.fence(false).await;
+        })
+        .await;
+        table.server.abort();
+        outcome.expect("spectator public bootstrap and key switch each reach ordinary Delta");
+    });
+}
+
+#[test]
+fn codec_lifecycle_spectator_switch_discards_captured_publication() {
+    run_async_test(|| async {
+        let table = NativeTable::new().await;
+        let outcome = tokio::time::timeout(Duration::from_secs(30), async {
+            table.keep_all().await;
+            let mut spectator = codec_spectator(&table, false).await;
+            let (other_key, mut other_peers) = lifecycle_second_game(&table).await;
+            let session = crate::lock_session(&table.app.sessions, &table.key.game_code)
+                .await
+                .unwrap();
+            let mut publisher = super::StateUpdatePublisher::capture(
+                &table.app.connections,
+                Some(&table.app.game_spectators),
+                table.key.clone(),
+                session.player_count,
+                session.state.eliminated_players.clone(),
+                session.rewind_options(),
+            )
+            .await;
+            let (lease, publisher) = table
+                .app
+                .context
+                .game_executor
+                .with_session(session, move |session| {
+                    let decision = crate::DecisionSnapshot::from_state(&session.state);
+                    let source = super::StateUpdateSource {
+                        revision: session.state_revision,
+                        state: &session.state,
+                        events: &[],
+                        log_entries: &[],
+                        decision: Some((&decision).into()),
+                    };
+                    publisher.publish(&source);
+                    assert_eq!(
+                        publisher.spectator_frames.len(),
+                        1,
+                        "positive captured A route/frame"
+                    );
+                    publisher
+                })
+                .await;
+            spectator
+                .send(&ClientMessage::SpectatorJoin {
+                    game_code: other_key.game_code.clone(),
+                })
+                .await;
+            let bootstrap = spectator.state().await;
+            assert_eq!(bootstrap.kind, Some(state_codec::FrameKind::Full));
+            assert_projection(&bootstrap.value, &other_key, crate::SPECTATOR_PLAYER_ID);
+            publisher.finish(&table.app.context.game_executor).await;
+            drop(lease);
+            for expected in [state_codec::FrameKind::Full, state_codec::FrameKind::Delta] {
+                let baseline = spectator.baseline.clone().unwrap();
+                let (_, _, references) =
+                    lifecycle_action(&table, &other_key, &mut other_peers, None).await;
+                let public = spectator.state().await;
+                assert_projection(&public.value, &other_key, crate::SPECTATOR_PLAYER_ID);
+                assert_eq!(public.kind, Some(expected));
+                assert_eq!(
+                    state_codec::encode(Some(&baseline), spectator.baseline.as_ref().unwrap())
+                        .unwrap()
+                        .kind(),
+                    expected
+                );
+                assert_eq!(&public.value, references.last().unwrap());
+            }
+            spectator.fence(false).await;
+        })
+        .await;
+        table.server.abort();
+        outcome.expect("captured A publication cannot follow B bootstrap or poison its baseline");
+    });
+}
+
+#[test]
+fn codec_lifecycle_prestart_join_then_start() {
+    run_async_test(|| async {
+        let table = NativeTable::new().await;
+        let outcome = tokio::time::timeout(Duration::from_secs(30), async {
+            let (key, host) = codec_create(&table, 4).await;
+            let mut peers = vec![host];
+            for seat in 1..4 {
+                let mut peer =
+                    codec_hello(&table.url, false, Some(serde_json::json!(["StateCodecV1"]))).await;
+                peer.send(&ClientMessage::JoinGame {
+                    game_code: key.game_code.clone(),
+                    deck: codec_deck(),
+                })
+                .await;
+                let first = peer.state().await;
+                assert_eq!(first.kind, Some(state_codec::FrameKind::Full));
+                assert_projection(&first.value, &key, PlayerId(seat));
+                if seat < 3 {
+                    assert_eq!(first.value["type"], "StateUpdate");
+                    assert_eq!(first.value["data"]["legal_actions"], serde_json::json!([]));
+                    let session = crate::lock_session(&table.app.sessions, &key.game_code)
+                        .await
+                        .unwrap();
+                    assert!(!session.game_started);
+                    assert_eq!(
+                        session
+                            .player_tokens
+                            .iter()
+                            .filter(|token| !token.is_empty())
+                            .count(),
+                        usize::from(seat) + 1
+                    );
+                } else {
+                    assert_eq!(first.value["type"], "GameStarted");
+                }
+                peers.push(peer);
+            }
+            for (seat, peer) in peers.iter_mut().enumerate().take(3) {
+                let bootstrap = peer.state().await;
+                assert_eq!(bootstrap.value["type"], "GameStarted");
+                assert_eq!(bootstrap.kind, Some(state_codec::FrameKind::Full));
+                assert_projection(&bootstrap.value, &key, PlayerId(seat as u8));
+            }
+            for expected in [state_codec::FrameKind::Full, state_codec::FrameKind::Delta] {
+                let (_, updates, _) = lifecycle_action(&table, &key, &mut peers, None).await;
+                assert!(updates.iter().all(|reply| reply.kind == Some(expected)));
+            }
+        })
+        .await;
+        table.server.abort();
+        outcome.expect("prestart join state then started bootstrap and ordinary Full/Delta");
+    });
+}
+
+#[test]
+fn codec_lifecycle_reconnect_does_not_replay_older_history() {
+    run_async_test(|| async {
+        let table = NativeTable::new().await;
+        let outcome = tokio::time::timeout(Duration::from_secs(30), async {
+            let mut host = codec_seat(&table, PlayerId(0), false).await;
+            let _old = codec_seat(&table, PlayerId(3), false).await;
+            host.fence(true).await;
+            let session = crate::lock_session(&table.app.sessions, &table.key.game_code)
+                .await
+                .unwrap();
+            let (lease, initial) = table
+                .app
+                .context
+                .game_executor
+                .with_session(session, |session| {
+                    enable_ai(session, [PlayerId(1), PlayerId(2)]);
+                    session.state_revision
+                })
+                .await;
+            drop(lease);
+            let gate = table.app.context.game_executor.arm_historical_publication();
+            host.send(&ClientMessage::Action {
+                action: GameAction::MulliganDecision {
+                    choice: MulliganChoice::Keep,
+                },
+            })
+            .await;
+            gate.entered.notified().await;
+            let mut returning =
+                codec_hello(&table.url, false, Some(serde_json::json!(["StateCodecV1"]))).await;
+            returning
+                .send(&ClientMessage::Reconnect {
+                    game_code: table.key.game_code.clone(),
+                    player_token: table.tokens[3].clone(),
+                    full_key: table.key.clone(),
+                })
+                .await;
+            returning
+                .send(&ClientMessage::Ping { timestamp: 8319 })
+                .await;
+            let mut bootstrap = None;
+            loop {
+                let reply = returning.next().await;
+                match reply.value["type"].as_str().unwrap() {
+                    "Pong" => {
+                        assert_eq!(reply.value["data"]["timestamp"], 8319);
+                        break;
+                    }
+                    "GameStarted" => {
+                        bootstrap = Some(reply);
+                    }
+                    "StateUpdate" | "Error" => {
+                        panic!("reconnect before bootstrap: {}", reply.value)
+                    }
+                    _ => {}
+                }
+            }
+            gate.release.notify_one();
+            let bootstrap = match bootstrap {
+                Some(reply) => reply,
+                None => returning.state().await,
+            };
+            assert_eq!(bootstrap.kind, Some(state_codec::FrameKind::Full));
+            assert_eq!(bootstrap.value["type"], "GameStarted");
+            assert_projection(&bootstrap.value, &table.key, PlayerId(3));
+            let revision = bootstrap.value["data"]["state_revision"].as_u64().unwrap();
+            assert!(revision >= initial + 3);
+            assert!(!bootstrap.value["data"]["legal_actions"]
+                .as_array()
+                .unwrap()
+                .is_empty());
+            // Join the historical publication before the local application
+            // fence; Ping above established only reader admission.
+            loop {
+                let reply = host.state().await;
+                if reply.value["data"]["state_revision"].as_u64().unwrap() >= revision {
+                    break;
+                }
+            }
+            returning.fence(false).await;
+            returning
+                .send(&ClientMessage::Action {
+                    action: GameAction::MulliganDecision {
+                        choice: MulliganChoice::Keep,
+                    },
+                })
+                .await;
+            let next = returning.state().await;
+            assert!(next.value["data"]["state_revision"].as_u64().unwrap() > revision);
+        })
+        .await;
+        table.server.abort();
+        outcome.expect("codec replacement bootstrap fences already-captured AI history");
+    });
+}
+
+#[test]
+fn codec_lifecycle_mixed_views_and_completion() {
+    run_async_test(|| async {
+        let table = NativeTable::new().await;
+        let outcome = tokio::time::timeout(Duration::from_secs(30), async {
+            table.keep_all().await;
+            let mut peers = Vec::new();
+            for (seat, offers) in [
+                Some(serde_json::json!(["StateCodecV1"])),
+                Some(serde_json::json!(["UnknownCodec"])),
+                None,
+                Some(serde_json::json!(["StateCodecV1"])),
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                let mut peer = codec_hello(&table.url, false, offers).await;
+                peer.send(&ClientMessage::Reconnect {
+                    game_code: table.key.game_code.clone(),
+                    player_token: table.tokens[seat].clone(),
+                    full_key: table.key.clone(),
+                })
+                .await;
+                let bootstrap = peer.state().await;
+                assert_eq!(bootstrap.kind.is_some(), seat == 0 || seat == 3);
+                peers.push(peer);
+            }
+            let mut spectator = codec_spectator(&table, true).await;
+            let mut legacy = codec_hello(&table.url, false, None).await;
+            legacy
+                .send(&ClientMessage::SpectatorJoin {
+                    game_code: table.key.game_code.clone(),
+                })
+                .await;
+            assert_eq!(legacy.state().await.kind, None);
+            for peer in &mut peers {
+                peer.fence(true).await;
+            }
+            let (actor, _) = current_action(&table).await;
+            let (own, _, _) = resync_reference(&table, Some(actor)).await;
+            assert!(!own["data"]["legal_actions"].as_array().unwrap().is_empty());
+            for (step, command_id) in [Some(8401), None, None, None].into_iter().enumerate() {
+                let (actor, replies, references) =
+                    lifecycle_action(&table, &table.key, &mut peers, command_id).await;
+                let baseline = spectator.baseline.clone().unwrap();
+                let public = spectator.state().await;
+                let old_public = legacy.state().await;
+                assert_eq!(old_public.kind, None);
+                assert_eq!(public.value, old_public.value);
+                assert_eq!(&public.value, references.last().unwrap());
+                assert_eq!(
+                    state_codec::encode(Some(&baseline), spectator.baseline.as_ref().unwrap())
+                        .unwrap()
+                        .kind(),
+                    public.kind.unwrap()
+                );
+                assert!(public.value.get("command_id").is_none());
+                for (seat, reply) in replies.iter().enumerate() {
+                    assert_eq!(reply.kind.is_some(), seat == 0 || seat == 3);
+                    match command_id {
+                        Some(id) if PlayerId(seat as u8) == actor => {
+                            assert_eq!(reply.value["command_id"], id)
+                        }
+                        Some(_) | None => assert!(reply.value.get("command_id").is_none()),
+                    }
+                }
+                let session = crate::lock_session(&table.app.sessions, &table.key.game_code)
+                    .await
+                    .unwrap();
+                let id = session.state.players[0].hand[0];
+                let object_key = id.0.to_string();
+                assert_eq!(
+                    replies[0].value["data"]["state"]["objects"][&object_key]["name"],
+                    session.state.objects[&id].name
+                );
+                assert_eq!(
+                    replies[0].value["data"]["state"]["objects"][&object_key]
+                        ["display_visible_to_viewer"],
+                    true
+                );
+                for value in [
+                    &replies[1].value,
+                    &replies[2].value,
+                    &replies[3].value,
+                    &public.value,
+                ] {
+                    assert!(value["data"]["state"]["objects"][&object_key]
+                        .get("display_visible_to_viewer")
+                        .is_none());
+                }
+                drop(session);
+                if step == 1 {
+                    let independent = peers[3].baseline.clone().unwrap();
+                    let recovered = peers[0].resync().await;
+                    assert_projection(&recovered.value, &table.key, PlayerId(0));
+                    for peer in peers.iter_mut().skip(1) {
+                        peer.fence(false).await;
+                    }
+                    spectator.fence(false).await;
+                    legacy.fence(false).await;
+                    assert_eq!(
+                        peers[3].baseline.as_ref().unwrap().as_bytes(),
+                        independent.as_bytes()
+                    );
+                }
+                if step >= 2 {
+                    assert_eq!(replies[0].kind, Some(state_codec::FrameKind::Delta));
+                    assert_eq!(replies[3].kind, Some(state_codec::FrameKind::Delta));
+                }
+            }
+            for peer in &mut peers {
+                peer.fence(false).await;
+            }
+            spectator.fence(false).await;
+            legacy.fence(false).await;
+        })
+        .await;
+        table.server.abort();
+        outcome.expect(
+            "mixed recipient-local histories, complete projections and one-shot completion",
+        );
     });
 }
