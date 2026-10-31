@@ -221,8 +221,7 @@ class MigrationTests(unittest.TestCase):
                                     for error in plan.unsupported), plan.unsupported)
                 self.assertEqual(plan.rendered, before)
         before = f"fn f() {{ let (value, _rest) = {F}(i); consume(_rest); }}"
-        self.contract(before, before.replace("(value, _rest)", "(value, rest)").replace(
-            F + "(i)", F + "(i).with_rest()").replace("consume(_rest)", "consume(rest)"), waivers=0)
+        self.refusal(before, "unsupported underscore-named remainder read")
 
     def test_ob_unrelated_typed_closure_refuses(self):
         for body in (f"let (v, _) = {F}(x); (v, 1)", f"({F}(x).0, 1)"):
@@ -242,17 +241,17 @@ class MigrationTests(unittest.TestCase):
                     f"let colored = {F}(j).waive({W}); consume(value, colored); }}")
         self.contract(before, expected, legacy=2, waivers=2)
 
-    def test_used_underscore_remainder_retains_debug_and_runtime_reads(self):
+    def test_named_remainder_retains_debug_and_runtime_reads(self):
         before = (
             "fn f() {\n"
-            "    let (parsed_target, _rem) = parse_mass_type_union(rest, ctx);\n"
+            "    let (parsed_target, rem) = parse_mass_type_union(rest, ctx);\n"
             "    #[cfg(debug_assertions)]\n"
-            "    assert_no_compound_remainder(_rem, text);\n"
+            "    assert_no_compound_remainder(rem, text);\n"
             "    let target = if filter_targets_stack(&parsed_target) {\n"
             "        constrain_filter_to_stack(parsed_target)\n"
             "    } else { parsed_target };\n"
             "    let (origin, target) = compose_exile_graveyard_origin_and_target(\n"
-            "        origin, target, rest, _rem, ctx, EffectScope::All,\n"
+            "        origin, target, rest, rem, ctx, EffectScope::All,\n"
             "    );\n"
             "    consume(origin, target);\n"
             "}")
@@ -269,9 +268,19 @@ class MigrationTests(unittest.TestCase):
             "    );\n"
             "    consume(origin, target);\n"
             "}")
-        self.contract(before, expected, waivers=0)
+        self.contract(before + COMPANION, expected + COMPANION.replace(
+            f"let (companion, _) = {F}(i)", f"let companion = {F}(i).waive({W})"))
         self.assertNotIn(".waive(", expected)
         self.assertNotIn(".remainder()", expected)
+
+    def test_underscore_named_remainder_read_refuses(self):
+        for body in (
+                "consume(value, _rem);",
+                "#[cfg(debug_assertions)] assert_no_compound_remainder(_rem, text); "
+                "compose(origin, value, rest, _rem, ctx);"):
+            with self.subTest(body=body):
+                before = f"fn f() {{ let (value, _rem) = {F}(i); {body} }}"
+                self.refusal(before, "unsupported underscore-named remainder read")
 
     def test_used_underscore_remainder_rebinding_refuses(self):
         before = (f"fn f() {{ let (mut value, _tail) = {F}(i); "
@@ -283,31 +292,6 @@ class MigrationTests(unittest.TestCase):
         self.assertEqual(plan.rendered, before)
         self.contract(f"fn f() {{ let (v, _unused) = {F}(i); consume(v); }}",
                       f"fn f() {{ let v = {F}(i).waive({W}); consume(v); }}")
-
-    def test_used_underscore_remainder_name_collision_refuses(self):
-        for prefix, pattern, body, category in (
-                ("let tail = previous(); ", "(value, _tail)", "consume(value, _tail, tail);", "collision"),
-                ("", "(tail, _tail)", "consume(tail, _tail);", "collision"),
-                ("", "(value, _tail)", "let tail = later(); consume(value, _tail, tail);", "collision"),
-                ("", "(value, _tail)", "{ let tail = nested(); consume(_tail, tail); }",
-                 "unsupported-scope _tail")):
-            before = f"fn f() {{ {prefix}let {pattern} = {F}(i); {body} }}"
-            with self.subTest(before=before):
-                plan = migration.plan_source(P, before)
-                self.assertTrue(plan.unsupported)
-                self.assertEqual(plan.rendered, before)
-                self.assertTrue(any(category in error for error in plan.unsupported))
-        for source in (
-                f"fn f(tail: &str) {{ let (value, _tail) = {F}(i); consume(_tail); }}",
-                f"fn f() {{ let tail = outer(); if ready() {{ let (value, _tail) = {F}(i); consume(_tail); }} }}",
-                f"fn f() {{ ctx.with_player_antecedents(|tail| {{ let (value, _tail) = {F}(i); consume(_tail); }}); }}",
-                f"fn f() {{ for tail in tails {{ let (value, _tail) = {F}(i); consume(_tail); }} }}",
-                f"fn f() {{ match input {{ Some(tail) => {{ let (value, _tail) = {F}(i); consume(_tail); }}, _ => (), }} }}"):
-            with self.subTest(source=source):
-                plan = migration.plan_source(P, source)
-                self.assertTrue(plan.unsupported)
-                self.assertEqual(plan.rendered, source)
-                self.assertTrue(any("collision" in error for error in plan.unsupported))
 
     def test_d1_enclosing_function_rebindings_refuse_for_let_and_match(self):
         bindings = (
@@ -370,14 +354,10 @@ class MigrationTests(unittest.TestCase):
     def test_d1b_same_block_shadowing_limits_reads_and_keeps_initializer(self):
         before = (f"fn f() {{ let (v, _rest) = {F}(i); consume(v, _rest); "
                   f"let (other, _rest) = {F}(j); consume(other); }}")
-        expected = (f"fn f() {{ let (v, rest) = {F}(i).with_rest(); consume(v, rest); "
-                    f"let other = {F}(j).waive({W}); consume(other); }}")
-        self.contract(before, expected, legacy=2, waivers=1)
+        self.refusal(before, "unsupported underscore-named remainder read")
         before = (f"fn f() {{ let (v, _rest) = {F}(i); "
                   "let _rest = inspect(_rest); consume(v, _rest); }")
-        expected = (f"fn f() {{ let (v, rest) = {F}(i).with_rest(); "
-                    "let _rest = inspect(rest); consume(v, _rest); }")
-        self.contract(before, expected, waivers=0)
+        self.refusal(before, "unsupported underscore-named remainder read")
         before = (f"fn f() {{ let (v, _rest) = {F}(i); "
                   'let _rest = other(); println!("{_rest}"); consume(v); }')
         self.contract(before, before.replace(f"let (v, _rest) = {F}(i)",
@@ -420,10 +400,10 @@ class MigrationTests(unittest.TestCase):
     def test_d1b_real_imperative_and_dispatch_sibling_shapes(self):
         before = (
             "fn f() { if all { "
-            "let (parsed_target, _rem) = parse_mass_type_union(rest, ctx); "
-            "#[cfg(debug_assertions)] assert_no_compound_remainder(_rem, text); "
+            "let (parsed_target, rem) = parse_mass_type_union(rest, ctx); "
+            "#[cfg(debug_assertions)] assert_no_compound_remainder(rem, text); "
             "let target = constrain(parsed_target); "
-            "let (origin, target) = compose(origin, target, rest, _rem, ctx); "
+            "let (origin, target) = compose(origin, target, rest, rem, ctx); "
             "return result(origin, target); } "
             "if mass_zone { let (target, _rem) = "
             "ctx.with_player_antecedents(|scoped| parse_target_with_ctx(rest_text, scoped)); "
@@ -431,11 +411,10 @@ class MigrationTests(unittest.TestCase):
             "let (origin, target) = compose(origin, target, rest_text, _rem, ctx); "
             "return result(origin, target); } }")
         expected = before.replace(
-            "let (parsed_target, _rem) = parse_mass_type_union(rest, ctx)",
-            "let (parsed_target, rem) = parse_mass_type_union(rest, ctx).with_rest()").replace(
-                "assert_no_compound_remainder(_rem, text)", "assert_no_compound_remainder(rem, text)", 1
-            ).replace("compose(origin, target, rest, _rem, ctx)", "compose(origin, target, rest, rem, ctx)")
-        self.contract(before, expected, waivers=0)
+            "let (parsed_target, rem) = parse_mass_type_union(rest, ctx)",
+            "let (parsed_target, rem) = parse_mass_type_union(rest, ctx).with_rest()")
+        self.contract(before + COMPANION, expected + COMPANION.replace(
+            f"let (companion, _) = {F}(i)", f"let companion = {F}(i).waive({W})"))
         before = (
             f"fn f() {{ if let Some((subject, _)) = read(i) {{ let (affected, _rest) = {F}(&subject); "
             "return result(affected); } "
@@ -531,11 +510,8 @@ class MigrationTests(unittest.TestCase):
                 self.assertFalse(plan.edits)
                 control = before.replace(expression, "inspect(_rest)")
                 self.refusal(control, "unsupported-scope _rest")
-                legal = before.replace(expression, "_rest")
-                retained = migration.plan_source(P, legal)
-                self.assertFalse(retained.unsupported, retained.unsupported)
-                self.assertIn("consume(v, rest)", retained.rendered)
-                self.assertIn(".with_rest()", retained.rendered)
+                plain_read = before.replace(expression, "_rest")
+                self.refusal(plain_read, "unsupported underscore-named remainder read")
 
     def test_b2_positive_positions_refuse_patterns_and_macro_tokens(self):
         for statement in (
@@ -559,9 +535,7 @@ class MigrationTests(unittest.TestCase):
                         control = control.replace("(v, _rest)", "(v, _)")
                     self.assertFalse(migration.plan_source(P, control).unsupported)
         before = f"fn f() {{ let (v, _rest) = {F}(i); consume(v, _rest); }}"
-        self.contract(before, before.replace("(v, _rest)", "(v, rest)").replace(
-            F + "(i)", F + "(i).with_rest()").replace("consume(v, _rest)", "consume(v, rest)"),
-            waivers=0)
+        self.refusal(before, "unsupported underscore-named remainder read")
 
     def test_b3_cfg_expression_chains_are_not_runtime_retention(self):
         for statement in (
@@ -734,6 +708,8 @@ class TreeTests(unittest.TestCase):
 
     def test_d1_d2_d3_refusal_preflights_whole_tree(self):
         cases = (
+            (f"let (v, _rem) = {F}(i); consume(v, _rem);",
+             "unsupported underscore-named remainder read"),
             (f"let (v, _rest) = {F}(i); if let Some(_rest) = opt {{ use_it(_rest); }}",
              "unsupported-scope _rest"),
             (f'match {F}(i) {{ (v, _rest) => {{ println!("{{_rest}}"); consume(v); }} }}',
@@ -822,9 +798,9 @@ class TinyGrammarTests(unittest.TestCase):
         self.assertTrue(any(category in error for error in plan.unsupported), plan.unsupported)
         self.assertEqual((plan.rendered, plan.edits), (before, ()))
         control = migration.plan_source(
-            P, f"fn f() {{ let (v, _rest) = {F}(i); consume(v, _rest); }}")
+            P, f"fn f() {{ let (v, _rest) = {F}(i); consume(v); }}")
         self.assertFalse(control.unsupported, control.unsupported)
-        self.assertIn("consume(v, rest)", control.rendered)
+        self.assertIn(f".waive({W})", control.rendered)
 
     def test_r4_f1_closure_after_block(self):
         for block in ("match v { _ => {} }", "{}", "while c {}", "for x in xs {}"):
@@ -935,8 +911,8 @@ class TinyGrammarTests(unittest.TestCase):
                 self.assertTrue(any("unsupported debug-only remainder observation" in error
                                     for error in result.unsupported), result.unsupported)
             else:
-                self.assertFalse(result.unsupported, result.unsupported)
-                self.assertIn("consume(rest)", result.rendered)
+                self.assertTrue(any("unsupported underscore-named remainder read" in error
+                                    for error in result.unsupported), result.unsupported)
 
 
 class RoundFiveTests(unittest.TestCase):
@@ -995,9 +971,9 @@ class RoundFiveTests(unittest.TestCase):
                 'consume("{{_rest}}");'):
             with self.subTest(control=statement):
                 plan = migration.plan_source(
-                    P, f"fn f() {{ let (v, _rest) = {F}(i); {statement} consume(v, _rest); }}")
+                    P, f"fn f() {{ let (v, _rest) = {F}(i); {statement} consume(v); }}")
                 self.assertFalse(plan.unsupported, plan.unsupported)
-                self.assertIn("consume(v, rest)", plan.rendered)
+                self.assertIn(f".waive({W})", plan.rendered)
 
     def test_r5_alias_and_mixed_runtime_capture_repros(self):
         for prefix, statement in (
@@ -1017,32 +993,6 @@ class RoundFiveTests(unittest.TestCase):
                         f"fn f() {{ let (v, _rest) = {F}(i); "
                         + self.message(macro, literal) + " consume(v); }",
                         "unsupported implicit format-capture remainder read")
-
-    def test_r5_rename_checks_decoded_new_name_captures(self):
-        for literal in ('"{rest}"', '"{:rest$}"', '"{:.rest$}"', '"{:>rest$}"',
-                        r'"\u{7b}rest}"', '"{\\\n    rest}"', 'r#"{rest:?}"#'):
-            with self.subTest(literal=literal):
-                self.refusal(
-                    f"fn f() {{ let (v, _rest) = {F}(i); consume(_rest); "
-                    f"consume({literal}); consume(v); }}", "remainder rename collision")
-        source = (f'fn f() {{ let (v, _rest) = {F}(i); consume(_rest); '
-                  'consume("{{rest}}"); consume(v); }')
-        self.assertFalse(migration.plan_source(P, source).unsupported)
-
-    def test_r5_closure_parameters_all_body_shapes(self):
-        inner = f"let (v, _rest) = {F}(i); consume(_rest); consume(v);"
-        for body in (
-                "{ " + inner + " }",
-                "match i { _ => { " + inner + " } }",
-                "if ready { " + inner + " } else {}",
-                "loop { " + inner + " break; }",
-                "consume({ " + inner + " () })"):
-            with self.subTest(body=body):
-                self.refusal(f"fn f() {{ let g = |rest: &str| {body}; }}",
-                             "remainder rename collision")
-                control = migration.plan_source(P, f"fn f() {{ let g = |other: &str| {body}; }}")
-                self.assertFalse(control.unsupported, control.unsupported)
-                self.assertIn("consume(rest)", control.rendered)
 
     def test_r5_implicit_capture_refusal_is_transactional(self):
         with tempfile.TemporaryDirectory() as directory:

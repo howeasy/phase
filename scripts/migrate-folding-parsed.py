@@ -4,15 +4,14 @@
 No Rust is written by --check or --replay. Producers are a declaration-bounded
 manual partition, never an entire-file exemption. Unknown consumers are errors.
 The permanent Gate H detector supplies the sole lexer/balanced-token authority.
-Tracked-name acceptance is the shared G-T1/G-T2a/G-T2b/G-T3 table in the detector's
-module docstring. Remainders admit only whole top-level call arguments in their
-binder's own block and the exact debug observation. Every other occurrence,
-including nested blocks/closures/macros, raw identifiers, captures/width refs,
-cooked unicode/hex escapes in visible format arguments and configuration-only reads,
-refuses the whole tree. Capture checks decode every visible literal regardless of
-macro name; renames also check captures of the new name and enclosing closure
-parameters for every expression-body shape. Ambient test-module configuration
-is not a read guard.
+Underscore-named remainders are waived only when unread, or observed by the exact
+G-T3 debug assertion (accessor plus waiver). Every other underscore-named read is
+refused; named retained remainders keep their binding and extract with with_rest.
+The shared tracked-name grammar also refuses nested blocks/closures/macros, raw
+identifiers, captures/width refs, cooked unicode/hex escapes in visible format
+arguments and configuration-only reads. Capture checks decode every visible
+literal regardless of macro name. Ambient test-module configuration is not a
+read guard.
 """
 from __future__ import annotations
 
@@ -321,71 +320,6 @@ def plan_source(path, source):
                     return None
             return None
 
-        def rename_collision(name, declaration, scope_end, visible_start, old_name):
-            """Refuse capture by local/outer bindings or existing name references."""
-            scope = ex.scopes[declaration]
-            # Include nested scopes: a new name there could capture a renamed
-            # read. References matter too, since the new local would shadow them.
-            if name in v[scope + 1:scope_end]:
-                return True
-            fn = owner(declaration)
-            if fn and name in v[fn[0]:fn[1]]:
-                return True
-            visible_end = min(
-                (after for at, (binding, after) in plain_lets.items()
-                 if v[at] == old_name and binding > declaration
-                 and ex.scopes[binding] == scope), default=scope_end)
-            if fn and ex.local_hazard(source, name, fn[0], fn[2], visible_start, visible_end):
-                return True
-            ancestors = set()
-            parent = ex.parents[scope]
-            while parent is not None:
-                ancestors.add(parent)
-                parent = ex.parents[parent]
-            for token in range(declaration):
-                if v[token] == "|":
-                    close = ex.end(token + 1, {"|"}, declaration)
-                    body = close + 1
-                    if v[body:body + 2] == ["-", ">"]:
-                        body = ex.end(body + 2, {"{"}, declaration)
-                    # Bound the whole closure expression by its containing
-                    # delimiter, not by a presumed brace body.
-                    limit = min((b for a, b in ex.pairs.items()
-                                 if a < token < b), default=len(v))
-                    extent = ex.end(body, {";", ","}, limit)
-                    if (close < declaration and body < declaration < extent
-                            and name in v[token + 1:close]):
-                        return True
-                if v[token] == "for":
-                    body = ex.body_brace(token, len(v))
-                    if body < declaration < ex.pairs.get(body, -1):
-                        pattern_end = ex.end(token + 1, {"in"}, body)
-                        if name in v[token + 1:pattern_end]:
-                            return True
-                if v[token] == "match":
-                    body = ex.body_brace(token, len(v))
-                    if body < declaration < ex.pairs.get(body, -1):
-                        for a, b in ex.match_patterns(body + 1, ex.pairs[body]):
-                            arrow = ex.end(a, {"=>"}, ex.pairs[body])
-                            end = ex.block_expression_end(arrow + 1, ex.pairs[body])
-                            if end is None:
-                                end = ex.end(arrow + 1, {","}, ex.pairs[body])
-                            if arrow < declaration < end and name in v[a:b]:
-                                return True
-                if v[token] != "let" or ex.scopes[token] not in ancestors:
-                    continue
-                equals = ex.end(token + 1, {"=", ";", "}"})
-                pattern_end = ex.end(token + 1, {":"}, equals)
-                if name not in v[token + 1:pattern_end]:
-                    continue
-                # A prior sibling if-let/while-let does not export its binding.
-                if token and v[token - 1] in ("if", "while"):
-                    body = ex.body_brace(token - 1, len(v))
-                    if body >= len(v) or not body < declaration < ex.pairs[body]:
-                        continue
-                return True
-            return False
-
         typed_rewrites = set()
         typed_closure_headers = [j for j in range(1, len(v) - 1)
                                  if v[j:j + 2] == ["-", ">"] and v[j - 1] == "|"]
@@ -511,19 +445,8 @@ def plan_source(path, source):
                     actions.update((key, "refused") for key in ids)
                     continue
                 if not debug_only:
-                    if residue is None:
-                        actions.update((key, "refused") for key in ids)
-                        reject(i, "unsupported used underscore result pattern")
-                        continue
-                    retained_name = v[residue].lstrip("_")
-                    if (re.fullmatch(r"[A-Za-z]\w*", retained_name) is None
-                            or rename_collision(retained_name, i, scope_end, end, v[residue])):
-                        actions.update((key, "refused") for key in ids)
-                        reject(i, f"remainder rename collision or invalid identifier: {retained_name}")
-                        continue
-                    for token in (residue, *reads):
-                        replace(token, token + 1, retained_name, "retained-remainder-name")
-                    assign(ids, "retain", "retained-underscore-binding")
+                    reject(i, "unsupported underscore-named remainder read")
+                    actions.update((key, "refused") for key in ids)
                     continue
                 try:
                     value = tuple_value(i + 1, pattern_end)

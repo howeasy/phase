@@ -1608,5 +1608,57 @@ class RoundFiveTests(unittest.TestCase):
                 self.assertEqual(rd.find_disposition_violations(self.PATH, source), [])
 
 
+class RoundSixTests(unittest.TestCase):
+    PATH = "crates/engine/src/parser/probe.rs"
+    REASON = "ResidueWaiver::Unaudited"
+
+    def test_macro_return_cannot_consume_direct_origin(self):
+        source = ("macro_rules! discard { (return $e:expr) => { let _ = $e; }; } "
+                  "fn probe(filter: Filter, i: &str) { "
+                  "discard! { return Parsed::new(filter, i) } }")
+        found = rd.find_disposition_violations(self.PATH, source)
+        self.assertIn("unsupported-scope", [h.family for h in found], found)
+        direct = "fn probe() { let _ = Parsed::new(filter, i); }"
+        self.assertIn("parsed-disposal", [
+            h.family for h in rd.find_disposition_violations(self.PATH, direct)])
+        waived = f"fn probe() {{ Parsed::new(filter, i).waive({self.REASON}); }}"
+        self.assertEqual(rd.find_disposition_violations(self.PATH, waived), [])
+
+    def test_macro_let_cannot_consume_extracted_tuple(self):
+        for expression in ("let (v, rest) = p.with_rest();",
+                           "let rest = p.with_rest().1;"):
+            with self.subTest(expression=expression):
+                source = "fn f() { unknown! { " + expression + " } }"
+                found = rd.find_disposition_violations(self.PATH, source)
+                self.assertIn("unsupported-scope", [h.family for h in found], found)
+                self.assertEqual(rd.find_disposition_violations(
+                    self.PATH, "fn f() { " + expression + " }"), [])
+
+    def test_macro_origin_battery(self):
+        declaration = ("fn parse_type_phrase_folding(i: &str) -> Parsed<'_, Filter> "
+                       "{ Parsed::new(filter, i) }\n")
+        for origin in ("Parsed::new(filter, i)", "parse_type_phrase_folding(i)"):
+            for template in (
+                    "unknown!(EXPR);",
+                    "macro_rules! discard { () => { EXPR }; }",
+                    "vec![EXPR];",
+                    "matches!(EXPR, _);",
+                    "crate::unknown! { return EXPR }",
+                    "unknown! { fn probe() -> Parsed<'a, Filter> { EXPR } }",
+                    "unknown!(EXPR.waive(ResidueWaiver::Unaudited));",
+                    "unknown!(EXPR.with_rest());"):
+                with self.subTest(origin=origin, template=template):
+                    source = declaration + "fn f() { " + template.replace("EXPR", origin) + " }"
+                    found = rd.find_disposition_violations(self.PATH, source)
+                    self.assertIn("unsupported-scope", [h.family for h in found], found)
+        for pattern in ("_", "p"):
+            for template in ("unknown! { BODY }", "macro_rules! m { () => { BODY }; }"):
+                with self.subTest(pattern=pattern, template=template):
+                    body = f"let {pattern}: Parsed<'_, Filter> = obtain();"
+                    source = "fn f() { " + template.replace("BODY", body) + " }"
+                    found = rd.find_disposition_violations(self.PATH, source)
+                    self.assertIn("unsupported-scope", [h.family for h in found], found)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

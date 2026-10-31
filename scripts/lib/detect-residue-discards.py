@@ -12,7 +12,8 @@ own block level only:
   G-T2a (Parsed): statement/let initializer starting `N.waive(...)`,
         `N.with_rest(...)` or `N.remainder(...)`; return/binder-block tail accepts
         only waive/with_rest. No argument, alias, nested-block or closure reads.
-  G-T2b (remainder): N is a whole top-level argument of one path/method call,
+  G-T2b (remainder read inspection; the transformer refuses these reads): N is a
+        whole top-level argument of one path/method call,
         itself a complete statement or plain-let initializer. `break(N);` and
         call-argument tuples after `>` also count as real reads. No cfg, macro,
         closure, block, array or struct within that argument list.
@@ -23,10 +24,13 @@ N or fn/let tokens in one refuse the enclosing function. Raw identifiers naming
 N/dispositions/ResidueWaiver, implicit captures/width references in any decoded
 visible literal, and cooked unicode/hex escapes in visible format-string macro
 arguments refuse. cfg anywhere in a containing statement/operand/header marks
-that read configuration-only (except G-T3). Ownerless/macro-contained binders refuse.
-Real tuple-era inventory: 92 discard bindings, 485 retained bindings, one runtime
-underscore argument (imperative.rs), one G-T3 observation (counter.rs). Tuple
-patterns contain identifiers with optional mut, no ref/type-ascribed remainders.
+that read configuration-only (except G-T3). Ownerless/macro-contained binders
+and Parsed origin expressions refuse, even without a named binder. Tokens inside
+macro trees cannot consume Parsed origins; known tuple assertions remain consumers
+of extracted tuples, not proof of Parsed consumption.
+Real tuple-era inventory: 92 discard bindings, 486 retained bindings, one G-T3
+observation (counter.rs). Tuple patterns contain identifiers with optional mut,
+no ref/type-ascribed remainders.
 Expression-with-block statement boundaries are shared by closure tails and
 comma-free match arms. Import aliases are lexical (module boundaries do not
 inherit them) and apply only to unqualified calls; qualified calls use the final
@@ -1078,6 +1082,7 @@ def find_disposition_violations(relpath, source, parsed_helpers=None):
     stream = all_code_stream(source)
     ex = Expressions(stream)
     v = ex.values
+    macro_tokens = {i for a, b in ex.macro_token_trees() for i in range(a, b + 1)}
     ops = list(dispositions(ex))
     parsed_helpers = (parsed_returning_helpers([source]) if parsed_helpers is None
                       else parsed_helpers)
@@ -1102,7 +1107,7 @@ def find_disposition_violations(relpath, source, parsed_helpers=None):
     for op in ops:
         if op.error:
             reject(op.token, op.error)
-        if op.receiver:
+        if op.receiver and op.token not in macro_tokens:
             receivers.append(op.receiver)
         if op.name == "with_rest" and not op.error:
             key = op.token
@@ -1142,6 +1147,8 @@ def find_disposition_violations(relpath, source, parsed_helpers=None):
         leaves[start, end] = i
         kinds[i] = "parsed"
         sites[i] = i
+        if i in macro_tokens:
+            reject(i, "unsupported-scope")
 
     # A Parsed type annotation establishes origin even for an opaque initializer.
     for i, token in enumerate(v):
@@ -1152,6 +1159,8 @@ def find_disposition_violations(relpath, source, parsed_helpers=None):
         if (equals >= len(v) or v[equals] != "=" or annotation == equals
                 or "Parsed" not in v[annotation + 1:equals]):
             continue
+        if i in macro_tokens:
+            reject(i + 1, "unsupported-scope")
         end = ex.initializer_end(equals + 1)
         if ex.result_leaves(equals + 1, end, leaves):
             continue
@@ -1196,6 +1205,8 @@ def find_disposition_violations(relpath, source, parsed_helpers=None):
 
     def accept_or_reject(ids, allowed):
         for key in ids:
+            if kinds[key] == "parsed" and sites[key] in macro_tokens:
+                continue  # Macro tokens cannot establish result consumption.
             consumed.add(key)
             if not allowed(key):
                 reject(sites[key], "parsed-disposal" if kinds[key] == "parsed"
@@ -1274,6 +1285,10 @@ def find_disposition_violations(relpath, source, parsed_helpers=None):
         ids = flowing(equals + 1, end)
         # Resolve reads before transferring ownership, not in a cleanup pass.
         for key in ids:
+            if i in macro_tokens:
+                reject(a if kinds[key] == "parsed" and named else sites[key],
+                       "unsupported-scope")
+                continue
             if kinds[key] == "parsed" and named:
                 consumed.add(key)  # ownership transfers to the new local
                 alias = a
@@ -1300,6 +1315,8 @@ def find_disposition_violations(relpath, source, parsed_helpers=None):
     for a, b in receivers:
         accept_or_reject(flowing(a, b), lambda k: kinds[k] == "parsed")
     for i, token in enumerate(v):
+        if i in macro_tokens:
+            continue
         if token == "match":
             opened = ex.body_brace(i, len(v))
             ids = flowing(i + 1, opened)
