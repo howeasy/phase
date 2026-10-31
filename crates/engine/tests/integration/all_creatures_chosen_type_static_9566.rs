@@ -1,4 +1,4 @@
-//! Engineered Plague {2}{B} Enchantment — verbatim Oracle text (Scryfall):
+//! Engineered Plague {2}{B} Enchantment — verbatim Oracle text (pinned MTGJSON):
 //! "As this enchantment enters, choose a creature type.
 //! All creatures of the chosen type get -1/-1."
 //!
@@ -24,7 +24,6 @@ use engine::types::ability::ChoiceType;
 use engine::types::actions::GameAction;
 use engine::types::game_state::{NamedChoiceSourceBinding, WaitingFor};
 use engine::types::identifiers::ObjectId;
-use engine::types::keywords::Keyword;
 use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::zones::Zone;
@@ -32,9 +31,9 @@ use engine::types::zones::Zone;
 const ENGINEERED_PLAGUE: &str =
     "As this enchantment enters, choose a creature type.\nAll creatures of the chosen type get -1/-1.";
 
-fn plague_in_hand(scenario: &mut GameScenario, name: &str) -> ObjectId {
+fn plague_in_hand(scenario: &mut GameScenario) -> ObjectId {
     scenario
-        .add_spell_to_hand(P0, name, false)
+        .add_spell_to_hand(P0, "Engineered Plague", false)
         .as_enchantment()
         .from_oracle_text(ENGINEERED_PLAGUE)
         .with_mana_cost(ManaCost::Cost {
@@ -148,7 +147,8 @@ fn naming_elemental_shrinks_only_elementals_on_both_sides() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
 
-    // Grim Lavamancer stand-in: not an Elemental, would die to a blanket -1/-1.
+    // Textless Human Wizard filler: Engineered Plague must not affect it when
+    // Elemental is chosen (Oracle text above; CR 611.3a).
     let opposing_wizard = scenario
         .add_creature(P1, "Opposing Human Wizard", 1, 1)
         .with_subtypes(vec!["Human", "Wizard"])
@@ -165,12 +165,22 @@ fn naming_elemental_shrinks_only_elementals_on_both_sides() {
         .add_creature(P0, "Own Elemental", 3, 3)
         .with_subtypes(vec!["Elemental"])
         .id();
+    // Woodland Changeling (MTGJSON): "Changeling (This card is every creature type.)"
+    // CR 702.73a: Woodland Changeling is an Elemental as well as every other
+    // creature type, so Engineered Plague's chosen-Elemental effect applies.
     let changeling = scenario
-        .add_creature(P1, "Opposing Changeling", 2, 2)
+        .add_creature(P1, "Woodland Changeling", 2, 2)
         .with_subtypes(vec!["Shapeshifter"])
-        .with_keyword(Keyword::Changeling)
+        .with_mana_cost(ManaCost::Cost {
+            generic: 1,
+            shards: vec![ManaCostShard::Green],
+        })
+        .from_oracle_text_with_keywords(
+            &["Changeling"],
+            "Changeling (This card is every creature type.)",
+        )
         .id();
-    let plague = plague_in_hand(&mut scenario, "Engineered Plague");
+    let plague = plague_in_hand(&mut scenario);
 
     let mut runner = scenario.build();
     seed_creature_types(&mut runner);
@@ -220,8 +230,8 @@ fn each_plague_shrinks_only_its_own_chosen_type() {
         .add_creature(P0, "Human", 2, 2)
         .with_subtypes(vec!["Human"])
         .id();
-    let plague_a = plague_in_hand(&mut scenario, "Engineered Plague A");
-    let plague_b = plague_in_hand(&mut scenario, "Engineered Plague B");
+    let plague_a = plague_in_hand(&mut scenario);
+    let plague_b = plague_in_hand(&mut scenario);
 
     let mut runner = scenario.build();
     seed_creature_types(&mut runner);
@@ -259,7 +269,7 @@ fn elemental_entering_later_is_shrunk_and_others_are_not() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
 
-    let plague = plague_in_hand(&mut scenario, "Engineered Plague");
+    let plague = plague_in_hand(&mut scenario);
     let late_elemental = creature_in_hand(&mut scenario, "Late Elemental", "Elemental");
     let late_goblin = creature_in_hand(&mut scenario, "Late Goblin", "Goblin");
 
