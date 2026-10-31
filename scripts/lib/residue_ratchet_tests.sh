@@ -85,7 +85,7 @@ else
 fi
 run_gate
 expect_rc 'baseline ceiling passes' 0
-expect_out 'real worktree snapshot is named' 'snapshot worktree)'
+expect_out 'real worktree snapshot is named' 'residue: 1 mixed obligations, ceiling 1; files scanned 2; snapshot worktree)'
 printf 'CI clean-checkout gate: exit %s\n%s\n' "$RC" "$OUT"
 OUT="$(cd "$FIXTURE" && "$BASH_BIN" scripts/check-parser-combinators.sh "$(git rev-parse HEAD)" 2>&1)"; RC=$?
 expect_rc 'clean same-head window retains cannot-answer exit' 3
@@ -116,7 +116,7 @@ printf 'SMOKE annotated closure discard: exit %s\n%s\n' "$RC" "$OUT"
 printf 'fn f() { let (v, _) = parse_target(input); }\n' > "$FIXTURE/crates/engine/src/parser/probe.rs"
 run_gate
 expect_rc 'removing annotated closure discard passes' 0
-expect_out 'annotated closure removal restores ceiling' 'ceiling 1;'
+expect_out 'annotated closure removal restores ceiling' 'residue: 1 mixed obligations, ceiling 1'
 printf 'SMOKE removed annotated closure discard: exit %s\n%s\n' "$RC" "$OUT"
 
 # Compound receivers must not hide a helper-result discard.
@@ -130,7 +130,7 @@ printf 'SMOKE indexed receiver discard: exit %s\n%s\n' "$RC" "$OUT"
 printf 'fn f() { let (v, _) = parse_target(input); }\n' > "$FIXTURE/crates/engine/src/parser/probe.rs"
 run_gate
 expect_rc 'removing indexed receiver discard passes' 0
-expect_out 'indexed receiver removal restores ceiling' 'ceiling 1;'
+expect_out 'indexed receiver removal restores ceiling' 'residue: 1 mixed obligations, ceiling 1'
 printf 'SMOKE removed indexed receiver discard: exit %s\n%s\n' "$RC" "$OUT"
 
 # Compound receiver projections discard the helper's remainder too.
@@ -144,7 +144,7 @@ printf 'SMOKE indexed receiver projection: exit %s\n%s\n' "$RC" "$OUT"
 printf 'fn f() { let (v, _) = parse_target(input); }\n' > "$FIXTURE/crates/engine/src/parser/probe.rs"
 run_gate
 expect_rc 'removing indexed receiver projection passes' 0
-expect_out 'indexed receiver projection removal restores ceiling' 'ceiling 1;'
+expect_out 'indexed receiver projection removal restores ceiling' 'residue: 1 mixed obligations, ceiling 1'
 printf 'SMOKE removed indexed receiver projection: exit %s\n%s\n' "$RC" "$OUT"
 
 # Generic wrapper and receiver calls must retain helper-result discard origins.
@@ -158,7 +158,7 @@ printf 'SMOKE turbofish wrapper discard: exit %s\n%s\n' "$RC" "$OUT"
 printf 'fn f() { let (v, _) = parse_target(input); }\n' > "$FIXTURE/crates/engine/src/parser/probe.rs"
 run_gate
 expect_rc 'removing turbofish wrapper discard passes' 0
-expect_out 'turbofish wrapper removal restores ceiling' 'ceiling 1;'
+expect_out 'turbofish wrapper removal restores ceiling' 'residue: 1 mixed obligations, ceiling 1'
 printf 'SMOKE removed turbofish wrapper discard: exit %s\n%s\n' "$RC" "$OUT"
 
 # Per-file ceilings and strict ledger parsing, including disappeared files.
@@ -286,7 +286,7 @@ EOF
 printf 'fn consumed(i: &str) { let (v, rest) = parse_target(i); consume(rest); }\n' >> "$FIXTURE/crates/engine/src/parser/probe.rs"
 run_gate
 expect_rc 'precise capture and consumed remainder pass worktree gate' 0
-expect_out 'precise capture worktree preserves witness' 'ceiling 1;'
+expect_out 'precise capture worktree preserves witness' 'residue: 1 mixed obligations, ceiling 1'
 printf 'PRECISE-CAPTURE worktree gate: exit %s\n%s\n' "$RC" "$OUT"
 git -C "$FIXTURE" add crates/engine/src/parser/probe.rs crates/engine/src/parser/capture.rs
 run_cached
@@ -392,7 +392,7 @@ for form in let-else or-pattern trailing-comma-drop qualified-drop any-default s
     printf 'fn f() { let (v, _) = parse_target(input); }\n%s\n' "$consumed" > "$FIXTURE/crates/engine/src/parser/probe.rs"
     run_gate
     expect_rc "$form removing discard passes worktree H" 0
-    expect_out "$form consumed worktree returns to baseline" 'ceiling 1;'
+    expect_out "$form consumed worktree returns to baseline" 'residue: 1 mixed obligations, ceiling 1'
     printf 'SMOKE %s worktree removed: exit %s\n%s\n' "$form" "$RC" "$OUT"
     printf 'fn f() { let (v, _) = parse_target(input); }\n%s\n' "$discarded" > "$FIXTURE/crates/engine/src/parser/probe.rs"
     git -C "$FIXTURE" add crates/engine/src/parser/probe.rs
@@ -404,7 +404,7 @@ for form in let-else or-pattern trailing-comma-drop qualified-drop any-default s
     git -C "$FIXTURE" add crates/engine/src/parser/probe.rs
     run_cached
     expect_rc "$form removing indexed discard passes H" 0
-    expect_out "$form consumed index returns to baseline" 'ceiling 1;'
+    expect_out "$form consumed index returns to baseline" 'residue: 1 mixed obligations, ceiling 1'
     expect_out "$form consumed snapshot is index" 'snapshot index)'
     printf 'SMOKE %s staged-index removed: exit %s\n%s\n' "$form" "$RC" "$OUT"
 done
@@ -438,7 +438,7 @@ for name in contests.rs latest_tests_helper.rs; do
     git -C "$FIXTURE" add "crates/engine/src/parser/$name"
     run_cached
     expect_rc "$name removing indexed discard passes" 0
-    expect_out "$name consumed index returns to baseline" 'ceiling 1;'
+    expect_out "$name consumed index returns to baseline" 'residue: 1 mixed obligations, ceiling 1'
     expect_out "$name consumed snapshot is index" 'snapshot index)'
     printf 'SMOKE %s staged-index removed: exit %s\n%s\n' "$name" "$RC" "$OUT"
 done
@@ -453,11 +453,11 @@ for owner in tests unit_tests; do
     printf 'fn hidden() { let _parsed = parse_target(input); }\n' > "$FIXTURE/crates/engine/src/parser/$owner/support.rs"
     run_gate
     expect_rc "$owner child stays test-only in worktree" 0
-    expect_out "$owner child is not counted in worktree" 'ceiling 1;'
+    expect_out "$owner child is not counted in worktree" 'residue: 1 mixed obligations, ceiling 1'
     git -C "$FIXTURE" add crates/engine/src/parser
     run_cached
     expect_rc "$owner child stays test-only in index" 0
-    expect_out "$owner child is not counted in index" 'ceiling 1;'
+    expect_out "$owner child is not counted in index" 'residue: 1 mixed obligations, ceiling 1'
     printf '#[cfg(test)]\nmod %s;\n#[path = "%s/support.rs"]\nmod shared;\n' "$owner" "$owner" > "$FIXTURE/crates/engine/src/parser/mod.rs"
     run_gate
     expect_rc "$owner child reached by production path counts" 1

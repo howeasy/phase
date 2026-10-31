@@ -18,8 +18,8 @@
 # production ceilings; test-only .with_rest() bypasses are still hard failures.
 # All-code disposition violations cannot be forgiven by ceiling headroom.
 # Unmigrated target-family and exact-default obligations remain independent.
-# Phase-1 complete-family registration changes no numeric ceiling; the existing
-# cost-file headroom is not a phase-1 burn-down or transferable debt allowance.
+# Registering the complete folding family changed no numeric ceiling; existing
+# per-file headroom is not a burn-down or a transferable debt allowance.
 # Distinct match-arm alternatives count separately, including parenthesized and
 # leading-| forms: splitting an arm preserves its obligation count. Mixed arms
 # count only discarding alternatives. Overlapping recognizers count once.

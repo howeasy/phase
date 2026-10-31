@@ -1244,6 +1244,39 @@ class DispositionTests(unittest.TestCase):
         self.assertEqual([h.family for h in hits(
             "fn f() { let _ = parse_type_phrase_folding(i); }")], ["whole-result"])
 
+    def test_f1_shadowed_rhs_cannot_consume_outer_origin(self):
+        body = ("let p = Parsed::new(filter, input); "
+                "{ let p = other; let q = p; "
+                f"q.waive({self.REASON}); }} ")
+        source = "fn f(other: Parsed<'_, Filter>) { " + body + "}"
+        self.assertEqual([(h.family, h.symbol) for h in self.violations(source)],
+                         [("parsed-disposal", "p")])
+        self.assertEqual(self.violations(
+            "fn f(other: Parsed<'_, Filter>) { " + body
+            + f"p.waive({self.REASON}); }}"), [])
+
+    def test_oc_shadow_initializer_consumes_previous_binding(self):
+        for observation in ("", "#[cfg(debug_assertions)] assert!(p.remainder().is_empty()); "):
+            with self.subTest(observation=observation):
+                source = ("fn f() { let p = Parsed::new(filter, i); " + observation
+                          + f"let p = p.waive({self.REASON}); consume(p); }}")
+                self.assertEqual(self.violations(source), [])
+                self.assertTrue(self.violations(source.replace(
+                    f"p.waive({self.REASON})", "other")))
+
+    def test_f3_constructor_paths_and_turbofish_require_disposition(self):
+        for constructor in ("Parsed::new", "crate::parser::parsed::Parsed::new",
+                            "Parsed::new::<Filter>", "Parsed::<Filter>::new",
+                            "crate::parser::parsed::Parsed::<Filter>::new"):
+            with self.subTest(constructor=constructor):
+                source = f"fn f() {{ let p = {constructor}(filter, input); }}"
+                self.assertEqual([(h.family, h.symbol) for h in self.violations(source)],
+                                 [("parsed-disposal", "p")])
+                self.assertEqual(self.violations(source[:-1]
+                    + f"p.waive({self.REASON}); }}"), [])
+        source = "fn f() { let p = <Parsed<'_, Filter>>::new(filter, input); }"
+        self.assertTrue(self.violations(source), "unsupported constructor must fail closed")
+
     def run_cli(self, files, mode="check"):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

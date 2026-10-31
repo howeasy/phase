@@ -72,7 +72,8 @@ def plan_source(path, source):
     edits = []
     calls = {}
     try:
-        ex = rd.Expressions(rd.all_code_stream(source))
+        stream = rd.all_code_stream(source)
+        ex = rd.Expressions(stream)
         v, offsets = ex.values, ex.offsets
 
         def offset(token):
@@ -232,9 +233,48 @@ def plan_source(path, source):
                     if v[at] in names:
                         bindings.append((token, at, ex.scopes[token],
                                          ex.initializer_end(equals + 1)))
+            # Parameter and arm patterns shadow only their body, not the
+            # surrounding scope or a for-loop iterator expression.
+            shadows = []
+            for token, value in enumerate(v):
+                pattern = body = after = None
+                if value == "|" and (token == 0 or v[token - 1] in
+                                      ("=", "(", ",", "move", "return")):
+                    close = ex.end(token + 1, {"|"})
+                    if close >= len(v):
+                        continue
+                    pattern, body = (token + 1, close), close + 1
+                    if v[body:body + 2] == ["-", ">"]:
+                        body = ex.end(body + 2, {"{"})
+                    after = (ex.pairs[body] + 1 if body < len(v) and v[body] == "{"
+                             else ex.end(body, {";", ","}))
+                elif value == "for":
+                    opened = ex.body_brace(token, len(v))
+                    if opened >= len(v):
+                        continue
+                    pattern = (token + 1, ex.end(token + 1, {"in"}, opened))
+                    body, after = opened, ex.pairs[opened] + 1
+                elif value == "match":
+                    opened = ex.body_brace(token, len(v))
+                    if opened >= len(v):
+                        continue
+                    for a, b in ex.match_patterns(opened + 1, ex.pairs[opened]):
+                        arrow = ex.end(b, {"=>"}, ex.pairs[opened])
+                        after = ex.block_expression_end(arrow + 1, ex.pairs[opened])
+                        if after is None:
+                            after = ex.end(arrow + 1, {","}, ex.pairs[opened])
+                        binding_tokens.update(range(a, b))
+                        shadows.append((set(v[a:b]) & names, b, after))
+                    continue
+                if pattern is not None:
+                    a, b = pattern
+                    binding_tokens.update(range(a, b))
+                    shadows.append((set(v[a:b]) & names, body, after))
             found = []
             for at in uses(names, start, end):
                 if at in binding_tokens:
+                    continue
+                if any(v[at] in bound and declaration < a <= at < b for bound, a, b in shadows):
                     continue
                 scope = ex.scopes[at]
                 while scope is not None:
@@ -246,6 +286,31 @@ def plan_source(path, source):
                         break
                     scope = ex.parents[scope]
             return found
+
+        def captured_literal(names, start, end):
+            """Refuse implicit format reads; doubled braces are literal text."""
+            a, b = offset(start), offset(end)
+            for match in re.finditer(r"\{\{|\}\}|\{([A-Za-z_]\w*)", source[a:b]):
+                if (match[1] in names and stream[a + match.start()] == " "):
+                    return True
+            return False
+
+        def debug_read(token):
+            for at, value in enumerate(v[:token]):
+                if value == "#" and v[at:at + 7] == [
+                        "#", "[", "cfg", "(", "debug_assertions", ")", "]"]:
+                    body = at + 7
+                    after = ex.block_expression_end(body, len(v))
+                    if after is None:
+                        after = ex.end(body, {";"})
+                    if body <= token < after:
+                        return True
+                if (value in ("debug_assert", "debug_assert_eq", "debug_assert_ne")
+                        and v[at + 1:at + 2] == ["!"]):
+                    opened = at + 2
+                    if opened in ex.pairs and opened < token < ex.pairs[opened]:
+                        return True
+            return False
 
         def residue_binding(start, end):
             """Locate the single residue identifier through known tuple wrappers."""
@@ -332,6 +397,22 @@ def plan_source(path, source):
                         continue
                     body = ex.end(j + 2, {"{"})
                     if body < len(v) and body < key < ex.pairs[body]:
+                        tail = ex.block_tail(body + 1, ex.pairs[body])
+                        forwards = key in ex.result_leaves(*tail, {calls[key]: key})
+                        registered = False
+                        for wrapper, name in enumerate(v):
+                            if name not in rd.RESULT_WRAPPERS:
+                                continue
+                            opened = wrapper + 1
+                            opened = ex.turbofish_end(opened) or opened
+                            if opened < len(v) and v[opened] == "(":
+                                result = ex.wrapper_body(name, opened, ex.pairs[opened] + 1)
+                                if result and result[0] == body:
+                                    registered = True
+                                    break
+                        if not forwards or not registered:
+                            reject(key, "unsupported non-forwarding typed closure")
+                            continue
                         a, b = j + 2, body
                         if v[a] != "(" or ex.pairs[a] != b - 1:
                             reject(key, "unsupported forwarding closure return annotation")
@@ -402,6 +483,10 @@ def plan_source(path, source):
             names = {v[residue]} if residue is not None else discarded_names(i + 1, pattern_end)
             scope_end = ex.pairs.get(ex.scopes[i], len(v))
             reads = binding_uses(names, i, end, scope_end)
+            if captured_literal(names, end, scope_end):
+                reject(i, "unsupported implicit format-capture remainder read")
+                actions.update((key, "refused") for key in ids)
+                continue
             if reads:
                 # Preserve the original counter-style debug-only observation.
                 # Any other read makes the residue a retained continuation,
@@ -416,6 +501,10 @@ def plan_source(path, source):
                     and len(ids) == 1 and len(names) == 1
                     and assertion_end > opened and v[assertion_end:assertion_end + 1] == [";"]
                     and all(opened < j < assertion_end for j in reads))
+                if not debug_only and all(debug_read(j) for j in reads):
+                    reject(i, "unsupported debug-only remainder observation")
+                    actions.update((key, "refused") for key in ids)
+                    continue
                 if not debug_only:
                     if residue is None:
                         actions.update((key, "refused") for key in ids)

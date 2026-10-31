@@ -771,14 +771,31 @@ def find_disposition_violations(relpath, source, parsed_helpers=None):
     # Constructor and Parsed-returning family calls establish origin. A
     # qualified unrelated enum variant named Parsed does not.
     for i, name in enumerate(v):
-        if i + 1 >= len(v) or v[i + 1] != "(" or (i and v[i - 1] == "fn"):
+        opened = i + 1
+        if opened >= len(v) or (i and v[i - 1] == "fn"):
             continue
-        constructor = name == "new" and v[max(0, i - 2):i] == ["Parsed", "::"]
+        opened = ex.turbofish_end(opened) or opened
+        if opened >= len(v) or v[opened] != "(":
+            continue
+        type_end = i - 1
+        generic = ex.turbofish_start(type_end)
+        type_name = generic - 1 if generic is not None else i - 2
+        constructor = (name == "new" and i >= 2 and v[i - 1] == "::"
+                       and type_name >= 0 and v[type_name] == "Parsed")
+        if (name == "new" and i >= 2 and v[i - 1] == "::"
+                and v[i - 2] == ">" and generic is None):
+            # Qualified-type syntax is outside the supported path/turbofish
+            # grammar. Do not let a bracketed Parsed constructor disappear.
+            boundary = max((j for j in range(i) if v[j] in ("=", ";", "{", "}")),
+                           default=-1)
+            if "Parsed" in v[boundary + 1:i]:
+                reject(i, "unsupported-parsed-constructor")
+                continue
         helper = ex.helper_name(i) in parsed_helpers and (i == 0 or v[i - 1] != ".")
         if not constructor and not helper:
             continue
-        start = ex.receiver_start(i + 1)
-        end = ex.pairs[i + 1] + 1
+        start = ex.receiver_start(opened)
+        end = ex.pairs[opened] + 1
         leaves[start, end] = i
         kinds[i] = "parsed"
         sites[i] = i
@@ -827,8 +844,31 @@ def find_disposition_violations(relpath, source, parsed_helpers=None):
 
     # Bindings carry Parsed origins within lexical scope. Tuple storage is
     # intentionally not tracked: it is already a forbidden bypass at extraction.
-    bindings = {}
     binding_tokens = set()
+    declarations = {}
+    for i, token in enumerate(v):
+        if token != "let":
+            continue
+        equals = ex.end(i + 1, {"=", ";", "}"})
+        if equals >= len(v) or v[equals] != "=":
+            continue
+        end = ex.initializer_end(equals + 1)
+        pattern_end = ex.end(i + 1, {":"}, equals)
+        binding_tokens.update(range(i + 1, equals))
+        for at in range(i + 1, pattern_end):
+            if re.fullmatch(r"[A-Za-z_]\w*", v[at]):
+                declarations.setdefault((v[at], ex.scopes[i]), []).append((end, at))
+
+    def binding_at(name, token):
+        scope = ex.scopes[token]
+        while scope is not None:
+            candidates = declarations.get((name, scope), ())
+            active = [at for end, at in candidates if end <= token]
+            if active:
+                return max(active)
+            scope = ex.parents[scope]
+        return None
+
     for i, token in enumerate(v):
         if token != "let":
             continue
@@ -842,46 +882,27 @@ def find_disposition_violations(relpath, source, parsed_helpers=None):
             a += 1
         named = (pattern_end == a + 1 and re.fullmatch(r"[A-Za-z]\w*", v[a]) is not None)
         ids = flowing(equals + 1, end)
-        binding_tokens.update(range(i + 1, equals))
+        # Resolve reads before transferring ownership, not in a cleanup pass.
         for key in ids:
             if kinds[key] == "parsed" and named:
                 consumed.add(key)  # ownership transfers to the new local
                 alias = a
                 kinds[alias] = "parsed"
                 sites[alias] = a
-                bindings[alias] = (v[a], ex.scopes[i], end)
                 # Install only reads dominated by this binding and in its scope.
                 for j in range(end, len(v)):
                     scope = ex.scopes[j]
                     while scope is not None and scope != ex.scopes[i]:
                         scope = ex.parents[scope]
-                    if (scope is not None and v[j] == v[a]
-                            and function_owner(j) == function_owner(i)):
+                    if (scope is not None and v[j] == v[a] and j not in binding_tokens
+                            and function_owner(j) == function_owner(i)
+                            and binding_at(v[a], j) == alias):
                         leaves[j, j + 1] = alias
             else:
                 accept_or_reject({key}, lambda k: (
                     ex.retains_residue(i + 1, pattern_end) if kinds[k] == "tuple"
                     else named and kinds[k] == "residue"))
 
-    # Resolve lexical shadowing for local reads, including nested scopes. The
-    # preceding binding pass installs potential reads; the nearest declaration
-    # decides which local is actually referenced.
-    for (a, b), key in list(leaves.items()):
-        if b != a + 1 or key not in bindings:
-            continue
-        name, _scope, _end = bindings[key]
-        scope = ex.scopes[a]
-        while scope is not None:
-            declarations = [j for j in binding_tokens if v[j] == name
-                            and ex.scopes[j] == scope and j < a]
-            if declarations:
-                nearest = max(declarations)
-                if nearest not in bindings:
-                    leaves.pop((a, b), None)
-                else:
-                    leaves[a, b] = nearest
-                break
-            scope = ex.parents[scope]
 
     for a, b in receivers:
         accept_or_reject(flowing(a, b), lambda k: kinds[k] == "parsed")

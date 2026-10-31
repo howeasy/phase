@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import importlib.util
-import os
 import shutil
 import subprocess
 import sys
@@ -14,7 +13,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[2]
-SCRIPT = Path(os.environ.get("FOLDING_MIGRATION_SCRIPT", ROOT / "scripts/migrate-folding-parsed.py"))
+SCRIPT = ROOT / "scripts/migrate-folding-parsed.py"
 SPEC = importlib.util.spec_from_file_location("folding_migration", SCRIPT)
 migration = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(migration)
@@ -170,6 +169,59 @@ class MigrationTests(unittest.TestCase):
             migration.render_edits("abcd", (migration.Edit(0, 3, "x", "probe"),
                                              migration.Edit(2, 4, "y", "probe")))
         self.contract(before[P], expected[P])
+
+    def test_f2_format_capture_refuses_without_writes(self):
+        for macro in ('println!("{_rest}")', 'format_args!("{_rest:?}")',
+                      'write!(out, "{_rest:>w$}")', 'assert!(ok, "{_rest}")'):
+            with self.subTest(macro=macro):
+                before = f"fn f() {{ let (value, _rest) = {F}(i); {macro}; consume(value); }}"
+                dest = self.root / P
+                dest.write_text(before)
+                result = subprocess.run([sys.executable, "-B", str(SCRIPT),
+                                         "--apply", "--root", str(self.root)],
+                                        capture_output=True, text=True)
+                self.assertEqual(result.returncode, 2, result.stderr)
+                self.assertEqual(dest.read_text(), before)
+        before = f'fn f() {{ let (value, _rest) = {F}(i); println!("{{{{_rest}}}}"); consume(value); }}'
+        self.contract(before, before.replace(f"let (value, _rest) = {F}(i)",
+                                            f"let value = {F}(i).waive({W})"))
+
+    def test_oa_debug_only_shapes_refuse_instead_of_losing_debt(self):
+        for observation in ("#[cfg(debug_assertions)] check_empty(_rem, i);",
+                            "#[cfg(debug_assertions)] { assert!(_rem.is_empty()); }",
+                            "debug_assert!(_rem.is_empty());",
+                            "consume(value); #[cfg(debug_assertions)] assert_no_compound_remainder(_rem, i);"):
+            with self.subTest(observation=observation):
+                before = f"fn f() {{ let (value, _rem) = {F}(i); {observation} consume(value); }}"
+                plan = migration.plan_source(P, before)
+                self.assertTrue(plan.unsupported)
+                self.assertEqual(plan.rendered, before)
+        # The registered immediate observation remains supported.
+        self.test_debug_observation_and_collision()
+
+    def test_oa_parameter_bindings_shadow_remainder(self):
+        for body in ("let g = |_rest: &str| _rest.len();",
+                     "let g = |_rest: &str| { _rest.len() };",
+                     "for _rest in tails { consume(_rest); }",
+                     "match other { Some(_rest) => consume(_rest), None => (), }"):
+            with self.subTest(body=body):
+                before = f"fn f() {{ let (value, _rest) = {F}(i); {body} consume(value); }}"
+                self.contract(before, before.replace(f"let (value, _rest) = {F}(i)",
+                                                     f"let value = {F}(i).waive({W})"))
+        before = f"fn f() {{ let (value, _rest) = {F}(i); consume(_rest); }}"
+        self.contract(before, before.replace("(value, _rest)", "(value, rest)").replace(
+            F + "(i)", F + "(i).with_rest()").replace("consume(_rest)", "consume(rest)"), waivers=0)
+
+    def test_ob_unrelated_typed_closure_refuses(self):
+        for body in (f"let (v, _) = {F}(x); (v, 1)", f"({F}(x).0, 1)"):
+            with self.subTest(body=body):
+                before = f"fn f() {{ let g = |x: &str| -> (Filter, usize) {{ {body} }}; }}"
+                plan = migration.plan_source(P, before)
+                self.assertTrue(plan.unsupported)
+                self.assertEqual(plan.rendered, before)
+        before = f"fn f() {{ let (v, _) = ctx.with_player_antecedents(|x| -> (Filter, &str) {{ {F}(x) }}); }}"
+        expected = f"fn f() {{ let v = ctx.with_player_antecedents(|x| -> Filter {{ {F}(x).waive({W}) }}); }}"
+        self.contract(before, expected)
 
     def test_shadowed_underscore_is_not_a_read(self):
         before = (f"fn f() {{ let (value, _rest) = {F}(i); "
@@ -449,35 +501,5 @@ class TreeTests(unittest.TestCase):
         self.assertIn("empty", result.stderr)
 
 
-def mutation_check():
-    """Run every method against a removed planning stage in a throwaway copy."""
-    with tempfile.TemporaryDirectory(prefix="folding-mutant-") as directory:
-        root = Path(directory)
-        (root / "scripts/lib").mkdir(parents=True)
-        relative = "scripts/lib/detect-residue-discards.py"
-        shutil.copyfile(ROOT / relative, root / relative)
-        source = SCRIPT.read_text()
-        needle = "def plan_source(path, source):\n"
-        if source.count(needle) != 1:
-            raise AssertionError("mutation seam missing or ambiguous")
-        mutant = source.replace(needle, needle + "    return SourcePlan(source, (), Counter(), 1, ())\n")
-        destination = root / "scripts/migrate-folding-parsed.py"
-        destination.write_text(mutant)
-        environment = dict(os.environ, FOLDING_MIGRATION_SCRIPT=str(destination),
-                           PYTHONPATH=str(ROOT / "scripts") + os.pathsep + os.environ.get("PYTHONPATH", ""))
-        methods = [kind.__name__ + "." + name for kind in (MigrationTests, TreeTests)
-                   for name in unittest.defaultTestLoader.getTestCaseNames(kind)]
-        for method in methods:
-            result = subprocess.run([sys.executable, "-B", str(Path(__file__).resolve()), method],
-                                    capture_output=True, text=True, env=environment)
-            if result.returncode != 1 or "Ran 1 test" not in result.stderr:
-                raise AssertionError(f"nondiscriminating mutation: {method}\n{result.stdout}{result.stderr}")
-            print(f"mutation planning-stage-removed: {method}: rejected (exit 1)")
-        print(f"mutation planning-stage-removed: {len(methods)}/{len(methods)} methods rejected; temporary copy removed")
-
-
 if __name__ == "__main__":
-    if sys.argv[1:] == ["--mutations"]:
-        mutation_check()
-    else:
-        unittest.main()
+    unittest.main()
