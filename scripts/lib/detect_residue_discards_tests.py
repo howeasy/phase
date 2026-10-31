@@ -1277,6 +1277,61 @@ class DispositionTests(unittest.TestCase):
         source = "fn f() { let p = <Parsed<'_, Filter>>::new(filter, input); }"
         self.assertTrue(self.violations(source), "unsupported constructor must fail closed")
 
+    def test_d4_nonplain_rebindings_refuse_instead_of_resolving_scope(self):
+        for binding in (
+                "let g = |p: Parsed<'_, Filter>| { p.waive(REASON); };",
+                "let g = |p| p.waive(REASON);",
+                "let g = match x { _ => |p| p.waive(REASON) };",
+                "let s = S { g: |p| p.waive(REASON) };",
+                "match x { Some(p) => { p.waive(REASON); } None => {} }",
+                "for p in values { p.waive(REASON); }",
+                "if let Some(p) = opt { use_it(p); }",
+                "while let Some(p) = next() { use_it(p); }",
+                "let Some(p) = opt else { return; }; use_it(p);",
+                "fn inner(p: Parsed<'_, Filter>) { p.waive(REASON); }"):
+            binding = binding.replace("REASON", self.REASON)
+            for position in ("before", "after"):
+                with self.subTest(binding=binding, position=position):
+                    origin = "let p = Parsed::new(filter, i); "
+                    body = binding + origin if position == "before" else origin + binding
+                    source = "fn f() { " + body + f"p.waive({self.REASON}); }}"
+                    found = self.violations(source)
+                    self.assertTrue(any(h.family == "unsupported-scope" and h.symbol == "p"
+                                        for h in found), found)
+                    # Same construct, distinct name: the outer origin is
+                    # consumed normally, not rejected by a blanket syntax ban.
+                    control = source.replace(binding, binding.replace("p", "other"))
+                    self.assertEqual(self.violations(control), [])
+        source = (f"fn f(p: Parsed<'_, Filter>) {{ let p = Parsed::new(filter, i); "
+                  f"p.waive({self.REASON}); }}")
+        self.assertTrue(any(h.family == "unsupported-scope" for h in self.violations(source)))
+
+    def test_d4_refuses_even_when_shadow_read_would_hide_disposal(self):
+        for binding in (
+                "let g = |p| p.waive(REASON);",
+                "match x { Some(p) => { p.waive(REASON); } None => {} }",
+                "for p in values { p.waive(REASON); }"):
+            source = ("fn f() { let p = Parsed::new(filter, i); "
+                      + binding.replace("REASON", self.REASON) + " }")
+            with self.subTest(binding=binding):
+                self.assertTrue(any(h.family == "unsupported-scope" and h.symbol == "p"
+                                    for h in self.violations(source)), self.violations(source))
+                control = source.replace("let p = Parsed::new(filter, i);", "")
+                self.assertEqual(self.violations(control), [])
+
+    def test_d4_cli_reports_scope_category_and_preserves_plain_let(self):
+        source = (f"fn f() {{ let p = Parsed::new(filter, i); "
+                  f"if let Some(p) = opt {{ use_it(p); }} p.waive({self.REASON}); }}")
+        files = {"production.rs": "fn reach() { let (v, _) = parse_target(i); }",
+                 "tests.rs": source}
+        result = self.run_cli(files)
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("unsupported-scope p", result.stdout + result.stderr)
+        files["tests.rs"] = (f"fn f() {{ let p = Parsed::new(filter, i); "
+                             f"let p = p.waive({self.REASON}); consume(p); }}")
+        result = self.run_cli(files)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
     def run_cli(self, files, mode="check"):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

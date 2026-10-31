@@ -217,75 +217,58 @@ def plan_source(path, source):
         def uses(names, start, end):
             return [j for j in range(start, end) if v[j] in names]
 
-        def binding_uses(names, declaration, start, end):
-            """Resolve underscore reads, excluding later/nested shadow bindings."""
-            bindings = []
-            binding_tokens = set()
-            for token, value in enumerate(v):
-                if value != "let":
-                    continue
-                equals = ex.end(token + 1, {"=", ";", "}"})
-                if equals >= len(v) or v[equals] != "=":
-                    continue
-                pattern_end = ex.end(token + 1, {":"}, equals)
-                binding_tokens.update(range(token + 1, pattern_end))
-                for at in range(token + 1, pattern_end):
-                    if v[at] in names:
-                        bindings.append((token, at, ex.scopes[token],
-                                         ex.initializer_end(equals + 1)))
-            # Parameter and arm patterns shadow only their body, not the
-            # surrounding scope or a for-loop iterator expression.
-            shadows = []
-            for token, value in enumerate(v):
-                pattern = body = after = None
-                if value == "|" and (token == 0 or v[token - 1] in
-                                      ("=", "(", ",", "move", "return")):
-                    close = ex.end(token + 1, {"|"})
-                    if close >= len(v):
+        binding_constructs = ex.binding_constructs()
+        plain_lets = {}
+        for token, value in enumerate(v):
+            if value != "let":
+                continue
+            equals = ex.end(token + 1, {"=", ";", "}"})
+            if v[equals:equals + 1] != ["="]:
+                continue
+            after = ex.initializer_end(equals + 1)
+            for at in range(token + 1, equals):
+                if binding_constructs.get(at) == "let":
+                    plain_lets[at] = (token, after)
+
+        def remainder_reads(names, pattern_start, pattern_end, token, start, end, scope):
+            """Resolve only block-local plain lets; refuse other binder scopes."""
+            if not names:
+                return []
+            fn = owner(token)
+            if fn is None:
+                reject(token, "unsupported remainder binding outside function")
+                return None
+            head, _body, function_end = fn
+            reads = []
+            for name in sorted(names):
+                visible_end = end
+                for at, kind in binding_constructs.items():
+                    if (not head <= at < function_end or v[at] != name
+                            or pattern_start <= at < pattern_end):
                         continue
-                    pattern, body = (token + 1, close), close + 1
-                    if v[body:body + 2] == ["-", ">"]:
-                        body = ex.end(body + 2, {"{"})
-                    after = (ex.pairs[body] + 1 if body < len(v) and v[body] == "{"
-                             else ex.end(body, {";", ","}))
-                elif value == "for":
-                    opened = ex.body_brace(token, len(v))
-                    if opened >= len(v):
+                    if kind != "let":
+                        reject(token, f"unsupported-scope {name}")
+                        return None
+                    declaration, after = plain_lets[at]
+                    if declaration <= token:
                         continue
-                    pattern = (token + 1, ex.end(token + 1, {"in"}, opened))
-                    body, after = opened, ex.pairs[opened] + 1
-                elif value == "match":
-                    opened = ex.body_brace(token, len(v))
-                    if opened >= len(v):
-                        continue
-                    for a, b in ex.match_patterns(opened + 1, ex.pairs[opened]):
-                        arrow = ex.end(b, {"=>"}, ex.pairs[opened])
-                        after = ex.block_expression_end(arrow + 1, ex.pairs[opened])
-                        if after is None:
-                            after = ex.end(arrow + 1, {","}, ex.pairs[opened])
-                        binding_tokens.update(range(a, b))
-                        shadows.append((set(v[a:b]) & names, b, after))
-                    continue
-                if pattern is not None:
-                    a, b = pattern
-                    binding_tokens.update(range(a, b))
-                    shadows.append((set(v[a:b]) & names, body, after))
-            found = []
-            for at in uses(names, start, end):
-                if at in binding_tokens:
-                    continue
-                if any(v[at] in bound and declaration < a <= at < b for bound, a, b in shadows):
-                    continue
-                scope = ex.scopes[at]
-                while scope is not None:
-                    candidates = [b for b in bindings if b[2] == scope and b[3] <= at
-                                  and v[b[1]] == v[at]]
-                    if candidates:
-                        if max(candidates)[0] == declaration:
-                            found.append(at)
-                        break
-                    scope = ex.parents[scope]
-            return found
+                    other_scope = ex.scopes[declaration]
+                    if other_scope == scope:
+                        # A let's new binding is not visible in its initializer.
+                        visible_end = min(visible_end, after)
+                    else:
+                        parent = ex.parents[other_scope]
+                        while parent is not None and parent != scope:
+                            parent = ex.parents[parent]
+                        if parent == scope:
+                            reject(token, f"unsupported-scope {name}")
+                            return None
+                if captured_literal({name}, start, visible_end):
+                    reject(token, "unsupported implicit format-capture remainder read")
+                    return None
+                reads.extend(j for j in uses({name}, start, visible_end)
+                             if j not in binding_constructs)
+            return sorted(reads)
 
         def captured_literal(names, start, end):
             """Refuse implicit format reads; doubled braces are literal text."""
@@ -296,15 +279,27 @@ def plan_source(path, source):
             return False
 
         def debug_read(token):
+            """Configuration-only reads never establish runtime retention."""
             for at, value in enumerate(v[:token]):
-                if value == "#" and v[at:at + 7] == [
-                        "#", "[", "cfg", "(", "debug_assertions", ")", "]"]:
-                    body = at + 7
+                if (value == "#" and v[at + 1:at + 2] == ["["]
+                        and v[at + 2:at + 3] in (["cfg"], ["cfg_attr"])):
+                    body = ex.pairs[at + 1] + 1
+                    while v[body:body + 2] == ["#", "["]:
+                        body = ex.pairs[body + 1] + 1
                     after = ex.block_expression_end(body, len(v))
                     if after is None:
-                        after = ex.end(body, {";"})
-                    if body <= token < after:
+                        boundary = ex.end(body, {";", "{"})
+                        after = (ex.pairs[boundary] + 1
+                                 if v[boundary:boundary + 1] == ["{"]
+                                 else boundary)
+                    if at <= token < after:
                         return True
+                if value in ("if", "while", "match", "for"):
+                    body = ex.body_brace(at, len(v))
+                    if any(v[j:j + 2] == ["cfg", "!"] for j in range(at + 1, body)):
+                        after = ex.block_expression_end(at, len(v))
+                        if after is not None and at <= token < after:
+                            return True
                 if (value in ("debug_assert", "debug_assert_eq", "debug_assert_ne")
                         and v[at + 1:at + 2] == ["!"]):
                     opened = at + 2
@@ -388,7 +383,9 @@ def plan_source(path, source):
                 return True
             return False
 
-        def closure_types(ids):
+        typed_rewrites = set()
+
+        def closure_types(ids, rewrite=True):
             # A discarded typed forwarding closure must return the value, not
             # its old tuple. Retained closures keep the original return type.
             for key in ids:
@@ -397,6 +394,9 @@ def plan_source(path, source):
                         continue
                     body = ex.end(j + 2, {"{"})
                     if body < len(v) and body < key < ex.pairs[body]:
+                        if not rewrite:
+                            reject(key, "unsupported typed wrapper disposition")
+                            continue
                         tail = ex.block_tail(body + 1, ex.pairs[body])
                         forwards = key in ex.result_leaves(*tail, {calls[key]: key})
                         registered = False
@@ -422,6 +422,7 @@ def plan_source(path, source):
                             reject(key, "unsupported forwarding closure tuple type")
                         else:
                             replace(a, b, text(*parts[0]), "closure-type")
+                            typed_rewrites.add(key)
 
         # Projection disposition is inserted at the family leaf, inside lazy
         # fallback/context closures, never by hoisting their computation.
@@ -482,15 +483,14 @@ def plan_source(path, source):
             residue = residue_binding(i + 1, pattern_end)
             names = {v[residue]} if residue is not None else discarded_names(i + 1, pattern_end)
             scope_end = ex.pairs.get(ex.scopes[i], len(v))
-            reads = binding_uses(names, i, end, scope_end)
-            if captured_literal(names, end, scope_end):
-                reject(i, "unsupported implicit format-capture remainder read")
+            reads = remainder_reads(names, i + 1, pattern_end, i, end, scope_end, ex.scopes[i])
+            if reads is None:
                 actions.update((key, "refused") for key in ids)
                 continue
             if reads:
-                # Preserve the original counter-style debug-only observation.
-                # Any other read makes the residue a retained continuation,
-                # including a cfg observation followed by a runtime consumer.
+                # Only this immediate registered assertion has a generated
+                # accessor+waiver form. Other configuration-only observations
+                # fail closed; extending that vocabulary belongs to phase 2.
                 assertion = end + 8
                 opened = assertion + 1
                 assertion_end = ex.pairs.get(opened, -1) + 1
@@ -584,10 +584,16 @@ def plan_source(path, source):
                                 after = ex.block_expression_end(body, ex.pairs[opened])
                                 if after is None:
                                     after = ex.end(body, {","}, ex.pairs[opened])
-                                if uses(names, b, after):
+                                scope = body if v[body:body + 1] == ["{"] else ex.scopes[a]
+                                reads = remainder_reads(names, a, b, i, b, after, scope)
+                                if reads is None:
+                                    actions.update((key, "refused") for key in ids)
+                                    break
+                                if reads:
                                     raise ValueError("match guard/body uses discarded remainder")
                                 replace(a, b, tuple_value(a, b), "match-pattern")
-                            assign(ids, "waive", "discard-match")
+                            else:
+                                assign(ids, "waive", "discard-match")
                         except ValueError as error:
                             reject(i, str(error))
                     else:
@@ -635,6 +641,8 @@ def plan_source(path, source):
 
         for key, (_start, end) in calls.items():
             action = actions.get(key)
+            if action in ("waive", "debug") and key not in typed_rewrites:
+                closure_types({key}, rewrite=False)
             if action is None:
                 reject(key, "unsupported family result consumer")
             elif action in ("waive", "retain"):

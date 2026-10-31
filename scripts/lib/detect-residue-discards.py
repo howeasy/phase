@@ -177,6 +177,70 @@ class Expressions:
                     self.aliases[self.scopes[i]][v[j + 2]] = (
                         v[j] if v[j] in HELPERS else None)
 
+    def binding_constructs(self):
+        """Conservative binding-token inventory, not a visibility/scope model.
+
+        Only ordinary let shadowing is resolved by the disposition detector.
+        Other constructs sharing an origin name are refused function-wide.
+        Pattern/type tokens may overapproximate bindings; never infer reads
+        from a construct whose binding semantics we do not support.
+        """
+        v = self.values
+        found = {}
+
+        def record(a, b, kind):
+            for at in range(a, b):
+                if re.fullmatch(r"[A-Za-z_]\w*", v[at]):
+                    found[at] = kind
+
+        pattern_tokens = set()
+        for i, token in enumerate(v):
+            if token == "let":
+                equals = self.end(i + 1, {"=", ";", "}"})
+                if equals < len(v) and v[equals] == "=":
+                    end = self.initializer_end(equals + 1)
+                    conditional = i > 0 and v[i - 1] in ("if", "while", "&", "|")
+                    kind = ("conditional-let" if conditional else
+                            "let-else" if v[end:end + 1] == ["else"] else "let")
+                    pattern_end = self.end(i + 1, {":"}, equals)
+                    record(i + 1, pattern_end, kind)
+                    pattern_tokens.update(range(i + 1, pattern_end))
+            elif token == "match":
+                body = self.body_brace(i, len(v))
+                if body < len(v):
+                    for a, b in self.match_patterns(body + 1, self.pairs[body]):
+                        record(a, b, "match")
+                        pattern_tokens.update(range(a, b))
+            elif token == "for":
+                end = self.end(i + 1, {"in", ";", "{"})
+                if v[end:end + 1] == ["in"]:
+                    record(i + 1, end, "for")
+                    pattern_tokens.update(range(i + 1, end))
+            elif token == "fn":
+                end = self.end(i + 1, {"{", ";"})
+                record(i + 1, end, "fn")
+            elif token in ("const", "static", "mod", "type", "struct", "enum", "union"):
+                name = i + 1
+                if v[name:name + 1] == ["mut"]:
+                    name += 1
+                if name < len(v):
+                    record(name, name + 1, "item")
+
+        # Scan every bar pair, including closures after => and struct fields.
+        # Match/let or-pattern bars are not closure delimiters.
+        i = 0
+        while i < len(v):
+            if v[i] != "|" or i in pattern_tokens:
+                i += 1
+                continue
+            close = self.end(i + 1, {"|", ";", "=>", "{", "}"})
+            if v[close:close + 1] == ["|"]:
+                record(i + 1, close, "closure")
+                i = close + 1
+            else:
+                i += 1
+        return found
+
     def helper_name(self, token):
         name = self.values[token]
         if token > 0 and self.values[token - 1] == "::":
@@ -859,6 +923,20 @@ def find_disposition_violations(relpath, source, parsed_helpers=None):
             if re.fullmatch(r"[A-Za-z_]\w*", v[at]):
                 declarations.setdefault((v[at], ex.scopes[i]), []).append((end, at))
 
+    # Refuse non-let rebinding rather than guessing closure/arm/loop visibility.
+    # Keep ordinary let declarations: shadow-and-consume initializers are legal.
+    binding_constructs = ex.binding_constructs() if "parsed" in kinds.values() else {}
+
+    def unsupported_scope(name, token):
+        owner = function_owner(token)
+        if owner is None:
+            return False
+        end = ex.pairs[owner]
+        head = max(j for j in range(owner) if v[j] == "fn"
+                   and ex.end(j + 1, {"{", ";"}) == owner)
+        return any(head <= at < end and v[at] == name and kind != "let"
+                   for at, kind in binding_constructs.items())
+
     def binding_at(name, token):
         scope = ex.scopes[token]
         while scope is not None:
@@ -889,6 +967,9 @@ def find_disposition_violations(relpath, source, parsed_helpers=None):
                 alias = a
                 kinds[alias] = "parsed"
                 sites[alias] = a
+                if unsupported_scope(v[a], a):
+                    reject(a, "unsupported-scope")
+                    continue
                 # Install only reads dominated by this binding and in its scope.
                 for j in range(end, len(v)):
                     scope = ex.scopes[j]
