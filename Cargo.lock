@@ -1946,6 +1946,7 @@ dependencies = [
  "same-file",
  "serde",
  "serde_json",
+ "sha2",
  "strum",
  "tracing",
  "tracing-subscriber",

@@ -3265,6 +3265,270 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
     filtered
 }
 
+/// Identity knowledge for a simulation observer, using precisely the same
+/// authority as the client projection (including controlled turns and expiring
+/// library knowledge). Debug disclosure is deliberately not consulted.
+pub fn known_object_ids_for_simulation(state: &GameState, viewer: PlayerId) -> HashSet<ObjectId> {
+    let projection = identity_projection_for_viewer(state, viewer);
+    state
+        .objects
+        .keys()
+        .copied()
+        .filter(|id| {
+            !matches!(
+                projection.get(id),
+                Some(IdentityProjection::Hidden | IdentityProjection::FaceDownRedacted)
+            )
+        })
+        .collect()
+}
+
+/// Remove observation-private history and derived caches from a sampled rules
+/// state. Unlike a viewer projection this retains the resolution continuation,
+/// pending costs and interaction authority needed to run the normal chooser.
+///
+/// Call after replacing unknown objects. `unknown` is computed by the same
+/// visibility authority as `known_object_ids_for_simulation`, not from card
+/// names or the decision owner's hand.
+pub fn scrub_fair_simulation(state: &mut GameState, viewer: PlayerId, unknown: &HashSet<ObjectId>) {
+    state.play_trace = None;
+    state.spell_cast_reversal = None;
+    *state.life_safety_probe = Default::default();
+    state.loop_detect_ring.clear();
+    state.loop_detect_held = None;
+    state.loop_answer_journal = None;
+    state.loop_decision_tally = Default::default();
+    state.reset_resolved_rules_journal();
+    *state.product_knowledge_state = Default::default();
+    state.completed_hidden_search_audiences.clear();
+    state
+        .active_library_searches
+        .retain(|_, search| search.learned_audience().contains(&viewer));
+    state.revealed_cards.retain(|id| !unknown.contains(id));
+    state
+        .public_revealed_cards
+        .retain(|id| !unknown.contains(id));
+    state.last_revealed_ids.retain(|id| !unknown.contains(id));
+    state.stack_bound_reveals.retain(|_, identities| {
+        identities.retain(|identity| !unknown.contains(&identity.object_id));
+        !identities.is_empty()
+    });
+    if state
+        .private_look_player
+        .is_some_and(|player| !viewer_has_private_access_to_player(state, viewer, player))
+    {
+        state.private_look_ids.clear();
+        state.private_look_player = None;
+    }
+    state.private_look_ids.retain(|id| !unknown.contains(id));
+    redact_hidden_identity_side_tables(state, unknown);
+    for record in state.zone_changes_this_turn.iter_mut() {
+        if unknown.contains(&record.object_id) {
+            redact_zone_change_record(record);
+        } else {
+            redact_record_payment(record, unknown);
+        }
+    }
+    for entry in state
+        .stack
+        .iter_mut()
+        .chain(state.resolving_stack_entry.iter_mut())
+    {
+        if let Some(ability) = entry.ability_mut() {
+            redact_ability_payment(ability, unknown);
+            redact_hidden_library_ability(ability, unknown);
+            ability.for_each_creation_lookback_event_mut(&mut |event| {
+                redact_fair_simulation_event(event, unknown, viewer);
+            });
+        }
+    }
+    state.for_each_trigger_event_carrier_mut(&mut |event| {
+        redact_fair_simulation_event(event, unknown, viewer);
+    });
+    for event in state
+        .pending_attack_trigger_events
+        .iter_mut()
+        .chain(state.deferred_entry_events.iter_mut())
+        .chain(
+            state
+                .consumed_before_priority_trigger_events
+                .iter_mut()
+                .map(|occurrence| &mut occurrence.event),
+        )
+    {
+        redact_fair_simulation_event(event, unknown, viewer);
+    }
+    for context in state.deferred_triggers.iter_mut().chain(
+        state
+            .pending_trigger_order
+            .iter_mut()
+            .flat_map(|order| order.groups.iter_mut())
+            .flat_map(|group| group.triggers.iter_mut()),
+    ) {
+        redact_ability_payment(&mut context.pending.ability, unknown);
+        redact_hidden_library_ability(&mut context.pending.ability, unknown);
+    }
+    if let Some(pending) = state.pending_trigger.as_mut() {
+        redact_ability_payment(&mut pending.ability, unknown);
+        redact_hidden_library_ability(&mut pending.ability, unknown);
+    }
+    redact_waiting_for_payment(&mut state.waiting_for, unknown);
+    if let Some(pending) = state.waiting_for.pending_cast_mut() {
+        redact_hidden_library_ability(&mut pending.ability, unknown);
+    }
+    if let Some(pending) = state.pending_cast.as_mut() {
+        redact_hidden_library_ability(&mut pending.ability, unknown);
+    }
+    redact_paused_ability_payment(state, unknown);
+    if let Some(transaction) = state.payment_transaction.as_mut() {
+        redact_ability_payment(&mut transaction.root, unknown);
+        redact_hidden_library_ability(&mut transaction.root, unknown);
+        redact_waiting_for_payment(&mut transaction.base_waiting_for, unknown);
+    }
+    let paid_objects: Vec<_> = state
+        .objects
+        .iter()
+        .filter_map(|(id, object)| {
+            payment_names_hidden_source(&object.mana_spent_source_snapshots, unknown).then_some(*id)
+        })
+        .collect();
+    for id in paid_objects {
+        if let Some(object) = state.objects.get_mut(&id) {
+            redact_payment_source_snapshots(&mut object.mana_spent_source_snapshots, unknown);
+        }
+    }
+    rebind_fair_control_observations(state, unknown);
+    state.battlefield_entry_observations.clear();
+    state.static_gate_truth.clear();
+    state.trigger_index = Default::default();
+    state.replacement_index = Default::default();
+    state.static_source_index = Default::default();
+    state.static_mode_presence = crate::types::statics::StaticModePresence::all_present();
+    state.layers_dirty = crate::types::game_state::LayersDirty::full();
+    state.layers_read_current_step = true;
+    state.public_state_dirty = crate::types::game_state::PublicStateDirty::all_dirty();
+}
+
+// These tables outlive the instruction that captured them and can retain an
+// otherwise-hidden source's complete printed definitions. Rebind their unknown
+// subjects to the sampled world while preserving occurrence/zone authority.
+fn rebind_fair_control_observations(state: &mut GameState, unknown: &HashSet<ObjectId>) {
+    if state.control_change_observations.is_empty() && state.control_change_captures.is_empty() {
+        return;
+    }
+    let samples: BTreeMap<_, _> = unknown
+        .iter()
+        .filter_map(|id| {
+            let object = state.objects.get(id)?;
+            let subject = state.capture_event_object_snapshot(*id)?;
+            let source = object
+                .snapshot_for_zone_change(*id, Some(object.zone), object.zone)
+                .trigger_source_context?;
+            Some((*id, (subject, source)))
+        })
+        .collect();
+    let rebind_subject = |subject: &mut crate::types::events::EventObjectSnapshot| {
+        if let Some((sample, _)) = samples.get(&subject.identity.object_id) {
+            let identity = subject.identity;
+            let zone = subject.zone;
+            *subject = sample.clone();
+            subject.identity = identity;
+            subject.zone = zone;
+        }
+    };
+    let rebind_source = |source: &mut crate::types::game_state::TriggerSourceContext| {
+        if let Some((_, sample)) = samples.get(&source.identity.reference.object_id) {
+            let identity = source.identity;
+            *source = sample.clone();
+            source.identity = identity;
+        }
+        redact_source_context_hidden_members(source, unknown);
+    };
+    let source_changes = |source: &crate::types::game_state::TriggerSourceContext| {
+        unknown.contains(&source.identity.reference.object_id)
+            || source_context_names_hidden_member(source, unknown)
+    };
+    state.control_change_observations.retain(|_, observation| {
+        rebind_subject(&mut observation.subject);
+        if observation.watchers.iter().any(&source_changes) {
+            for watcher in Arc::make_mut(&mut observation.watchers) {
+                rebind_source(watcher);
+            }
+        }
+        if observation
+            .doublers
+            .iter()
+            .any(|doubler| source_changes(&doubler.source))
+        {
+            for doubler in Arc::make_mut(&mut observation.doublers) {
+                rebind_source(&mut doubler.source);
+            }
+        }
+        true
+    });
+    state.control_change_captures.retain(|_, link| {
+        if !link
+            .capture
+            .subjects
+            .iter()
+            .any(|subject| unknown.contains(&subject.identity.object_id))
+            && !link.capture.watchers.iter().any(&source_changes)
+            && !link
+                .capture
+                .doublers
+                .iter()
+                .any(|doubler| source_changes(&doubler.source))
+        {
+            return true;
+        }
+        let capture = Arc::make_mut(&mut link.capture);
+        for subject in &mut capture.subjects {
+            rebind_subject(subject);
+        }
+        if capture.watchers.iter().any(&source_changes) {
+            for watcher in Arc::make_mut(&mut capture.watchers) {
+                rebind_source(watcher);
+            }
+        }
+        if capture
+            .doublers
+            .iter()
+            .any(|doubler| source_changes(&doubler.source))
+        {
+            for doubler in Arc::make_mut(&mut capture.doublers) {
+                rebind_source(&mut doubler.source);
+            }
+        }
+        true
+    });
+}
+
+fn redact_fair_simulation_event(
+    event: &mut GameEvent,
+    unknown: &HashSet<ObjectId>,
+    viewer: PlayerId,
+) {
+    redact_hidden_zone_change_event(event, unknown);
+    redact_hidden_library_event(event, unknown);
+    match event {
+        GameEvent::HiddenSearchViewed {
+            cards, audience, ..
+        } if !audience.contains(&viewer) => {
+            cards.clear();
+            audience.clear();
+        }
+        GameEvent::CardsRevealed { card_ids, .. } => {
+            card_ids.retain(|id| !unknown.contains(id));
+        }
+        GameEvent::SpellCast {
+            object_id, card_id, ..
+        } if unknown.contains(object_id) => {
+            *card_id = CardId(0);
+        }
+        _ => {}
+    }
+}
+
 /// CR 723.4 + CR 805.8: a player controlling another player sees the
 /// information visible to that player; when turns are shared, controlling one
 /// player controls that player's team. Reuse submitter authority so the same

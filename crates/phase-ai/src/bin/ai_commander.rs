@@ -9,6 +9,16 @@
 //! (default 4) within `FormatConfig::commander()`'s seat range;
 //! `--difficulty-pK` overrides seat K's difficulty for any K below N.
 //!
+//! Campaign protocol (exclusive of ordinary flags/environment overrides):
+//! `--campaign-capabilities` prints versioned JSON without loading data.
+//! `--campaign-game <manifest.json> --campaign-output <new-absolute-directory>`
+//! records one strictly pinned four-seat game, with synchronous action journals.
+//! Inputs and output remain below the manifest staging directory.
+//! `--campaign-normalize <export.json> <requests.json> --campaign-output <new-file>`
+//! resolves and canonicalizes expanded deck sections using the engine database.
+//! `--campaign-fixture <new-absolute-directory>` prepares local real-card inputs
+//! and capped/complete manifests; it never substitutes canned game outcomes.
+//!
 //! Usage (pod-lab loop-3 Q5): `--profile server-release`, not plain
 //! `--release` -- `[profile.release]` (workspace `Cargo.toml`) sets `panic =
 //! 'abort'` (it exists to keep the WASM build small), which silently defeats
@@ -58,9 +68,7 @@ use std::path::PathBuf;
 use std::time::Instant;
 
 use engine::database::CardDatabase;
-use engine::game::deck_loading::{
-    load_and_hydrate_decks, resolve_deck_list, DeckList, DeckPayload, PlayerDeckList,
-};
+use engine::game::deck_loading::{resolve_deck_list, DeckList, DeckPayload, PlayerDeckList};
 use engine::types::events::GameEvent;
 use engine::types::format::FormatConfig;
 use engine::types::game_state::{GameState, WaitingFor};
@@ -92,6 +100,33 @@ const GAME_THREAD_STACK_SIZE: usize = 32 << 20;
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
+    // Campaign protocols are exclusive and never consult ordinary environment
+    // overrides or dump paths. Capabilities does not load any game/data.
+    if args.iter().skip(1).any(|a| a.starts_with("--campaign-")) {
+        let code = match campaign_command(&args) {
+            Ok(command) => {
+                if matches!(
+                    command,
+                    CampaignCommand::Capabilities | CampaignCommand::Configs
+                ) {
+                    execute_campaign(command)
+                } else {
+                    std::thread::Builder::new()
+                        .name("ai-commander-campaign".into())
+                        .stack_size(GAME_THREAD_STACK_SIZE)
+                        .spawn(move || execute_campaign(command))
+                        .expect("failed to spawn campaign thread")
+                        .join()
+                        .unwrap_or(101)
+                }
+            }
+            Err(error) => {
+                eprintln!("{error}");
+                1
+            }
+        };
+        std::process::exit(code);
+    }
     // Harness escape hatch (pod-lab): forces the run into measurement mode
     // even on the single-game route. Read exactly once, here, and threaded
     // through as a plain `bool` — this repo's "no `set_var`" rule.
@@ -128,6 +163,68 @@ fn main() {
     // an unmistakable failure either way.
     let exit_code = handle.join().unwrap_or(101);
     std::process::exit(exit_code);
+}
+
+enum CampaignCommand {
+    Capabilities,
+    Configs,
+    Game {
+        manifest: PathBuf,
+        output: PathBuf,
+    },
+    Fixture {
+        directory: PathBuf,
+    },
+    Normalize {
+        export: PathBuf,
+        requests: PathBuf,
+        output: PathBuf,
+    },
+}
+
+fn campaign_command(args: &[String]) -> Result<CampaignCommand, String> {
+    let args: Vec<&str> = args.iter().skip(1).map(String::as_str).collect();
+    match args.as_slice() {
+        ["--campaign-capabilities"] => Ok(CampaignCommand::Capabilities),
+        ["--campaign-configs"] => Ok(CampaignCommand::Configs),
+        ["--campaign-fixture", directory] => Ok(CampaignCommand::Fixture { directory: directory.into() }),
+        ["--campaign-game", manifest, "--campaign-output", output]
+        | ["--campaign-output", output, "--campaign-game", manifest] => Ok(CampaignCommand::Game {
+            manifest: manifest.into(), output: output.into(),
+        }),
+        ["--campaign-normalize", export, requests, "--campaign-output", output] => Ok(CampaignCommand::Normalize {
+            export: export.into(), requests: requests.into(), output: output.into(),
+        }),
+        _ => Err("campaign flags are exclusive: --campaign-capabilities | --campaign-configs | --campaign-fixture <new-absolute-directory> | --campaign-game <manifest.json> --campaign-output <new-absolute-directory> | --campaign-normalize <export.json> <requests.json> --campaign-output <new-file>".into()),
+    }
+}
+
+fn execute_campaign(command: CampaignCommand) -> i32 {
+    let result = match command {
+        CampaignCommand::Capabilities => Ok(phase_ai::campaign::capabilities()),
+        CampaignCommand::Configs => phase_ai::campaign::config_catalog(),
+        CampaignCommand::Game { manifest, output } => {
+            phase_ai::campaign::run_manifest(&manifest, &output)
+        }
+        CampaignCommand::Fixture { directory } => {
+            phase_ai::campaign::write_smoke_inputs(&directory)
+        }
+        CampaignCommand::Normalize {
+            export,
+            requests,
+            output,
+        } => phase_ai::campaign::normalize_corpus(&export, &requests, &output),
+    };
+    match result {
+        Ok(value) => {
+            println!("{value}");
+            0
+        }
+        Err(error) => {
+            eprintln!("campaign: {error}");
+            1
+        }
+    }
 }
 
 /// Bundles the parsed CLI arguments `run` needs. A plain struct (not more
@@ -1185,9 +1282,7 @@ fn classify_run_outcome(aborted: bool, waiting_for: &WaitingFor) -> RunOutcome {
 /// zero legal actions — a permanent AI stall the first time an opponent's
 /// card triggers a "name a card" choice.
 fn build_game_state(db: &CardDatabase, payload: &DeckPayload, players: u8, seed: u64) -> GameState {
-    let mut state = GameState::new(FormatConfig::commander(), players, seed);
-    load_and_hydrate_decks(&mut state, payload, Some(db));
-    state
+    phase_ai::campaign::build_game_state(db, payload, players, seed)
 }
 
 /// Builds one seat's `AiConfig` for a single game. Single authority for this

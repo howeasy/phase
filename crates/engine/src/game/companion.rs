@@ -603,6 +603,10 @@ pub(crate) fn finish_paid_companion_to_hand(
         super::printed_cards::apply_card_face_to_object(obj, &card_face);
     }
     deck_loading::stamp_created_card_shared(state, obj_id, printing);
+    // The companion declaration and this move are public. Retain knowledge of
+    // the newly created hand occurrence without turning it into a rules reveal.
+    let viewers: Vec<_> = state.players.iter().map(|player| player.id).collect();
+    state.remember_card_identities(viewers, &[obj_id]);
 
     events.push(GameEvent::CompanionMovedToHand { player, card_name });
     state.lands_tapped_for_mana.remove(&player);

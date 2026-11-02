@@ -153,6 +153,27 @@ pub fn settle_headless_contest(
     ai_players: &HashSet<PlayerId>,
     rng: &mut impl Rng,
 ) -> bool {
+    settle_headless_contest_inner(state, ai_players, rng, &mut Vec::new(), false)
+}
+
+/// The same deterministic host settlement with its complete engine event stream.
+/// This is an atomic host transition, not a fabricated player GameAction.
+pub fn settle_headless_contest_recorded(
+    state: &mut GameState,
+    ai_players: &HashSet<PlayerId>,
+    rng: &mut impl Rng,
+    events: &mut Vec<GameEvent>,
+) -> bool {
+    settle_headless_contest_inner(state, ai_players, rng, events, true)
+}
+
+fn settle_headless_contest_inner(
+    state: &mut GameState,
+    ai_players: &HashSet<PlayerId>,
+    rng: &mut impl Rng,
+    events: &mut Vec<GameEvent>,
+    capture_click_events: bool,
+) -> bool {
     let WaitingFor::PhysicalContest { contest, .. } = &state.waiting_for else {
         return false;
     };
@@ -166,17 +187,20 @@ pub fn settle_headless_contest(
         + config.settle_window_ms
         + config.inactivity_timeout_ms;
     let mut clickers = AiContestants::default();
-    let mut events = Vec::new();
     let mut now = 0;
-    start_contest(state, config, now, &mut events);
+    start_contest(state, config, now, events);
     while matches!(state.waiting_for, WaitingFor::PhysicalContest { .. }) {
         if now > budget_ms {
-            cancel_contest(state, ContestCancelReason::HostAborted, now, &mut events);
+            cancel_contest(state, ContestCancelReason::HostAborted, now, events);
             break;
         }
         now += HEADLESS_TICK_MS;
-        advance_contest(state, now, &mut events);
-        clickers.click_due(state, &seats, now, rng, |_, _| {});
+        advance_contest(state, now, events);
+        clickers.click_due(state, &seats, now, rng, |_, emitted| {
+            if capture_click_events {
+                events.extend(emitted);
+            }
+        });
     }
     true
 }
@@ -612,5 +636,32 @@ mod tests {
             state.waiting_for,
             WaitingFor::PhysicalContest { .. }
         ));
+    }
+
+    #[test]
+    fn recorded_headless_settlement_preserves_events_without_changing_play() {
+        let (mut ordinary, _) = cast_into_contest();
+        let mut recorded = ordinary.clone();
+        let players = HashSet::from([P0, P1]);
+        assert!(settle_headless_contest(
+            &mut ordinary,
+            &players,
+            &mut StdRng::seed_from_u64(3)
+        ));
+        let mut events = Vec::new();
+        assert!(settle_headless_contest_recorded(
+            &mut recorded,
+            &players,
+            &mut StdRng::seed_from_u64(3),
+            &mut events
+        ));
+        assert!(
+            !events.is_empty(),
+            "host transition events must reach the journal"
+        );
+        assert_eq!(
+            crate::campaign::deterministic_state_hash(&ordinary).unwrap(),
+            crate::campaign::deterministic_state_hash(&recorded).unwrap(),
+        );
     }
 }

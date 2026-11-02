@@ -26,7 +26,7 @@ use crate::strategy_profile::StrategyProfile;
 pub const AI_SEARCH_TIME_BUDGET_MS: Option<u32> = Some(1500);
 
 /// How much the AI reasons about what the opponent might hold.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize)]
 pub enum ThreatAwareness {
     /// VeryEasy, Easy: no threat reasoning.
     #[default]
@@ -100,7 +100,7 @@ pub enum Platform {
 }
 
 /// Runtime mode for AI execution.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub enum ExecutionMode {
     /// Production and interactive callers use latency-bounded search and
     /// caller-supplied entropy.
@@ -116,7 +116,7 @@ impl ExecutionMode {
 }
 
 /// Search algorithm configuration.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct SearchConfig {
     pub enabled: bool,
     pub max_depth: u32,
@@ -160,13 +160,13 @@ pub struct SearchConfig {
     pub determinization_samples: u32,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub enum PlannerMode {
     BeamOnly,
     BeamPlusRollout,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub enum OpponentModel {
     DeterministicBestReply,
     ThreatWeightedReply,
@@ -175,7 +175,7 @@ pub enum OpponentModel {
 
 /// How the heuristic combat AI gates a marginal attacker (see
 /// [`crate::combat_ai`]).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub enum CombatEvModel {
     /// The historical 3-way boolean gate (`free_damage` / `favorable_trade` /
     /// `lifelink_bonus` per objective). Un-animated man-lands are invisible and
@@ -188,7 +188,7 @@ pub enum CombatEvModel {
     DownsideWeighted,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct AiProfile {
     pub risk_tolerance: f64,
     pub interaction_patience: f64,
@@ -1340,7 +1340,7 @@ pub const UNTUNED_POLICY_PENALTY_FIELDS: &[(&str, &str)] = &[
 ];
 
 /// Full AI configuration combining difficulty, search, and evaluation settings.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct AiConfig {
     pub difficulty: AiDifficulty,
     pub temperature: f64,

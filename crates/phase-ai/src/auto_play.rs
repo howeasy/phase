@@ -254,6 +254,19 @@ pub fn run_ai_action(
     rng: &mut impl Rng,
     session: &Arc<AiSession>,
 ) -> std::ops::ControlFlow<AiActionsStop, AiActionResult> {
+    run_ai_action_with_choice(state, ai_players, ai_configs, |state, config, contract| {
+        choose_action_with_issued_contract(state, config, rng, session, contract)
+    })
+}
+
+/// Shared choice/apply seam. Both ordinary and observed drivers retain the real
+/// engine contract; a chooser is never allowed to apply to the authoritative state.
+fn run_ai_action_with_choice(
+    state: &mut GameState,
+    ai_players: &HashSet<PlayerId>,
+    ai_configs: &HashMap<PlayerId, AiConfig>,
+    choose: impl FnOnce(&GameState, &AiConfig, &AiDecisionContract) -> Option<GameAction>,
+) -> std::ops::ControlFlow<AiActionsStop, AiActionResult> {
     // CR 723.5: The controller makes the controlled player's decisions, so the
     // authorized submitter, not the semantic owner, selects the AI config.
     let Some((semantic_owner, actor)) = eligible_ai_decision(state, ai_players) else {
@@ -267,7 +280,7 @@ pub fn run_ai_action(
         }
     };
     let contract = AiDecisionContract::issue(state, semantic_owner);
-    let action = match choose_action_with_issued_contract(state, config, rng, session, &contract) {
+    let action = match choose(state, config, &contract) {
         Some(action) => action,
         None => {
             tracing::warn!(player = ?actor, "choose_action returned None — stopping AI loop");
@@ -591,6 +604,106 @@ pub fn run_driver_loop(
                     total_actions: total,
                     exit: DriverExit::BatchBreak(stop),
                 };
+            }
+        }
+    }
+}
+
+/// Opt-in hooks run synchronously before the next decision. The ordinary driver
+/// does not construct hooks, timing samples, projections or journal allocations.
+pub trait DriverHooks {
+    fn choose(
+        &mut self,
+        state: &GameState,
+        config: &AiConfig,
+        contract: &AiDecisionContract,
+        rng: &mut impl Rng,
+        session: Option<&Arc<AiSession>>,
+    ) -> Result<Option<GameAction>, String>;
+
+    fn applied(
+        &mut self,
+        actor: PlayerId,
+        semantic_owner: PlayerId,
+        verified_pass: bool,
+        result: &AiActionResult,
+    ) -> Result<(), String>;
+
+    fn host_settled(&mut self, state: &GameState, events: &[GameEvent]) -> Result<(), String>;
+}
+
+/// Observed counterpart of the same exact-cap driver. A failed observer stops
+/// immediately, preserving the successfully written prefix, never skipping an
+/// action in order to keep computing.
+pub fn run_driver_loop_observed(
+    state: &mut GameState,
+    ai_players: &HashSet<PlayerId>,
+    ai_configs: &HashMap<PlayerId, AiConfig>,
+    rng: &mut impl Rng,
+    session: Option<&Arc<AiSession>>,
+    action_cap: usize,
+    hooks: &mut impl DriverHooks,
+) -> Result<DriverOutcome, String> {
+    let mut total = 0;
+    let mut settlements = 0;
+    loop {
+        // Host transitions do not spend the AI action cap.
+        if matches!(state.waiting_for, WaitingFor::PhysicalContest { .. }) {
+            if settlements >= MAX_HOST_SETTLEMENTS_PER_SEQUENCE {
+                return Ok(DriverOutcome {
+                    total_actions: total,
+                    exit: DriverExit::BatchBreak(AiActionsStop::ActionSafetyCapReached {
+                        limit: settlements,
+                    }),
+                });
+            }
+            let mut events = Vec::new();
+            if crate::contest::settle_headless_contest_recorded(state, ai_players, rng, &mut events)
+            {
+                hooks.host_settled(state, &events)?;
+                settlements += 1;
+                continue;
+            }
+        }
+        if total >= action_cap {
+            return Ok(DriverOutcome {
+                total_actions: total,
+                exit: DriverExit::CapReached,
+            });
+        }
+        let decision = eligible_ai_decision(state, ai_players);
+        let mut choice_error = None;
+        let mut verified_pass = false;
+        let result =
+            run_ai_action_with_choice(state, ai_players, ai_configs, |state, config, contract| {
+                match hooks.choose(state, config, contract, rng, session) {
+                    Ok(action) => {
+                        verified_pass = action
+                            .as_ref()
+                            .is_some_and(|a| verified_ai_stack_pass_player(state, a).is_some());
+                        action
+                    }
+                    Err(error) => {
+                        choice_error = Some(error);
+                        None
+                    }
+                }
+            });
+        if let Some(error) = choice_error {
+            return Err(error);
+        }
+        match result {
+            std::ops::ControlFlow::Continue(result) => {
+                total += 1;
+                settlements = 0;
+                let (semantic_owner, actor) = decision.expect("applied action has an actor");
+                hooks.applied(actor, semantic_owner, verified_pass, &result)?;
+            }
+            std::ops::ControlFlow::Break(stop) => {
+                return Ok(DriverOutcome {
+                    total_actions: total,
+                    exit: DriverExit::BatchBreak(stop),
+                })
             }
         }
     }
