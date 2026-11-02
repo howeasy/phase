@@ -144,10 +144,7 @@ impl FairDecisionContext {
         *ordinal = ordinal
             .checked_add(1)
             .ok_or(FairDecisionError::DecisionOrdinalExhausted)?;
-        let database = self
-            .card_database
-            .as_deref()
-            .or_else(|| state.card_db.as_ref().map(|database| &**database));
+        let database = self.card_database.as_deref().or(state.card_db.as_deref());
         let synthetic = materialize_fair_state(state, actor, seed, database)?;
         let contract = AiDecisionContract::issue(&synthetic, semantic_owner);
         if contract.authorized_actor != actor {
