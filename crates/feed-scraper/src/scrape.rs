@@ -12,23 +12,81 @@ pub struct ScrapeConfig {
     pub delay_ms: u64,
 }
 
-pub fn scrape_metagame(client: &Client, config: &ScrapeConfig) -> Vec<FeedDeck> {
-    let url = format!("https://www.mtggoldfish.com/metagame/{}", config.format);
+#[derive(serde::Serialize)]
+pub struct ScrapeFailure {
+    pub url: String,
+    pub error: String,
+    pub retry_after: Option<String>,
+}
 
-    eprintln!("Fetching metagame page: {url}");
-    let resp = match client.get(&url).send() {
-        Ok(r) => r,
-        Err(e) => {
-            eprintln!("Failed to fetch metagame page: {e}");
-            return Vec::new();
-        }
+#[derive(serde::Serialize)]
+pub struct ScrapeDiagnostics {
+    pub schema_version: u32,
+    pub parser_version: &'static str,
+    pub requested_top_n: usize,
+    pub discovered_urls: Vec<String>,
+    pub parsed_count: usize,
+    pub failures: Vec<ScrapeFailure>,
+    pub complete: bool,
+}
+
+pub struct ScrapeResult {
+    pub decks: Vec<FeedDeck>,
+    pub diagnostics: ScrapeDiagnostics,
+}
+
+fn fetch_page(client: &Client, url: &str) -> Result<String, ScrapeFailure> {
+    let failure = |error: String, retry_after| ScrapeFailure {
+        url: url.to_string(),
+        error,
+        retry_after,
+    };
+    let response = client
+        .get(url)
+        .send()
+        .map_err(|error| failure(error.to_string(), None))?;
+    let retry_after = response
+        .headers()
+        .get(reqwest::header::RETRY_AFTER)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_string);
+    if response.status() == reqwest::StatusCode::TOO_MANY_REQUESTS
+        || response.status() == reqwest::StatusCode::SERVICE_UNAVAILABLE
+        || retry_after.is_some()
+    {
+        return Err(failure(
+            format!("server requested backoff: {}", response.status()),
+            Some(retry_after.unwrap_or_else(|| "3600".to_string())),
+        ));
+    }
+    response
+        .error_for_status()
+        .map_err(|error| failure(error.to_string(), None))?
+        .text()
+        .map_err(|error| failure(error.to_string(), None))
+}
+
+pub fn scrape_metagame(client: &Client, config: &ScrapeConfig) -> ScrapeResult {
+    let url = format!("https://www.mtggoldfish.com/metagame/{}", config.format);
+    let mut result = ScrapeResult {
+        decks: Vec::new(),
+        diagnostics: ScrapeDiagnostics {
+            schema_version: 1,
+            parser_version: env!("CARGO_PKG_VERSION"),
+            requested_top_n: config.top_n,
+            discovered_urls: Vec::new(),
+            parsed_count: 0,
+            failures: Vec::new(),
+            complete: false,
+        },
     };
 
-    let body = match resp.text() {
-        Ok(t) => t,
-        Err(e) => {
-            eprintln!("Failed to read response: {e}");
-            return Vec::new();
+    eprintln!("Fetching metagame page: {url}");
+    let body = match fetch_page(client, &url) {
+        Ok(body) => body,
+        Err(error) => {
+            result.diagnostics.failures.push(error);
+            return result;
         }
     };
 
@@ -57,9 +115,17 @@ pub fn scrape_metagame(client: &Client, config: &ScrapeConfig) -> Vec<FeedDeck> 
                 } else {
                     format!("https://www.mtggoldfish.com{base_url}")
                 };
+                if !reqwest::Url::parse(&full_url).is_ok_and(|url| {
+                    url.scheme() == "https" && url.host_str() == Some("www.mtggoldfish.com")
+                }) {
+                    continue;
+                }
                 // Deduplicate by URL
                 if !deck_urls.iter().any(|(u, _)| u == &full_url) {
                     deck_urls.push((full_url, name));
+                    if deck_urls.len() == config.top_n {
+                        break;
+                    }
                 }
             }
         }
@@ -70,7 +136,7 @@ pub fn scrape_metagame(client: &Client, config: &ScrapeConfig) -> Vec<FeedDeck> 
 
     eprintln!("Found {} deck links", deck_urls.len());
 
-    let mut decks = Vec::new();
+    result.diagnostics.discovered_urls = deck_urls.iter().map(|(url, _)| url.clone()).collect();
     for (i, (url, archetype_name)) in deck_urls.iter().enumerate() {
         if i > 0 {
             thread::sleep(Duration::from_millis(config.delay_ms));
@@ -78,19 +144,41 @@ pub fn scrape_metagame(client: &Client, config: &ScrapeConfig) -> Vec<FeedDeck> 
 
         eprintln!("[{}/{}] Fetching: {archetype_name}", i + 1, deck_urls.len());
 
-        match scrape_deck(client, url, archetype_name) {
-            Some(deck) => decks.push(deck),
-            None => eprintln!("  Failed to parse deck page"),
+        match fetch_page(client, url) {
+            Ok(body) => match parse_deck(&body, archetype_name) {
+                Some(deck) => result.decks.push(deck),
+                None => result.diagnostics.failures.push(ScrapeFailure {
+                    url: url.clone(),
+                    error: "deck page had no parseable main section".to_string(),
+                    retry_after: None,
+                }),
+            },
+            Err(error) => {
+                let backoff = error.retry_after.is_some();
+                result.diagnostics.failures.push(error);
+                if backoff {
+                    for (remaining, _) in deck_urls.iter().skip(i + 1) {
+                        result.diagnostics.failures.push(ScrapeFailure {
+                            url: remaining.clone(),
+                            error: "not requested: server backoff is active".to_string(),
+                            retry_after: None,
+                        });
+                    }
+                    break;
+                }
+            }
         }
     }
 
-    decks
+    result.diagnostics.parsed_count = result.decks.len();
+    result.diagnostics.complete = !deck_urls.is_empty()
+        && result.decks.len() == deck_urls.len()
+        && result.diagnostics.failures.is_empty();
+    result
 }
 
-fn scrape_deck(client: &Client, url: &str, archetype_name: &str) -> Option<FeedDeck> {
-    let resp = client.get(url).send().ok()?;
-    let body = resp.text().ok()?;
-    let document = Html::parse_document(&body);
+fn parse_deck(body: &str, archetype_name: &str) -> Option<FeedDeck> {
+    let document = Html::parse_document(body);
 
     let mut main = Vec::new();
     let mut sideboard = Vec::new();
@@ -304,6 +392,33 @@ fn config_format_tag(document: &Html) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn completeness_diagnostics_preserve_each_failed_url_and_backoff() {
+        let diagnostics = ScrapeDiagnostics {
+            schema_version: 1,
+            parser_version: env!("CARGO_PKG_VERSION"),
+            requested_top_n: 10,
+            discovered_urls: vec!["https://www.mtggoldfish.com/archetype/a".to_string()],
+            parsed_count: 0,
+            failures: vec![ScrapeFailure {
+                url: "https://www.mtggoldfish.com/archetype/a".to_string(),
+                error: "server requested backoff: 429".to_string(),
+                retry_after: Some("3600".to_string()),
+            }],
+            complete: false,
+        };
+        let json = serde_json::to_value(diagnostics).unwrap();
+        assert_eq!(json["parsed_count"], 0);
+        assert_eq!(json["complete"], false);
+        assert_eq!(json["failures"][0]["retry_after"], "3600");
+        assert_eq!(json["discovered_urls"][0], json["failures"][0]["url"]);
+    }
+
+    #[test]
+    fn empty_page_is_not_a_successfully_parsed_deck() {
+        assert!(parse_deck("<html><body>rate limited</body></html>", "fixture").is_none());
+    }
 
     #[test]
     fn shock_lands_infer_both_of_their_colors() {

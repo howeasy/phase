@@ -50,6 +50,18 @@ fn main() {
 
     let client = Client::builder()
         .user_agent("Mozilla/5.0 (compatible; phase-rs-feed-scraper/0.1)")
+        .timeout(std::time::Duration::from_secs(60))
+        .redirect(reqwest::redirect::Policy::custom(|attempt| {
+            if attempt.previous().len() >= 5 {
+                attempt.error("too many redirects")
+            } else if attempt.url().scheme() == "https"
+                && attempt.url().host_str() == Some("www.mtggoldfish.com")
+            {
+                attempt.follow()
+            } else {
+                attempt.error("redirect outside the public feed authority")
+            }
+        }))
         .build()
         .expect("failed to build HTTP client");
 
@@ -65,10 +77,35 @@ fn main() {
         };
 
         eprintln!("Scraping {format} metagame (top {})...", cli.top);
-        let decks = scrape_metagame(&client, &config);
+        let scraped = scrape_metagame(&client, &config);
+        let decks = scraped.decks;
         eprintln!("Scraped {} decks for {format}", decks.len());
+        let directory = cli.output_dir.clone().unwrap_or_else(|| PathBuf::from("."));
+        if let Err(error) = std::fs::create_dir_all(&directory) {
+            eprintln!("Failed to create output directory: {error}");
+            had_failure = true;
+            continue;
+        }
+        let diagnostics_path = directory.join(format!("mtggoldfish-{format}.diagnostics.json"));
+        let diagnostics = serde_json::to_vec_pretty(&scraped.diagnostics)
+            .expect("failed to serialize scrape diagnostics");
+        if let Err(error) = std::fs::write(&diagnostics_path, diagnostics) {
+            eprintln!("Failed to write scrape diagnostics: {error}");
+            had_failure = true;
+            continue;
+        }
+        if scraped
+            .diagnostics
+            .failures
+            .iter()
+            .any(|failure| failure.retry_after.is_some())
+        {
+            eprintln!("Server backoff is active; stopping all remaining formats");
+            had_failure = true;
+            break;
+        }
 
-        if decks.len() < cli.min_decks {
+        if !scraped.diagnostics.complete || decks.len() < cli.min_decks {
             eprintln!(
                 "ERROR: scrape returned {} decks for {format} (minimum {}); refusing to overwrite feed file",
                 decks.len(),
@@ -96,7 +133,7 @@ fn main() {
         let output_path = if formats.len() == 1 {
             cli.output
                 .clone()
-                .unwrap_or_else(|| PathBuf::from(format!("mtggoldfish-{format}.json")))
+                .unwrap_or_else(|| directory.join(format!("mtggoldfish-{format}.json")))
         } else {
             let dir = cli.output_dir.clone().unwrap_or_else(|| PathBuf::from("."));
             dir.join(format!("mtggoldfish-{format}.json"))
@@ -122,14 +159,18 @@ fn capitalize(s: &str) -> String {
     }
 }
 
-/// Simple ISO 8601 timestamp (UTC date) without pulling in chrono.
+/// ISO 8601 capture timestamp without pulling in chrono.
 fn chrono_lite_now() -> String {
     let secs = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .expect("time went backwards")
         .as_secs();
     let (year, month, day) = civil_from_days((secs / 86_400) as i64);
-    format!("{year:04}-{month:02}-{day:02}T00:00:00Z")
+    let day_seconds = secs % 86_400;
+    let hour = day_seconds / 3_600;
+    let minute = (day_seconds % 3_600) / 60;
+    let second = day_seconds % 60;
+    format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}Z")
 }
 
 /// Convert days since 1970-01-01 to a `(year, month, day)` Gregorian date.
