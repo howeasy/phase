@@ -3492,6 +3492,22 @@ mod tests {
         );
     }
 
+    /// CR 201.5c + CR 205.3j: a comma-less planeswalker name whose Oracle text uses the
+    /// first name alone ("Kaito Shizuki" -> "Kaito") normalizes that subject to `~` even
+    /// though "Kaito" is also a planeswalker subtype; the type-position occurrence
+    /// ("a Kaito planeswalker") stays literal, and a creature-subtype first word
+    /// ("Merfolk Mistbinder") keeps its lord-effect guard.
+    #[test]
+    fn normalize_planeswalker_first_name_subject_keeps_type_reference_literal() {
+        let text = "At the beginning of your end step, if Kaito entered this turn, he phases out.\n[-7]: You get an emblem with \"As long as you control a Kaito planeswalker, draw a card.\"";
+        assert_eq!(
+            normalize_card_name_refs(text, "Kaito Shizuki"),
+            "At the beginning of your end step, if ~ entered this turn, he phases out.\n[-7]: You get an emblem with \"As long as you control a Kaito planeswalker, draw a card.\""
+        );
+        let lord = "Other Merfolk you control get +1/+1.";
+        assert_eq!(normalize_card_name_refs(lord, "Merfolk Mistbinder"), lord);
+    }
+
     #[test]
     fn normalize_of_short_name_keeps_subtype_type_reference_literal() {
         // CR 205.3j + CR 201.3a: "Gideon of the Trials" — the of-derived short

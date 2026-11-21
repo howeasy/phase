@@ -383,6 +383,8 @@ mod integration_adventure;
 mod integration_bending;
 mod integration_landfall;
 mod intensity_triggered_source_read;
+mod intervening_if_history;
+mod intervening_if_self_state;
 mod invigorate_alternative_cost;
 mod invoke_calamity_free_cast;
 mod ir_spell_node_readers;

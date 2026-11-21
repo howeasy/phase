@@ -2536,7 +2536,7 @@ fn parse_source_attachment_state(input: &str) -> OracleResult<'_, StaticConditio
     .parse(input)
 }
 
-/// CR 301.5a + CR 303.4 + CR 608.2c: "<subject> is enchanted or equipped" /
+/// CR 301.5a + CR 303.4 + CR 603.4: "<subject> is enchanted or equipped" /
 /// "<subject> is equipped and enchanted" — two attachment states sharing one
 /// subject and one copula (Warchanter Skald). The bare right-hand predicate has
 /// no subject of its own, so `parse_condition_connective` cannot recurse into it;
@@ -7842,7 +7842,7 @@ fn parse_zone_history_condition(input: &str) -> OracleResult<'_, StaticCondition
     .parse(input)
 }
 
-/// CR 700.4 + CR 603.4: "no <permanent type phrase> left the battlefield this
+/// CR 603.6c + CR 603.4: "no <permanent type phrase> left the battlefield this
 /// turn" — the negated leave-the-battlefield history gate (Sarevok, Deathbringer:
 /// "no permanents left the battlefield this turn"). The affirmative twins above
 /// compare the same `ZoneChangeCountThisTurn` count `>= 1`; this arm compares it
@@ -7854,7 +7854,9 @@ fn parse_no_permanents_left_battlefield_this_turn(
     let (rest, type_text) = take_until(" left the battlefield this turn").parse(rest)?;
     let (rest, _) = tag(" left the battlefield this turn").parse(rest)?;
     let (filter, leftover) = parse_type_phrase_folding(type_text);
-    if !leftover.trim().is_empty() || filter == TargetFilter::Any {
+    if !leftover.trim().is_empty()
+        || !crate::parser::oracle_target::target_filter_has_meaningful_content(&filter)
+    {
         return Err(oracle_err(input));
     }
     Ok((
@@ -7915,7 +7917,12 @@ fn parse_graveyard_departure_type_noun(input: &str) -> OracleResult<'_, TargetFi
     let (rest, type_text) = take_until(" card").parse(input)?;
     let (rest, _) = alt((tag(" cards"), tag(" card"))).parse(rest)?;
     let (filter, leftover) = parse_type_phrase_folding(type_text);
-    if !leftover.trim().is_empty() || filter == TargetFilter::Any {
+    // `add_owned_with_props` drops the owner and non-token axes on a non-`Typed`
+    // fold (an `Or`), so only a single typed noun is accepted here.
+    if !leftover.trim().is_empty() || !matches!(filter, TargetFilter::Typed(_)) {
+        return Err(oracle_err(input));
+    }
+    if !crate::parser::oracle_target::target_filter_has_meaningful_content(&filter) {
         return Err(oracle_err(input));
     }
     Ok((rest, filter))
@@ -28933,14 +28940,15 @@ mod counters_among_condition_tests {
 #[cfg(test)]
 mod intervening_if_state_condition_tests {
     use super::{
-        parse_inner_condition, parse_target_controller_count_condition, referent_noun_matches_slot,
-        ObjectReferentNoun,
+        add_owned_with_props, make_quantity_ge, parse_inner_condition,
+        parse_target_controller_count_condition, referent_noun_matches_slot, ObjectReferentNoun,
     };
     use crate::types::ability::{
-        AggregateFunction, Comparator, FilterProp, PlayerScope, QuantityExpr, QuantityRef,
-        StaticCondition, TargetFilter, TypeFilter, TypedFilter,
+        AggregateFunction, Comparator, ControllerRef, CountScope, FilterProp, PlayerScope,
+        QuantityExpr, QuantityRef, StaticCondition, TargetFilter, TypeFilter, TypedFilter,
     };
     use crate::types::mana::ManaColor;
+    use crate::types::zones::Zone;
 
     fn life_threshold(text: &str) -> (PlayerScope, Comparator, i32) {
         let (rest, condition) = parse_inner_condition(text).expect("condition must parse");
@@ -29119,6 +29127,148 @@ mod intervening_if_state_condition_tests {
         assert!(referent_noun_matches_slot(
             ObjectReferentNoun::Creature,
             &TargetFilter::Typed(TypedFilter::creature())
+        ));
+    }
+
+    /// CR 301.5a + CR 303.4 + CR 603.4: two attachment states sharing one subject
+    /// and copula fold to one connective over the typed source predicates
+    /// (Warchanter Skald: "it's enchanted or equipped"); the single-state and the
+    /// "enchanted by N Auras" forms keep their own arms.
+    #[test]
+    fn source_attachment_state_list_composes_one_connective() {
+        let (rest, c) = parse_inner_condition("this creature is enchanted or equipped").unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(
+            c,
+            StaticCondition::Or {
+                conditions: vec![
+                    StaticCondition::SourceIsEnchanted,
+                    StaticCondition::SourceIsEquipped,
+                ],
+            }
+        );
+        let (rest, c) = parse_inner_condition("~ is equipped and enchanted").unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(
+            c,
+            StaticCondition::And {
+                conditions: vec![
+                    StaticCondition::SourceIsEquipped,
+                    StaticCondition::SourceIsEnchanted,
+                ],
+            }
+        );
+        // No-regression: the single-state arm and the Aura-count arm still win.
+        let (rest, c) = parse_inner_condition("~ is equipped").unwrap();
+        assert_eq!((rest, c), ("", StaticCondition::SourceIsEquipped));
+        assert!(matches!(
+            parse_inner_condition("this creature is enchanted by exactly two auras"),
+            Ok(("", StaticCondition::QuantityComparison { .. }))
+        ));
+    }
+
+    /// CR 603.6c + CR 603.4: "no <type> left the battlefield this turn" compares the
+    /// zone-change count `== 0`; the noun is folded by the shared type parser, an
+    /// unrecognized noun declines, and the affirmative Revolt arm is unchanged.
+    #[test]
+    fn no_permanents_left_the_battlefield_compares_count_to_zero() {
+        let (rest, c) =
+            parse_inner_condition("no permanents left the battlefield this turn").unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(
+            c,
+            StaticCondition::QuantityComparison {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::ZoneChangeCountThisTurn {
+                        from: Some(Zone::Battlefield),
+                        to: None,
+                        filter: TargetFilter::Typed(TypedFilter::permanent()),
+                    },
+                },
+                comparator: Comparator::EQ,
+                rhs: QuantityExpr::Fixed { value: 0 },
+            }
+        );
+        assert!(
+            parse_inner_condition("no flibbertigibbets left the battlefield this turn").is_err()
+        );
+        let (_, revolt) =
+            parse_inner_condition("a permanent you controlled left the battlefield this turn")
+                .unwrap();
+        assert!(matches!(
+            revolt,
+            StaticCondition::QuantityComparison {
+                comparator: Comparator::GE,
+                ..
+            }
+        ));
+    }
+
+    /// CR 404.1 + CR 205.2: "a creature card left your graveyard this turn" keeps the
+    /// owner and non-token axes of the bare "a card left your graveyard" arm and adds
+    /// the folded type; an unrecognized noun declines.
+    #[test]
+    fn typed_card_left_your_graveyard_adds_the_type_axis() {
+        let (rest, c) =
+            parse_inner_condition("a creature card left your graveyard this turn").unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(
+            c,
+            make_quantity_ge(
+                QuantityRef::ZoneChangeCountThisTurn {
+                    from: Some(Zone::Graveyard),
+                    to: None,
+                    filter: add_owned_with_props(
+                        TargetFilter::Typed(TypedFilter::creature()),
+                        ControllerRef::You,
+                        &[FilterProp::NonToken],
+                    ),
+                },
+                1,
+            )
+        );
+        let (_, bare) = parse_inner_condition("a card left your graveyard this turn").unwrap();
+        assert!(matches!(
+            bare,
+            StaticCondition::QuantityComparison {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::ZoneChangeCountThisTurn {
+                        filter: TargetFilter::Typed(_),
+                        ..
+                    },
+                },
+                ..
+            }
+        ));
+        assert!(
+            parse_inner_condition("a flibbertigibbet card left your graveyard this turn").is_err()
+        );
+        // An `Or` fold would lose the owner and non-token axes, so it declines.
+        assert!(
+            parse_inner_condition("a creature or land card left your graveyard this turn").is_err()
+        );
+    }
+
+    /// CR 105.1: "blue and/or black" is the same either-colour disjunction as "blue
+    /// or black" (Sandstalker Moloch).
+    #[test]
+    fn spell_history_color_and_or_equals_color_or() {
+        let and_or =
+            parse_inner_condition("an opponent cast a blue and/or black spell this turn").unwrap();
+        let or = parse_inner_condition("an opponent cast a blue or black spell this turn").unwrap();
+        assert_eq!(and_or, or);
+        assert!(matches!(
+            and_or.1,
+            StaticCondition::QuantityComparison {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::SpellsCast {
+                        scope: CountScope::Opponents,
+                        filter: Some(TargetFilter::Or { .. }),
+                        ..
+                    },
+                },
+                ..
+            }
         ));
     }
 }

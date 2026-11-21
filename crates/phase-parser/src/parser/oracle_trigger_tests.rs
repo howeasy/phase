@@ -3434,20 +3434,34 @@ fn name_sticker_goblin_parses_complete_trigger_and_die_table() {
 #[test]
 fn source_zone_contraction_is_context_gated() {
     assert_eq!(
-        source_zone_contraction_tail("it's on the battlefield and you control a creature", true),
+        source_state_contraction_tail("it's on the battlefield and you control a creature", true),
         Some(" on the battlefield and you control a creature")
     );
     assert_eq!(
-        source_zone_contraction_tail("it’s in your graveyard, return it", true),
+        source_state_contraction_tail("it’s in your graveyard, return it", true),
         Some(" in your graveyard, return it")
     );
     assert_eq!(
-        source_zone_contraction_tail("it on the battlefield", true),
+        source_state_contraction_tail("it on the battlefield", true),
         None
     );
-    assert_eq!(source_zone_contraction_tail("it's a Goblin", true), None);
+    assert_eq!(source_state_contraction_tail("it's a Goblin", true), None);
+    // CR 301.5a + CR 303.4: the attachment-state tails bind only on a self trigger.
     assert_eq!(
-        source_zone_contraction_tail("it's on the battlefield", false),
+        source_state_contraction_tail("it's equipped, choose one", true),
+        Some(" equipped, choose one")
+    );
+    assert_eq!(
+        source_state_contraction_tail("it's enchanted or equipped, create a token", true),
+        Some(" enchanted or equipped, create a token")
+    );
+    assert_eq!(source_state_contraction_tail("it's equipped", false), None);
+    assert_eq!(
+        source_state_contraction_tail("it's enchanting a creature", true),
+        None
+    );
+    assert_eq!(
+        source_state_contraction_tail("it's on the battlefield", false),
         None,
         "event-object trigger contexts must not be retargeted to the source"
     );
@@ -46703,4 +46717,59 @@ fn or_split_carries_shared_adjunct_to_bare_leg() {
         let legs = parse_trigger_lines(line, name);
         assert_eq!(legs[0].description.as_deref(), Some(first_leg), "{name}");
     }
+}
+
+/// CR 301.5a + CR 303.4 + CR 603.4: on a self trigger, a bare source-bound "it's
+/// enchanted" / "it's enchanted or equipped" is hoisted to the trigger condition
+/// through the shared grammar (Krond the Dawn-Clad, Warchanter Skald).
+#[test]
+fn self_trigger_bare_its_attachment_state_hoists_the_intervening_if() {
+    let krond = parse_trigger_line(
+        "Whenever Krond attacks, if it's enchanted, exile target permanent.",
+        "Krond the Dawn-Clad",
+    );
+    assert_eq!(krond.mode, TriggerMode::Attacks);
+    assert!(
+        matches!(
+            &krond.condition,
+            Some(TriggerCondition::SourceMatchesFilter { filter })
+                if filter_contains_filter_prop(filter, &|prop| matches!(
+                    prop,
+                    FilterProp::HasAttachment { kind, .. } if *kind == AttachmentKind::Aura
+                ))
+        ),
+        "expected an Aura attachment gate, got {:?}",
+        krond.condition
+    );
+    let skald = parse_trigger_line(
+        "Whenever this creature becomes tapped, if it's enchanted or equipped, create a 2/1 red Dwarf Berserker creature token.",
+        "Warchanter Skald",
+    );
+    assert_eq!(skald.mode, TriggerMode::Taps);
+    assert!(
+        matches!(&skald.condition, Some(TriggerCondition::Or { conditions }) if conditions.len() == 2),
+        "expected Or[enchanted, equipped], got {:?}",
+        skald.condition
+    );
+}
+
+/// Negative twin: on a trigger whose subject is not the source, "it" names the
+/// event object, so the bare `it's enchanted` must not be rebound to the source:
+/// the intervening-if stays unhoisted and the trigger fails closed (reach guard:
+/// the head parsed as an attack trigger).
+#[test]
+fn non_self_trigger_bare_its_attachment_state_is_not_rebound_to_the_source() {
+    let def = parse_trigger_line(
+        "Whenever a creature you control attacks, if it's enchanted, draw a card.",
+        "Test Subject Of Nothing",
+    );
+    assert_eq!(def.mode, TriggerMode::Attacks);
+    assert!(
+        !matches!(
+            &def.condition,
+            Some(TriggerCondition::SourceMatchesFilter { .. })
+        ),
+        "a non-self trigger must not bind `it` to the trigger source: {:?}",
+        def.condition
+    );
 }
