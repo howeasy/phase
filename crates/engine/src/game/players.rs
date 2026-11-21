@@ -529,7 +529,13 @@ fn pile_entries<'a>(
         })
         .into_iter()
         .flatten()
-        .filter(move |snap| snap.supplier.is_some() && snap.supplier == reader);
+        .filter(move |snap| snap.supplier.is_some() && snap.supplier == reader)
+        // CR 608.2c: a card the instruction just performed moved ("exile up to one
+        // other target creature ... return each other card exiled with this
+        // Vehicle" — Mysterious Limousine) is the "this way" card of that
+        // resolution, not one of the other cards of the pile: only links made by an
+        // earlier resolution (an earlier instance of a doubled trigger) are read live.
+        .filter(move |snap| !state.last_zone_changed_ids.contains(&snap.exiled_id));
     // `departed`, not `admits`: an entry whose successor is this incarnation
     // belongs to an earlier departure, a different object.
     let later = state

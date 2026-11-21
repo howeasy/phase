@@ -2991,7 +2991,7 @@ pub struct AttachmentSnapshot {
 /// CR 603.10a + CR 607.2a: Snapshot of a single card linked as "exiled with"
 /// a source at the instant before that source leaves the battlefield.
 /// Readers that consult the live card gate on [`Self::is_still_exiled`].
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Eq, Serialize, Deserialize)]
 pub struct LinkedExileSnapshot {
     pub exiled_id: ObjectId,
     pub owner: PlayerId,
@@ -3010,6 +3010,40 @@ pub struct LinkedExileSnapshot {
     /// a granted ability) or predates the field.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub supplier: Option<crate::game::game_object::LinkedAbilitySource>,
+}
+
+/// CR 607.5: the `supplier` is attribution metadata read by a pile reader, not part of
+/// what a position is. It carries the exiling object's incarnation and copy-effect ids,
+/// which advance every cycle of a loop, so comparing it would make two otherwise
+/// identical positions of a repeating game differ (loop detection compares
+/// `GameState`s). Everything else about the card compares.
+impl PartialEq for LinkedExileSnapshot {
+    fn eq(&self, other: &Self) -> bool {
+        let LinkedExileSnapshot {
+            exiled_id,
+            owner,
+            mana_value,
+            incarnation,
+            supplier: _,
+        } = self;
+        *exiled_id == other.exiled_id
+            && *owner == other.owner
+            && *mana_value == other.mana_value
+            && *incarnation == other.incarnation
+    }
+}
+
+/// See the `PartialEq` of [`LinkedExileSnapshot`]: the `supplier` is not part of a position.
+impl PartialEq for ExileLink {
+    fn eq(&self, other: &Self) -> bool {
+        let ExileLink {
+            exiled_id,
+            source_id,
+            kind,
+            supplier: _,
+        } = self;
+        *exiled_id == other.exiled_id && *source_id == other.source_id && *kind == other.kind
+    }
 }
 
 impl LinkedExileSnapshot {
@@ -3955,7 +3989,7 @@ pub enum LookGrant {
     Player { player: PlayerId },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Eq, Serialize, Deserialize)]
 pub struct ExileLink {
     pub exiled_id: ObjectId,
     pub source_id: ObjectId,
@@ -41696,17 +41730,12 @@ impl GameState {
                 owner: _,
                 mana_value: _,
                 incarnation,
-                supplier,
+                // Attribution metadata, not part of a position (see the manual
+                // `PartialEq` on `LinkedExileSnapshot`).
+                supplier: _,
             } in snapshots
             {
                 f(*exiled_id, incarnation);
-                // CR 607.5: the exiling ability's pair names its creator's incarnation.
-                if let Some(supplier) = supplier {
-                    f(
-                        supplier.creator.object_id,
-                        &mut supplier.creator.incarnation,
-                    );
-                }
             }
         }
         // The may-trigger origins on every ability that can still resolve, and the
