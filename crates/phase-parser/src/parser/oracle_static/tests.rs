@@ -9489,20 +9489,24 @@ fn static_top_of_library_black_gate_vampire_nocturnus() {
 }
 
 #[test]
-fn static_enchanted_or_equipped_stays_unrecognized() {
-    // Novice Knight: "As long as this creature is enchanted or equipped, ~ has
-    // first strike." The rhs "equipped" elides its subject, so the disjunction
-    // cannot be decomposed — the whole condition falls through to Unrecognized
-    // (no regression: it is Unrecognized today, and the new bare "is enchanted"
-    // arm intentionally does NOT salvage half of it).
+fn static_enchanted_or_equipped_parses_as_attachment_disjunction() {
+    // CR 301.5a + CR 303.4: "As long as this creature is enchanted or equipped, ~ has
+    // first strike." The right-hand "equipped" elides its subject and copula, which
+    // the shared-subject attachment-state list arm now decomposes into one typed
+    // disjunction instead of falling through to Unrecognized.
     let def =
         parse_static_line("As long as this creature is enchanted or equipped, ~ has first strike.")
             .unwrap();
     assert_eq!(def.mode, StaticMode::Continuous);
-    assert!(matches!(
+    assert_eq!(
         def.condition,
-        Some(StaticCondition::Unrecognized { .. })
-    ));
+        Some(StaticCondition::Or {
+            conditions: vec![
+                StaticCondition::SourceIsEnchanted,
+                StaticCondition::SourceIsEquipped,
+            ],
+        })
+    );
 }
 
 #[test]
@@ -41839,7 +41843,7 @@ fn defender_exception_rules_bearing_remainder_composes_both_halves() {
 }
 
 #[test]
-fn novice_knight_leading_condition_form_fails_closed() {
+fn novice_knight_leading_condition_form_parses_the_attachment_gate() {
     let def = parse_static_line(
         "As long as this creature is enchanted or equipped, it can attack as though it didn't have defender.",
     )
@@ -41848,13 +41852,14 @@ fn novice_knight_leading_condition_form_fails_closed() {
     assert_eq!(def.affected, Some(TargetFilter::SelfRef));
     assert_eq!(
         def.condition,
-        Some(StaticCondition::Not {
-            condition: Box::new(StaticCondition::Unrecognized {
-                text: "this creature is enchanted or equipped".to_string(),
-            }),
+        Some(StaticCondition::Or {
+            conditions: vec![
+                StaticCondition::SourceIsEnchanted,
+                StaticCondition::SourceIsEquipped,
+            ],
         }),
-        "the inert marker, NOT a bare Unrecognized: a bare one evaluates TRUE, which \
-         made this printed gate an unconditional attack permission"
+        "the gate is the typed attachment disjunction; the former inert `Not(Unrecognized)` \
+         marker (which kept the permission off) is no longer needed once it parses"
     );
 
     // PAIRED POSITIVE CONTROL, SAME PRODUCTION, SAME FIXTURE: arm 1's plain form.

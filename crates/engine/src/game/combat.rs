@@ -11977,7 +11977,7 @@ mod tests {
     /// coverage still reports the clause as an unimplemented gap.
     ///
     /// This is the RUNTIME half of that fix: the parse-side shape is pinned by
-    /// `novice_knight_leading_condition_form_fails_closed`, but a condition shape
+    /// `novice_knight_leading_condition_form_fails_closed` (since renamed `novice_knight_leading_condition_form_parses_the_attachment_gate`: Novice Knight now types its gate), but a condition shape
     /// alone does not establish that the declaration is actually refused.
     ///
     /// TWO-SIDED ON ONE CARRIER SHAPE: the inert marker withholds, and an anchored
