@@ -3139,6 +3139,7 @@ pub(super) fn lower_targeted_action_ast(ast: TargetedImperativeAst) -> Effect {
                 enters_with_modifications: Default::default(),
                 mana_spend_permission: None,
                 cast_cost_modifier: None,
+                single_use_group: None,
             },
             target,
             grantee: crate::types::ability::PermissionGrantee::ObjectOwner,
@@ -14305,9 +14306,11 @@ fn anaphoric_trigger_body_note_value(rest: &str) -> Option<QuantityExpr> {
     Some(QuantityExpr::Ref { qty })
 }
 
-/// CR 205.1a + CR 205.1b + CR 110.2a + CR 122.1 + CR 115.2: recognize the
-/// `assimilate <target phrase>` keyword action and return the phrase's target
-/// filter.
+/// CR 701.72a + CR 701.72b + CR 205.1a + CR 205.1b + CR 110.2a + CR 122.1 + CR 115.2:
+/// recognize the `assimilate <target phrase>` keyword action and return the
+/// phrase's target filter. CR 701.72 (Assimilate) exists only in the Comprehensive
+/// Rules edition effective November 6, 2026; the repository's pinned September 25,
+/// 2026 edition does not have it yet.
 ///
 /// Anchored on `tag("assimilate ")` — the trailing space IS the word boundary,
 /// so `assimilates`/`assimilation`/`Assimilation Aegis` cannot match. The
@@ -14350,7 +14353,17 @@ fn parse_assimilate_target(
         Some(Zone::Exile) if target.references_exiled_by_source() => {
             Some((target, Some(Zone::Exile)))
         }
-        _ => None,
+        // Any other zone, or an exile filter that names no linked pile, is a
+        // phrasing this production does not model.
+        Some(
+            Zone::Exile
+            | Zone::Library
+            | Zone::Hand
+            | Zone::Battlefield
+            | Zone::Stack
+            | Zone::Command,
+        )
+        | None => None,
     }
 }
 

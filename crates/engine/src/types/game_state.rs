@@ -3003,6 +3003,13 @@ pub struct LinkedExileSnapshot {
     /// no live object has (fail-closed, mirroring `CostPaidObjectSnapshot`).
     #[serde(default = "crate::types::ability::legacy_incarnation")]
     pub incarnation: u64,
+    /// CR 607.5 + CR 607.2a: the ability pair that exiled this card (the exiling
+    /// object's incarnation and the copiable set of the ability), copied from the
+    /// link it was captured from. `None` when the exile was not made by an
+    /// attributable activated or triggered ability (a cost, a replacement effect,
+    /// a granted ability) or predates the field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supplier: Option<crate::game::game_object::LinkedAbilitySource>,
 }
 
 impl LinkedExileSnapshot {
@@ -3953,6 +3960,14 @@ pub struct ExileLink {
     pub exiled_id: ObjectId,
     pub source_id: ObjectId,
     pub kind: ExileLinkKind,
+    /// CR 607.5 + CR 607.2a: the ability pair that made this link — the exiling
+    /// object's incarnation and the copiable set of the resolving ability
+    /// (`exile_links::resolving_exile_supplier`). An ability that reads the pile
+    /// is linked only to abilities of its own set (CR 607.5), so a reader of a
+    /// later link compares this against its own pair. `None` when the exile was
+    /// not made by an attributable activated or triggered ability.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supplier: Option<crate::game::game_object::LinkedAbilitySource>,
 }
 
 /// CR 702.xxx: Paradigm (Strixhaven) first-resolution record.
@@ -41681,9 +41696,17 @@ impl GameState {
                 owner: _,
                 mana_value: _,
                 incarnation,
+                supplier,
             } in snapshots
             {
                 f(*exiled_id, incarnation);
+                // CR 607.5: the exiling ability's pair names its creator's incarnation.
+                if let Some(supplier) = supplier {
+                    f(
+                        supplier.creator.object_id,
+                        &mut supplier.creator.incarnation,
+                    );
+                }
             }
         }
         // The may-trigger origins on every ability that can still resolve, and the
@@ -57177,6 +57200,7 @@ Go for the Goal! — {3}, {T}: Until end of turn, target creature gains \"Whenev
                 owner: PlayerId(0),
                 mana_value: 0,
                 incarnation,
+                supplier: None,
             };
             record.attachments = vec![attachment.clone()];
             record.linked_exile_snapshot = vec![linked.clone()];
@@ -65528,6 +65552,7 @@ Go for the Goal! — {3}, {T}: Until end of turn, target creature gains \"Whenev
             kind: ExileLinkKind::UntilSourceLeaves {
                 return_zone: Zone::Battlefield,
             },
+            supplier: None,
         };
         let json = serde_json::to_string(&link).unwrap();
         let deserialized: ExileLink = serde_json::from_str(&json).unwrap();
@@ -67788,6 +67813,7 @@ Go for the Goal! — {3}, {T}: Until end of turn, target creature gains \"Whenev
             kind: ExileLinkKind::UntilSourceLeaves {
                 return_zone: Zone::Battlefield,
             },
+            supplier: None,
         });
         state.pending_trigger = Some(Box::new(PendingTrigger {
             source_id: ObjectId(5),

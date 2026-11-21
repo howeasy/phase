@@ -1451,6 +1451,7 @@ fn exile_alt_cost_permission(
         enters_with_modifications: Default::default(),
         mana_spend_permission: None,
         cast_cost_modifier: None,
+        single_use_group: None,
     }
 }
 

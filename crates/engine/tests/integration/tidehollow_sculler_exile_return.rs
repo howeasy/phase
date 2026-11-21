@@ -840,6 +840,7 @@ fn ugins_labyrinth_activated_return_puts_imprinted_card_in_owners_hand() {
             exiled_id: imprinted,
             source_id: labyrinth,
             kind: ExileLinkKind::TrackedBySource,
+            supplier: None,
         });
     assert_eq!(zone_of(&runner, imprinted), Zone::Exile);
 

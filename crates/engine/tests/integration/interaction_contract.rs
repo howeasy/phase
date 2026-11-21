@@ -8295,6 +8295,7 @@ fn tap_land_for_mana_labels_a_choice_among_exiled_colors_land() {
             exiled_id: exiled,
             source_id: pit,
             kind: engine::types::game_state::ExileLinkKind::TrackedBySource,
+            supplier: None,
         });
 
     let labels = projected_land_mana_labels(runner.state_mut(), pit, "pit-of-offerings-label");

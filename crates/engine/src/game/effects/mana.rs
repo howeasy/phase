@@ -1485,6 +1485,7 @@ mod tests {
             exiled_id: exiled,
             source_id: source,
             kind: ExileLinkKind::TrackedBySource,
+            supplier: None,
         });
 
         let options = exiled_color_options(&state, LinkedExileScope::ThisObject, source);
@@ -1528,6 +1529,7 @@ mod tests {
                 exiled_id,
                 source_id: source,
                 kind: ExileLinkKind::TrackedBySource,
+                supplier: None,
             });
         }
 
@@ -3981,6 +3983,7 @@ mod tests {
                 source_id: lens,
                 exiled_id: imprinted,
                 kind: ExileLinkKind::TrackedBySource,
+                supplier: None,
             });
             let ability_index =
                 crate::game::casting::activated_ability_definitions(runner.state(), chamber)

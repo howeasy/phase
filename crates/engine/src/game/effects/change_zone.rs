@@ -9392,6 +9392,7 @@ mod tests {
             kind: ExileLinkKind::UntilSourceLeaves {
                 return_zone: Zone::Battlefield,
             },
+            supplier: None,
         });
         state.exile_links.push(ExileLink {
             exiled_id: exiled2,
@@ -9399,6 +9400,7 @@ mod tests {
             kind: ExileLinkKind::UntilSourceLeaves {
                 return_zone: Zone::Battlefield,
             },
+            supplier: None,
         });
         // Link from a different source — should not be consumed
         state.exile_links.push(ExileLink {
@@ -9407,6 +9409,7 @@ mod tests {
             kind: ExileLinkKind::UntilSourceLeaves {
                 return_zone: Zone::Battlefield,
             },
+            supplier: None,
         });
 
         // CR 607.2a + CR 406.6: ChangeZoneAll with ExiledBySource moves linked cards to graveyard.

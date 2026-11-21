@@ -944,6 +944,7 @@ pub fn resolve(
                     crate::game::casting::resolution_land_card_admission
                 }
                 crate::types::ability::CastFromZoneDriver::LingeringPermission
+                | crate::types::ability::CastFromZoneDriver::LingeringWindow { .. }
                 | crate::types::ability::CastFromZoneDriver::DuringResolution => {
                     crate::game::casting::resolution_land_front_card_admission
                 }
@@ -2987,6 +2988,7 @@ fn record_lingering_permissions(
         duration,
         mana_spend_permission,
         cast_cost_modifier,
+        driver,
     ) = match &ability.effect {
         Effect::CastFromZone {
             mode,
@@ -2997,6 +2999,7 @@ fn record_lingering_permissions(
             duration,
             mana_spend_permission,
             cast_cost_modifier,
+            driver,
             ..
         } => (
             *mode,
@@ -3007,10 +3010,30 @@ fn record_lingering_permissions(
             duration.clone(),
             *mana_spend_permission,
             cast_cost_modifier.clone(),
+            *driver,
         ),
         _ => return Err(EffectError::MissingParam("CastFromZone".to_string())),
     };
     let constraint = freeze_cast_permission_constraint(state, ability, constraint);
+    // CR 601.2a + CR 611.2a: a grant whose printed cap is exactly one cast
+    // ("you may cast a spell from among cards exiled with this enchantment")
+    // authorizes one cast across every card it stamps. One group per resolution,
+    // shared by the sibling permissions below. The id names no published tracked
+    // set: registering one would make it the highest id, which a later
+    // `TrackedSet { id: 0 }` anaphor in the same chain would mis-bind to.
+    let single_use_group = match driver {
+        crate::types::ability::CastFromZoneDriver::LingeringWindow { bounds }
+            if bounds.is_exactly_one_cast() =>
+        {
+            let group = crate::types::identifiers::TrackedSetId(state.next_tracked_set_id);
+            state.next_tracked_set_id += 1;
+            Some(group)
+        }
+        crate::types::ability::CastFromZoneDriver::LingeringWindow { .. }
+        | crate::types::ability::CastFromZoneDriver::LingeringPermission
+        | crate::types::ability::CastFromZoneDriver::DuringResolution
+        | crate::types::ability::CastFromZoneDriver::ResolutionWindow { .. } => None,
+    };
     let graveyard_replacement = cast_from_zone_graveyard_destination(ability);
     // CR 614.1c + CR 122.1: "the creature cast this way enters with a [counter]
     // counter on it" — recorded on the granted permission so the cast
@@ -3181,6 +3204,7 @@ fn record_lingering_permissions(
                     // prices the cast. CR 305.1 keeps it off the land-play
                     // companion built below.
                     cast_cost_modifier: cast_cost_modifier.clone(),
+                    single_use_group,
                 }
             };
             // CR 611.2b: a host-bound lifetime must be evaluated once now —
@@ -3197,7 +3221,25 @@ fn record_lingering_permissions(
                 .lifetime()
                 .duration
                 .is_some_and(Duration::ends_when_host_leaves_play);
-            if !obj.casting_permissions.contains(&permission) {
+            // The resolver can reach this grant twice for one resolution; two
+            // grants that differ only in the freshly minted budget group are one
+            // grant, so a card never holds two budgets for the same instruction.
+            let without_group = |permission: &CastingPermission| {
+                let mut copy = permission.clone();
+                if let CastingPermission::ExileWithAltCost {
+                    single_use_group, ..
+                } = &mut copy
+                {
+                    *single_use_group = None;
+                }
+                copy
+            };
+            let candidate = without_group(&permission);
+            if !obj
+                .casting_permissions
+                .iter()
+                .any(|existing| without_group(existing) == candidate)
+            {
                 obj.casting_permissions.push(permission);
                 if host_bound {
                     needs_lifetime_check = true;
@@ -5119,11 +5161,13 @@ mod tests {
             exiled_id: instant,
             source_id: source,
             kind: ExileLinkKind::TrackedBySource,
+            supplier: None,
         });
         state.exile_links.push(ExileLink {
             exiled_id: creature,
             source_id: source,
             kind: ExileLinkKind::TrackedBySource,
+            supplier: None,
         });
 
         let ability = ResolvedAbility::new(
@@ -5188,6 +5232,7 @@ mod tests {
                 exiled_id,
                 source_id: source,
                 kind: ExileLinkKind::TrackedBySource,
+                supplier: None,
             });
         }
         let active_set = TrackedSetId(1);
@@ -6760,6 +6805,7 @@ mod tests {
                     exiled_id,
                     source_id: source,
                     kind: ExileLinkKind::TrackedBySource,
+                    supplier: None,
                 });
             }
             let active_set = TrackedSetId(1);
@@ -7051,6 +7097,7 @@ mod tests {
             exiled_id: land,
             source_id: source,
             kind: ExileLinkKind::TrackedBySource,
+            supplier: None,
         });
         let ability = ResolvedAbility::new(
             Effect::CastFromZone {
@@ -7147,6 +7194,7 @@ mod tests {
             exiled_id: land,
             source_id: source,
             kind: ExileLinkKind::TrackedBySource,
+            supplier: None,
         });
         assert_eq!(
             exiled_card_link_is_empty(&state, &unbound),

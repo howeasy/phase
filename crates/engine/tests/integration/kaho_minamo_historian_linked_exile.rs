@@ -93,6 +93,7 @@ fn kaho_board(flickers: usize) -> KahoBoard {
         exiled_id: pile,
         source_id: kaho,
         kind: ExileLinkKind::TrackedBySource,
+        supplier: None,
     });
     KahoBoard {
         runner,

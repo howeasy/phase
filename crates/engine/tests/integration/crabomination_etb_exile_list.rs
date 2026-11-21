@@ -452,6 +452,7 @@ fn crabomination_prior_exile_linked_to_it_is_not_offered() {
         exiled_id: prior,
         source_id: crab,
         kind: ExileLinkKind::TrackedBySource,
+        supplier: None,
     });
     let linked = |runner: &GameRunner| -> Vec<ObjectId> {
         linked_exile_cards_for_source(runner.state(), crab)

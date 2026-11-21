@@ -59809,6 +59809,19 @@ fn cast_mechanism_bound_pairing_table_is_exact() {
         );
     }
 
+    // The grant-scoped budget carries exactly one cast.
+    assert_eq!(
+        CastFromZoneDriver::for_batch_bounds(CastMechanism::LingeringWindow, one),
+        Some(CastFromZoneDriver::LingeringWindow { bounds: one })
+    );
+    for rejected in [unbounded, two, budget] {
+        assert_eq!(
+            CastFromZoneDriver::for_batch_bounds(CastMechanism::LingeringWindow, rejected),
+            None,
+            "the grant-scoped budget cannot carry {rejected:?}"
+        );
+    }
+
     // The two one-card mechanisms accept an exact single-card cap and nothing
     // else — including not an unbounded clause, which they would narrow.
     for (mechanism, expected) in [
@@ -73006,6 +73019,11 @@ fn assimilate_a_creature_card_exiled_with_it_lowers_to_linked_exile_pick() {
         &["Artifact".to_string(), "Creature".to_string()],
         &["Borg".to_string()],
     );
+    assert_eq!(
+        parsed.triggers.len(),
+        2,
+        "Assimilation Assessor must parse its enters and attacks triggers"
+    );
     for trigger in &parsed.triggers {
         let execute = trigger.execute.as_deref().expect("execute body");
         assert!(
@@ -73013,6 +73031,139 @@ fn assimilate_a_creature_card_exiled_with_it_lowers_to_linked_exile_pick() {
             "Assimilation Assessor must lower fully: {execute:#?}"
         );
     }
+    assert!(
+        parsed
+            .triggers
+            .iter()
+            .filter_map(|trigger| trigger.execute.as_deref())
+            .any(|execute| matches!(
+                &*execute.effect,
+                Effect::ChangeZone {
+                    origin: Some(Zone::Exile),
+                    destination: Zone::Battlefield,
+                    ..
+                }
+            )),
+        "the Assessor attack trigger must lower to the linked-exile ChangeZone shape"
+    );
+}
+
+/// CR 601.2a + CR 611.2a: the `CastFromZone` of an ability chain, if any.
+fn cast_from_zone_in_chain(ability: &AbilityDefinition) -> Option<&AbilityDefinition> {
+    if matches!(*ability.effect, Effect::CastFromZone { .. }) {
+        return Some(ability);
+    }
+    ability
+        .sub_ability
+        .as_deref()
+        .and_then(cast_from_zone_in_chain)
+}
+
+/// CR 601.2a + CR 611.2a + CR 607.2a: "until end of turn, you may cast a [creature]
+/// spell from among cards exiled with [this object]" prints a cap of one cast over
+/// a persistent linked pile and states a duration, so its grant shares one budget
+/// (`LingeringWindow`) and its "may" stays inside the grant rather than becoming
+/// an accept/decline prompt. A plural clause, or one stating no duration
+/// (Jeleva, Nephalia's Scourge), keeps the per-object permission.
+#[test]
+fn cast_a_spell_from_linked_exile_under_a_duration_shares_one_budget() {
+    use crate::types::ability::ResolutionCastWindow;
+
+    let window = |def: &AbilityDefinition| {
+        let found = cast_from_zone_in_chain(def).expect("a CastFromZone in the chain");
+        let Effect::CastFromZone { driver, .. } = &*found.effect else {
+            unreachable!("matched above");
+        };
+        (*driver, found.optional)
+    };
+    let one = ResolutionCastWindow {
+        max_casts: Some(1),
+        max_total_mv: None,
+    };
+
+    // Court of Locthwain: the third sentence, behind the monarch condition.
+    let court = parse_oracle_text(
+        "When this enchantment enters, you become the monarch.\n\
+         At the beginning of your upkeep, exile the top card of target opponent's library. You may \
+         play that card for as long as it remains exiled, and mana of any type can be spent to \
+         cast it. If you're the monarch, until end of turn, you may cast a spell from among cards \
+         exiled with this enchantment without paying its mana cost.",
+        "Court of Locthwain",
+        &[],
+        &["Enchantment".to_string()],
+        &[],
+    );
+    let (driver, optional) = court
+        .triggers
+        .iter()
+        .filter_map(|trigger| trigger.execute.as_deref())
+        .find(|execute| cast_from_zone_in_chain(execute).is_some())
+        .map(window)
+        .expect("Court's upkeep trigger casts from linked exile");
+    assert_eq!(driver, CastFromZoneDriver::LingeringWindow { bounds: one });
+    assert!(
+        !optional,
+        "the grant's own accept lives in the cast, not a prompt"
+    );
+
+    // Idol of Endurance: the activated form, free.
+    let idol = parse_oracle_text(
+        "When this artifact enters, exile all creature cards with mana value 3 or less from \
+         your graveyard until this artifact leaves the battlefield.\n\
+         {1}{W}, {T}: Until end of turn, you may cast a creature spell from among cards exiled \
+         with this artifact without paying its mana cost.",
+        "Idol of Endurance",
+        &[],
+        &["Artifact".to_string()],
+        &[],
+    );
+    let def = idol
+        .abilities
+        .iter()
+        .find(|ability| cast_from_zone_in_chain(ability).is_some())
+        .expect("Idol's activated ability casts from linked exile");
+    assert_eq!(
+        window(def),
+        (CastFromZoneDriver::LingeringWindow { bounds: one }, false)
+    );
+
+    // Serpent's Soul-Jar: the paid form.
+    let jar = parse_oracle_text(
+        "Whenever an Elf you control dies, exile it.\n\
+         {T}, Pay 2 life: Until end of turn, you may cast a creature spell from among cards \
+         exiled with this artifact.",
+        "Serpent's Soul-Jar",
+        &[],
+        &["Artifact".to_string()],
+        &[],
+    );
+    let def = jar
+        .abilities
+        .iter()
+        .find(|ability| cast_from_zone_in_chain(ability).is_some())
+        .expect("Soul-Jar's activated ability casts from linked exile");
+    assert_eq!(
+        window(def),
+        (CastFromZoneDriver::LingeringWindow { bounds: one }, false)
+    );
+
+    // No stated duration (Jeleva's attack trigger): the per-object permission stays.
+    let jeleva = parse_oracle_text(
+        "Whenever Jeleva attacks, you may cast an instant or sorcery spell from among cards \
+         exiled with Jeleva without paying its mana cost.",
+        "Jeleva, Nephalia's Scourge",
+        &[],
+        &["Creature".to_string()],
+        &["Vampire".to_string(), "Wizard".to_string()],
+    );
+    let (driver, _) = jeleva
+        .triggers
+        .iter()
+        .filter_map(|trigger| trigger.execute.as_deref())
+        .find(|execute| cast_from_zone_in_chain(execute).is_some())
+        .map(window)
+        .expect("Jeleva's attack trigger casts from linked exile");
+    assert_eq!(driver, CastFromZoneDriver::LingeringPermission);
 }
 
 const CODIE_CONTINUATION_TEXT: &str = "Add {W}{U}{B}{R}{G}. When you next cast a spell this turn, \

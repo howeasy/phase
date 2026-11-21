@@ -2791,13 +2791,23 @@ pub(crate) fn capture_linked_exile_snapshot(
     source_id: ObjectId,
     from: Zone,
 ) -> Vec<crate::types::game_state::LinkedExileSnapshot> {
-    if from != Zone::Battlefield {
-        return Vec::new();
-    }
+    live_linked_exile_snapshots(state, source_id, from).collect()
+}
 
-    crate::game::exile_links::live_links_for_source(state, source_id)
-        .filter_map(|link| crate::game::exile_links::exiled_card_snapshot(state, link.exiled_id))
-        .collect()
+/// The lazy form of [`capture_linked_exile_snapshot`], for readers that ask one
+/// card's membership and must not build the whole pile per candidate.
+pub(crate) fn live_linked_exile_snapshots(
+    state: &GameState,
+    source_id: ObjectId,
+    from: Zone,
+) -> impl Iterator<Item = crate::types::game_state::LinkedExileSnapshot> + '_ {
+    (from == Zone::Battlefield)
+        .then(|| crate::game::exile_links::live_links_for_source(state, source_id))
+        .into_iter()
+        .flatten()
+        .filter_map(move |link| {
+            crate::game::exile_links::exiled_card_snapshot(state, link.exiled_id, link.supplier)
+        })
 }
 
 /// CR 607.2a + CR 607.2b + CR 113.7a: Persist a battlefield departure's
@@ -6763,6 +6773,7 @@ mod tests {
             source_id: source,
             exiled_id: exiled,
             kind: crate::types::game_state::ExileLinkKind::TrackedBySource,
+            supplier: None,
         });
 
         let mut events = Vec::new();
@@ -6780,6 +6791,7 @@ mod tests {
                 owner: PlayerId(1),
                 mana_value: 4,
                 incarnation: state.objects[&exiled].incarnation,
+                supplier: None,
             }]
         );
         assert!(
@@ -6818,6 +6830,7 @@ mod tests {
             source_id: source,
             exiled_id: exiled,
             kind: crate::types::game_state::ExileLinkKind::TrackedBySource,
+            supplier: None,
         });
 
         let mut events = Vec::new();
@@ -6866,6 +6879,7 @@ mod tests {
             source_id: source,
             exiled_id: exiled,
             kind: crate::types::game_state::ExileLinkKind::TrackedBySource,
+            supplier: None,
         });
 
         let mut events = Vec::new();
@@ -6911,6 +6925,7 @@ mod tests {
                 source_id: source,
                 exiled_id: exiled,
                 kind: crate::types::game_state::ExileLinkKind::TrackedBySource,
+                supplier: None,
             });
             let departed = state.objects[&source].incarnation;
             move_to_zone(&mut state, source, Zone::Graveyard, &mut events);
@@ -6922,6 +6937,7 @@ mod tests {
                     owner: PlayerId(1),
                     mana_value: 0,
                     incarnation: state.objects[&exiled].incarnation,
+                    supplier: None,
                 }],
             });
         }

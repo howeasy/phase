@@ -297,6 +297,7 @@ fn hideaway_exiled_card_visible_to_controller_hidden_from_opponent() {
             lookers: std::collections::BTreeSet::new(),
             source_incarnation: state.objects[&source].incarnation,
         },
+        supplier: None,
     });
 
     // Controller (P0) may look — real identity survives the filter.
@@ -343,6 +344,7 @@ fn tracked_by_source_face_down_exile_stays_hidden_from_controller() {
         exiled_id: hidden,
         source_id: source,
         kind: ExileLinkKind::TrackedBySource,
+        supplier: None,
     });
 
     // Even the controller of the exiling permanent may NOT look — Bomat-style

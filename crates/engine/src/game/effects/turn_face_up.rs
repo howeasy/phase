@@ -107,6 +107,7 @@ mod tests {
             source_id: source,
             exiled_id: exiled,
             kind: ExileLinkKind::TrackedBySource,
+            supplier: None,
         });
         (source, exiled)
     }

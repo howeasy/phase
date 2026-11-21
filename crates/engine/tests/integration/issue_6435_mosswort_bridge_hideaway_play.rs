@@ -614,6 +614,7 @@ fn blink_bridge_under_its_activation(rehide: bool) -> Option<BlinkedBridge> {
             lookers: BTreeSet::from([P0]),
             source_incarnation: incarnation_activated,
         },
+        supplier: None,
     });
     fund_green(&mut runner);
 

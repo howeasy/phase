@@ -5315,6 +5315,7 @@ fn redact_linked_exile_snapshot(member: &mut crate::types::game_state::LinkedExi
         owner: _,
         mana_value,
         incarnation: _,
+        supplier: _,
     } = member;
     *mana_value = 0;
 }
@@ -6132,12 +6133,14 @@ mod tests {
                         owner,
                         mana_value: 4,
                         incarnation: state.objects[&secret].incarnation,
+                        supplier: None,
                     },
                     LinkedExileSnapshot {
                         exiled_id: public_member,
                         owner,
                         mana_value: 3,
                         incarnation: state.objects[&public_member].incarnation,
+                        supplier: None,
                     },
                 ],
             }],
@@ -7649,6 +7652,7 @@ mod tests {
                 lookers: std::collections::BTreeSet::from([owner]),
                 source_incarnation: 0,
             },
+            supplier: None,
         });
         vec![
             LinkedExileSnapshot {
@@ -7656,12 +7660,14 @@ mod tests {
                 owner,
                 mana_value: 4,
                 incarnation: state.objects[&hidden].incarnation,
+                supplier: None,
             },
             LinkedExileSnapshot {
                 exiled_id: public,
                 owner,
                 mana_value: 3,
                 incarnation: state.objects[&public].incarnation,
+                supplier: None,
             },
         ]
     }
@@ -7690,6 +7696,7 @@ mod tests {
                             owner: raw_member.owner,
                             mana_value: 0,
                             incarnation: raw_member.incarnation,
+                            supplier: None,
                         },
                         "{label} {path}: the hidden member keeps id and owner, loses its mana value"
                     );
@@ -15832,6 +15839,7 @@ mod tests {
                 enters_with_modifications: Default::default(),
                 mana_spend_permission: None,
                 cast_cost_modifier: None,
+                single_use_group: None,
             }];
             (state, id)
         };
@@ -16352,6 +16360,7 @@ mod tests {
             enters_with_modifications: Default::default(),
             mana_spend_permission: None,
             cast_cost_modifier: None,
+            single_use_group: None,
         }
     }
 

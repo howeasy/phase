@@ -358,6 +358,7 @@ fn compound_exile_grants_casting_permission_over_full_tracked_set() {
                 enters_with_counter: None,
                 enters_with_modifications: Default::default(),
                 cast_cost_modifier: None,
+                single_use_group: None,
             },
             target: TargetFilter::TrackedSet {
                 id: engine::types::identifiers::TrackedSetId(0),
@@ -670,6 +671,7 @@ fn clone_shell_dies_trigger_puts_exiled_creature_onto_battlefield() {
             source_id: shell,
             exiled_id: exiled_creature,
             kind: engine::types::game_state::ExileLinkKind::TrackedBySource,
+            supplier: None,
         });
 
     runner.cast(murder).target_object(shell).resolve();
@@ -725,6 +727,7 @@ fn clone_shell_dies_trigger_leaves_non_creature_in_exile() {
             source_id: shell,
             exiled_id: exiled_spell,
             kind: engine::types::game_state::ExileLinkKind::TrackedBySource,
+            supplier: None,
         });
 
     runner.cast(murder).target_object(shell).resolve();

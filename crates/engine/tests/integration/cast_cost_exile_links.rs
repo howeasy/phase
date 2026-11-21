@@ -525,6 +525,7 @@ fn kept_tracked_pile_does_not_join_the_new_cast_cost_pile() {
         exiled_id: x,
         source_id: keeper,
         kind: ExileLinkKind::TrackedBySource,
+        supplier: None,
     });
     runner.cast(release).target_objects(&[keeper]).resolve();
     // Reach guard: the seeded pile is kept across the exit to exile (Mechtitan

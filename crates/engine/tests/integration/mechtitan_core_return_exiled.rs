@@ -132,6 +132,7 @@ fn mechtitan_core_returns_exiled_pile_tapped_after_token_leaves() {
             exiled_id: exiled,
             source_id: core,
             kind: ExileLinkKind::TrackedBySource,
+            supplier: None,
         });
     }
     // A control card exiled by a DIFFERENT source must never come back.
@@ -147,6 +148,7 @@ fn mechtitan_core_returns_exiled_pile_tapped_after_token_leaves() {
         exiled_id: unrelated,
         source_id: other_source,
         kind: ExileLinkKind::TrackedBySource,
+        supplier: None,
     });
 
     install_mechtitan_return_trigger(state, core, token);

@@ -5498,11 +5498,11 @@ fn entry_counter_rider_clause(
     // the permission (`lower::fold_cast_rider_into_graveyard_grant`).
     let prior_grants_a_lingering_cast = match prior {
         Some(Effect::CastFromZone {
-            driver: CastFromZoneDriver::LingeringPermission,
+            driver,
             duration: Some(_),
             alt_ability_cost: None,
             ..
-        }) => true,
+        }) if driver.is_lingering() => true,
         Some(effect) => crate::parser::oracle_ir::ast::is_graveyard_permission_grant(effect),
         None => false,
     };
@@ -7968,6 +7968,7 @@ fn try_parse_airbend_clause(tp: TextPair<'_>) -> Option<ParsedEffectClause> {
                         enters_with_modifications: Default::default(),
                         mana_spend_permission: None,
                         cast_cost_modifier: None,
+                        single_use_group: None,
                     },
                     target: TargetFilter::TrackedSet {
                         id: TrackedSetId(0),
@@ -39957,8 +39958,9 @@ fn try_parse_cast_effect(lower: &str, ctx: &ParseContext) -> Option<Effect> {
     // AND it with `ExiledBySource` so the cast is restricted both by card
     // type and by the source-exile-link.
     //
-    // KNOWN RESIDUAL (pre-existing, deliberately NOT closed here). This surface
-    // has never read a printed cast cap at all, so it does not go through
+    // KNOWN RESIDUAL (pre-existing, narrowed to the clauses that state no
+    // duration: a clause that states one and prints a cap of exactly one now
+    // reads it, below). This surface has never read a printed cast cap at all, so it does not go through
     // `from_among_batch_bounds` / `CastFromZoneDriver::for_batch_bounds` the way
     // the four batch arms above now do. Its singular members — Idol of
     // Endurance, Court of Locthwain, Jeleva, Kaho, Kylox's Voltstrider, Tasha,
@@ -40008,6 +40010,27 @@ fn try_parse_cast_effect(lower: &str, ctx: &ParseContext) -> Option<Effect> {
             }
             _ => TargetFilter::ExiledBySource,
         };
+        // CR 601.2a + CR 611.2a: a printed cap of exactly one cast ("you may cast A
+        // spell from among cards exiled with ~") under a STATED duration ("until
+        // end of turn" — Court of Locthwain, Idol of Endurance, Serpent's Soul-Jar)
+        // bounds the whole grant, so the permissions it writes share one budget
+        // (`CastFromZoneDriver::LingeringWindow`, chosen through the pairing
+        // authority). Every other shape keeps the per-object permission; see the
+        // residual above.
+        let driver = if mode == CardPlayMode::Cast
+            && (ctx.stated_clause_duration.is_some() || clause_states_a_duration(rest))
+        {
+            from_among_batch_bounds(rest)
+                .and_then(|bounds| {
+                    crate::types::ability::CastFromZoneDriver::for_batch_bounds(
+                        CastMechanism::LingeringWindow,
+                        bounds,
+                    )
+                })
+                .unwrap_or(crate::types::ability::CastFromZoneDriver::LingeringPermission)
+        } else {
+            crate::types::ability::CastFromZoneDriver::LingeringPermission
+        };
         return Some(Effect::CastFromZone {
             target,
             without_paying_mana_cost: without_paying,
@@ -40016,7 +40039,7 @@ fn try_parse_cast_effect(lower: &str, ctx: &ParseContext) -> Option<Effect> {
             alt_ability_cost: None,
             constraint,
             duration: None,
-            driver: crate::types::ability::CastFromZoneDriver::LingeringPermission,
+            driver,
             mana_spend_permission: None,
             cast_cost_modifier: None,
             additional_cost: None,

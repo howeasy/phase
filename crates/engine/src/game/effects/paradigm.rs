@@ -43,6 +43,7 @@ pub fn arm_paradigm(
         source_id: object_id,
         exiled_id: object_id,
         kind: ExileLinkKind::ParadigmSource { player: controller },
+        supplier: None,
     });
     true
 }

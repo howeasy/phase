@@ -361,11 +361,6 @@ fn bloodsoaked_insights_any_type_rider_is_scoped_to_the_exiled_cards() {
 /// among cards exiled with this enchantment without paying its mana cost" —
 /// which the report also names ("as the monarch it should be free to cast").
 fn court_of_locthwain(monarch: bool) {
-    court_of_locthwain_with_older_link(monarch, false);
-}
-
-/// `older_link` pre-links a {G} card exiled by an EARLIER trigger to the Court.
-fn court_of_locthwain_with_older_link(monarch: bool, older_link: bool) {
     let mut scenario = GameScenario::new_n_player(2, 42);
     scenario.at_phase(Phase::PreCombatMain);
     let deeper = scenario.add_card_to_library_top(P1, "Deeper");
@@ -390,25 +385,7 @@ fn court_of_locthwain_with_older_link(monarch: bool, older_link: bool) {
     let court = scenario
         .add_enchantment_from_oracle(P0, "Court of Locthwain", COURT_OF_LOCTHWAIN)
         .id();
-    let older = older_link.then(|| {
-        let mut b = scenario.add_spell_to_exile(P0, "Older Sorcery", false);
-        b.with_mana_cost(ManaCost::Cost {
-            shards: vec![ManaCostShard::Green],
-            generic: 0,
-        });
-        b.id()
-    });
     let mut runner = scenario.build();
-    if let Some(older) = older {
-        runner
-            .state_mut()
-            .exile_links
-            .push(engine::types::game_state::ExileLink {
-                exiled_id: older,
-                source_id: court,
-                kind: engine::types::game_state::ExileLinkKind::TrackedBySource,
-            });
-    }
     if monarch {
         // Court's own ETB made its controller the monarch when it entered;
         // the enchantment starts on the battlefield here, so set the crown.
@@ -451,13 +428,16 @@ fn court_of_locthwain_with_older_link(monarch: bool, older_link: bool) {
     );
     assert_eq!(runner.state().objects[&deeper].zone, Zone::Library);
 
-    // The paid permission carries the concession in both cases; the monarch's
-    // free cast is a source-linked window (`ExiledBySource`, until end of
-    // turn) that leaves no permission on the card — it shows in the cast
-    // below, where no land is tapped.
+    // The paid permission carries the concession in both cases. The monarch's
+    // free cast adds one shared-budget permission (CR 601.2a, 611.2a).
+    let expected_permissions = if monarch {
+        vec![Some(ManaSpendPermission::AnyTypeOrColor), None]
+    } else {
+        vec![Some(ManaSpendPermission::AnyTypeOrColor)]
+    };
     assert_eq!(
         recorded_concessions(&runner, green),
-        vec![Some(ManaSpendPermission::AnyTypeOrColor)],
+        expected_permissions,
         "\"any type\" rides onto the granted permission"
     );
     // Move to P0's main phase and cast the {G} card.
@@ -477,21 +457,180 @@ fn court_of_locthwain_with_older_link(monarch: bool, older_link: bool) {
     } else {
         assert_eq!(tapped, 1, "exactly one Swamp paid for {{G}}");
     }
-    if let Some(older) = older {
-        // CR 406.6: the monarch's window covers every card exiled with the
-        // Court, including one linked before this trigger resolved.
-        let tapped = cast_granted_card(&mut runner, older, &swamps);
-        assert_eq!(
-            tapped,
-            usize::from(!monarch),
-            "older linked card: free only for the monarch"
-        );
-    }
 }
 
+/// Court of Locthwain at P0's upkeep with one card already exiled with it by an
+/// earlier upkeep (`first`: linked, and holding the paid "you may play that card
+/// for as long as it remains exiled, and mana of any type can be spent to cast
+/// it" permission that upkeep recorded) and the second upkeep's own exile
+/// (`second`). The printed "you may cast a spell from among cards exiled with
+/// this enchantment without paying its mana cost" covers both linked cards but
+/// authorizes ONE cast in all (CR 601.2a: "a spell"), whichever card it is spent
+/// on; the other stays castable only by paying, with the any-type concession of
+/// its own exile (CR 609.4b). The earlier upkeep's state is seeded rather than
+/// replayed because the scenario's turn driver cannot cross two full turns here.
+fn court_with_an_earlier_exile(monarch: bool) -> (GameRunner, ObjectId, ObjectId, [ObjectId; 2]) {
+    let mut scenario = GameScenario::new_n_player(2, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    let green_cost = ManaCost::Cost {
+        shards: vec![ManaCostShard::Green],
+        generic: 0,
+    };
+    scenario.add_card_to_library_top(P1, "Deeper");
+    let second = {
+        let mut b = scenario.add_spell_to_library_top(P1, "Second Sorcery", false);
+        b.with_mana_cost(green_cost.clone());
+        b.id()
+    };
+    scenario.add_card_to_library_top(P1, "P1 Draw");
+    for _ in 0..4 {
+        scenario.add_card_to_library_top(P0, "P0 Filler");
+    }
+    let first = {
+        let mut b = scenario.add_spell_to_exile(P1, "First Sorcery", false);
+        b.with_mana_cost(green_cost);
+        b.id()
+    };
+    let swamps = [
+        scenario.add_basic_land(P0, ManaColor::Black),
+        scenario.add_basic_land(P0, ManaColor::Black),
+    ];
+    let court = scenario
+        .add_enchantment_from_oracle(P0, "Court of Locthwain", COURT_OF_LOCTHWAIN)
+        .id();
+    let mut runner = scenario.build();
+    runner
+        .state_mut()
+        .exile_links
+        .push(engine::types::game_state::ExileLink {
+            exiled_id: first,
+            source_id: court,
+            kind: engine::types::game_state::ExileLinkKind::TrackedBySource,
+            supplier: None,
+        });
+    // The permission the earlier upkeep's "you may play that card ..." recorded
+    // (the shape the first Court test reads off a real upkeep).
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&first)
+        .expect("the earlier exile exists")
+        .casting_permissions
+        .push(CastingPermission::PlayFromExile {
+            provenance: engine::types::ability::PlayFromExileProvenance::Impulse,
+            mode: engine::types::ability::CardPlayMode::Play,
+            duration: engine::types::ability::Duration::Permanent,
+            granted_to: P0,
+            frequency: engine::types::statics::CastFrequency::Unlimited,
+            source_id: Some(court),
+            invalidation: None,
+            exiled_by_ability_controller: Some(P0),
+            mana_spend_permission: Some(ManaSpendPermission::AnyTypeOrColor),
+            card_filter: None,
+            single_use_group: None,
+            single_use: false,
+            cast_cost_modifier: None,
+            alt_ability_cost: None,
+            without_paying_mana_cost: false,
+            land_enter_tapped: engine::types::zones::EtbTapState::Unspecified,
+        });
+    if monarch {
+        runner.state_mut().monarch = Some(P0);
+    }
+    runner.advance_to_phase(Phase::Upkeep);
+    runner.advance_to_phase(Phase::PreCombatMain);
+    runner.advance_to_phase(Phase::Upkeep);
+    assert_eq!(runner.state().active_player, P0);
+    assert_eq!(
+        runner.state().stack.len(),
+        1,
+        "Court's upkeep trigger waits"
+    );
+    settle(&mut runner);
+    assert_eq!(runner.state().objects[&second].zone, Zone::Exile);
+    runner.advance_to_phase(Phase::PreCombatMain);
+    assert_eq!(runner.state().active_player, P0);
+    (runner, first, second, swamps)
+}
+
+/// Whether the engine offers casting `card` now.
+fn cast_is_offered(runner: &GameRunner, card: ObjectId) -> bool {
+    legal_actions(runner.state()).iter().any(
+        |action| matches!(action, GameAction::CastSpell { object_id, .. } if *object_id == card),
+    )
+}
+
+/// The monarch's one free cast, spent on the card just exiled, leaves the older
+/// linked card castable only by paying.
 #[test]
-fn court_of_locthwains_older_linked_card_is_free_for_the_monarch() {
-    court_of_locthwain_with_older_link(true, true);
+fn court_of_locthwains_free_cast_spent_on_the_new_card_leaves_the_old_one_paid() {
+    let (mut runner, first, second, swamps) = court_with_an_earlier_exile(true);
+    assert_eq!(
+        cast_granted_card(&mut runner, second, &swamps),
+        0,
+        "the one free cast: no Swamp tapped"
+    );
+    assert!(
+        cast_is_offered(&runner, first),
+        "the older card stays castable"
+    );
+    assert_eq!(
+        cast_granted_card(&mut runner, first, &swamps),
+        1,
+        "no second free cast: the older card taps one Swamp with the any-type concession"
+    );
+}
+
+/// The same budget spent on the older linked card leaves the new card paid.
+#[test]
+fn court_of_locthwains_free_cast_spent_on_the_old_card_leaves_the_new_one_paid() {
+    let (mut runner, first, second, swamps) = court_with_an_earlier_exile(true);
+    assert_eq!(
+        cast_granted_card(&mut runner, first, &swamps),
+        0,
+        "the one free cast covers the older linked card too"
+    );
+    assert!(cast_is_offered(&runner, second));
+    assert_eq!(
+        cast_granted_card(&mut runner, second, &swamps),
+        1,
+        "no second free cast: the new card is paid"
+    );
+}
+
+/// Without the crown there is no free cast at all: both cards are paid.
+#[test]
+fn court_of_locthwains_non_monarch_casts_are_paid() {
+    let (mut runner, first, second, swamps) = court_with_an_earlier_exile(false);
+    assert_eq!(cast_granted_card(&mut runner, second, &swamps), 1);
+    // The helper counts every tapped Swamp, so the second cast shows 2 in all.
+    assert_eq!(cast_granted_card(&mut runner, first, &swamps), 2);
+}
+
+/// "Until end of turn": an unused free cast is gone after the turn ends, and a
+/// permission of the paid kind remains.
+#[test]
+fn court_of_locthwains_free_cast_expires_at_end_of_turn() {
+    let (mut runner, first, second, _swamps) = court_with_an_earlier_exile(true);
+    let free_permissions = |runner: &GameRunner, card: ObjectId| {
+        runner.state().objects[&card]
+            .casting_permissions
+            .iter()
+            .filter(|permission| matches!(permission, CastingPermission::ExileWithAltCost { .. }))
+            .count()
+    };
+    assert_eq!(free_permissions(&runner, first), 1);
+    assert_eq!(free_permissions(&runner, second), 1);
+    runner.advance_to_phase(Phase::Upkeep);
+    assert_eq!(runner.state().active_player, P1, "the turn ended");
+    for card in [first, second] {
+        assert_eq!(free_permissions(&runner, card), 0, "the free cast expired");
+        assert_eq!(
+            recorded_concessions(&runner, card),
+            vec![Some(ManaSpendPermission::AnyTypeOrColor)],
+            "the paid permission remains"
+        );
+    }
 }
 
 #[test]

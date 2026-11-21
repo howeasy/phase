@@ -287,6 +287,7 @@ fn limousine_attack(choose_opposing: bool) -> (GameRunner, ObjectId, ObjectId) {
         exiled_id: prior,
         source_id: limo,
         kind: ExileLinkKind::TrackedBySource,
+        supplier: None,
     });
 
     // CR 702.122a: crew 2 with the 2/2.

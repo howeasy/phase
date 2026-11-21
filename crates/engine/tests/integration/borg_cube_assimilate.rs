@@ -11,10 +11,13 @@
 //!    Station (...)
 //!    12+ | Artifact creatures you control have flying."
 //!
-//! `assimilate` has no published CR 701.x number (needs manual verification
-//! once the Star Trek rules update ships). The card it moves is chosen from
-//! the cards exiled with Borg Cube (CR 607.2a); when there is none, the
-//! fallback exile runs and that card becomes linked to Borg Cube (CR 406.6).
+//! CR 701.72b (Assimilate; the Comprehensive Rules edition effective November 6,
+//! 2026 — the repository pins September 25, 2026, which lacks it): to assimilate a
+//! permanent card in a zone other than the battlefield, put it onto the
+//! battlefield under your control with a +1/+1 counter; it's a Borg artifact
+//! creature. The card it moves is chosen from the cards exiled with Borg Cube
+//! (CR 607.2a); when there is none, the fallback exile runs and that card
+//! becomes linked to Borg Cube (CR 406.6).
 
 use engine::game::combat::AttackTarget;
 use engine::game::layers::evaluate_layers;
@@ -24,7 +27,7 @@ use engine::types::card_type::CoreType;
 use engine::types::counter::CounterType;
 use engine::types::game_state::WaitingFor;
 use engine::types::identifiers::ObjectId;
-use engine::types::mana::ManaCost;
+use engine::types::mana::{ManaColor, ManaCost, ManaCostShard};
 use engine::types::phase::Phase;
 use engine::types::zones::Zone;
 
@@ -44,9 +47,28 @@ fn borg_cube_in_hand(scenario: &mut GameScenario) -> ObjectId {
         .add_creature_to_hand_from_oracle(P0, "Borg Cube", 6, 6, "")
         .as_artifact()
         .with_subtypes(vec!["Spacecraft"])
-        .with_mana_cost(ManaCost::zero())
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::White, ManaCostShard::Black],
+            generic: 5,
+        })
         .from_oracle_text_with_keywords(&["Affinity", "Station"], BORG_CUBE)
         .id()
+}
+
+/// Lands that pay Borg Cube's printed {5}{W}{B}.
+fn fund_borg_cube(scenario: &mut GameScenario) {
+    scenario.add_basic_land(P0, ManaColor::Black);
+    for _ in 0..6 {
+        scenario.add_basic_land(P0, ManaColor::White);
+    }
+}
+
+/// Lands that pay Assimilation Assessor's printed {4}{B}.
+fn fund_assessor(scenario: &mut GameScenario) {
+    scenario.add_basic_land(P0, ManaColor::Black);
+    for _ in 0..4 {
+        scenario.add_basic_land(P0, ManaColor::White);
+    }
 }
 
 fn seed_creature_types(runner: &mut GameRunner) {
@@ -139,6 +161,7 @@ fn borg_cube_exiles_on_entry_then_assimilates_on_attack() {
         .with_subtypes(vec!["Human", "Soldier"])
         .id();
     let bystander = scenario.add_creature(P1, "Test Bystander", 1, 1).id();
+    fund_borg_cube(&mut scenario);
     let cube = borg_cube_in_hand(&mut scenario);
     let mut runner = scenario.build();
     seed_creature_types(&mut runner);
@@ -234,6 +257,7 @@ fn borg_cube_fallback_may_choose_no_target() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     let bystander = scenario.add_creature(P1, "Test Bystander", 2, 2).id();
+    fund_borg_cube(&mut scenario);
     let cube = borg_cube_in_hand(&mut scenario);
     let mut runner = scenario.build();
 
@@ -294,8 +318,12 @@ fn assimilation_assessor_assimilates_a_creature_card_from_its_linked_pile() {
         .add_creature_to_hand_from_oracle(P0, "Assimilation Assessor", 5, 5, ASSIMILATION_ASSESSOR)
         .as_artifact_creature()
         .with_subtypes(vec!["Borg"])
-        .with_mana_cost(ManaCost::zero())
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Black],
+            generic: 4,
+        })
         .id();
+    fund_assessor(&mut scenario);
     let mut runner = scenario.build();
     seed_creature_types(&mut runner);
     {
@@ -422,7 +450,10 @@ fn borg_cube_doubled_entry_assimilates_the_card_the_first_trigger_exiled() {
         .add_creature(P1, "Second Knight", 3, 3)
         .with_subtypes(vec!["Human", "Knight"])
         .id();
-    scenario.add_artifact_from_oracle(P0, "Panharmonicon", PANHARMONICON);
+    scenario
+        .add_artifact_from_oracle(P0, "Panharmonicon", PANHARMONICON)
+        .with_mana_cost(ManaCost::generic(4));
+    fund_borg_cube(&mut scenario);
     let cube = borg_cube_in_hand(&mut scenario);
     let mut runner = scenario.build();
     seed_creature_types(&mut runner);

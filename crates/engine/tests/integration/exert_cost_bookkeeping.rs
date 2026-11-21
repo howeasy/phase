@@ -659,6 +659,7 @@ fn triggered_only_grant_omits_standalone_exert_permission() {
             exiled_id: provider,
             source_id: koh,
             kind: ExileLinkKind::TrackedBySource,
+            supplier: None,
         });
         runner.state_mut().layers_dirty.mark_full();
         engine::game::layers::evaluate_layers(runner.state_mut());
@@ -907,6 +908,7 @@ fn granted_exert_scenario_with(
         exiled_id: paincaster_card,
         source_id: cauldron,
         kind: ExileLinkKind::TrackedBySource,
+        supplier: None,
     });
     runner.state_mut().layers_dirty.mark_full();
     engine::game::layers::evaluate_layers(runner.state_mut());

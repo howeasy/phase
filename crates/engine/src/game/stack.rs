@@ -3390,6 +3390,7 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) -> u32 {
                                     kind: ExileLinkKind::UntilSourceLeaves {
                                         return_zone: Zone::Hand,
                                     },
+                                    supplier: None,
                                 });
                             }
                         }
@@ -9459,6 +9460,7 @@ mod tests {
                     enters_with_modifications: Default::default(),
                     mana_spend_permission: None,
                     cast_cost_modifier: None,
+                    single_use_group: None,
                 });
         }
 

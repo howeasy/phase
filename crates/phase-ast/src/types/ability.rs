@@ -2978,6 +2978,14 @@ pub enum CastFromZoneDriver {
     /// a running-total budget has no faithful lingering form, so that degrade
     /// REFUSES (`None`) and the clause becomes an honest gap instead.
     ResolutionWindow { bounds: ResolutionCastWindow },
+    /// CR 601.2a + CR 611.2a: Grant a lingering permission on every card of a
+    /// persistent source-linked pile (Court of Locthwain, Idol of Endurance) AND
+    /// enforce the printed cast cap across the whole grant: the permissions the
+    /// one resolution writes share a budget (`single_use_group` on each
+    /// `ExileWithAltCost`), so a cap of one authorizes one cast total, not one
+    /// per card. Carries the bound it enforces; only an exactly-one cap is
+    /// representable (`CastFromZoneDriver::for_batch_bounds`).
+    LingeringWindow { bounds: ResolutionCastWindow },
 }
 
 /// CR 608.2c + CR 202.3: The two bounds a resolution-scoped free-cast window
@@ -3076,6 +3084,10 @@ pub enum CastMechanism {
     /// At runtime a land//land modal DFC bound outside the graveyard also keeps
     /// a lingering grant (CR 712.12 election — follow-up).
     LingeringPermission,
+    /// CR 601.2a + CR 611.2a: a lingering permission over a persistent linked pile
+    /// whose grant shares one cast budget across its per-card permissions.
+    /// Enforces an exactly-one cap and nothing else.
+    LingeringWindow,
     /// CR 608.2g: cast exactly ONE card as the granting ability resolves. The
     /// self-library-peek form ("look at the top four cards of your library. You
     /// may cast a spell from among them …"), whose private-library selection
@@ -3120,6 +3132,7 @@ impl CastFromZoneDriver {
     /// | mechanism | bounds it can enforce | why |
     /// |---|---|---|
     /// | [`CastMechanism::LingeringPermission`] | unbounded only | `record_lingering_permissions` writes an INDEPENDENT `CastingPermission` per object (`game/effects/cast_from_zone.rs`). There is no grant-scoped ledger, so `N` of a batch of `M > N` cannot be enforced — the controller may cast all `M`. |
+    /// | [`CastMechanism::LingeringWindow`] | exactly one cast | the permissions one resolution writes share a `single_use_group` budget, so one cast under any of them voids the rest. |
     /// | [`CastMechanism::SingleCardDuringResolution`] | exactly one cast | `initiate_cast_during_resolution` puts exactly one card on the stack. It cannot reach `N > 1`, and it cannot honor an unbounded clause either. |
     /// | [`CastMechanism::ResolutionTimePrivateZonePick`] | exactly one cast | `open_private_zone_cast_selection` opens `EffectZoneChoice { count: 1, up_to: true }`. Same one-card ceiling, enforced by the private-zone tail rather than by the driver. |
     /// | [`CastMechanism::ResolutionWindow`] | any bounds | `Effect::FreeCastFromZones`' stop-early loop reads `ResolutionCastWindow` directly. |
@@ -3139,6 +3152,11 @@ impl CastFromZoneDriver {
             CastMechanism::LingeringPermission => {
                 bounds.is_unbounded().then_some(Self::LingeringPermission)
             }
+            // CR 601.2a + CR 611.2a: the grant-scoped budget counts exactly one
+            // cast across the permissions of one resolution.
+            CastMechanism::LingeringWindow => bounds
+                .is_exactly_one_cast()
+                .then_some(Self::LingeringWindow { bounds }),
             // CR 608.2g: exactly one card reaches the stack, so this mechanism
             // is honest for an exact single-card cap and for nothing else — not
             // for `N > 1` (under-permissive), and not for an unbounded clause.
@@ -3165,6 +3183,17 @@ impl CastFromZoneDriver {
     /// case and is elided from serialized `Effect::CastFromZone` bodies.
     pub fn is_default(&self) -> bool {
         matches!(self, CastFromZoneDriver::LingeringPermission)
+    }
+
+    /// CR 118.9 + CR 611.2a: true for both mechanisms that grant lingering
+    /// permissions exercised at a later priority window. The single predicate
+    /// the parser's optional-effect and cost-rider seams ask, so a new lingering
+    /// mechanism cannot be missed by one of them.
+    pub fn is_lingering(&self) -> bool {
+        matches!(
+            self,
+            CastFromZoneDriver::LingeringPermission | CastFromZoneDriver::LingeringWindow { .. }
+        )
     }
 
     /// CR 608.2g: true iff this effect casts the SINGLE resolved target as the
@@ -3235,6 +3264,10 @@ impl CastFromZoneDriver {
             // lifetime.
             CastFromZoneDriver::LingeringPermission => {
                 Some(CastFromZoneDriver::LingeringPermission)
+            }
+            // Already lingering and already carrying its budget.
+            CastFromZoneDriver::LingeringWindow { bounds } => {
+                Some(CastFromZoneDriver::LingeringWindow { bounds })
             }
         }
     }
@@ -5359,6 +5392,18 @@ pub enum CastingPermission {
         /// legitimate carrier. `None` for every grant with no printed rider.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cast_cost_modifier: Option<CastCostModifier>,
+        /// CR 601.2a + CR 611.2a: Identity of the one cast budget this grant shares
+        /// with its sibling permissions. `Some` only for a grant whose printed
+        /// cap is exactly one cast over a source-linked pile ("until end of turn,
+        /// you may cast a spell from among cards exiled with this enchantment" —
+        /// Court of Locthwain, Idol of Endurance): `record_lingering_permissions`
+        /// writes one permission per pile card, and the first cast made under any
+        /// of them spends the group (`casting::consume_single_use_play_from_exile`),
+        /// which strips the rest. The id is a fresh `TrackedSetId` that names no
+        /// published set (a grant identity, not a membership list). `None` for
+        /// every other grant, which keeps its independent per-object permission.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        single_use_group: Option<TrackedSetId>,
     },
     /// CR 400.7i: Play from exile until duration expires (impulse draw).
     /// Building block for "exile top N, choose one, you may play it this turn" patterns.
@@ -51269,6 +51314,7 @@ mod tests {
             enters_with_modifications: Default::default(),
             mana_spend_permission: None,
             cast_cost_modifier: None,
+            single_use_group: None,
         };
         let json = serde_json::to_string(&with_host).unwrap();
         assert!(
@@ -51570,6 +51616,7 @@ mod tests {
             enters_with_modifications: Default::default(),
             mana_spend_permission: None,
             cast_cost_modifier: None,
+            single_use_group: None,
         };
         let mut v: serde_json::Value =
             serde_json::from_str(&serde_json::to_string(&modern).unwrap()).unwrap();
@@ -54138,6 +54185,7 @@ mod cast_cost_modifier_serde_tests {
             enters_with_modifications: Default::default(),
             mana_spend_permission: None,
             cast_cost_modifier: Some(modifier.clone()),
+            single_use_group: None,
         };
         assert_eq!(alt_cost.cast_cost_modifier(), Some(&modifier));
         assert_eq!(

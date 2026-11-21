@@ -43,6 +43,7 @@ fn add_encode_link(state: &mut GameState, card_id: ObjectId, creature_id: Object
         exiled_id: card_id,
         source_id: creature_id,
         kind: ExileLinkKind::Cipher,
+        supplier: None,
     });
 }
 

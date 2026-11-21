@@ -284,6 +284,7 @@ pub(crate) fn tracked_exile_of_acting_incarnation(
 pub(crate) fn exiled_card_snapshot(
     state: &GameState,
     exiled_id: ObjectId,
+    supplier: Option<LinkedAbilitySource>,
 ) -> Option<LinkedExileSnapshot> {
     state
         .objects
@@ -296,6 +297,7 @@ pub(crate) fn exiled_card_snapshot(
             // split card records its combined mana value.
             mana_value: obj.effective_mana_value(),
             incarnation: obj.incarnation,
+            supplier,
         })
 }
 
@@ -404,6 +406,10 @@ pub(crate) fn push_with_kind_as(
 ) {
     let live = state.objects.get(&source_id).map(|obj| obj.incarnation);
     let departed_creator = creator.filter(|creator| live != Some(*creator));
+    // CR 607.5 + CR 607.2a: the ability pair doing this exile, kept on the link
+    // (and on its LKI snapshot) so a later reader of the pile can tell whether
+    // the card was exiled by an ability linked to its own.
+    let supplier = resolving_exile_supplier(state, source_id);
     let recorded = match (&kind, departed_creator) {
         // CR 610.3 + CR 400.7: the incarnation that made an "until it leaves"
         // exile had already left the battlefield (a copy of its ability put
@@ -413,7 +419,7 @@ pub(crate) fn push_with_kind_as(
         (
             ExileLinkKind::TrackedBySource | ExileLinkKind::UntilSourceLeaves { .. },
             Some(creator),
-        ) => record_departed_linked_exile(state, exiled_id, source_id, creator),
+        ) => record_departed_linked_exile(state, exiled_id, source_id, creator, supplier),
         // The live object's own exile, or a kind that is never diverted: a
         // look link carries its creator (`push_look_link`); a craft material is
         // linked at cost time; a cast-cost link is made while the spell is the
@@ -430,7 +436,7 @@ pub(crate) fn push_with_kind_as(
             | ExileLinkKind::CraftMaterial
             | ExileLinkKind::CastCost,
             _,
-        ) => record_link(state, exiled_id, source_id, kind),
+        ) => record_link(state, exiled_id, source_id, kind, supplier),
     };
     if recorded {
         mirror_link_to_linked_emblems(state, exiled_id, source_id);
@@ -449,9 +455,10 @@ fn record_departed_linked_exile(
     exiled_id: ObjectId,
     source_id: ObjectId,
     creator: u64,
+    supplier: Option<LinkedAbilitySource>,
 ) -> bool {
     // The exile was replaced: nothing was exiled with any incarnation.
-    let Some(snapshot) = exiled_card_snapshot(state, exiled_id) else {
+    let Some(snapshot) = exiled_card_snapshot(state, exiled_id, supplier) else {
         return false;
     };
     let entries = state.linked_exile_lki.entry(source_id).or_default();
@@ -489,6 +496,7 @@ fn record_link(
     exiled_id: ObjectId,
     source_id: ObjectId,
     kind: ExileLinkKind,
+    supplier: Option<LinkedAbilitySource>,
 ) -> bool {
     if let Some(existing) = state
         .exile_links
@@ -506,6 +514,7 @@ fn record_link(
         exiled_id,
         source_id,
         kind,
+        supplier,
     });
     push_exiled_with_source_this_turn(state, exiled_id, source_id);
     true
@@ -533,7 +542,10 @@ pub(crate) fn linked_exile_incarnation(state: &GameState, source_id: ObjectId) -
 /// of `source_id` is resolving (a replacement redirect, a state-based action,
 /// another object's effect, a spell), or when that ability is granted or its
 /// provenance is not attributable: such an exile pairs with no emblem.
-fn resolving_exile_supplier(state: &GameState, source_id: ObjectId) -> Option<LinkedAbilitySource> {
+pub(crate) fn resolving_exile_supplier(
+    state: &GameState,
+    source_id: ObjectId,
+) -> Option<LinkedAbilitySource> {
     let entry = state
         .resolving_stack_entry
         .as_ref()
@@ -586,7 +598,13 @@ fn mirror_link_to_linked_emblems(state: &mut GameState, exiled_id: ObjectId, sou
         .collect();
     for emblem_id in emblems {
         // `record_link`, not `push_with_kind`: a mirror link never mirrors again.
-        record_link(state, exiled_id, emblem_id, ExileLinkKind::TrackedBySource);
+        record_link(
+            state,
+            exiled_id,
+            emblem_id,
+            ExileLinkKind::TrackedBySource,
+            None,
+        );
     }
 }
 
@@ -938,6 +956,7 @@ mod tests {
                 enters_with_modifications: Default::default(),
                 mana_spend_permission: None,
                 cast_cost_modifier: None,
+                single_use_group: None,
             },
         );
         let play_grant = exiled(
@@ -990,6 +1009,7 @@ mod tests {
                 enters_with_modifications: Default::default(),
                 mana_spend_permission: None,
                 cast_cost_modifier: None,
+                single_use_group: None,
             },
         );
 
@@ -2267,7 +2287,7 @@ mod tests {
     }
 
     fn snapshot_of(state: &GameState, card: ObjectId) -> LinkedExileSnapshot {
-        exiled_card_snapshot(state, card).expect("the card is in exile")
+        exiled_card_snapshot(state, card, None).expect("the card is in exile")
     }
 
     /// CR 400.7 + CR 113.7a + CR 607.2a: a tracked exile made by an ability of
@@ -2479,6 +2499,7 @@ mod tests {
             exiled_id: live_card,
             source_id: source,
             kind: ExileLinkKind::TrackedBySource,
+            supplier: None,
         });
         state.linked_exile_lki.insert(
             source,
@@ -2561,6 +2582,7 @@ mod tests {
                 exiled_id,
                 source_id: source,
                 kind,
+                supplier: None,
             });
         }
         let read = |reader| kinds_of(links_for_reader(&state, source, Some(reader)));

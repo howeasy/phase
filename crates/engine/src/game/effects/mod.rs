@@ -11264,6 +11264,7 @@ fn effect_fields_read_filter_population(
                         enters_with_modifications,
                         mana_spend_permission: _,
                         cast_cost_modifier: _,
+                        single_use_group: _,
                     } => {
                         constraint.as_ref().is_some_and(has_cast_constraint)
                             || duration.as_ref().is_some_and(has_duration)
@@ -53655,6 +53656,7 @@ mod tests {
                         enters_with_modifications: Default::default(),
                         mana_spend_permission: None,
                         cast_cost_modifier: None,
+                        single_use_group: None,
                     },
                     target: TargetFilter::TrackedSet {
                         id: TrackedSetId(0),
@@ -53761,6 +53763,7 @@ mod tests {
                         enters_with_modifications: Default::default(),
                         mana_spend_permission: None,
                         cast_cost_modifier: None,
+                        single_use_group: None,
                     },
                     target: TargetFilter::TrackedSet {
                         id: TrackedSetId(0),
@@ -53840,6 +53843,7 @@ mod tests {
                     enters_with_modifications: Default::default(),
                     mana_spend_permission: None,
                     cast_cost_modifier: None,
+                    single_use_group: None,
                 },
                 target: TargetFilter::TrackedSet {
                     id: TrackedSetId(0),
@@ -60985,6 +60989,7 @@ mod tests {
                         enters_with_modifications: Default::default(),
                         mana_spend_permission: None,
                         cast_cost_modifier: None,
+                        single_use_group: None,
                     },
                     target: TargetFilter::Any,
                     grantee: Default::default(),
@@ -61011,6 +61016,7 @@ mod tests {
                             },
                         mana_spend_permission: None,
                         cast_cost_modifier: None,
+                        single_use_group: None,
                     },
                     target: TargetFilter::Any,
                     grantee: Default::default(),
@@ -63175,6 +63181,7 @@ mod tests {
                 source_id: source,
                 exiled_id: exiled,
                 kind: ExileLinkKind::TrackedBySource,
+                supplier: None,
             });
         }
 
@@ -63316,18 +63323,21 @@ mod tests {
                         owner: PlayerId(0),
                         mana_value: 2,
                         incarnation: state.objects[&exiled_a].incarnation,
+                        supplier: None,
                     },
                     LinkedExileSnapshot {
                         exiled_id: exiled_b,
                         owner: PlayerId(0),
                         mana_value: 3,
                         incarnation: state.objects[&exiled_b].incarnation,
+                        supplier: None,
                     },
                     LinkedExileSnapshot {
                         exiled_id: exiled_c,
                         owner: PlayerId(1),
                         mana_value: 4,
                         incarnation: state.objects[&exiled_c].incarnation,
+                        supplier: None,
                     },
                 ],
                 ..crate::types::game_state::ZoneChangeRecord::test_minimal(
@@ -64723,6 +64733,7 @@ mod tests {
             source_id: source,
             exiled_id: land_card,
             kind: ExileLinkKind::TrackedBySource,
+            supplier: None,
         });
 
         let token_rider = ResolvedAbility::new(
@@ -69694,6 +69705,7 @@ mod tests {
             exiled_id: exiled,
             source_id: source,
             kind: crate::types::game_state::ExileLinkKind::TrackedBySource,
+            supplier: None,
         });
     }
 

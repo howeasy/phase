@@ -77,6 +77,7 @@ fn issue_1515_emperor_of_bones_binds_haste_and_delayed_sacrifice_to_returned_cre
         exiled_id: returned,
         source_id: emperor,
         kind: ExileLinkKind::TrackedBySource,
+        supplier: None,
     });
 
     let def = parse_effect_chain(EMPEROR_COUNTER_TRIGGER_EFFECT, AbilityKind::Spell);
@@ -203,6 +204,7 @@ fn emperor_of_bones_counter_trigger_uses_returned_creature_in_cast_pipeline() {
         exiled_id: returned,
         source_id: emperor,
         kind: ExileLinkKind::TrackedBySource,
+        supplier: None,
     });
 
     runner.cast(counter_spell).target_object(emperor).resolve();
@@ -261,6 +263,7 @@ fn emperor_of_bones_adapt_pipeline_binds_delayed_sacrifice_to_returned_creature(
         exiled_id: returned,
         source_id: emperor,
         kind: ExileLinkKind::TrackedBySource,
+        supplier: None,
     });
 
     runner
@@ -1291,6 +1294,7 @@ fn emperor_of_bones_resumes_riders_after_anointed_peacekeepers_as_enters_choices
         exiled_id: peacekeeper,
         source_id: emperor,
         kind: ExileLinkKind::TrackedBySource,
+        supplier: None,
     });
 
     let definition = parse_effect_chain(EMPEROR_COUNTER_TRIGGER_EFFECT, AbilityKind::Spell);
@@ -1402,6 +1406,7 @@ fn emperor_of_bones_preserves_pay_amount_choice_through_replacement_pipeline() {
         exiled_id: peacekeeper,
         source_id: emperor,
         kind: ExileLinkKind::TrackedBySource,
+        supplier: None,
     });
     runner
         .state_mut()

@@ -151,6 +151,7 @@ fn build_agatha_yawgmoth_state() -> (GameState, ObjectId, usize) {
         exiled_id: exiled_yawgmoth,
         source_id: cauldron,
         kind: ExileLinkKind::TrackedBySource,
+        supplier: None,
     });
 
     let host = create_object(

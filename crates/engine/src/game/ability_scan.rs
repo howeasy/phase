@@ -2937,6 +2937,7 @@ fn casting_permission_axes(permission: &CastingPermission, mode: ScanMode) -> Ax
             enters_with_modifications,
             mana_spend_permission: _,
             cast_cost_modifier: _,
+            single_use_group: _,
         } => {
             let mut acc = Axes {
                 history: HistoryReads::ALL,

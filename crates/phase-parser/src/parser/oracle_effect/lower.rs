@@ -1295,10 +1295,7 @@ fn find_prev_cast_from_zone_cost_modifier_mut(
         // report the clause as supported.
         let carries_rider = matches!(
             def.effect.as_ref(),
-            Effect::CastFromZone {
-                driver: CastFromZoneDriver::LingeringPermission,
-                ..
-            }
+            Effect::CastFromZone { driver, .. } if driver.is_lingering()
         );
         if carries_rider {
             if let Effect::CastFromZone {

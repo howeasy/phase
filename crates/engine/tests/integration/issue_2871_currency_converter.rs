@@ -72,6 +72,7 @@ fn issue_2871_currency_converter_land_creates_treasure_only() {
         source_id: converter,
         exiled_id: land,
         kind: ExileLinkKind::TrackedBySource,
+        supplier: None,
     });
 
     let treasure_before = count_battlefield_tokens(runner.state(), "Treasure");
@@ -121,6 +122,7 @@ fn issue_2871_currency_converter_nonland_creates_rogue_only() {
         source_id: converter,
         exiled_id: nonland,
         kind: ExileLinkKind::TrackedBySource,
+        supplier: None,
     });
 
     let treasure_before = count_battlefield_tokens(runner.state(), "Treasure");
@@ -164,6 +166,7 @@ fn issue_2871_inverse_card_type_riders_create_treasure_for_land() {
         source_id: source,
         exiled_id: land,
         kind: ExileLinkKind::TrackedBySource,
+        supplier: None,
     });
 
     let treasure_before = count_battlefield_tokens(runner.state(), "Treasure");
@@ -213,6 +216,7 @@ fn issue_2871_inverse_card_type_riders_create_rogue_for_nonland() {
         source_id: source,
         exiled_id: nonland,
         kind: ExileLinkKind::TrackedBySource,
+        supplier: None,
     });
 
     let treasure_before = count_battlefield_tokens(runner.state(), "Treasure");

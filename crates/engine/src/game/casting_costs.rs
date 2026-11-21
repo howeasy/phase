@@ -15813,6 +15813,18 @@ fn finalize_cast_with_phyrexian_choices_inner(
         })
     });
 
+    // CR 601.2a + CR 611.2a: the shared cast budget of an `ExileWithAltCost` grant
+    // ("you may cast a spell from among cards exiled with this enchantment" —
+    // Court of Locthwain), read from the elected permission before the move drops
+    // it, like the `PlayFromExile` group above.
+    let single_use_alt_cost_group =
+        super::casting::selected_exile_alt_cost_permission_single_use_group(
+            state,
+            object_id,
+            player,
+            casting_permission_index,
+        );
+
     // CR 614.1a + CR 608.2n + CR 400.7 / CR 113.6e: Capture the `CastFromZone`
     // grant's graveyard-redirect destination BEFORE the Exile→Stack move. For an
     // exile-origin cast (a card "exiled with it" then cast — Kylox's Voltstrider),
@@ -16282,7 +16294,7 @@ fn finalize_cast_with_phyrexian_choices_inner(
     // every other card still in the tracked set so the remaining exiled cards
     // can no longer be cast (Chandra, Hope's Beacon +1: "an instant or sorcery
     // spell" — one total).
-    if let Some(group) = single_use_play_group {
+    if let Some(group) = single_use_play_group.or(single_use_alt_cost_group) {
         super::casting::consume_single_use_play_from_exile(state, group);
     }
 
@@ -16528,6 +16540,7 @@ fn evaluate_cascade_constraint_with_resulting_mv(
                 enters_with_modifications: Default::default(),
                 mana_spend_permission,
                 cast_cost_modifier: None,
+                single_use_group: None,
             };
         }
         let waiting_for = handle_resolution_cast_success(
@@ -30347,6 +30360,7 @@ mod tests {
                     enters_with_modifications: Default::default(),
                     mana_spend_permission: None,
                     cast_cost_modifier: None,
+                    single_use_group: None,
                 });
 
             (state, hit, vec![miss_a, miss_b])
@@ -30476,6 +30490,7 @@ mod tests {
                     enters_with_modifications: Default::default(),
                     mana_spend_permission: None,
                     cast_cost_modifier: None,
+                    single_use_group: None,
                 });
 
             let outcome = evaluate_cascade_constraint_with_resulting_mv(
@@ -30560,6 +30575,7 @@ mod tests {
                     enters_with_modifications: Default::default(),
                     mana_spend_permission: None,
                     cast_cost_modifier: None,
+                    single_use_group: None,
                 });
 
             let outcome = evaluate_cascade_constraint_with_resulting_mv(
@@ -30611,6 +30627,7 @@ mod tests {
                     enters_with_modifications: Default::default(),
                     mana_spend_permission: None,
                     cast_cost_modifier: None,
+                    single_use_group: None,
                 });
             push_announcement_stack_entry(&mut state, hit);
 
@@ -30671,6 +30688,7 @@ mod tests {
                     enters_with_modifications: Default::default(),
                     mana_spend_permission: None,
                     cast_cost_modifier: None,
+                    single_use_group: None,
                 });
             hit_obj
                 .casting_permissions
@@ -30689,6 +30707,7 @@ mod tests {
                     enters_with_modifications: Default::default(),
                     mana_spend_permission: None,
                     cast_cost_modifier: None,
+                    single_use_group: None,
                 });
             push_announcement_stack_entry(&mut state, hit);
 
@@ -30741,6 +30760,7 @@ mod tests {
                     enters_with_modifications: Default::default(),
                     mana_spend_permission: None,
                     cast_cost_modifier: None,
+                    single_use_group: None,
                 });
             state.players[0].mana_pool.add(ManaUnit {
                 color: ManaType::Colorless,
@@ -30813,6 +30833,7 @@ mod tests {
                     enters_with_modifications: Default::default(),
                     mana_spend_permission: None,
                     cast_cost_modifier: None,
+                    single_use_group: None,
                 });
             hit_obj
                 .casting_permissions
@@ -30851,6 +30872,7 @@ mod tests {
                     enters_with_modifications: Default::default(),
                     mana_spend_permission: None,
                     cast_cost_modifier: None,
+                    single_use_group: None,
                 });
             push_announcement_stack_entry(&mut state, hit);
 
@@ -30924,6 +30946,7 @@ mod tests {
                     enters_with_modifications: Default::default(),
                     mana_spend_permission: None,
                     cast_cost_modifier: None,
+                    single_use_group: None,
                 });
             hit_obj
                 .casting_permissions
@@ -30942,6 +30965,7 @@ mod tests {
                     enters_with_modifications: Default::default(),
                     mana_spend_permission: None,
                     cast_cost_modifier: None,
+                    single_use_group: None,
                 });
             push_announcement_stack_entry(&mut state, hit);
 

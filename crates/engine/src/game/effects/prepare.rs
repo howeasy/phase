@@ -646,6 +646,7 @@ fn synthesize_prepared_copy_object(
             enters_with_modifications: Default::default(),
             mana_spend_permission: None,
             cast_cost_modifier: None,
+            single_use_group: None,
         });
     state.objects.insert(copy_id, copy_obj);
     // allow-raw-zone: registers CR 722.3c copy birth in exile; there is no source-zone move.
@@ -1825,6 +1826,7 @@ mod tests {
                     enters_with_modifications: Default::default(),
                     mana_spend_permission: None,
                     cast_cost_modifier: None,
+                    single_use_group: None,
                 });
             source.back_face = Some(BackFaceForTest::prepare_with_cost(ManaCost::Cost {
                 shards: vec![ManaCostShard::Red],

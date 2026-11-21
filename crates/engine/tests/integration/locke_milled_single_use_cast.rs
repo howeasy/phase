@@ -838,6 +838,7 @@ fn a_static_exile_permission_does_not_reach_a_land_that_left_exile() {
             exiled_id: land,
             source_id: source,
             kind: ExileLinkKind::TrackedBySource,
+            supplier: None,
         });
         state
             .cards_exiled_with_source_this_turn

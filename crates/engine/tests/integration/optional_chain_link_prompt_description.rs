@@ -65,6 +65,7 @@ fn imprinted_scepter(
         source_id: scepter,
         exiled_id: exiled,
         kind: ExileLinkKind::TrackedBySource,
+        supplier: None,
     });
     fund_generic(&mut runner, 2);
 

@@ -29,6 +29,7 @@ fn exile_and_link(
         exiled_id: obj,
         source_id: source,
         kind: ExileLinkKind::TrackedBySource,
+        supplier: None,
     });
 }
 

@@ -3368,12 +3368,12 @@ pub(crate) fn assemble_effect_chain_with_provenance(
         let is_lingering_cast_from_zone = matches!(
             &clause_ir.parsed.effect,
             Effect::CastFromZone {
-                driver: CastFromZoneDriver::LingeringPermission,
+                driver,
                 constraint: None,
                 alt_ability_cost: None,
                 duration: Some(_),
                 ..
-            }
+            } if driver.is_lingering()
         );
         // CR 608.2g + CR 608.2c: the resolution-scoped BATCH window
         // (`CastFromZoneDriver::ResolutionWindow` — "you may cast any number

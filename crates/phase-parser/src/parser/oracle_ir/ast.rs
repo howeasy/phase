@@ -2632,7 +2632,7 @@ pub(crate) fn refuse_cast_cost_modifier_on_unsupported_driver(effect: &mut Effec
     else {
         return;
     };
-    if *driver == crate::types::ability::CastFromZoneDriver::LingeringPermission {
+    if driver.is_lingering() {
         return;
     }
     let gap = cast_cost_modifier_without_host_gap(modifier);

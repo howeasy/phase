@@ -709,6 +709,7 @@ mod tests {
                 exiled_id: exiled,
                 source_id,
                 kind: crate::types::game_state::ExileLinkKind::TrackedBySource,
+                supplier: None,
             });
             assert!(
                 !crate::game::players::linked_exile_cards_for_source(&state, source_id).is_empty(),

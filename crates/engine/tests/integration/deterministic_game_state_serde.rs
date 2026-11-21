@@ -2222,6 +2222,7 @@ fn build_all_direct_numeric_maps_state() -> GameState {
                     owner: PlayerId(0),
                     mana_value: 1,
                     incarnation: 2,
+                    supplier: None,
                 }],
             }],
         ),
@@ -2236,6 +2237,7 @@ fn build_all_direct_numeric_maps_state() -> GameState {
                         owner: PlayerId(1),
                         mana_value: 2,
                         incarnation: 5,
+                        supplier: None,
                     }],
                 },
                 LinkedExileLki {
@@ -2246,6 +2248,7 @@ fn build_all_direct_numeric_maps_state() -> GameState {
                         owner: PlayerId(0),
                         mana_value: 3,
                         incarnation: 9,
+                        supplier: None,
                     }],
                 },
             ],

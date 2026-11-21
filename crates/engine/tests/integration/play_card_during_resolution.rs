@@ -1767,6 +1767,7 @@ fn buggy_board(hide: bool) -> (GameRunner, ObjectId, Option<ObjectId>) {
                 lookers: BTreeSet::from([P0]),
                 source_incarnation: incarnation,
             },
+            supplier: None,
         });
     }
     (runner, buggy, hidden)

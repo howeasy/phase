@@ -323,6 +323,7 @@ fn cast_under_unriddled_permission_has_no_rider() {
             enters_with_modifications: Default::default(),
             mana_spend_permission: None,
             cast_cost_modifier: None,
+            single_use_group: None,
         });
 
     // Reach guard: the seeded permission is usable.

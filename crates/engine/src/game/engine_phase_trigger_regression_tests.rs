@@ -2294,6 +2294,7 @@ fn static_prison_unless_pay_sacrifice_returns_exiled_permanent() {
         kind: ExileLinkKind::UntilSourceLeaves {
             return_zone: Zone::Battlefield,
         },
+        supplier: None,
     });
 
     // The "sacrifice this enchantment unless you pay {E}" trigger has

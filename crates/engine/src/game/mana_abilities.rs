@@ -8615,6 +8615,7 @@ mod tests {
             enters_with_modifications: Default::default(),
             mana_spend_permission: None,
             cast_cost_modifier: None,
+            single_use_group: None,
         };
         let grant = |graveyard_replacement: Option<SpellStackToGraveyardReplacement>| {
             Effect::GrantCastingPermission {
@@ -12449,6 +12450,7 @@ mod tests {
             exiled_id: exiled,
             source_id: pit,
             kind: ExileLinkKind::TrackedBySource,
+            supplier: None,
         });
         (pit, exiled)
     }
@@ -12601,6 +12603,7 @@ mod tests {
                 exiled_id: exiled,
                 source_id: pit,
                 kind: ExileLinkKind::TrackedBySource,
+                supplier: None,
             });
         }
 
@@ -12670,6 +12673,7 @@ mod tests {
                 exiled_id: exiled,
                 source_id: pit,
                 kind: ExileLinkKind::TrackedBySource,
+                supplier: None,
             });
         }
 

@@ -114,6 +114,7 @@ fn exiled_with_grant(cost: ManaCost, grant_cost: ManaCost) -> (GameRunner, Objec
             enters_with_modifications: Default::default(),
             mana_spend_permission: None,
             cast_cost_modifier: None,
+            single_use_group: None,
         });
     (runner, card)
 }

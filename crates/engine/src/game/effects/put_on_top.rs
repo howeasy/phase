@@ -1701,6 +1701,7 @@ mod tests {
                 exiled_id,
                 source_id: source,
                 kind: ExileLinkKind::TrackedBySource,
+                supplier: None,
             });
         }
 
