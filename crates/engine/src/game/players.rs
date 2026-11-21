@@ -1877,6 +1877,55 @@ mod tests {
         assert_eq!(pile_ids(&state, &context), vec![first]);
     }
 
+    /// CR 607.5: the linked-exile LKI of the bound incarnation is pair-scoped like
+    /// the live links: an entry whose exiling ability is another pair is dropped,
+    /// an entry of the reading pair and an unattributed one are kept.
+    #[test]
+    fn linked_exile_pile_scopes_lki_entries_to_the_reading_pair() {
+        use crate::game::game_object::LinkedAbilitySource;
+        use crate::types::ability::CharacteristicSetRef::Own;
+        use crate::types::identifiers::ObjectIncarnationRef;
+        let (mut state, source, own, other) = live_source_with_exiles();
+        let unattributed = create_object(
+            &mut state,
+            CardId(4),
+            PlayerId(1),
+            "Unattributed".into(),
+            Zone::Exile,
+        );
+        let incarnation = state.objects[&source].incarnation;
+        let pair = |set| {
+            Some(LinkedAbilitySource {
+                creator: ObjectIncarnationRef::of(source, incarnation),
+                characteristic_set: set,
+            })
+        };
+        let snap = |id, supplier| LinkedExileSnapshot {
+            exiled_id: id,
+            owner: PlayerId(1),
+            mana_value: 0,
+            incarnation: state.objects[&id].incarnation,
+            supplier,
+        };
+        let entry = LinkedExileLki {
+            departed: incarnation,
+            successor: incarnation + 1,
+            snapshot: vec![
+                snap(own, pair(Own)),
+                snap(other, pair(copied_set(7))),
+                snap(unattributed, None),
+            ],
+        };
+        state.linked_exile_lki.insert(source, vec![entry]);
+        let context = crate::game::triggers::trigger_source_context_for_latch(
+            &state,
+            &state.objects[&source],
+        );
+        resolving_characteristic(&mut state, source, Own);
+        assert_eq!(pile_ids(&state, &context), vec![own, unattributed]);
+        assert!(!linked_exile_pile_holds(&state, &context, other));
+    }
+
     /// The membership form answers exactly what the vector form does.
     #[test]
     fn linked_exile_pile_holds_agrees_with_the_pile() {

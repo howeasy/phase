@@ -3213,7 +3213,8 @@ impl CastFromZoneDriver {
     /// free-cast window this driver opens, or `None` for the two single-card
     /// mechanisms. The single authority the `cast_from_zone` router reads to
     /// decide whether to convert the grant into an `Effect::FreeCastFromZones`
-    /// window over the batch.
+    /// window over the batch. `LingeringWindow` is not one: it grants lingering
+    /// permissions and carries its bound for the grant-scoped budget.
     pub fn window_bounds(&self) -> Option<ResolutionCastWindow> {
         match self {
             CastFromZoneDriver::ResolutionWindow { bounds } => Some(*bounds),
