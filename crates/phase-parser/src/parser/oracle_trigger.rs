@@ -11168,7 +11168,7 @@ fn try_extract_intervening(
     // self-token parser that bare `it` is a source reference.
     let normalized_fragment;
     let condition_input =
-        if let Some(tail) = source_zone_contraction_tail(cond_fragment, source_is_self) {
+        if let Some(tail) = source_state_contraction_tail(cond_fragment, source_is_self) {
             normalized_fragment = format!("this creature is{tail}");
             normalized_fragment.as_str()
         } else {
@@ -11207,7 +11207,7 @@ fn try_extract_intervening(
     let Some(inner) = static_condition_to_trigger_condition(&sc).map(wrap) else {
         return InterveningExtraction::Absent;
     };
-    // `source_zone_contraction_tail` changes only the consumed subject/copula;
+    // `source_state_contraction_tail` changes only the consumed subject/copula;
     // the unconsumed suffix is byte-for-byte the original suffix, so its length
     // gives the correct span in `cond_fragment` for `strip_condition_clause`.
     let consumed = cond_fragment.len() - rest.len();
@@ -11218,11 +11218,12 @@ fn try_extract_intervening(
 }
 
 /// Returns the unmodified suffix after a source-bound `it's` / `it’s` only
-/// when it immediately opens a zone predicate. This is deliberately narrower
+/// when it immediately opens a zone predicate or an attachment-state predicate
+/// (CR 301.5a "equipped", CR 303.4 "enchanted"). This is deliberately narrower
 /// than a global pronoun rule: an event-object condition such as `if it's a
 /// Goblin` must retain its existing event-subject meaning, and bare `it on ...`
 /// must decline rather than being guessed as the trigger source.
-fn source_zone_contraction_tail(input: &str, source_is_self: bool) -> Option<&str> {
+fn source_state_contraction_tail(input: &str, source_is_self: bool) -> Option<&str> {
     if !source_is_self {
         return None;
     }
@@ -11238,6 +11239,8 @@ fn source_zone_contraction_tail(input: &str, source_is_self: bool) -> Option<&st
         tag(" in the command zone"),
         tag(" in exile"),
         tag(" exiled"),
+        tag(" equipped"),
+        tag(" enchanted"),
     ))
     .parse(tail)
     .ok()?;

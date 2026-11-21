@@ -2526,6 +2526,30 @@ fn parse_combat_state_predicate(input: &str) -> OracleResult<'_, StaticCondition
     Ok((rest, result))
 }
 
+/// CR 301.5a / CR 303.4: one attachment-state predicate of the source, with the
+/// copula already consumed ("equipped" / "enchanted").
+fn parse_source_attachment_state(input: &str) -> OracleResult<'_, StaticCondition> {
+    alt((
+        value(StaticCondition::SourceIsEquipped, tag("equipped")),
+        value(StaticCondition::SourceIsEnchanted, tag("enchanted")),
+    ))
+    .parse(input)
+}
+
+/// CR 301.5a + CR 303.4 + CR 608.2c: "<subject> is enchanted or equipped" /
+/// "<subject> is equipped and enchanted" — two attachment states sharing one
+/// subject and one copula (Warchanter Skald). The bare right-hand predicate has
+/// no subject of its own, so `parse_condition_connective` cannot recurse into it;
+/// the connector axis is the shared `parse_condition_connector`.
+fn parse_source_attachment_state_list(input: &str) -> OracleResult<'_, StaticCondition> {
+    let (rest, _) = parse_source_subject(input)?;
+    let (rest, _) = tag("is ").parse(rest)?;
+    let (rest, first) = parse_source_attachment_state(rest)?;
+    let (rest, connective) = parse_condition_connector(rest)?;
+    let (rest, second) = parse_source_attachment_state(rest)?;
+    Ok((rest, connective.build(vec![first, second])))
+}
+
 /// CR 301.5a: Parse "<subject> is equipped" → SourceIsEquipped.
 fn parse_source_is_equipped(input: &str) -> OracleResult<'_, StaticCondition> {
     let (rest, _) = parse_source_subject(input)?;
@@ -2740,6 +2764,9 @@ fn parse_source_state_conditions(input: &str) -> OracleResult<'_, StaticConditio
         // "is attacking" / "is blocking" / "is blocked" / "is attacking or blocking"
         // and their negations ("isn't attacking", etc.).
         parse_combat_state_predicate,
+        // CR 301.5a + CR 303.4: "~ is enchanted or equipped" — must precede the
+        // single-state arms, which would stop after the first predicate.
+        parse_source_attachment_state_list,
         // CR 301.5a: "~ is equipped" / "this creature is equipped" / etc.
         parse_source_is_equipped,
         // CR 701.37: "~ is monstrous" / "this creature is monstrous" / etc.
@@ -7804,6 +7831,7 @@ fn parse_zone_history_condition(input: &str) -> OracleResult<'_, StaticCondition
                 tag("a creature left the battlefield under your control this turn"),
             )),
         ),
+        parse_no_permanents_left_battlefield_this_turn,
         value(
             make_quantity_ge(QuantityRef::DescendedThisTurn, 1),
             tag("you descended this turn"),
@@ -7812,6 +7840,35 @@ fn parse_zone_history_condition(input: &str) -> OracleResult<'_, StaticCondition
         parse_you_sacrificed_this_turn,
     ))
     .parse(input)
+}
+
+/// CR 700.4 + CR 603.4: "no <permanent type phrase> left the battlefield this
+/// turn" — the negated leave-the-battlefield history gate (Sarevok, Deathbringer:
+/// "no permanents left the battlefield this turn"). The affirmative twins above
+/// compare the same `ZoneChangeCountThisTurn` count `>= 1`; this arm compares it
+/// `== 0`, with the noun folded by the shared type-phrase parser.
+fn parse_no_permanents_left_battlefield_this_turn(
+    input: &str,
+) -> OracleResult<'_, StaticCondition> {
+    let (rest, _) = tag("no ").parse(input)?;
+    let (rest, type_text) = take_until(" left the battlefield this turn").parse(rest)?;
+    let (rest, _) = tag(" left the battlefield this turn").parse(rest)?;
+    let (filter, leftover) = parse_type_phrase_folding(type_text);
+    if !leftover.trim().is_empty() || filter == TargetFilter::Any {
+        return Err(oracle_err(input));
+    }
+    Ok((
+        rest,
+        make_quantity_comparison(
+            QuantityRef::ZoneChangeCountThisTurn {
+                from: Some(Zone::Battlefield),
+                to: None,
+                filter,
+            },
+            Comparator::EQ,
+            0,
+        ),
+    ))
 }
 
 /// CR 404.1: "[a | N or more] card(s) left your graveyard this turn" — the
@@ -7826,7 +7883,13 @@ fn parse_card_left_your_graveyard_this_turn(input: &str) -> OracleResult<'_, Sta
         value(1u32, tag("a ")),
     ))
     .parse(input)?;
-    let (rest, _) = alt((tag("cards"), tag("card"))).parse(rest)?;
+    // Type axis: the bare noun ("a card") or a type-qualified noun ("a creature
+    // card", Syrix, Carrier of the Flame), folded by the shared type-phrase parser.
+    let (rest, type_filter) = alt((
+        value(TargetFilter::Any, alt((tag("cards"), tag("card")))),
+        parse_graveyard_departure_type_noun,
+    ))
+    .parse(rest)?;
     let (rest, _) = tag(" left your graveyard this turn").parse(rest)?;
     Ok((
         rest,
@@ -7835,7 +7898,7 @@ fn parse_card_left_your_graveyard_this_turn(input: &str) -> OracleResult<'_, Sta
                 from: Some(Zone::Graveyard),
                 to: None,
                 filter: add_owned_with_props(
-                    TargetFilter::Any,
+                    type_filter,
                     ControllerRef::You,
                     &[FilterProp::NonToken],
                 ),
@@ -7843,6 +7906,19 @@ fn parse_card_left_your_graveyard_this_turn(input: &str) -> OracleResult<'_, Sta
             n,
         ),
     ))
+}
+
+/// CR 404.1 + CR 205.2: "<type phrase> card(s)" ahead of " left your graveyard".
+/// The type words are folded by `parse_type_phrase_folding`; an unfolded remainder
+/// or an untyped fold declines, so an unrecognized noun stays a gap.
+fn parse_graveyard_departure_type_noun(input: &str) -> OracleResult<'_, TargetFilter> {
+    let (rest, type_text) = take_until(" card").parse(input)?;
+    let (rest, _) = alt((tag(" cards"), tag(" card"))).parse(rest)?;
+    let (filter, leftover) = parse_type_phrase_folding(type_text);
+    if !leftover.trim().is_empty() || filter == TargetFilter::Any {
+        return Err(oracle_err(input));
+    }
+    Ok((rest, filter))
 }
 
 /// CR 205.3i + CR 404.1 + CR 602.5: "the number of A plus the number of B is N
@@ -10223,7 +10299,14 @@ pub(crate) fn parse_spell_history_filter(type_text: &str) -> Option<TargetFilter
     if leftover.trim().is_empty() && filter != TargetFilter::Any {
         return Some(filter);
     }
-    if let Ok((rest, (first, _, second))) = (parse_color, tag(" or "), parse_color).parse(type_text)
+    // CR 105.1: "blue and/or black" names a spell of either colour or both, so it
+    // is the same disjunction as "blue or black".
+    if let Ok((rest, (first, _, second))) = (
+        parse_color,
+        alt((tag(" and/or "), tag(" or "))),
+        parse_color,
+    )
+        .parse(type_text)
     {
         if rest.trim().is_empty() {
             return Some(TargetFilter::Or {

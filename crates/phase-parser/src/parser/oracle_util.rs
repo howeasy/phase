@@ -3085,6 +3085,12 @@ pub fn normalize_card_name_refs_reporting(
                 // E.g., "The Twelfth Doctor" must not replace "The" in
                 // "The first spell you cast..." — that "The" is an article,
                 // not a reference to the card.
+                // CR 201.5c + CR 205.3j: a planeswalker's first name is also a
+                // planeswalker subtype ("Kaito" on Kaito Shizuki), so the subtype
+                // exclusion below must not hide it. The preserving replacer keeps a
+                // type-position occurrence ("a Kaito planeswalker") literal.
+                let is_planeswalker_name = len == 1
+                    && noncreature_subtype_set(&candidate) == Some(SubtypeSet::Planeswalker);
                 if len == 1 {
                     let lower_candidate = candidate.to_lowercase();
                     // Ordered cheapest-first: small matches! sets short-circuit
@@ -3101,14 +3107,21 @@ pub fn normalize_card_name_refs_reporting(
                         // ("Search for Tomorrow"). Reject it so the word survives
                         // unmangled.
                         || is_rules_vocabulary_word(&lower_candidate)
-                        || is_subtype_word(&lower_candidate)
-                        || parse_subtype(&lower_candidate)
-                            .is_some_and(|(_, consumed)| consumed == lower_candidate.len())
+                        || (!is_planeswalker_name
+                            && (is_subtype_word(&lower_candidate)
+                                || parse_subtype(&lower_candidate)
+                                    .is_some_and(|(_, consumed)| consumed == lower_candidate.len())))
                     {
                         continue;
                     }
                 }
-                let replaced = replace_all_words_case_sensitive(&result, &candidate, "~");
+                let replaced = if is_planeswalker_name {
+                    replace_all_words_case_sensitive_preserving_subtype_status_refs(
+                        &result, &candidate, "~",
+                    )
+                } else {
+                    replace_all_words_case_sensitive(&result, &candidate, "~")
+                };
                 if replaced != result {
                     // Guard: Don't replace subtype references like "Sliver creatures"
                     // when "Sliver" is a prefix of the card name "Sliver Hivelord".
