@@ -388,20 +388,28 @@ fn resolve_syrix_creature_return(db: &CardDatabase) -> GameRunner {
         selection.current_slot, 0,
         "the written order puts the Phoenix source first"
     );
-    assert!(
-        target_slots[0]
-            .legal_targets
-            .contains(&TargetRef::Object(board.syrix)),
-        "the first slot is 'target Phoenix you control'; legal targets = {:?}",
-        target_slots[0].legal_targets
+    assert_eq!(
+        target_slots[0].legal_targets,
+        vec![TargetRef::Object(board.syrix)],
+        "the first slot is 'target Phoenix you control': Syrix is the only Phoenix"
     );
-    assert!(
-        target_slots[1]
-            .legal_targets
-            .contains(&TargetRef::Player(P1)),
-        "the second slot is 'any target'; P1 must be legal; legal targets = {:?}",
-        target_slots[1].legal_targets
+    // 'any target': both players and Syrix, the only creature on the battlefield.
+    let any_target = &target_slots[1].legal_targets;
+    assert_eq!(
+        any_target.len(),
+        3,
+        "any target = two players + Syrix, got {any_target:?}"
     );
+    for target in [
+        TargetRef::Player(P0),
+        TargetRef::Player(P1),
+        TargetRef::Object(board.syrix),
+    ] {
+        assert!(
+            any_target.contains(&target),
+            "{target:?} must be legal, got {any_target:?}"
+        );
+    }
 
     board
         .runner

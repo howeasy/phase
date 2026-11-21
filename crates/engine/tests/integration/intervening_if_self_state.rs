@@ -29,7 +29,7 @@
 //!     and treated as though it does not exist, without changing zones.
 
 use engine::database::card_db::CardDatabase;
-use engine::game::combat::AttackTarget;
+use engine::game::combat::{get_valid_attacker_ids, validate_attackers, AttackTarget};
 use engine::game::game_object::{AttachTarget, PhaseStatus};
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::scenario_db::GameScenarioDbExt;
@@ -82,8 +82,11 @@ fn settle_at_end_step_priority(runner: &GameRunner) {
         runner.stack_names()
     );
     assert!(
-        matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
-        "expected end-step priority (CR 513.1), got {:?}",
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { player: P0 }
+        ),
+        "expected P0's end-step priority (CR 513.1), got {:?}",
         runner.state().waiting_for
     );
 }
@@ -173,14 +176,19 @@ fn krond_attacks_while_enchanted_exiles_target_permanent() {
     assert_eq!(player, P0, "Krond's controller chooses the exile target");
     assert_eq!(target_slots.len(), 1, "exactly one 'target permanent' slot");
     let legal_targets = &target_slots[selection.current_slot].legal_targets;
-    assert!(
-        legal_targets.contains(&TargetRef::Object(bear)),
-        "permanents controlled by the opponent (P1) must be legal targets"
+    // "target permanent": exactly the three permanents on the battlefield (Krond,
+    // the Rancor enchanting it, and the opponent's bear), no stack or graveyard object.
+    assert_eq!(
+        legal_targets.len(),
+        3,
+        "exactly three legal permanents, got {legal_targets:?}"
     );
-    assert!(
-        legal_targets.contains(&TargetRef::Object(krond)),
-        "permanents controlled by the attacker (P0) must be legal targets"
-    );
+    for permanent in [krond, rancor, bear] {
+        assert!(
+            legal_targets.contains(&TargetRef::Object(permanent)),
+            "{permanent:?} must be a legal target, got {legal_targets:?}"
+        );
+    }
 
     runner
         .act(GameAction::ChooseTarget {
@@ -577,7 +585,7 @@ fn kaito_shizuki_enters_this_turn_phases_out_at_his_end_step() {
 
 /// Negative sibling: Kaito has been on the battlefield since a previous turn,
 /// so at the end step the intervening-if is false (CR 603.4): no trigger goes
-/// on the stack and he stays phased in (CR 702.26c). Reach-guards: the end step
+/// on the stack and he stays phased in (CR 603.4). Reach-guards: the end step
 /// really was reached, and `entered_battlefield_turn` — the field the
 /// `SourceEnteredThisTurn` condition arm reads
 /// (`conditions::eval_source_entered_this_turn`) — is not the current turn, so
@@ -598,7 +606,7 @@ fn kaito_shizuki_entered_a_previous_turn_stays_phased_in_at_his_end_step() {
     assert_eq!(kaito_object.zone, Zone::Battlefield);
     assert!(
         matches!(kaito_object.phase_status, PhaseStatus::PhasedIn),
-        "Kaito must stay phased in when he did not enter this turn (CR 702.26c)"
+        "Kaito must stay phased in when he did not enter this turn (CR 603.4)"
     );
     settle_at_end_step_priority(&runner);
 
@@ -700,24 +708,34 @@ fn novice_knight_equipped_can_attack_despite_defender() {
     settle_at_declare_attackers_priority(&runner);
 }
 
-/// Negative sibling: the bare Novice Knight keeps Defender (CR 702.3b), so
-/// declaring it as an attacker is rejected. Reach-guard: the same declaration
-/// is legal in the enchanted test above, so the rejection is caused by the
-/// unmet condition and not by the scenario.
+/// Negative sibling: the bare Novice Knight keeps Defender (CR 702.3b). The
+/// declare-attackers step is entered with a vanilla Grizzly Bears beside it, so
+/// the prompt exists and the differential is observable: the Bears are valid
+/// attackers, the Knight is not, and declaring it is rejected on that ground.
 #[test]
 fn novice_knight_bare_cannot_attack_because_of_defender() {
     let db = load_db();
     let mut scenario = GameScenario::new();
-    scenario.at_phase(Phase::PreCombatMain);
+    scenario.at_phase(Phase::DeclareAttackers);
     let knight = scenario.add_real_card(P0, "Novice Knight", Zone::Battlefield, db);
-    let mut runner = scenario.build();
-    engine::game::rehydrate_game_from_card_db(runner.state_mut(), db);
+    let bears = scenario.add_real_card(P0, "Grizzly Bears", Zone::Battlefield, db);
+    let runner = scenario.build();
 
-    runner.advance_to_combat();
+    let valid = get_valid_attacker_ids(runner.state());
     assert!(
-        runner
-            .declare_attackers(&[(knight, AttackTarget::Player(P1))])
-            .is_err(),
-        "a Novice Knight with no attachment has Defender and cannot attack (CR 702.3b)"
+        valid.contains(&bears),
+        "reach: the vanilla creature is a legal attacker, so attackers are being computed: {valid:?}"
+    );
+    assert!(
+        !valid.contains(&knight),
+        "CR 702.3b: a bare Novice Knight has defender and is not a valid attacker: {valid:?}"
+    );
+    assert!(
+        validate_attackers(runner.state(), &[knight]).is_err(),
+        "declaring the bare Knight must be rejected (CR 702.3b)"
+    );
+    assert!(
+        validate_attackers(runner.state(), &[bears]).is_ok(),
+        "control: declaring the vanilla creature is legal"
     );
 }

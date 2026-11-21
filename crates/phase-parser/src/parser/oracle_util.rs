@@ -3080,17 +3080,17 @@ pub fn normalize_card_name_refs_reporting(
         for len in (1..name_words.len()).rev() {
             let candidate = name_words[..len].join(" ");
             if candidate.len() >= 2 {
-                // Guard: Single-word candidates that are common English articles
-                // or determiners must not be treated as self-references.
-                // E.g., "The Twelfth Doctor" must not replace "The" in
-                // "The first spell you cast..." — that "The" is an article,
-                // not a reference to the card.
                 // CR 201.5c + CR 205.3j: a planeswalker's first name is also a
                 // planeswalker subtype ("Kaito" on Kaito Shizuki), so the subtype
                 // exclusion below must not hide it. The preserving replacer keeps a
                 // type-position occurrence ("a Kaito planeswalker") literal.
                 let is_planeswalker_name = len == 1
                     && noncreature_subtype_set(&candidate) == Some(SubtypeSet::Planeswalker);
+                // Guard: Single-word candidates that are common English articles
+                // or determiners must not be treated as self-references.
+                // E.g., "The Twelfth Doctor" must not replace "The" in
+                // "The first spell you cast..." — that "The" is an article,
+                // not a reference to the card.
                 if len == 1 {
                     let lower_candidate = candidate.to_lowercase();
                     // Ordered cheapest-first: small matches! sets short-circuit
@@ -3499,6 +3499,9 @@ mod tests {
     /// ("Merfolk Mistbinder") keeps its lord-effect guard.
     #[test]
     fn normalize_planeswalker_first_name_subject_keeps_type_reference_literal() {
+        // Production normalizes per Oracle line (the card's other lines carry a
+        // `~` from "this token", which would skip the whole-text fallback), so the
+        // trigger line is the input here.
         let text = "At the beginning of your end step, if Kaito entered this turn, he phases out.\n[-7]: You get an emblem with \"As long as you control a Kaito planeswalker, draw a card.\"";
         assert_eq!(
             normalize_card_name_refs(text, "Kaito Shizuki"),

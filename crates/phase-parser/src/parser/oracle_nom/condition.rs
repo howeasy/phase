@@ -2715,8 +2715,7 @@ fn parse_source_hasnt_dealt_damage(input: &str) -> OracleResult<'_, StaticCondit
 fn parse_contraction_source_state_condition(input: &str) -> OracleResult<'_, StaticCondition> {
     let (rest, _) = parse_pronoun_copula_contraction_prefix(input)?;
     alt((
-        value(StaticCondition::SourceIsEquipped, tag("equipped")),
-        value(StaticCondition::SourceIsEnchanted, tag("enchanted")),
+        parse_source_attachment_state,
         value(StaticCondition::SourceIsTapped, tag("tapped")),
         value(StaticCondition::SourceIsMonstrous, tag("monstrous")),
         value(StaticCondition::SourceIsAttacking, tag("attacking")),
@@ -7842,7 +7841,7 @@ fn parse_zone_history_condition(input: &str) -> OracleResult<'_, StaticCondition
     .parse(input)
 }
 
-/// CR 603.6c + CR 603.4: "no <permanent type phrase> left the battlefield this
+/// CR 603.4: "no <permanent type phrase> left the battlefield this
 /// turn" — the negated leave-the-battlefield history gate (Sarevok, Deathbringer:
 /// "no permanents left the battlefield this turn"). The affirmative twins above
 /// compare the same `ZoneChangeCountThisTurn` count `>= 1`; this arm compares it
@@ -29188,7 +29187,7 @@ mod intervening_if_state_condition_tests {
         ));
     }
 
-    /// CR 603.6c + CR 603.4: "no <type> left the battlefield this turn" compares the
+    /// CR 603.4: "no <type> left the battlefield this turn" compares the
     /// zone-change count `== 0`; the noun is folded by the shared type parser, an
     /// unrecognized noun declines, and the affirmative Revolt arm is unchanged.
     #[test]
