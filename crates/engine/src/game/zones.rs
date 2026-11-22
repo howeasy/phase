@@ -7440,7 +7440,22 @@ mod tests {
 
         // CR 603.10a + CR 607.2a: the departure's zone-change record carries the
         // same attribution for the look-back readers that consult it.
-        let record = departure_record(&events, source);
+        let record = events
+            .iter()
+            .find_map(|event| {
+                if let GameEvent::ZoneChanged {
+                    object_id,
+                    from,
+                    record,
+                    ..
+                } = event
+                {
+                    (*object_id == source && *from == Some(Zone::Battlefield)).then(|| &**record)
+                } else {
+                    None
+                }
+            })
+            .expect("the battlefield departure was emitted");
         assert_eq!(record.linked_exile_snapshot.len(), 3);
         for &(exiled, supplier) in &linked {
             let snap = record

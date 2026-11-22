@@ -1277,7 +1277,7 @@ pub(super) fn attach_cast_cost_modifier_to_previous_play_from_exile(
 }
 
 /// Walk the previous def and its `sub_ability` chain for a
-/// `LingeringPermission`-driven `Effect::CastFromZone`'s rider slot. Mirrors
+/// lingering-driver (`LingeringPermission` or `LingeringWindow`) `Effect::CastFromZone`'s rider slot. Mirrors
 /// [`find_prev_play_from_exile_permission_mut`]: the grant lands as a sibling
 /// def in the compound "exile … then you may play it" shape and as a nested
 /// sub-ability in the self-contained one, and the rider must absorb either way.
@@ -1323,7 +1323,7 @@ fn find_prev_cast_from_zone_cost_modifier_mut(
 /// on the effect that states it, and the resolver decides which of the
 /// permissions it creates may carry it (CR 305.1: never the land-play half).
 ///
-/// Returns `false` for a non-`LingeringPermission` driver, so the rider falls
+/// Returns `false` for a non-lingering driver, so the rider falls
 /// through to the `PlayFromExile` host and, failing that, to the assembly
 /// seam's refusal — `cast_cost_modifier_without_host_gap`, which lowers the
 /// rider as `CAST_COST_MODIFIER_WITHOUT_HOST_GAP` rather than letting its

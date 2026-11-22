@@ -8169,8 +8169,8 @@ fn filter_inner_for_object(
                 )
         }
         // CR 603.10a + CR 607.2a: "cards exiled with [this object]" on a
-        // trigger resolves from `players::linked_exile_pile` of the trigger's
-        // bound incarnation; other contexts fall back to live exile links.
+        // trigger resolves from the pile of the trigger's bound incarnation
+        // (`players::linked_exile_pile_holds`); other contexts fall back to live exile links.
         // CR 400.7: an entry names the object it captured, so a card that left
         // exile (and any later exile of it) does not match.
         TargetFilter::ExiledBySource => {

@@ -2749,13 +2749,13 @@ pub(crate) fn cast_cost_modifier_without_host_gap(
 /// Twin of [`refuse_additional_cost_on_lingering_cast`], inverted on the driver
 /// axis because the two riders ride opposite mechanisms:
 /// `record_lingering_permissions` is the one site that stamps a cost modifier
-/// onto the permissions the grant creates, so `LingeringPermission` is the only
-/// driver with a slot — while an additional cost is charged only by the
+/// onto the permissions the grant creates, so a lingering driver
+/// (`LingeringPermission` or `LingeringWindow`) is the only kind with a slot — while an additional cost is charged only by the
 /// during-resolution cast.
 ///
 /// Called at the one seam that can DEGRADE an already-stamped grant off the
 /// lingering mechanism (`attach_alt_cost_to_prior_cast_from_zone`, beside its
-/// twin); the absorption site refuses a non-`LingeringPermission` host up front
+/// twin); the absorption site refuses a non-lingering host up front
 /// (`attach_cast_cost_modifier_to_prior_cast_from_zone`), so that path never
 /// stamps one for this to find. Zero printed carriers today.
 pub(crate) fn refuse_cast_cost_modifier_on_unsupported_driver(effect: &mut Effect) {

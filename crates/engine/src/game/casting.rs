@@ -5447,7 +5447,7 @@ pub(crate) fn single_use_play_from_exile_group(
     })
 }
 
-/// CR 601.2a + CR 611.2a: Spend a single-use `PlayFromExile` grant. Records the
+/// CR 601.2a + CR 611.2a: Spend a single-use `PlayFromExile` or `ExileWithAltCost` grant. Records the
 /// `group` in `exile_play_single_use_consumed` and strips the now-void
 /// `PlayFromExile { single_use_group == group, single_use: true }` permission
 /// from every object still carrying it, so the remaining cards in that tracked

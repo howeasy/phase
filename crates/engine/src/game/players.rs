@@ -509,8 +509,7 @@ fn pile_entries<'a>(
         .cloned();
     // CR 608.2h + CR 607.2a: the pile is read when the effect is applied, so a
     // card exiled with the source after the trigger latched (by an earlier
-    // instance of the same doubled trigger, CR 603.2d, or earlier in this
-    // resolution) belongs to it. CR 400.7: only while the bound incarnation is
+    // instance of the same doubled trigger, CR 603.2d) belongs to it. CR 400.7: only while the bound incarnation is
     // still current in the zone it was observed in; a source that changed zones
     // is a new object whose links are not this trigger's. CR 607.5: and only a
     // card exiled by an ability of the reading ability's own pair; with no known
@@ -535,6 +534,10 @@ fn pile_entries<'a>(
         // Vehicle" — Mysterious Limousine) is the "this way" card of that
         // resolution, not one of the other cards of the pile: only links made by an
         // earlier resolution (an earlier instance of a doubled trigger) are read live.
+        // `last_zone_changed_ids` holds the ids of the most recent zone-change node
+        // only, so this exclusion reaches the card exiled by the node immediately
+        // before the reading node; a card exiled earlier in the same resolution, with
+        // another node between, is read live (Court of Locthwain's free cast).
         .filter(move |snap| !state.last_zone_changed_ids.contains(&snap.exiled_id));
     // `departed`, not `admits`: an entry whose successor is this incarnation
     // belongs to an earlier departure, a different object.
