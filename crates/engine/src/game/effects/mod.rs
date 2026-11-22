@@ -18070,9 +18070,14 @@ fn gated_run_keeps_ledger_for_this_way_head(ability: &ResolvedAbility) -> bool {
 /// "this way" still names the move. The caller applies this only when the node
 /// moved no objects.
 fn moved_object_step_keeps_ledger_for_this_way_head(ability: &ResolvedAbility) -> bool {
-    let reads_this_way_ledger = |condition: &AbilityCondition| match condition {
-        AbilityCondition::Not { condition } => condition.zone_changed_this_way_head().is_some(),
-        other => other.zone_changed_this_way_head().is_some(),
+    let reads_this_way_ledger = |condition: &AbilityCondition| {
+        // "If you can't" is the negated form: unwrap one `Not` and ask the same question.
+        let unwrapped = if let AbilityCondition::Not { condition } = condition {
+            &**condition
+        } else {
+            condition
+        };
+        unwrapped.zone_changed_this_way_head().is_some()
     };
     matches!(
         ability.effect,
