@@ -765,8 +765,10 @@ pub(crate) fn parse_modal_header_ast(text: &str) -> Option<ModalHeaderAst> {
         }
     }
 
-    // CR 700.2b + CR 701.9b (analogous): "choose one at random" — the game draws
-    // the mode(s); "at random" fixes how, not who chooses. The qualifier is a
+    // CR 701.9b (analogous): "choose one at random" — the game draws the
+    // mode(s). No CR rule says who chooses a mode drawn at random; this reads
+    // "choose one at random" as the controller choosing one or more modes
+    // (CR 700.17), so the draw faces a dilemma. The qualifier is a
     // word-boundary phrase flag on the header sentence, not parsing dispatch.
     let selection = if nom_primitives::scan_contains(&header_lower, "at random") {
         TargetSelectionMode::Random

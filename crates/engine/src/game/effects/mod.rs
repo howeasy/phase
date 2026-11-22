@@ -67284,21 +67284,60 @@ mod tests {
         assert!(tail.is_none(), "nothing detaches: {tail:?}");
     }
 
+    /// Syndic of Tithes' verbatim Oracle text (MTGJSON `AtomicCards.json`).
+    const SYNDIC_OF_TITHES_ORACLE: &str = "Extort (Whenever you cast a spell, you may pay {W/B}. If you do, each opponent loses 1 life and you gain that much life.)";
+
+    /// The printed face of Syndic of Tithes, parsed from that Oracle text the
+    /// way the card database does it: `Extort` is a printed keyword, so the
+    /// reminder text carries no ability of its own and the keyword trigger is
+    /// installed by `synthesize_extort`.
+    fn syndic_of_tithes_face() -> CardFace {
+        let parsed = crate::parser::parse_oracle_text(
+            SYNDIC_OF_TITHES_ORACLE,
+            "Syndic of Tithes",
+            &["Extort".to_string()],
+            &["Creature".to_string()],
+            &["Human".to_string(), "Cleric".to_string()],
+        );
+        assert!(
+            parsed.triggers.is_empty(),
+            "REACH: the printed reminder text is not a trigger: {:?}",
+            parsed.triggers
+        );
+        let mut face = CardFace {
+            name: "Syndic of Tithes".to_string(),
+            oracle_text: Some(SYNDIC_OF_TITHES_ORACLE.to_string()),
+            keywords: vec!["Extort".parse().expect("printed keyword")],
+            abilities: parsed.abilities,
+            triggers: parsed.triggers,
+            static_abilities: parsed.statics,
+            replacements: parsed.replacements,
+            ..CardFace::default()
+        };
+        synthesize_extort(&mut face);
+        face
+    }
+
     /// U2 — CR 702.101a: the fan-out head's own gate is the gate the whole
     /// fan-out inherited (extort's "If you do"), not one seat's decision, so
     /// "you gain life equal to the total life lost this way" stays the one
     /// aggregate tail after every seat.
+    ///
+    /// Printed card: Syndic of Tithes — "Extort (Whenever you cast a spell, you
+    /// may pay {W/B}. If you do, each opponent loses 1 life and you gain that
+    /// much life.)" Parsed from that Oracle text, then `synthesize_extort`.
+    /// Mutant: classifying the head's performed gate as `PerSeatGated` keeps
+    /// the aggregate `GainLife` in the seat template, resolving it once per
+    /// opponent instead of once.
     #[test]
     fn player_scope_head_gate_does_not_retain_aggregate_tail() {
-        let mut face = CardFace::default();
-        face.keywords.push(Keyword::Extort);
-        synthesize_extort(&mut face);
+        let face = syndic_of_tithes_face();
         let execute = face
             .triggers
             .iter()
             .find(|t| matches!(t.mode, TriggerMode::SpellCast))
             .and_then(|t| t.execute.as_deref())
-            .expect("synthesized extort trigger");
+            .expect("extort trigger from the printed card");
         let resolved = build_resolved_from_def(execute, ObjectId(100), PlayerId(0));
         let (template, tail) = split_at_first_scope(&resolved);
         assert!(matches!(template.effect, Effect::LoseLife { .. }));

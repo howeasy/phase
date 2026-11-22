@@ -105,6 +105,16 @@ pub(super) fn handle_ability_mode_choice(
             events,
         )
     } else {
+        // CR 603.3c + CR 700.17 (edition effective 2026-11-06): the controller
+        // chooses a modal triggered ability's modes as it is put on the stack, and
+        // the choice cannot be undone (no CancelCast for a triggered mode prompt).
+        // The chooser is latched on the chosen modes; whichever construction step
+        // completes the entry faces the dilemma, inside the finisher's own span
+        // (`engine_stack::place_trigger_targets`, or the no-target branch of
+        // `handle_triggered_mode_choice`). A chosen mode's target may still be
+        // outstanding, in which case the entry on the stack is half-built (CR 603.3d)
+        // and an observer must not land above it before then.
+        resolved.context.mode_chooser = dilemma_chooser;
         // Round-20 seam 2: the finisher wraps the result HERE, at the public
         // `SelectModes` entry, and never inside `handle_triggered_mode_choice`.
         // That function is re-entered inside trigger dispatch (via
@@ -125,28 +135,6 @@ pub(super) fn handle_ability_mode_choice(
             },
             events,
         )?;
-        // CR 603.3c + CR 700.2b: a triggered ability's modes are chosen as it is
-        // put on the stack; the choice cannot be undone (no CancelCast for a
-        // triggered mode prompt), so the event and the history are written
-        // together.
-        if let Some(pending) = state.pending_trigger.as_mut() {
-            // CR 603.3c + CR 603.3d: a chosen mode's target is still to be
-            // chosen, so the ability is not on the stack yet. The dilemma is
-            // faced when the construction finishes, inside the finisher's own
-            // span (`engine_stack::place_trigger_targets`), the same custody the
-            // target-lock events of this construction have: an observer that
-            // triggers on it is held until the finisher's drain and never lands
-            // above the half-built entry.
-            pending.ability.context.mode_chooser = dilemma_chooser;
-        } else {
-            if let Some(chooser) = dilemma_chooser {
-                super::ability_utils::emit_face_dilemma_event(chooser, events);
-            }
-            super::ability_utils::record_face_dilemma_after_stack_placement(
-                state,
-                dilemma_chooser,
-            );
-        }
         Ok(triggers::finish_trigger_construction_action(
             state, events, produced,
         ))
@@ -602,15 +590,18 @@ struct TriggeredModeChoice {
     span_owner: triggers::ConstructionSpanOwner,
 }
 
-/// CR 700.2b: the controller chooses the mode; "at random" fixes how it is
-/// picked. Complete a modal *triggered* ability whose `selection` is `Random`
+/// No CR rule says who chooses a mode drawn at random; this reads "choose one at
+/// random" as the controller choosing one or more modes (CR 700.17), so the draw
+/// faces a dilemma. Complete a modal *triggered* ability whose `selection` is `Random`
 /// (Cult of Skaro "choose one at random") without prompting `modal.chooser`. The game draws the mode index/indices via
 /// `random_select_modal_indices` (seeded `state.rng`), then routes through the
 /// SAME finalization path the interactive controller-choice flow uses
 /// (`handle_triggered_mode_choice`) so target legality, per-mode labels, and
 /// stack-entry mutation stay identical. The controller remains the mode chooser
-/// (CR 700.2b), so a nonempty draw faces one dilemma, emitted and recorded here
-/// exactly as the prompted path does.
+/// (CR 700.2b: the controller of a modal triggered ability chooses the mode(s)
+/// as part of putting it on the stack), so a nonempty draw faces one dilemma,
+/// which the construction step that completes the entry emits and records
+/// exactly as on the prompted path.
 ///
 /// Preconditions (the "push first, choose second" contract — see
 /// `dispatch_pending_trigger_context`): `state.pending_trigger` is set and its
@@ -646,13 +637,18 @@ pub(super) fn resolve_random_modal_trigger(
         &modal,
         &indices,
     );
-    // CR 700.2b + CR 700.17 (edition effective 2026-11-06): the controller is still
-    // the mode chooser of a random draw, so the nonempty draw faces one dilemma.
+    // CR 700.17 (edition effective 2026-11-06): the controller is still the mode
+    // chooser of a random draw (the reading stated above), so the nonempty draw
+    // faces one dilemma.
     let dilemma_chooser = super::ability_utils::mode_choice_dilemma_chooser(player, &indices);
     let mut resolved =
         build_chained_resolved(&mode_abilities, indices.as_slice(), source_id, player)?;
     resolved.selected_mode_labels = selected_mode_labels(&modal.mode_descriptions, &indices);
 
+    // CR 700.17 (edition effective 2026-11-06): latched exactly as on the prompted
+    // `SelectModes` path; the construction step that completes the entry faces the
+    // dilemma, so a failed construction records nothing.
+    resolved.context.mode_chooser = dilemma_chooser;
     let waiting_for = handle_triggered_mode_choice(
         state,
         TriggeredModeChoice {
@@ -669,14 +665,6 @@ pub(super) fn resolve_random_modal_trigger(
         },
         events,
     )?;
-    // CR 603.3c + CR 700.2b: as on the prompted `SelectModes` path, a triggered
-    // mode choice cannot be undone once construction succeeds, so the event
-    // and the history are written together. A failed construction returned
-    // above and records nothing.
-    if let Some(chooser) = dilemma_chooser {
-        super::ability_utils::emit_face_dilemma_event(chooser, events);
-    }
-    super::ability_utils::record_face_dilemma_after_stack_placement(state, dilemma_chooser);
     Ok(Some(waiting_for))
 }
 
@@ -959,6 +947,7 @@ fn handle_triggered_mode_choice(
         // on the stack (pushed at modal pause-time); mutate its ability with
         // the resolved mode and clear `pending_trigger_entry` so the resolver
         // may fire this entry.
+        let dilemma_chooser = trigger.ability.context.mode_chooser.take();
         if !triggers::finalize_pending_trigger_entry(state, &trigger.ability) {
             // Unexpected dangling cursor: the entry is no longer on the stack.
             // Recover per CR 608.1 (resolution selects the spell or ability on
@@ -971,28 +960,40 @@ fn handle_triggered_mode_choice(
             return Ok(WaitingFor::Priority { player });
         }
         priority::clear_priority_passes(state);
+        // CR 700.17 (edition effective 2026-11-06) + CR 603.3c: no mode needs a
+        // target, so the entry is complete and the dilemma is faced now, inside
+        // the finisher's own span: an observer that triggers on it is matched
+        // here and held until the drain below has run, so a sibling's mode prompt
+        // that surfaces from the drain cannot swallow it (CR 603.2e).
+        let span_start = events.len();
+        if let Some(chooser) = dilemma_chooser {
+            super::ability_utils::emit_face_dilemma_event(chooser, events);
+            super::ability_utils::record_face_dilemma_after_stack_placement(state, Some(chooser));
+        }
+        let held = triggers::hold_construction_span(state, events, span_start, span_owner);
         debug_assert!(
             !triggers::is_pending_trigger_construction_active(state),
             "deferred-trigger drain entered with construction still active",
         );
-        match span_owner {
+        let drained = match span_owner {
             // CR 113.2c + CR 603.2 + CR 603.3b: Drain siblings deferred behind
             // this modal trigger so each independent instance reaches the stack
             // (issue #416). CR 603.2c: the windows of that drain run on the
             // action buffer, so their ranges are claimed.
-            triggers::ConstructionSpanOwner::Finisher => {
-                if let Some(waiting_for) = triggers::drain_on_action_buffer(
-                    state,
-                    events,
-                    triggers::drain_deferred_triggers_after_trigger_construction,
-                ) {
-                    return Ok(waiting_for);
-                }
-            }
+            triggers::ConstructionSpanOwner::Finisher => triggers::drain_on_action_buffer(
+                state,
+                events,
+                triggers::drain_deferred_triggers_after_trigger_construction,
+            ),
             // CR 603.3b: inside a dispatch window, the enclosing dispatcher's
             // end-of-batch drain places the queue after the batch's remaining
             // siblings; no nested window runs inside this one.
-            triggers::ConstructionSpanOwner::EnclosingWindow => {}
+            triggers::ConstructionSpanOwner::EnclosingWindow => None,
+        };
+        // CR 603.3b: what triggered during this process waits until the drain returned.
+        triggers::release_construction_span(state, held);
+        if let Some(waiting_for) = drained {
+            return Ok(waiting_for);
         }
     }
 

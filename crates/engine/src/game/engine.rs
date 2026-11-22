@@ -18095,9 +18095,10 @@ pub(super) fn begin_pending_trigger_target_selection(
                 return Ok(None);
             };
 
-            // CR 700.2b: the controller chooses the mode; "at random" fixes how
-            // it is picked. "Choose ... at random" modal triggers (Cult of
-            // Skaro) are resolved inline by
+            // No CR rule says who chooses a mode drawn at random; this reads
+            // "choose one at random" as the controller choosing one or more
+            // modes (CR 700.17), so the draw faces a dilemma. "Choose ... at
+            // random" modal triggers (Cult of Skaro) are resolved inline by
             // `dispatch_pending_trigger_context` via `state.rng` — they clear
             // `modal` before this re-entry surfaces a `WaitingFor`, so reaching
             // here with a `Random` selection means the dispatcher was bypassed.

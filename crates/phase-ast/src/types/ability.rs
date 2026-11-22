@@ -37068,8 +37068,9 @@ pub struct ModalChoice {
     #[serde(default = "default_player_filter_controller")]
     pub chooser: PlayerFilter,
     /// CR 700.2b + CR 701.9b (analogous): When `Random`, the game draws the
-    /// mode(s) uniformly at random (Cult of Skaro "choose one at random"); the
-    /// controller is still the modal chooser (CR 700.2b). Default
+    /// mode(s) uniformly at random (Cult of Skaro "choose one at random"). No CR
+    /// rule says who chooses a mode drawn at random; this reads it as the
+    /// controller choosing one or more modes (CR 700.17). Default
     /// `Chosen` preserves controller-choice; omitted from card-data when default.
     #[serde(default, skip_serializing_if = "TargetSelectionMode::is_chosen")]
     pub selection: TargetSelectionMode,

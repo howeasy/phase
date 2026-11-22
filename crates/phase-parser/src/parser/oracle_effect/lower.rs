@@ -7200,11 +7200,7 @@ pub(super) fn rebind_decline_body_recipient(effect: &mut Effect) {
         Effect::Draw { target, .. }
         | Effect::Discard { target, .. }
         | Effect::Mill { target, .. }
-        | Effect::DealDamage { target, .. }
-        // CR 701.22a + CR 701.25a: scry and surveil act on "your library" — the
-        // recipient is the keyword action's performer.
-        | Effect::Scry { target, .. }
-        | Effect::Surveil { target, .. } => rebind(target),
+        | Effect::DealDamage { target, .. } => rebind(target),
         Effect::Token { owner, .. } => rebind(owner),
         // CR 608.2c: "that player exiles …" in the body is the scoped opponent's
         // own move, so its performer follows the same rebind.

@@ -1679,9 +1679,10 @@ fn modal_indices_have_legal_target_assignment(
 /// you choose one or more modes"; CR 603.3c removes a zero-mode trigger).
 ///
 /// The selection procedure does not change the chooser: a "choose one at
-/// random" trigger (Cult of Skaro) is still the controller's mode choice under
-/// CR 700.2b — "at random" fixes how the mode is picked, not who chooses it —
-/// so a nonempty random draw faces a dilemma exactly like a prompted one.
+/// random" trigger (Cult of Skaro) is still the controller's mode choice. No
+/// CR rule says who chooses a mode drawn at random; this reads "choose one at
+/// random" as the controller choosing one or more modes (CR 700.17), so a
+/// nonempty random draw faces a dilemma exactly like a prompted one.
 pub(crate) fn mode_choice_dilemma_chooser(
     chooser: PlayerId,
     indices: &[usize],
@@ -2410,8 +2411,10 @@ pub fn random_select_targets_for_ability(
     Ok(chosen)
 }
 
-/// CR 700.2b: the controller chooses the mode; "at random" fixes how it is
-/// picked. Resolve a modal ability whose `selection` is `Random` (Cult of Skaro
+/// No CR rule says who chooses a mode drawn at random; this reads "choose one
+/// at random" as the controller choosing one or more modes (CR 700.17), so the
+/// draw faces a dilemma. Resolve a modal ability whose `selection` is `Random`
+/// (Cult of Skaro
 /// "choose one at random") by uniformly drawing mode index/indices from the
 /// legal set using the engine's seeded RNG (`state.rng`), so no
 /// `WaitingFor::AbilityModeChoice` is emitted. Mirrors
