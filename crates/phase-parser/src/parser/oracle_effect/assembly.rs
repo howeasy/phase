@@ -49,8 +49,9 @@ use super::lower::{
     cast_cost_modifier_rider, chain_references_chosen_card, clone_would_transplant_gated_referent,
     consolidate_die_and_coin_defs, definition_targets_self_source,
     effect_publishes_revealed_subject, ensure_remember_card_after_object_choice,
-    extract_bounded_target_multi_target, extract_exact_target_multi_target,
-    extract_verb_up_to_multi_target, fold_copy_spell_gains_haste_and_quoted_grant,
+    exclude_this_way_cards_from_other_linked_pile, extract_bounded_target_multi_target,
+    extract_exact_target_multi_target, extract_verb_up_to_multi_target,
+    fold_copy_spell_gains_haste_and_quoted_grant,
     fold_deal_damage_then_prevent_into_computed_amount, fold_enters_this_way_counter_rider,
     fold_exile_resolving_rider, fold_search_choose_type_conditional_destination,
     fold_token_it_has_grants_into_token_statics, gate_other_revealed_card_on_multiplayer_reveal,
@@ -4830,6 +4831,13 @@ pub(crate) fn assemble_effect_chain_with_provenance(
     // moved object instead, and do so before `oracle_trigger::lower_trigger_ir`
     // can otherwise blindly lift that same `ParentTarget` to `TriggeringSource`.
     rebind_zone_changed_this_way_pronoun_to_moved_object(&mut result);
+
+    // CR 608.2c + CR 607.2a: "each other card exiled with ~" behind a
+    // put-into-exile-this-way gate must exclude the card(s) that gated
+    // instruction just exiled — spell the exclusion as a typed
+    // `Not { LastZoneChanged }` leg on the linked pile's `And` (Mysterious
+    // Limousine) instead of leaving it to the pile reader.
+    exclude_this_way_cards_from_other_linked_pile(&mut result);
     // CR 608.2c: a leading "If it's a [type] card" rider on a single-card
     // library-edge move names the moved card. Bare "it" lowers to `ParentTarget`,
     // which a `Mill` head cannot resolve. Rebind it before trigger lowering can

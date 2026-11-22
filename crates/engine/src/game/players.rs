@@ -528,17 +528,7 @@ fn pile_entries<'a>(
         })
         .into_iter()
         .flatten()
-        .filter(move |snap| snap.supplier.is_some() && snap.supplier == reader)
-        // CR 608.2c: a card the instruction just performed moved ("exile up to one
-        // other target creature ... return each other card exiled with this
-        // Vehicle" — Mysterious Limousine) is the "this way" card of that
-        // resolution, not one of the other cards of the pile: only links made by an
-        // earlier resolution (an earlier instance of a doubled trigger) are read live.
-        // `last_zone_changed_ids` holds the ids of the most recent zone-change node
-        // only, so this exclusion reaches the card exiled by the node immediately
-        // before the reading node; a card exiled earlier in the same resolution, with
-        // another node between, is read live (Court of Locthwain's free cast).
-        .filter(move |snap| !state.last_zone_changed_ids.contains(&snap.exiled_id));
+        .filter(move |snap| snap.supplier.is_some() && snap.supplier == reader);
     // `departed`, not `admits`: an entry whose successor is this incarnation
     // belongs to an earlier departure, a different object.
     let later = state
@@ -1820,6 +1810,25 @@ mod tests {
         assert_eq!(pile_ids(&state, &context), vec![first]);
 
         crate::game::exile_links::push_tracked_by_source(&mut state, second, source);
+        assert_eq!(pile_ids(&state, &context), vec![first, second]);
+        assert!(linked_exile_pile_holds(&state, &context, second));
+    }
+
+    /// CR 607.2a: the pile reader holds no exclusion of its own for "the card the
+    /// preceding instruction moved" (a card the resolution's ledger names); an
+    /// "other" that means that is written into the reading ability's filter.
+    #[test]
+    fn linked_exile_pile_keeps_a_link_the_resolution_ledger_names() {
+        use crate::types::ability::CharacteristicSetRef::Own;
+        let (mut state, source, first, second) = live_source_with_exiles();
+        resolving_characteristic(&mut state, source, Own);
+        crate::game::exile_links::push_tracked_by_source(&mut state, first, source);
+        let context = crate::game::triggers::trigger_source_context_for_latch(
+            &state,
+            &state.objects[&source],
+        );
+        crate::game::exile_links::push_tracked_by_source(&mut state, second, source);
+        state.last_zone_changed_ids = vec![second];
         assert_eq!(pile_ids(&state, &context), vec![first, second]);
         assert!(linked_exile_pile_holds(&state, &context, second));
     }

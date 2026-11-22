@@ -568,7 +568,11 @@ fn pass_priority_to(runner: &mut GameRunner, phase: Phase) {
             .act(GameAction::PassPriority)
             .expect("PassPriority accepted");
     }
-    assert_eq!(runner.state().phase, phase, "priority passes reach {phase:?}");
+    assert_eq!(
+        runner.state().phase,
+        phase,
+        "priority passes reach {phase:?}"
+    );
 }
 
 /// Whether the engine offers casting `card` now.

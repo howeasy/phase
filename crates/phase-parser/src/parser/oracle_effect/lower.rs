@@ -73,6 +73,7 @@ use super::{
     parse_for_each_object_copy_parts, refine_damage_target_remainder, replace_player_anaphor,
     scan_contains_phrase, target_filter_controller_ref, ParsedEffectClause,
 };
+use crate::types::ability::filter_contains_filter_prop;
 use crate::types::ability::generic_effect_population_filter;
 
 pub(super) fn rewrite_player_anaphor_targets_in_definition(def: &mut AbilityDefinition) {
@@ -3283,6 +3284,65 @@ pub(super) fn rebind_zone_changed_this_way_pronoun_to_moved_object(def: &mut Abi
     }
     if let Some(els) = def.else_ability.as_deref_mut() {
         rebind_zone_changed_this_way_pronoun_to_moved_object(els);
+    }
+}
+
+/// CR 608.2c + CR 607.2a: in "If a creature is put into exile this way,
+/// return each other card exiled with ~", "other" means other than the
+/// card(s) the gated instruction just moved (the ledger the
+/// `ZoneChangedThisWay` gate reads), so the `And` of the linked pile gains an
+/// explicit `Not { LastZoneChanged }` leg instead of the pile reader
+/// consulting that ledger.
+pub(super) fn exclude_this_way_cards_from_other_linked_pile(def: &mut AbilityDefinition) {
+    let parent_exiles = matches!(
+        def.effect.as_ref(),
+        Effect::ChangeZone {
+            destination: Zone::Exile,
+            ..
+        }
+    );
+    if parent_exiles {
+        if let Some(sub) = def.sub_ability.as_deref_mut() {
+            let gate_binds_exile = matches!(
+                sub.condition.as_ref(),
+                Some(AbilityCondition::ZoneChangedThisWay {
+                    destination: Some(Zone::Exile),
+                    ..
+                })
+            );
+            if gate_binds_exile {
+                if let Effect::ChangeZoneAll {
+                    target: TargetFilter::And { filters },
+                    ..
+                } = sub.effect.as_mut()
+                {
+                    let pile_is_linked_exile = filters
+                        .iter()
+                        .any(|leg| matches!(leg, TargetFilter::ExiledBySource));
+                    let pile_says_other = filters.iter().any(|leg| {
+                        filter_contains_filter_prop(leg, &|prop| *prop == FilterProp::Another)
+                    });
+                    let pile_already_excludes = filters.iter().any(|leg| {
+                        matches!(
+                            leg,
+                            TargetFilter::Not { filter }
+                                if matches!(filter.as_ref(), TargetFilter::LastZoneChanged)
+                        )
+                    });
+                    if pile_is_linked_exile && pile_says_other && !pile_already_excludes {
+                        filters.push(TargetFilter::Not {
+                            filter: Box::new(TargetFilter::LastZoneChanged),
+                        });
+                    }
+                }
+            }
+        }
+    }
+    if let Some(sub) = def.sub_ability.as_deref_mut() {
+        exclude_this_way_cards_from_other_linked_pile(sub);
+    }
+    if let Some(els) = def.else_ability.as_deref_mut() {
+        exclude_this_way_cards_from_other_linked_pile(els);
     }
 }
 
@@ -17580,6 +17640,120 @@ mod tests {
                 "{card}: a follower that reads an object beyond its slots is not a host follower"
             );
         }
+    }
+
+    /// CR 608.2c + CR 607.2a: Mysterious Limousine's "If a creature is put
+    /// into exile this way, return each other card exiled with ~" must spell
+    /// the "other than the ones exiled this way" exclusion as a
+    /// `Not { LastZoneChanged }` leg on the linked pile's `And`, while
+    /// Banisher Priest — a plain exile-until with no "this way" gate — must
+    /// gain no such leg anywhere in its trigger.
+    #[test]
+    fn limousine_linked_pile_excludes_this_way_cards_and_priest_gains_no_leg() {
+        let limo = crate::parser::oracle::parse_oracle_text(
+            "Whenever this Vehicle enters or attacks, exile up to one other target creature until this Vehicle leaves the battlefield. If a creature is put into exile this way, return each other card exiled with this Vehicle to the battlefield under its owner's control.",
+            "Mysterious Limousine",
+            &[],
+            &["Artifact".to_string()],
+            &[],
+        );
+        let pile = limo
+            .triggers
+            .iter()
+            .filter_map(|trigger| trigger.execute.as_deref())
+            .find_map(gated_exile_return_pile)
+            .expect("the gated return must lower to a ChangeZoneAll linked pile");
+        assert_eq!(
+            pile,
+            vec![
+                TargetFilter::Typed(TypedFilter {
+                    type_filters: vec![TypeFilter::Card],
+                    controller: None,
+                    properties: vec![crate::types::ability::FilterProp::Another],
+                }),
+                TargetFilter::ExiledBySource,
+                TargetFilter::Not {
+                    filter: Box::new(TargetFilter::LastZoneChanged),
+                },
+            ],
+            "the linked pile must be the other-card exile set minus the cards exiled this way"
+        );
+
+        let priest = crate::parser::oracle::parse_oracle_text(
+            "When this creature enters, exile target creature an opponent controls until this creature leaves the battlefield.",
+            "Banisher Priest",
+            &[],
+            &["Creature".to_string()],
+            &["Human".to_string(), "Cleric".to_string()],
+        );
+        assert!(
+            !priest
+                .triggers
+                .iter()
+                .filter_map(|trigger| trigger.execute.as_deref())
+                .any(def_tree_contains_not_last_zone_changed),
+            "no \"this way\" gate means no Not {{ LastZoneChanged }} leg anywhere"
+        );
+    }
+
+    /// The `And` legs of the `ChangeZoneAll` that an exile `ChangeZone`'s
+    /// "put into exile this way" gate rides on, or `None` for other chains.
+    fn gated_exile_return_pile(def: &AbilityDefinition) -> Option<Vec<TargetFilter>> {
+        let mut cur = Some(def);
+        while let Some(d) = cur {
+            if matches!(
+                d.effect.as_ref(),
+                Effect::ChangeZone {
+                    destination: Zone::Exile,
+                    ..
+                }
+            ) {
+                if let Some(sub) = d.sub_ability.as_deref() {
+                    if matches!(
+                        sub.condition.as_ref(),
+                        Some(AbilityCondition::ZoneChangedThisWay {
+                            destination: Some(Zone::Exile),
+                            ..
+                        })
+                    ) {
+                        if let Effect::ChangeZoneAll {
+                            target: TargetFilter::And { filters },
+                            ..
+                        } = sub.effect.as_ref()
+                        {
+                            return Some(filters.clone());
+                        }
+                    }
+                }
+            }
+            cur = d.sub_ability.as_deref();
+        }
+        None
+    }
+
+    /// Whether any target filter reachable from `def`'s effect (sub- and
+    /// else-ability chains included) is `Not { LastZoneChanged }`.
+    fn def_tree_contains_not_last_zone_changed(def: &AbilityDefinition) -> bool {
+        let mut effect = def.effect.clone();
+        let mut found = false;
+        super::each_target_filter_mut(&mut effect, &mut |filter| {
+            found |= crate::types::ability::filter_grammar_any(filter, &|node| {
+                matches!(
+                    node,
+                    crate::types::ability::FilterGrammarNode::Filter(TargetFilter::Not { filter })
+                        if matches!(filter.as_ref(), TargetFilter::LastZoneChanged)
+                )
+            });
+        });
+        found
+            || def
+                .sub_ability
+                .as_deref()
+                .is_some_and(def_tree_contains_not_last_zone_changed)
+            || def
+                .else_ability
+                .as_deref()
+                .is_some_and(def_tree_contains_not_last_zone_changed)
     }
 }
 #[cfg(test)]
