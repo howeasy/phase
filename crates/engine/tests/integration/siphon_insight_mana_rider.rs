@@ -441,7 +441,7 @@ fn court_of_locthwain(monarch: bool) {
         "\"any type\" rides onto the granted permission"
     );
     // Move to P0's main phase and cast the {G} card.
-    runner.advance_to_phase(Phase::PreCombatMain);
+    pass_priority_to(&mut runner, Phase::PreCombatMain);
     assert_eq!(runner.state().active_player, P0);
     let untapped_before = swamps
         .iter()
@@ -548,21 +548,27 @@ fn court_with_an_earlier_exile(monarch: bool) -> (GameRunner, ObjectId, ObjectId
     );
     settle(&mut runner);
     assert_eq!(runner.state().objects[&second].zone, Zone::Exile);
-    // Real priority passes, not `advance_to_phase`: that driver re-enters the
-    // step the game already sits in (`turns::auto_advance` runs the upkeep's
-    // beginning-of-step triggers again, against CR 503.1a's single putting onto
-    // the stack), so a second upkeep trigger would resolve and grant again.
+    pass_priority_to(&mut runner, Phase::PreCombatMain);
+    assert_eq!(runner.state().active_player, P0);
+    (runner, first, second, swamps)
+}
+
+/// Pass priority with real actions until the game reaches `phase`. Not
+/// `GameRunner::advance_to_phase`: that driver starts by re-entering the step the
+/// game already sits in (`turns::auto_advance` runs the upkeep's beginning-of-step
+/// triggers again), so after Court's upkeep trigger resolved it would put and
+/// resolve a second one in the same upkeep, though CR 503.1a puts the abilities
+/// that triggered at the beginning of the upkeep on the stack once, as the step begins.
+fn pass_priority_to(runner: &mut GameRunner, phase: Phase) {
     for _ in 0..8 {
-        if runner.state().phase == Phase::PreCombatMain {
-            break;
+        if runner.state().phase == phase {
+            return;
         }
         runner
             .act(GameAction::PassPriority)
             .expect("PassPriority accepted");
     }
-    assert_eq!(runner.state().phase, Phase::PreCombatMain);
-    assert_eq!(runner.state().active_player, P0);
-    (runner, first, second, swamps)
+    assert_eq!(runner.state().phase, phase, "priority passes reach {phase:?}");
 }
 
 /// Whether the engine offers casting `card` now.
