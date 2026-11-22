@@ -10,8 +10,9 @@
 //! event happens as the modes are announced (CR 603.2); the per-turn history is
 //! written once the announcement reaches the stack (CR 601.2i + CR 733.1: an
 //! undone announcement records nothing). Copies (CR 707.10, CR 700.2g) face
-//! no dilemma (a copy copies the chosen modes and chooses none, CR 700.2g). Modes drawn at
-//! random are still the controller's choice (CR 700.2b), so a nonempty random
+//! no dilemma (a copy copies the chosen modes and chooses none, CR 700.2g). No CR
+//! rule says who chooses a mode drawn at random; this reads "choose one at random"
+//! as the controller choosing one or more modes (CR 700.17), so a nonempty random
 //! draw faces one.
 //!
 //! Every named card below is the printed card, added from the curated card
@@ -569,17 +570,25 @@ fn a_cancelled_activation_records_no_dilemma() {
     assert_eq!(dilemmas(&runner, P0), 1);
 }
 
-/// R12 — CR 113.6m: Gabriel Lorca's ability works from the graveyard; paying
-/// {B} returns it to its owner's hand.
+/// R12 — CR 113.6m: Gabriel Lorca, Mirror Menace ("Whenever you face a
+/// dilemma, you may pay {B}. If you do, return this card from your graveyard to
+/// your hand.") works from the graveyard; paying the {B} taps the black source.
+/// The charm's {W}{B}{G} and Lorca's {B} are the only payments on the board, so
+/// accepting taps both Swamps (one for each {B}) while declining leaves exactly
+/// one tapped. The unpayable counterpart is `lorca_cannot_pay_without_black_mana`.
 #[test]
 fn lorca_returns_from_the_graveyard_when_paid() {
     let Some(db) = shared_card_db() else { return };
     for accept in [true, false] {
         let mut scenario = board();
         let lorca = scenario.add_real_card(P0, "Gabriel Lorca, Mirror Menace", Zone::Graveyard, db);
-        // Lorca's printed {B} in addition to Abzan Charm's {W}{B}{G}.
-        scenario.add_basic_land(P0, ManaColor::Black);
-        let charm = add_abzan_charm(&mut scenario, db);
+        // Lorca's printed {B} in addition to Abzan Charm's {W}{B}{G}. Both black
+        // sources are held by id so each payment's tap is asserted exactly.
+        let lorca_swamp = scenario.add_basic_land(P0, ManaColor::Black);
+        let plains = scenario.add_basic_land(P0, ManaColor::White);
+        let charm_swamp = scenario.add_basic_land(P0, ManaColor::Black);
+        let forest = scenario.add_basic_land(P0, ManaColor::Green);
+        let charm = scenario.add_real_card(P0, "Abzan Charm", Zone::Hand, db);
         let mut runner = scenario.build();
         cast(&mut runner, charm);
         let record = drive(
@@ -591,15 +600,79 @@ fn lorca_returns_from_the_graveyard_when_paid() {
             },
         );
         assert_eq!(record.optional_actors, vec![P0], "accept {accept}");
-        let zone = runner
-            .state()
-            .objects
-            .values()
-            .find(|object| object.name == "Gabriel Lorca, Mirror Menace")
-            .map(|object| object.zone);
         let expected = if accept { Zone::Hand } else { Zone::Graveyard };
-        assert_eq!(zone, Some(expected), "accept {accept} ({lorca:?})");
+        assert_eq!(
+            runner.state().objects[&lorca].zone,
+            expected,
+            "accept {accept}"
+        );
+        // REACH: the charm's payment tapped its {W} and {G} lands either way.
+        assert!(
+            runner.state().objects[&plains].tapped,
+            "the charm's {{W}} was paid (accept {accept})"
+        );
+        assert!(
+            runner.state().objects[&forest].tapped,
+            "the charm's {{G}} was paid (accept {accept})"
+        );
+        // The charm's {B} tapped exactly one Swamp; the other is the only black
+        // source left, so accepting taps it for Lorca's {B} and declining
+        // leaves it untapped.
+        let (lorca_tapped, charm_tapped) = (
+            runner.state().objects[&lorca_swamp].tapped,
+            runner.state().objects[&charm_swamp].tapped,
+        );
+        if accept {
+            assert!(
+                lorca_tapped && charm_tapped,
+                "both Swamps are tapped: the charm's {{B}} and Lorca's {{B}}"
+            );
+        } else {
+            assert!(
+                lorca_tapped != charm_tapped,
+                "exactly one Swamp is tapped when the payment is declined"
+            );
+        }
     }
+}
+
+/// R12b — CR 608.2d: with no black source anywhere (a Charming Prince {1}{W}
+/// board), Lorca's "you may pay {B}" is an impossible optional payment, which
+/// is declined without opening a choice window: no optional prompt is raised,
+/// the dilemma is still faced (the Prince's mode choice), and the card stays in
+/// the graveyard. Fails if the unpayable offer opened an `OptionalEffectChoice`
+/// prompt (the drive records every optional actor) or returned the card anyway.
+#[test]
+fn lorca_cannot_pay_without_black_mana() {
+    let Some(db) = shared_card_db() else { return };
+    let mut scenario = board();
+    let lorca = scenario.add_real_card(P0, "Gabriel Lorca, Mirror Menace", Zone::Graveyard, db);
+    // Charming Prince {1}{W}: the dilemma source needs no black mana.
+    for _ in 0..2 {
+        scenario.add_basic_land(P0, ManaColor::White);
+    }
+    let prince = scenario.add_real_card(P0, "Charming Prince", Zone::Hand, db);
+    let mut runner = scenario.build();
+    let life = runner.life(P0);
+    cast(&mut runner, prince);
+    let record = drive(
+        &mut runner,
+        Plan {
+            modes: vec![vec![1]],
+            ..Plan::default()
+        },
+    );
+    assert_eq!(runner.life(P0), life + 3, "REACH: the gain mode resolved");
+    assert_eq!(dilemmas(&runner, P0), 1, "REACH: the dilemma was faced");
+    assert!(
+        record.optional_actors.is_empty(),
+        "no optional prompt was raised: {record:?}"
+    );
+    assert_eq!(
+        runner.state().objects[&lorca].zone,
+        Zone::Graveyard,
+        "the card stays in the graveyard"
+    );
 }
 
 /// R13 — the per-turn history clears at the start of the next turn (the
@@ -953,7 +1026,6 @@ fn prince_exile_mode_at_target_prompt(
     runner
         .act(GameAction::SelectModes { indices: vec![2] })
         .expect("choose the exile mode");
-    eprintln!("PROBE0 after modes deferred={} stack={}", runner.state().deferred_triggers.len(), runner.state().stack.len());
     assert!(
         matches!(
             runner.state().waiting_for,
@@ -1006,7 +1078,6 @@ fn a_targeted_modal_trigger_faces_one_dilemma_and_its_observer_resolves_first() 
             target: Some(TargetRef::Object(bear)),
         })
         .expect("choose the first Bear");
-    eprintln!("PROBE deferred={} pending_trigger={} dil={}", runner.state().deferred_triggers.len(), runner.state().pending_trigger.is_some(), dilemmas(&runner, P0));
     let sources: Vec<ObjectId> = runner
         .state()
         .stack
@@ -1041,5 +1112,447 @@ fn a_targeted_modal_trigger_faces_one_dilemma_and_its_observer_resolves_first() 
         "REACH: the exile mode resolved"
     );
     assert_eq!(hand_len(&runner, P0), hand, "Seven drew exactly once");
+    assert_eq!(dilemmas(&runner, P0), 1);
+}
+
+/// R22 — CR 700.2b + CR 603.3c + CR 700.17 (edition effective 2026-11-06):
+/// Panharmonicon ("If an artifact or creature entering causes a triggered
+/// ability of a permanent you control to trigger, that ability triggers an
+/// additional time.") doubles Charming Prince's enters trigger into two separate
+/// triggered abilities, and the per-turn count "counts the number of spells
+/// and/or abilities the player has chosen one or more modes for that turn", so
+/// each instance's own mode choice faces its own dilemma: two prompts, two
+/// records, two Seven of Nine draws from one entering event. Fails if the
+/// doubled batch were counted as one dilemma, or if the second instance never
+/// reached its mode choice.
+#[test]
+fn two_modal_triggers_in_one_batch_each_face_a_dilemma() {
+    let Some(db) = shared_card_db() else { return };
+    let mut scenario = board();
+    add_seven(&mut scenario, P0, db);
+    scenario.add_real_card(P0, "Panharmonicon", Zone::Battlefield, db);
+    // Charming Prince {1}{W}.
+    for _ in 0..2 {
+        scenario.add_basic_land(P0, ManaColor::White);
+    }
+    let prince = scenario.add_real_card(P0, "Charming Prince", Zone::Hand, db);
+    let mut runner = scenario.build();
+    let hand = hand_len(&runner, P0);
+    let life = runner.life(P0);
+    cast(&mut runner, prince);
+    let record = drive(
+        &mut runner,
+        Plan {
+            modes: vec![vec![1], vec![1]],
+            ..Plan::default()
+        },
+    );
+    assert_eq!(
+        record.mode_choosers,
+        vec![P0, P0],
+        "REACH: both doubled triggers asked for their modes"
+    );
+    assert_eq!(runner.life(P0), life + 6, "REACH: both gain modes resolved");
+    assert_eq!(
+        hand_len(&runner, P0),
+        hand - 1 + 2,
+        "Seven drew exactly twice"
+    );
+    assert!(
+        runner.state().stack.is_empty(),
+        "REACH: the batch resolved to an empty stack"
+    );
+    assert_eq!(dilemmas(&runner, P0), 2);
+}
+
+/// R22b — CR 700.2b + CR 603.3c + CR 700.2c: the same doubled batch with the
+/// first Prince instance on the targeted mode ("Exile another target creature
+/// you own", answered through the `TriggerTargetSelection` prompt) and the
+/// second on "You gain 3 life". The first construction's span is released
+/// after its own drain, so both Prince instances sit below both Seven triggers:
+/// the first Seven draw resolves while the first Bear is still on the battlefield.
+/// Fails if the deferred sibling were placed above the observers, or if either
+/// construction recorded no dilemma.
+#[test]
+fn two_modal_triggers_first_targeted_each_face_a_dilemma() {
+    let Some(db) = shared_card_db() else { return };
+    let mut scenario = board();
+    let seven = add_seven(&mut scenario, P0, db);
+    let bear = scenario.add_creature(P0, "Owned Bear A", 2, 2).id();
+    scenario.add_creature(P0, "Owned Bear B", 2, 2);
+    scenario.add_real_card(P0, "Panharmonicon", Zone::Battlefield, db);
+    // Charming Prince {1}{W}.
+    for _ in 0..2 {
+        scenario.add_basic_land(P0, ManaColor::White);
+    }
+    let prince = scenario.add_real_card(P0, "Charming Prince", Zone::Hand, db);
+    let mut runner = scenario.build();
+    let hand = hand_len(&runner, P0);
+    let life = runner.life(P0);
+    cast(&mut runner, prince);
+    for _ in 0..8 {
+        match runner.state().waiting_for.clone() {
+            WaitingFor::AbilityModeChoice { .. } => break,
+            WaitingFor::OrderTriggers { .. } => {
+                drain_order_triggers_with_identity(runner.state_mut());
+            }
+            WaitingFor::Priority { .. } => {
+                runner
+                    .act(GameAction::PassPriority)
+                    .expect("pass priority so the Prince resolves");
+            }
+            other => panic!("unexpected prompt {other:?}"),
+        }
+    }
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::AbilityModeChoice { player: P0, .. }
+        ),
+        "REACH: the first doubled trigger asks P0 for its modes: {:?}",
+        runner.state().waiting_for
+    );
+    runner
+        .act(GameAction::SelectModes { indices: vec![2] })
+        .expect("choose the exile mode on the first trigger");
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::TriggerTargetSelection { .. }
+        ),
+        "REACH: the exile mode asks for its target: {:?}",
+        runner.state().waiting_for
+    );
+    runner
+        .act(GameAction::ChooseTarget {
+            target: Some(TargetRef::Object(bear)),
+        })
+        .expect("choose the first Bear");
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::AbilityModeChoice { player: P0, .. }
+        ),
+        "REACH: the second doubled trigger asks P0 for its modes: {:?}",
+        runner.state().waiting_for
+    );
+    runner
+        .act(GameAction::SelectModes { indices: vec![1] })
+        .expect("choose the gain mode on the second trigger");
+    assert_eq!(dilemmas(&runner, P0), 2);
+    let sources: Vec<ObjectId> = runner
+        .state()
+        .stack
+        .iter()
+        .map(|entry| entry.source_id)
+        .collect();
+    assert_eq!(
+        sources,
+        vec![prince, prince, seven, seven],
+        "both Prince triggers below both Seven triggers"
+    );
+    runner.pass_both_players();
+    assert_eq!(
+        hand_len(&runner, P0),
+        hand,
+        "REACH: the top of the stack was Seven's draw"
+    );
+    assert_eq!(
+        runner.state().objects[&bear].zone,
+        Zone::Battlefield,
+        "the first Bear survives the first Seven trigger"
+    );
+    drive(&mut runner, Plan::default());
+    assert_eq!(
+        runner.state().objects[&bear].zone,
+        Zone::Exile,
+        "REACH: the targeted mode resolved"
+    );
+    assert_eq!(runner.life(P0), life + 3, "REACH: the gain mode resolved");
+    assert_eq!(
+        hand_len(&runner, P0),
+        hand + 1,
+        "Seven drew exactly twice, the Prince left the hand"
+    );
+    assert_eq!(dilemmas(&runner, P0), 2);
+    assert!(
+        runner.state().stack.is_empty(),
+        "REACH: the batch resolved to an empty stack"
+    );
+}
+
+/// R1c — CR 601.2b + CR 700.2a + CR 700.2c: Abzan Charm ("Choose one —
+/// • Exile target creature with power 3 or greater. • You draw two cards and
+/// you lose 2 life. • Distribute two +1/+1 counters among one or two target
+/// creatures.") cast to completion on its targeted mode faces exactly one
+/// dilemma (CR 700.17, edition effective 2026-11-06): Seven of Nine draws once
+/// while the charm exiles the chosen Giant and leaves the other alone. Fails if
+/// a targeted modal spell recorded no dilemma, or one per prompt (mode plus
+/// target).
+#[test]
+fn a_modal_spell_with_a_targeted_mode_faces_one_dilemma_when_cast_to_completion() {
+    let Some(db) = shared_card_db() else { return };
+    let mut scenario = board();
+    add_seven(&mut scenario, P0, db);
+    // Two legal exile targets, so the mode raises its target prompt.
+    let giant = scenario.add_creature(P1, "P1 Giant", 4, 4).id();
+    let second_giant = scenario.add_creature(P1, "P1 Second Giant", 4, 4).id();
+    let charm = add_abzan_charm(&mut scenario, db);
+    let mut runner = scenario.build();
+    let hand = hand_len(&runner, P0);
+    cast(&mut runner, charm);
+    let record = drive(
+        &mut runner,
+        Plan {
+            modes: vec![vec![0]],
+            targets: vec![TargetRef::Object(giant)],
+            ..Plan::default()
+        },
+    );
+    assert_eq!(
+        record.mode_choosers,
+        vec![P0],
+        "REACH: the charm's mode prompt was answered"
+    );
+    assert_eq!(
+        runner.state().objects[&giant].zone,
+        Zone::Exile,
+        "REACH: the targeted mode resolved"
+    );
+    assert_eq!(
+        runner.state().objects[&second_giant].zone,
+        Zone::Battlefield,
+        "only the chosen target was exiled"
+    );
+    assert!(
+        runner.state().stack.is_empty(),
+        "REACH: the stack emptied at priority"
+    );
+    assert_eq!(
+        hand_len(&runner, P0),
+        hand - 1 + 1,
+        "Seven drew exactly once"
+    );
+    assert_eq!(dilemmas(&runner, P0), 1);
+}
+
+/// R5e — CR 603.3c + CR 700.2b + CR 700.2c: Elim Garak, Simple Tailor
+/// ("Whenever you face a dilemma, each opponent loses 2 life and you gain 2
+/// life.") is the only other creature P0 owns, so the Prince's "Exile another
+/// target creature you own" mode has exactly one legal target and the engine
+/// auto-selects it: no `TriggerTargetSelection` prompt, the construction still
+/// faces its one dilemma, and per the ruling "An ability that triggers
+/// whenever a player faces a dilemma will resolve before the spell or ability
+/// that caused it to trigger" Garak's trigger resolves (P1 −2, P0 +2) while
+/// Garak is still on the battlefield — the Prince's trigger exiles him
+/// afterwards. Fails if the auto-targeted construction skipped the dilemma
+/// record, or if the observer resolved only after the ability that caused it.
+#[test]
+fn a_modal_trigger_with_a_single_legal_target_faces_one_dilemma() {
+    let Some(db) = shared_card_db() else { return };
+    let mut scenario = board();
+    let garak = scenario.add_real_card(P0, "Elim Garak, Simple Tailor", Zone::Battlefield, db);
+    // Charming Prince {1}{W}.
+    for _ in 0..2 {
+        scenario.add_basic_land(P0, ManaColor::White);
+    }
+    let prince = scenario.add_real_card(P0, "Charming Prince", Zone::Hand, db);
+    let mut runner = scenario.build();
+    let lives = (runner.life(P0), runner.life(P1));
+    cast(&mut runner, prince);
+    for _ in 0..8 {
+        if matches!(
+            runner.state().waiting_for,
+            WaitingFor::AbilityModeChoice { .. }
+        ) {
+            break;
+        }
+        runner
+            .act(GameAction::PassPriority)
+            .expect("pass priority so the Prince resolves");
+    }
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::AbilityModeChoice { player: P0, .. }
+        ),
+        "REACH: the enters trigger asks P0 for its modes: {:?}",
+        runner.state().waiting_for
+    );
+    runner
+        .act(GameAction::SelectModes { indices: vec![2] })
+        .expect("choose the exile mode");
+    assert!(
+        !matches!(
+            runner.state().waiting_for,
+            WaitingFor::TriggerTargetSelection { .. }
+        ),
+        "the single legal target was auto-selected: {:?}",
+        runner.state().waiting_for
+    );
+    let sources: Vec<ObjectId> = runner
+        .state()
+        .stack
+        .iter()
+        .map(|entry| entry.source_id)
+        .collect();
+    assert_eq!(
+        sources,
+        vec![prince, garak],
+        "REACH: the Prince's trigger with Garak's dilemma trigger above it"
+    );
+    assert_eq!(dilemmas(&runner, P0), 1);
+    runner.pass_both_players();
+    assert_eq!(
+        (runner.life(P0), runner.life(P1)),
+        (lives.0 + 2, lives.1 - 2),
+        "REACH: Garak's trigger resolved first, applied once"
+    );
+    assert_eq!(
+        runner.state().objects[&garak].zone,
+        Zone::Battlefield,
+        "the Prince's trigger has not resolved yet"
+    );
+    drive(&mut runner, Plan::default());
+    assert_eq!(
+        runner.state().objects[&garak].zone,
+        Zone::Exile,
+        "REACH: the exile mode resolved"
+    );
+    assert_eq!(
+        (runner.life(P0), runner.life(P1)),
+        (lives.0 + 2, lives.1 - 2),
+        "Garak's effect applied exactly once"
+    );
+    assert_eq!(dilemmas(&runner, P0), 1);
+}
+
+/// R5f — CR 714.3a + CR 700.2b + CR 603.3c: Summon: Magus Sisters ("I, II,
+/// III — Choose one at random — • Combine Powers! — Put three +1/+1 counters on
+/// target creature. • Defense! — Put a shield counter on target creature. You
+/// gain 3 life. • Fight! — This creature fights up to one target creature an
+/// opponent controls.") enters with its first lore counter and chapter I draws
+/// a mode through the seeded RNG. The P1 Bear is a legal target of every drawn
+/// mode (the fight mode's "up to one" slot holds both the empty and the Bear
+/// assignment, so no mode auto-selects), so whichever mode the fixed scenario
+/// seed draws, the half-built chapter entry waits alone on the stack with no
+/// Seven of Nine trigger above it and no dilemma recorded; the record and the
+/// observer arrive only when the target choice finishes the construction,
+/// exactly as on the prompted path. The outcome is asserted per drawn mode
+/// (three +1/+1 counters, or a shield counter with 3 life, or the fight
+/// killing the Bear) — the row pins the invariant, not one seed's draw. Fails
+/// if the random draw recorded the dilemma before the construction finished,
+/// or placed the observer above the half-built entry.
+#[test]
+fn a_random_modal_trigger_with_a_targeted_mode_faces_one_dilemma() {
+    let Some(db) = shared_card_db() else { return };
+    let mut scenario = board();
+    let seven = add_seven(&mut scenario, P0, db);
+    let bear = scenario.add_creature(P1, "P1 Bear", 2, 2).id();
+    // Summon: Magus Sisters {4}{G}.
+    for _ in 0..5 {
+        scenario.add_basic_land(P0, ManaColor::Green);
+    }
+    let saga = scenario.add_real_card(P0, "Summon: Magus Sisters", Zone::Hand, db);
+    let mut runner = scenario.build();
+    let hand = hand_len(&runner, P0);
+    let life = runner.life(P0);
+    cast(&mut runner, saga);
+    for _ in 0..8 {
+        if matches!(
+            runner.state().waiting_for,
+            WaitingFor::TriggerTargetSelection { .. }
+        ) {
+            break;
+        }
+        runner
+            .act(GameAction::PassPriority)
+            .expect("pass priority so the Saga resolves");
+    }
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::TriggerTargetSelection { .. }
+        ),
+        "REACH: the drawn mode asks for its target: {:?}",
+        runner.state().waiting_for
+    );
+    let sources: Vec<ObjectId> = runner
+        .state()
+        .stack
+        .iter()
+        .map(|entry| entry.source_id)
+        .collect();
+    assert_eq!(
+        sources,
+        vec![saga],
+        "only the half-built chapter trigger is on the stack"
+    );
+    assert_eq!(hand_len(&runner, P0), hand - 1, "Seven has not drawn yet");
+    assert_eq!(
+        dilemmas(&runner, P0),
+        0,
+        "the draw is latched, not recorded"
+    );
+    runner
+        .act(GameAction::ChooseTarget {
+            target: Some(TargetRef::Object(bear)),
+        })
+        .expect("choose the Bear for the drawn mode");
+    let sources: Vec<ObjectId> = runner
+        .state()
+        .stack
+        .iter()
+        .map(|entry| entry.source_id)
+        .collect();
+    assert_eq!(
+        sources,
+        vec![saga, seven],
+        "REACH: the chapter trigger, with Seven's dilemma trigger above it"
+    );
+    assert_eq!(dilemmas(&runner, P0), 1);
+    runner.pass_both_players();
+    assert_eq!(
+        hand_len(&runner, P0),
+        hand,
+        "REACH: Seven's draw resolved first"
+    );
+    drive(&mut runner, Plan::default());
+    let shield = runner.state().objects[&bear]
+        .counters
+        .get(&CounterType::Shield)
+        .copied()
+        .unwrap_or(0);
+    if runner.state().objects[&bear].zone == Zone::Graveyard {
+        // Fight! was drawn: the 5/5 Saga fought the Bear.
+        assert_eq!(
+            (runner.life(P0), shield, plus_counters(&runner, bear)),
+            (life, 0, 0),
+            "the fight killed the Bear and nothing else applied"
+        );
+    } else if runner.life(P0) == life + 3 {
+        // Defense! was drawn.
+        assert_eq!(
+            (shield, plus_counters(&runner, bear)),
+            (1, 0),
+            "the shield counter landed and nothing else applied"
+        );
+    } else {
+        // Combine Powers! was drawn.
+        assert_eq!(
+            (plus_counters(&runner, bear), shield, runner.life(P0)),
+            (3, 0, life),
+            "three +1/+1 counters landed and nothing else applied"
+        );
+    }
+    assert_eq!(
+        hand_len(&runner, P0),
+        hand - 1 + 1,
+        "Seven drew exactly once"
+    );
+    assert!(
+        runner.state().stack.is_empty(),
+        "REACH: the chapter resolved to an empty stack"
+    );
     assert_eq!(dilemmas(&runner, P0), 1);
 }

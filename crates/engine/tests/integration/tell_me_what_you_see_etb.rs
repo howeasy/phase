@@ -179,11 +179,6 @@ fn decline_opponent_loses_four_and_controller_surveils_one() {
     let p0_hand_after_cast = hand_len(&runner, P0) - 1;
 
     let record = cast_and_resolve(&mut runner, card, P1, false);
-    eprintln!(
-        "R1 record: {record:?}; life P0 {} P1 {}",
-        runner.life(P0),
-        runner.life(P1)
-    );
 
     // CR 118.12: only the targeted opponent decides whether P0 draws.
     assert_eq!(record.optional_actors, vec![P1]);
@@ -217,11 +212,6 @@ fn accept_controller_draws_one_and_nobody_surveils() {
     let p0_hand_after_cast = hand_len(&runner, P0) - 1;
 
     let record = cast_and_resolve(&mut runner, card, P1, true);
-    eprintln!(
-        "R2 record: {record:?}; life P0 {} P1 {}",
-        runner.life(P0),
-        runner.life(P1)
-    );
 
     // CR 118.12: the accept branch ran — P1 decided and P0 drew one card.
     assert_eq!(record.optional_actors, vec![P1]);
@@ -249,11 +239,6 @@ fn enters_trigger_offers_only_opponents_as_targets() {
     let (mut runner, card) = scenario(2, db);
     let p1_life = runner.life(P1);
     let record = cast_and_resolve(&mut runner, card, P1, false);
-    eprintln!(
-        "M1 record: {record:?}; life P0 {} P1 {}",
-        runner.life(P0),
-        runner.life(P1)
-    );
     match record.target_prompts.as_slice() {
         [] => {
             // CR 115.1: with no prompt the only legal target was auto-chosen;
@@ -285,12 +270,6 @@ fn three_players_only_the_targeted_opponent_decides() {
     let p1_life = runner.life(P1);
     let p2_life = runner.life(P2);
     let record = cast_and_resolve(&mut runner, card, P2, false);
-    eprintln!(
-        "M2 record: {record:?}; life P0 {} P1 {} P2 {}",
-        runner.life(P0),
-        runner.life(P1),
-        runner.life(P2)
-    );
     assert_eq!(record.optional_actors, vec![P2]);
     assert_eq!(runner.life(P0), p0_life);
     assert_eq!(runner.life(P1), p1_life);

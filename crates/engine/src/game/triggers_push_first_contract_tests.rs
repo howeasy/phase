@@ -468,9 +468,11 @@ fn push_first_no_legal_modes_modal_trigger_dropped_silently() {
     assert_eq!(face_dilemma_history(&state, PlayerId(0)), 0);
 }
 
-/// CR 700.2b: the controller chooses the mode; "at random" fixes how it is
-/// picked. A modal triggered ability declared "choose one at random" (Cult of
-/// Skaro) must NOT prompt the controller with `AbilityModeChoice` — the mode is
+/// No CR rule says who chooses a mode drawn at random; this reads "choose one
+/// at random" as the controller choosing one or more modes (CR 700.17), so the
+/// draw faces a dilemma. A modal triggered ability declared "choose one at
+/// random" (Cult of Skaro) must NOT prompt the controller with
+/// `AbilityModeChoice` — the mode is
 /// drawn via `state.rng` and the ability reaches the stack with a resolved,
 /// non-modal mode. Regression test for the unconsumed-random-axis defect.
 #[test]
@@ -587,8 +589,8 @@ fn random_modal_trigger_resolves_without_prompting() {
         matches!(labels.as_slice(), [label] if label == "A" || label == "B"),
         "the random modal trigger must retain the label of the engine-selected mode, got {labels:?}",
     );
-    // CR 700.2b: the controller still chooses the randomly drawn mode, so it
-    // faces one dilemma — the event in the dispatch's event custody, and one
+    // No CR rule says who chooses a mode drawn at random; read as the controller
+    // choosing it, the draw faces one dilemma — the event in the dispatch's event custody, and one
     // history entry (CR 700.17, edition effective 2026-11-06).
     assert_eq!(face_dilemma_events(&events, PlayerId(0)), 1);
     assert_eq!(face_dilemma_history(&state, PlayerId(0)), 1);

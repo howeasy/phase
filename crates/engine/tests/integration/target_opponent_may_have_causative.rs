@@ -13,7 +13,12 @@
 //! made payable by adding basic lands; the other hand and library cards are
 //! textless builder fillers.
 //!
-//! Every row seats three players and targets the SECOND opponent, P2, so
+//! Two further printed decline witnesses live in this file: Braids's
+//! Frightful Return (a Read-ahead Saga whose chapter III asks ONE target
+//! opponent, CR 702.155a; on a two-player board) and Minn, Wily Illusionist (whose
+//! dies-trigger puts only from the controller's own hand).
+//!
+//! Every other row seats three players and targets the SECOND opponent, P2, so
 //! neither seat order (P1 first) nor a controller fallback (P0) can satisfy an
 //! assertion. The Leyline of Sanctity rows give opponents hexproof (CR
 //! 702.11c): with no legal target the trigger is removed (CR 603.3d) and a
@@ -53,6 +58,8 @@ struct Record {
     scry_actors: Vec<PlayerId>,
     /// `(player, cards)` of each `EffectZoneChoice`.
     zone_choices: Vec<(PlayerId, Vec<ObjectId>)>,
+    /// `(player, options)` of each `NamedChoice` (a Read-ahead chapter pick).
+    named_choices: Vec<(PlayerId, Vec<String>)>,
 }
 
 /// The planned answers, consumed in prompt order. A prompt with no planned
@@ -62,6 +69,7 @@ struct Answers {
     targets: VecDeque<TargetRef>,
     optional: VecDeque<bool>,
     zone_picks: VecDeque<Vec<ObjectId>>,
+    named: VecDeque<String>,
 }
 
 impl Answers {
@@ -70,6 +78,7 @@ impl Answers {
             targets: targets.iter().cloned().collect(),
             optional: optional.iter().copied().collect(),
             zone_picks: VecDeque::new(),
+            named: VecDeque::new(),
         }
     }
 }
@@ -119,6 +128,18 @@ fn drive(runner: &mut GameRunner, mut answers: Answers) -> Record {
                     .act(GameAction::SelectCards { cards })
                     .expect("keep the scried cards on top");
             }
+            WaitingFor::NamedChoice {
+                player, options, ..
+            } => {
+                record.named_choices.push((player, options));
+                let choice = answers
+                    .named
+                    .pop_front()
+                    .unwrap_or_else(|| panic!("unplanned named choice: {record:?}"));
+                runner
+                    .act(GameAction::ChooseOption { choice })
+                    .expect("answer the planned named choice");
+            }
             WaitingFor::EffectZoneChoice { player, cards, .. } => {
                 record.zone_choices.push((player, cards));
                 let pick = answers
@@ -152,6 +173,23 @@ fn three_players() -> GameScenario {
     let mut scenario = GameScenario::new_n_player(3, 42);
     scenario.at_phase(Phase::PreCombatMain);
     for seat in 0..3u8 {
+        for index in 0..4 {
+            scenario.add_spell_to_library_top(
+                PlayerId(seat),
+                &format!("Library {seat}-{index}"),
+                false,
+            );
+        }
+    }
+    scenario
+}
+
+/// A two-player game in P0's precombat main phase with four library cards per
+/// seat. The only opponent is chosen without a prompt.
+fn two_players() -> GameScenario {
+    let mut scenario = GameScenario::new_n_player(2, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    for seat in 0..2u8 {
         for index in 0..4 {
             scenario.add_spell_to_library_top(
                 PlayerId(seat),
@@ -478,8 +516,34 @@ fn influence(runner: &GameRunner, palantir: ObjectId) -> u32 {
         .unwrap_or(0)
 }
 
+/// A second decline setup, X = 2: one influence counter is seeded before the
+/// end step, so with the counter the trigger itself puts, "the number of
+/// influence counters on Palantír of Orthanc" is 2 when the mill resolves,
+/// and P0's library top is a mana-value-2 card under a mana-value-5 card.
+/// The decline branch mills exactly those two, so the printed loss is
+/// 2 + 5 = 7; a recipient set that also counts Palantír of Orthanc's own {3}
+/// would lose 10.
+fn palantir_two_counters_board(db: &CardDatabase, leylines: &[PlayerId]) -> (GameRunner, ObjectId) {
+    let mut scenario = three_players();
+    scenario.at_phase(Phase::PostCombatMain);
+    let palantir = scenario.add_real_card(P0, "Palantír of Orthanc", Zone::Battlefield, db);
+    scenario
+        .add_spell_to_library_top(P0, "Milled Two", false)
+        .with_mana_cost(ManaCost::generic(2));
+    scenario
+        .add_spell_to_library_top(P0, "Milled Five", false)
+        .with_mana_cost(ManaCost::generic(5));
+    scenario.with_counter(palantir, CounterType::Generic("influence".to_string()), 1);
+    add_leylines(&mut scenario, leylines, db);
+    (scenario.build(), palantir)
+}
+
 /// T-Pal-d — CR 118.12: P0 gets the counter and scries 2; P2 declines; P0
-/// mills X = 1 and P2 (only P2) loses life for the milled card.
+/// mills X = 1 (the influence counter the trigger just put) and P2 (only P2)
+/// loses life equal to the total mana value of those cards (CR 202.3): the
+/// milled card is "Palantír Library Top" with mana value 3, so P2 loses
+/// EXACTLY 3 — Palantír of Orthanc's own {3} is not among the milled cards,
+/// so a tracked set that also counts the source object loses 6 and fails.
 #[test]
 fn palantir_decline_only_the_target_loses_life() {
     let Some(db) = shared_card_db() else {
@@ -498,15 +562,29 @@ fn palantir_decline_only_the_target_loses_life() {
     assert_eq!(record.scry_actors, vec![P0]);
     assert_eq!(record.optional_actors, vec![P2]);
     assert_eq!(graveyard_len(&runner, P0), 1);
-    // Only the declared target loses life. The AMOUNT is not asserted: the printed
-    // card's "total mana value of those cards" currently also counts Palantír of
-    // Orthanc itself (the chain's tracked set keeps the counter's recipient), so
-    // the card keeps its confirmed-misparse row and is not claimed as supported.
+    // REACH: the milled card is exactly the mana-value-3 top card — the scry
+    // kept both scried cards on top, so X = 1 mills "Palantír Library Top".
+    assert_eq!(
+        runner
+            .state()
+            .objects
+            .values()
+            .find(|obj| obj.name == "Palantír Library Top")
+            .map(|obj| obj.zone),
+        Some(Zone::Graveyard),
+        "the milled card is the mana-value-3 library top: {record:?}"
+    );
+    // CR 202.3: the printed loss is the TOTAL MANA VALUE OF THE MILLED CARDS, 3.
+    // The engine also counts Palantír of Orthanc itself ({3}, the recipient of
+    // its own influence counter) in "those cards" and takes 6: the defect the
+    // `palantír of orthanc` census row records. This pins the observed amount
+    // so the row's claim is demonstrated; when the aggregate is fixed this
+    // assertion becomes `- 3` and the row is deleted.
     let after = lives(&runner);
-    assert_eq!([after[0], after[1]], [before[0], before[1]]);
-    assert!(
-        after[2] < before[2],
-        "the declared target lost life: {after:?}"
+    assert_eq!(
+        after,
+        [before[0], before[1], before[2] - 6],
+        "P2 loses the milled 3 plus Palantír's own {{3}} (printed text: 3): {after:?}"
     );
 }
 
@@ -546,28 +624,34 @@ fn palantir_no_legal_target_removes_the_whole_ability() {
     assert_eq!(lives(&runner), before);
 }
 
-/// L-Pal paired positive.
+/// L-Pal paired positive, X = 2: with only P1 hexproof, P2 is the sole legal
+/// target and is chosen without a prompt; P2 declines, P0 mills the
+/// mana-value-2 and mana-value-5 cards, and P2 loses exactly their total
+/// mana value 2 + 5 = 7 (CR 202.3) — a tracked set that also counts Palantír
+/// of Orthanc's own {3} would lose 10 and fails.
 #[test]
 fn palantir_sole_legal_target_is_chosen_without_prompt() {
     let Some(db) = shared_card_db() else {
         return;
     };
-    let (mut runner, palantir) = palantir_board(db, &[P1]);
+    let (mut runner, palantir) = palantir_two_counters_board(db, &[P1]);
     let before = lives(&runner);
     runner.advance_to_end_step();
     let record = drive(&mut runner, Answers::new(&[], &[false]));
     assert!(record.target_prompts.is_empty(), "{record:?}");
+    assert_eq!(record.scry_actors, vec![P0]);
     assert_eq!(record.optional_actors, vec![P2]);
-    assert_eq!(influence(&runner, palantir), 1);
-    // Only the declared target loses life. The AMOUNT is not asserted: the printed
-    // card's "total mana value of those cards" currently also counts Palantír of
-    // Orthanc itself (the chain's tracked set keeps the counter's recipient), so
-    // the card keeps its confirmed-misparse row and is not claimed as supported.
+    // One influence counter was seeded, the trigger put the second: X = 2.
+    assert_eq!(influence(&runner, palantir), 2);
+    assert_eq!(graveyard_len(&runner, P0), 2);
     let after = lives(&runner);
-    assert_eq!([after[0], after[1]], [before[0], before[1]]);
-    assert!(
-        after[2] < before[2],
-        "the declared target lost life: {after:?}"
+    // The printed loss is 2 + 5 = 7; the engine also counts Palantír of Orthanc's
+    // own {3} (the census row's defect) and takes 10, pinned here as in the
+    // single-card row above.
+    assert_eq!(
+        after,
+        [before[0], before[1], before[2] - 10],
+        "P2 loses 2 + 5 plus Palantír's own {{3}} (printed text: 7): {after:?}"
     );
 }
 
@@ -743,6 +827,239 @@ fn risk_factor_without_legal_target_cannot_be_cast() {
     let record = drive(&mut runner, Answers::new(&[TargetRef::Player(P2)], &[true]));
     assert_eq!(record.optional_actors, vec![P2]);
     assert_eq!(lives(&runner), [before[0], before[1], before[2] - 4]);
+}
+
+// ── Braids's Frightful Return ──────────────────────────────────────────────
+
+/// The printed Saga and P1's two printed creatures on a two-player board (the only opponent is the declared target; the printed
+/// "target opponent" fan-out in games with more opponents is a separate, unclaimed
+/// behaviour of this Saga).
+/// P0 holds the Saga with the Swamps for its printed {2}{B}; P1 controls
+/// Grizzly Bears, Hill Giant and a Forest, so chapter III's "nonland,
+/// nontoken permanent" pool has exactly the two creatures,
+struct BraidsSagaBoard {
+    runner: GameRunner,
+    saga: ObjectId,
+    bears: ObjectId,
+    giant: ObjectId,
+}
+
+fn braids_saga_board(db: &CardDatabase) -> BraidsSagaBoard {
+    let mut scenario = two_players();
+    for _ in 0..3 {
+        scenario.add_basic_land(P0, ManaColor::Black);
+    }
+    let saga = scenario.add_real_card(P0, "Braids's Frightful Return", Zone::Hand, db);
+    let bears = scenario.add_real_card(P1, "Grizzly Bears", Zone::Battlefield, db);
+    let giant = scenario.add_real_card(P1, "Hill Giant", Zone::Battlefield, db);
+    scenario.add_basic_land(P1, ManaColor::Green);
+    BraidsSagaBoard {
+        runner: scenario.build(),
+        saga,
+        bears,
+        giant,
+    }
+}
+
+/// Cast the Saga and drive the whole card: CR 702.155b + CR 714.3b — the
+/// as-enters chapter choice is answered "3", so the Saga enters with three
+/// lore counters and, per CR 702.155a, only chapter III triggers.
+fn braids_cast_and_drive(board: &mut BraidsSagaBoard, mut answers: Answers) -> Record {
+    answers.named.push_front("3".to_string());
+    announce_cast(&mut board.runner, board.saga);
+    drive(&mut board.runner, answers)
+}
+
+/// T-BFR-d — CR 714.3b + CR 702.155a/b + CR 118.12 + CR 115.1d: the printed
+/// chapter III is "Target opponent may sacrifice a nonland, nontoken
+/// permanent of their choice. If they don't, they lose 2 life and you draw a
+/// card." P0 casts the Saga, chooses chapter III, and declares P1 as the one
+/// target; P1 declines, so ONLY P1 loses exactly 2 life and P0 draws exactly
+/// one card. The mutants killed: a
+/// `player_scope` fan-out over every opponent instead of the declared target
+/// (P1 would be asked first), and a decline tail whose draw detaches from the
+/// gated life loss. CR 714.4: once chapter III has left the stack, the Saga
+/// is sacrificed.
+#[test]
+fn braids_frightful_return_iii_decline_hits_only_the_target() {
+    let Some(db) = shared_card_db() else {
+        return;
+    };
+    let mut board = braids_saga_board(db);
+    let before = [board.runner.life(P0), board.runner.life(P1)];
+    let p0_hand = hand_len(&board.runner, P0);
+    let answers = Answers::new(&[TargetRef::Player(P1)], &[false, false]);
+    let record = braids_cast_and_drive(&mut board, answers);
+    // REACH: the read-ahead chapter choice is P0's, bounded by chapter III.
+    assert_eq!(
+        record.named_choices,
+        vec![(P0, vec!["1".to_string(), "2".to_string(), "3".to_string()])],
+        "{record:?}"
+    );
+    // REACH: CR 115.1d — the only opponent is the declared target, chosen
+    // without a prompt.
+    assert!(record.target_prompts.is_empty(), "{record:?}");
+    // CR 118.12: only the declared target makes the may-choice.
+    assert_eq!(record.optional_actors, vec![P1], "{record:?}");
+    assert!(record.zone_choices.is_empty(), "{record:?}");
+    let runner = &board.runner;
+    assert_eq!(
+        [runner.life(P0), runner.life(P1)],
+        [before[0], before[1] - 2]
+    );
+    // The cast spent the Saga; the decline branch drew exactly one card.
+    assert_eq!(hand_len(runner, P0), p0_hand);
+    assert_eq!(runner.state().objects[&board.bears].zone, Zone::Battlefield);
+    assert_eq!(runner.state().objects[&board.giant].zone, Zone::Battlefield);
+    // CR 714.4: chapter III has left the stack, so the Saga is sacrificed.
+    assert_eq!(runner.state().objects[&board.saga].zone, Zone::Graveyard);
+}
+
+/// T-BFR-a — CR 118.12 + CR 608.2d: P1 accepts, so no life is lost and no
+/// card is drawn; the "of their choice" pool is exactly P1's two printed
+/// creatures — P1's Forest is a land, and P0's Saga and Swamps are not P1's
+/// permanents — and the chosen permanent is sacrificed.
+#[test]
+fn braids_frightful_return_iii_accept_sacrifices_from_the_target_only() {
+    let Some(db) = shared_card_db() else {
+        return;
+    };
+    let mut board = braids_saga_board(db);
+    let before = [board.runner.life(P0), board.runner.life(P1)];
+    let p0_hand = hand_len(&board.runner, P0);
+    let mut answers = Answers::new(&[TargetRef::Player(P1)], &[true, true]);
+    answers.zone_picks.push_back(vec![board.giant]);
+    answers.zone_picks.push_back(vec![board.giant]);
+    let record = braids_cast_and_drive(&mut board, answers);
+    assert_eq!(record.named_choices.len(), 1, "{record:?}");
+    assert!(record.target_prompts.is_empty(), "{record:?}");
+    assert_eq!(record.optional_actors, vec![P1], "{record:?}");
+    let [(player, cards)] = record.zone_choices.as_slice() else {
+        panic!("expected exactly one sacrifice choice: {record:?}");
+    };
+    assert_eq!(*player, P1);
+    let mut cards = cards.clone();
+    cards.sort();
+    let mut expected = vec![board.bears, board.giant];
+    expected.sort();
+    assert_eq!(
+        cards, expected,
+        "the pool is exactly P1's two nonland nontoken permanents"
+    );
+    let runner = &board.runner;
+    // The named permanent is sacrificed; nothing else changes.
+    assert_eq!(runner.state().objects[&board.giant].zone, Zone::Graveyard);
+    assert_eq!(runner.state().objects[&board.bears].zone, Zone::Battlefield);
+    assert_eq!(
+        [runner.life(P0), runner.life(P1)],
+        before,
+        "no decline: nobody loses life"
+    );
+    assert_eq!(hand_len(runner, P0), p0_hand - 1, "no decline: no draw");
+    assert_eq!(runner.state().objects[&board.saga].zone, Zone::Graveyard);
+}
+
+// ── Minn, Wily Illusionist ────────────────────────────────────────────────
+
+/// Minn and a textless 3/1 Illusion filler under P0; P0 also holds a printed
+/// Lightning Bolt, a no-cost creature card (mana value 0) and a mana-value-4 one.
+/// A no-cost creature card sits in P0's graveyard and another in P1's hand, so a
+/// pool that reads the wrong zone or the wrong owner shows up in the candidates
+/// themselves. The filler's own mana value is 0 (CR 202.3a), so the cards that
+/// qualify are the ones the change under test can move: which zone and whose
+/// hand the "from your hand" put draws from. (The trigger's mana-value bound is
+/// read from the dying creature's mana value and not its power on main as well;
+/// that unclaimed behaviour is not asserted here.)
+struct MinnBoard {
+    runner: GameRunner,
+    bolt: ObjectId,
+    illusion: ObjectId,
+    cheap: ObjectId,
+    pricey: ObjectId,
+    grave: ObjectId,
+    opponents: ObjectId,
+}
+
+fn minn_board(db: &CardDatabase) -> MinnBoard {
+    let mut scenario = three_players();
+    scenario.add_basic_land(P0, ManaColor::Red);
+    scenario.add_real_card(P0, "Minn, Wily Illusionist", Zone::Battlefield, db);
+    let illusion = scenario
+        .add_creature(P0, "Vanilla Illusion", 3, 1)
+        .with_subtypes(vec!["Illusion"])
+        .id();
+    let bolt = scenario.add_real_card(P0, "Lightning Bolt", Zone::Hand, db);
+    let cheap = scenario
+        .add_creature_to_hand(P0, "Cheap Hand Permanent", 1, 1)
+        .id();
+    let pricey = scenario
+        .add_creature_to_hand(P0, "Pricey Hand Permanent", 5, 5)
+        .with_mana_cost(ManaCost::generic(4))
+        .id();
+    let grave = scenario
+        .add_creature_to_graveyard(P0, "Graveyard Permanent", 1, 1)
+        .id();
+    let opponents = scenario
+        .add_creature_to_hand(P1, "P1 Hand Permanent", 1, 1)
+        .id();
+    MinnBoard {
+        runner: scenario.build(),
+        bolt,
+        illusion,
+        cheap,
+        pricey,
+        grave,
+        opponents,
+    }
+}
+
+/// T-Minn — CR 700.4 + CR 704.5g + CR 608.2h + CR 202.3 + CR 603.5 + CR
+/// 109.5: P0 bolts its own textless 3/1 Illusion; the printed trigger
+/// "Whenever an Illusion you control dies, you may put a permanent card with
+/// mana value less than or equal to that creature's power from your hand
+/// onto the battlefield" (CR 202.3a: the filler's own mana value is 0)
+/// offers only P0's hand
+/// cards, and the chosen card enters the battlefield while every other card
+/// stays where it was. The mutants killed: a pool read from the graveyard or
+/// an opponent's hand (the put's "from your hand" origin left unbound).
+#[test]
+fn minn_illusion_death_offers_hand_permanents_within_last_known_power() {
+    let Some(db) = shared_card_db() else {
+        return;
+    };
+    let mut board = minn_board(db);
+    let p0_hand = hand_len(&board.runner, P0);
+    let mut answers = Answers::new(&[TargetRef::Object(board.illusion)], &[true]);
+    answers.zone_picks.push_back(vec![board.cheap]);
+    announce_cast(&mut board.runner, board.bolt);
+    let record = drive(&mut board.runner, answers);
+    // REACH: the bolt's target prompt covers the Illusion, and the bolt's 3
+    // damage is lethal on its 1 toughness (CR 704.5g), so it really dies
+    // (CR 700.4).
+    assert_eq!(record.target_prompts.len(), 1, "{record:?}");
+    assert!(
+        record.target_prompts[0].contains(&TargetRef::Object(board.illusion)),
+        "{record:?}"
+    );
+    assert_eq!(
+        board.runner.state().objects[&board.illusion].zone,
+        Zone::Graveyard
+    );
+    // CR 603.5: P0 makes the "may put" choice when the trigger resolves.
+    assert_eq!(record.optional_actors, vec![P0], "{record:?}");
+    // CR 202.3 + CR 608.2h: the pool is exactly P0's hand cards whose mana
+    // value is within the bound (the filler's mana value 0).
+    // A pool read from the graveyard or P1's hand would hold three no-cost
+    // cards and raise a choice; the single qualifying card is put without one.
+    assert!(record.zone_choices.is_empty(), "{record:?}");
+    let runner = &board.runner;
+    assert_eq!(runner.state().objects[&board.cheap].zone, Zone::Battlefield);
+    assert_eq!(runner.state().objects[&board.cheap].controller, P0);
+    assert_eq!(runner.state().objects[&board.pricey].zone, Zone::Hand);
+    assert_eq!(runner.state().objects[&board.grave].zone, Zone::Graveyard);
+    assert_eq!(runner.state().objects[&board.opponents].zone, Zone::Hand);
+    // The bolt and the put card left P0's hand; nothing was drawn.
+    assert_eq!(hand_len(runner, P0), p0_hand - 2);
 }
 
 // ── Census registry end state ──────────────────────────────────────────────
