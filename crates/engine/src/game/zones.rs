@@ -7450,7 +7450,7 @@ mod tests {
                     ..
                 } = event
                 {
-                    (*object_id == source && *from == Some(Zone::Battlefield)).then(|| &**record)
+                    (*object_id == source && *from == Some(Zone::Battlefield)).then_some(&**record)
                 } else {
                     None
                 }
