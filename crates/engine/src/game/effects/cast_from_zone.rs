@@ -3289,25 +3289,10 @@ fn record_lingering_permissions(
                 .lifetime()
                 .duration
                 .is_some_and(Duration::ends_when_host_leaves_play);
-            // The resolver can reach this grant twice for one resolution; two
-            // grants that differ only in the freshly minted budget group are one
-            // grant, so a card never holds two budgets for the same instruction.
-            let without_group = |permission: &CastingPermission| {
-                let mut copy = permission.clone();
-                if let CastingPermission::ExileWithAltCost {
-                    single_use_group, ..
-                } = &mut copy
-                {
-                    *single_use_group = None;
-                }
-                copy
-            };
-            let candidate = without_group(&permission);
-            if !obj
-                .casting_permissions
-                .iter()
-                .any(|existing| without_group(existing) == candidate)
-            {
+            // CR 611.2a: each resolution generates its own effect. It mints its
+            // own budget group, so the permission a second activation writes
+            // differs from the first one's and both stay: two grants, two casts.
+            if !obj.casting_permissions.contains(&permission) {
                 obj.casting_permissions.push(permission);
                 if host_bound {
                     needs_lifetime_check = true;

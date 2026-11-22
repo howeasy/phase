@@ -140,6 +140,51 @@ fn idol_of_endurance_grants_one_free_creature_cast_across_its_pile() {
     );
 }
 
+/// Two activations of the Idol before any cast are two grants: two free casts
+/// over the pile, no more (CR 611.2a). The Idol's untap stands in for an untap
+/// effect the scenario cannot provide.
+#[test]
+fn idol_of_endurance_activated_twice_grants_two_free_casts() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let bear = |scenario: &mut GameScenario, name: &str| {
+        scenario
+            .add_creature_to_graveyard(P0, name, 2, 2)
+            .with_subtypes(vec!["Bear"])
+            .with_mana_cost(cost(&[ManaCostShard::Green], 1))
+            .id()
+    };
+    let first = bear(&mut scenario, "Grizzly Bears");
+    let second = bear(&mut scenario, "Runeclaw Bear");
+    let idol = scenario
+        .add_artifact_to_hand_from_oracle(P0, "Idol of Endurance", IDOL_OF_ENDURANCE)
+        .with_mana_cost(cost(&[ManaCostShard::White], 2))
+        .id();
+    let lands: Vec<ObjectId> = (0..7)
+        .map(|_| scenario.add_basic_land(P0, ManaColor::White))
+        .collect();
+    let mut runner = scenario.build();
+
+    runner.cast(idol).resolve();
+    runner.activate(idol, 0).resolve();
+    runner.state_mut().objects.get_mut(&idol).unwrap().tapped = false;
+    runner.activate(idol, 0).resolve();
+    let spent = tapped_count(&runner, &lands);
+    assert_eq!(spent, 7, "the Idol and two activations were paid");
+    assert!(cast_is_offered(&runner, first));
+    assert!(cast_is_offered(&runner, second));
+
+    cast_to_resolution(&mut runner, second);
+    assert_eq!(runner.state().objects[&second].zone, Zone::Battlefield);
+    assert!(
+        cast_is_offered(&runner, first),
+        "the second activation's grant is still unspent"
+    );
+    cast_to_resolution(&mut runner, first);
+    assert_eq!(runner.state().objects[&first].zone, Zone::Battlefield);
+    assert_eq!(tapped_count(&runner, &lands), spent, "both casts were free");
+}
+
 /// Serpent's Soul-Jar: the paid form. Two linked Elf cards; one cast, paying
 /// its mana cost, spends the grant.
 #[test]

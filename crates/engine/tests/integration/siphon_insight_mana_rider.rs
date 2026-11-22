@@ -548,7 +548,19 @@ fn court_with_an_earlier_exile(monarch: bool) -> (GameRunner, ObjectId, ObjectId
     );
     settle(&mut runner);
     assert_eq!(runner.state().objects[&second].zone, Zone::Exile);
-    runner.advance_to_phase(Phase::PreCombatMain);
+    // Real priority passes, not `advance_to_phase`: that driver re-enters the
+    // step the game already sits in (`turns::auto_advance` runs the upkeep's
+    // beginning-of-step triggers again, against CR 503.1a's single putting onto
+    // the stack), so a second upkeep trigger would resolve and grant again.
+    for _ in 0..8 {
+        if runner.state().phase == Phase::PreCombatMain {
+            break;
+        }
+        runner
+            .act(GameAction::PassPriority)
+            .expect("PassPriority accepted");
+    }
+    assert_eq!(runner.state().phase, Phase::PreCombatMain);
     assert_eq!(runner.state().active_player, P0);
     (runner, first, second, swamps)
 }
