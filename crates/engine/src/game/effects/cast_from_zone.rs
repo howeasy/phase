@@ -3083,7 +3083,7 @@ fn record_lingering_permissions(
         _ => return Err(EffectError::MissingParam("CastFromZone".to_string())),
     };
     let constraint = freeze_cast_permission_constraint(state, ability, constraint);
-    // CR 601.2a + CR 611.2a: a grant whose printed cap is exactly one cast
+    // CR 608.2c + CR 611.2a: a grant whose printed cap is exactly one cast
     // ("you may cast a spell from among cards exiled with this enchantment")
     // authorizes one cast across every card it stamps. One group per resolution,
     // shared by the sibling permissions below. The id names no published tracked

@@ -4627,7 +4627,7 @@ pub(super) fn exile_alt_cost_permission_supports_cast(
             single_use_group,
             ..
         } => {
-            // CR 601.2a + CR 611.2a: a spent shared budget no longer authorizes
+            // CR 608.2c + CR 611.2a: a spent shared budget no longer authorizes
             // another cast (the sweep in `consume_single_use_play_from_exile`
             // strips the siblings; this is the gate for a stale copy).
             single_use_group
@@ -4929,7 +4929,7 @@ pub(super) fn selected_exile_alt_cost_permission_graveyard_replacement(
     }
 }
 
-/// CR 601.2a + CR 611.2a: the shared cast budget the cast of `object_id` spends:
+/// CR 608.2c + CR 611.2a: the shared cast budget the cast of `object_id` spends:
 /// the `single_use_group` of the `ExileWithAltCost` permission elected for THIS
 /// cast, read before the stack move drops the object's permissions. Mirrors
 /// `selected_exile_alt_cost_permission_graveyard_replacement`, so a sibling

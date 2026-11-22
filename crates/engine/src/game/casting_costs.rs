@@ -15814,7 +15814,7 @@ fn finalize_cast_with_phyrexian_choices_inner(
         })
     });
 
-    // CR 601.2a + CR 611.2a: the shared cast budget of an `ExileWithAltCost` grant
+    // CR 608.2c + CR 611.2a: the shared cast budget of an `ExileWithAltCost` grant
     // ("you may cast a spell from among cards exiled with this enchantment" —
     // Court of Locthwain), read from the elected permission before the move drops
     // it, like the `PlayFromExile` group above.

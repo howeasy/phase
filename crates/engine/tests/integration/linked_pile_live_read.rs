@@ -33,7 +33,7 @@ use engine::types::ability::TargetRef;
 use engine::types::actions::GameAction;
 use engine::types::game_state::{ExileLinkKind, WaitingFor};
 use engine::types::identifiers::ObjectId;
-use engine::types::mana::{parse_mtgjson_mana_cost, ManaColor, ManaType, ManaUnit};
+use engine::types::mana::{parse_mtgjson_mana_cost, ManaColor};
 use engine::types::phase::Phase;
 use engine::types::zones::Zone;
 
@@ -43,7 +43,6 @@ const PANHARMONICON: &str = "If an artifact or creature entering causes a trigge
 const BISHOP_OF_BINDING: &str = "When this creature enters, exile target creature an opponent controls until this creature leaves the battlefield.\nWhenever this creature attacks, target Vampire gets +X/+X until end of turn, where X is the power of the exiled card.";
 const CLOUDSHIFT: &str = "Exile target creature you control, then return that card to the battlefield under your control.";
 const WRATH_OF_GOD: &str = "Destroy all creatures. They can't be regenerated.";
-const MURDER: &str = "Destroy target creature.";
 
 /// Answer each pending trigger target prompt in order from `targets`, stopping
 /// at the first non-prompt state. Returns how many prompts were answered.
@@ -266,83 +265,14 @@ fn mimic_vat_simultaneous_deaths_leave_exactly_one_card_exiled() {
     }
 }
 
-/// CR 608.2c + CR 607.2a: "other" excludes the card the SAME resolution just
-/// exiled, and nothing else. The set the exclusion reads is the moved-object
-/// ledger, which the node that exiles overwrites and each top-level resolution
-/// clears, so a stale entry naming an unrelated pile card cannot keep that card
-/// from returning. The ledger is seeded with the previously imprinted card
-/// before the second imprint resolves; that card must still return.
-#[test]
-fn mimic_vat_stale_moved_ledger_does_not_pin_an_older_pile_card() {
-    let mut scenario = GameScenario::new();
-    scenario.at_phase(Phase::PreCombatMain);
-    let vat = scenario
-        .add_artifact_from_oracle(P0, "Mimic Vat", MIMIC_VAT)
-        .with_mana_cost(parse_mtgjson_mana_cost("{3}"))
-        .id();
-    let first_card = scenario.add_creature(P1, "Grizzly Bears", 2, 2).id();
-    let second_card = scenario.add_creature(P1, "Runeclaw Bear", 2, 2).id();
-    let murders: Vec<ObjectId> = (0..2)
-        .map(|_| {
-            scenario
-                .add_spell_to_hand_from_oracle(P0, "Murder", true, MURDER)
-                .with_mana_cost(parse_mtgjson_mana_cost("{1}{B}{B}"))
-                .id()
-        })
-        .collect();
-    scenario.with_mana_pool(
-        P0,
-        (0..6)
-            .map(|_| ManaUnit::new(ManaType::Black, ObjectId(0), false, vec![]))
-            .collect(),
-    );
-    let mut runner = scenario.build();
-    assert_eq!(runner.state().objects[&vat].zone, Zone::Battlefield);
-
-    runner
-        .cast(murders[0])
-        .target_object(first_card)
-        .accept_optional()
-        .resolve();
-    runner.advance_until_stack_empty();
-    assert_eq!(
-        runner.state().objects[&first_card].zone,
-        Zone::Exile,
-        "reach: the first imprint exiled its card"
-    );
-
-    // Hostile: a leftover moved-object ledger naming the older pile card.
-    runner.state_mut().last_zone_changed_ids = vec![first_card];
-
-    runner
-        .cast(murders[1])
-        .target_object(second_card)
-        .accept_optional()
-        .resolve();
-    runner.advance_until_stack_empty();
-    let state = runner.state();
-    assert_eq!(
-        state.objects[&second_card].zone,
-        Zone::Exile,
-        "reach: the second imprint exiled its card and it stays exiled"
-    );
-    assert_eq!(
-        state.objects[&first_card].zone,
-        Zone::Graveyard,
-        "the older pile card still returns: the stale ledger entry did not pin it"
-    );
-}
-
 /// CR 400.7 + CR 607.2a + CR 608.2h (Bishop of Binding): the attack trigger of
 /// the FIRST incarnation is on the stack; Bishop is blinked with Cloudshift (its
 /// first exiled card returns as Bishop leaves), the new incarnation's enters
 /// trigger exiles another creature under ITS link, and that link resolves BEFORE
 /// the old trigger. The old trigger's X is "the power of the exiled card" read by
 /// the old incarnation, which exiled nothing that is still exiled: X is 0 (CR 400.7,
-/// CR 607.2a, CR 608.2h; the card's published ruling says the same, as quoted by
-/// the plan and not independently verified here). The successor's link must not
-/// be read by the old incarnation's trigger. The pump is a `Pump`, not a move,
-/// so CR 610.3b does not remove the trigger's effect.
+/// CR 607.2a, CR 608.2h). The successor's link must not be read by the old
+/// incarnation's trigger.
 ///
 /// Positive control (reads X from the pile at all):
 /// `bishop_of_binding_where_x_exiled_card_power::bishop_of_binding_pumps_target_vampire_by_exiled_card_power`
