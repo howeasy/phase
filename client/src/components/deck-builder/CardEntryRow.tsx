@@ -29,13 +29,16 @@ function ParseItemPill({ item, depth = 0 }: { item: ParsedItem; depth?: number }
         }`}
         data-supported={item.supported ? "true" : "false"}
         title={item.source_text ?? item.label}
-        aria-label={item.supported ? undefined : t("card.parseItemUnsupported", { label: item.label })}
       >
         <span className={`font-semibold uppercase ${CATEGORY_COLORS[item.category] ?? "text-gray-400"}`}>
           {item.category.slice(0, 3)}
         </span>
         <span>{item.label}</span>
-        {!item.supported && <span className="text-rose-400">&#x2717;</span>}
+        {!item.supported && (
+          <span className="text-rose-400" role="img" aria-label={t("card.parseItemUnsupported")}>
+            &#x2717;
+          </span>
+        )}
       </span>
       {item.children?.map((child, i) => (
         <ParseItemPill key={`${depth}-${i}`} item={child} depth={depth + 1} />
@@ -257,14 +260,7 @@ export function CardEntryRow({
       </div>
       {expanded && unsupported && (
         <div className="mb-1.5 ml-4 mt-0.5 rounded-lg border border-white/6 bg-black/30 px-2 py-1.5">
-          {(unsupported.gap_details?.length ?? 0) > 0 || unsupported.gaps.length > 0 ? (
-            <div className="mb-1.5">
-              <div className="mb-1 text-[9px] font-semibold uppercase tracking-wider text-amber-300">
-                {t("card.unsupportedReasonsHeading")}
-              </div>
-              <UnsupportedGapList card={unsupported} />
-            </div>
-          ) : null}
+          <UnsupportedGapList card={unsupported} />
           {unsupported.oracle_text && (
             <div className="mb-1.5 font-mono text-[10px] leading-snug text-slate-400 italic">
               {unsupported.oracle_text}

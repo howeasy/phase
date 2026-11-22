@@ -293,7 +293,7 @@ describe("CardEntryRow", () => {
     expect(screen.getByText(BOLT_TEXT)).toBeInTheDocument();
   });
 
-  it("marks unsupported parse chips with data-supported=false and an accessible name", () => {
+  it("marks unsupported parse chips with data-supported=false and a named mark", () => {
     render(
       <CardEntryRow
         entry={{ count: 1, name: "Zur the Enchanter" }}
@@ -320,9 +320,8 @@ describe("CardEntryRow", () => {
     const supportedChip = document.querySelector('[data-supported="true"]');
     expect(unsupportedChip).not.toBeNull();
     expect(supportedChip).not.toBeNull();
-    expect(unsupportedChip?.getAttribute("aria-label")).toBe("SearchLibrary (unsupported)");
-    expect(unsupportedChip?.getAttribute("aria-label")).toContain("unsupported");
-    expect(supportedChip?.getAttribute("aria-label")).toBeNull();
+    expect(unsupportedChip?.querySelector('[role="img"]')).toHaveAttribute("aria-label", "Unsupported");
+    expect(supportedChip?.querySelector('[role="img"]')).toBeNull();
   });
 
   it("keeps the badge title and aria-label counting gaps", () => {

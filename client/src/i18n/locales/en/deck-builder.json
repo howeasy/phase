@@ -90,7 +90,7 @@
     "unsupportedTitle_one": "{{count}} unsupported mechanic — click to expand",
     "unsupportedTitle_other": "{{count}} unsupported mechanics — click to expand",
     "unsupportedReasonsHeading": "Why this card is unsupported",
-    "parseItemUnsupported": "{{label}} (unsupported)"
+    "parseItemUnsupported": "Unsupported"
   },
   "grid": {
     "allFormats": "All",

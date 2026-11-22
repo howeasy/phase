@@ -938,7 +938,8 @@ fn deck_compatibility_gap_details_name_every_gap_source() {
         .as_deref()
         .expect("the swallow gap names its printed clause");
     assert!(
-        swallow_text.contains("top or bottom of its owner's library"),
+        !swallow_text.starts_with("[warning:")
+            && swallow_text.contains("top or bottom of its owner's library"),
         "the swallow source text is the printed rider, not the detector display: {swallow_text}"
     );
 }

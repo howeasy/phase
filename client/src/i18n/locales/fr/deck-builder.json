@@ -89,7 +89,7 @@
     "unsupportedTitle_one": "{{count}} mécanique non prise en charge — cliquez pour développer",
     "unsupportedTitle_other": "{{count}} mécaniques non prises en charge — cliquez pour développer",
     "unsupportedReasonsHeading": "Pourquoi cette carte n'est pas prise en charge",
-    "parseItemUnsupported": "{{label}} (non prise en charge)",
+    "parseItemUnsupported": "Non prise en charge",
     "moveToTarget": "Déplacer un {{name}} vers {{target}}"
   },
   "grid": {

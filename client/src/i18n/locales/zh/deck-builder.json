@@ -118,7 +118,7 @@
     "unsupportedTitle_one": "{{count}}个不受支持的机制——点击展开",
     "unsupportedTitle_other": "{{count}}个不受支持的机制——点击展开",
     "unsupportedReasonsHeading": "这张牌不受支持的原因",
-    "parseItemUnsupported": "{{label}}（不受支持）"
+    "parseItemUnsupported": "不受支持"
   },
   "commanderPanel": {
     "cardCount": "{{count}}/{{expected}}张牌",
