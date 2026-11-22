@@ -1296,12 +1296,15 @@ fn deck_compatibility_entry_projection_gap_is_deck_only_and_explained() {
     assert_eq!(arcane.gaps, [ENTRY_PROJECTION_GAP]);
     assert_eq!(arcane.gap_details.len(), 1);
     assert_eq!(arcane.gap_details[0].handler, ENTRY_PROJECTION_GAP);
+    // The two deck-only entry labels have no printed clause to cite: the report
+    // never emits them, so `blank_gap_text` ends at its handler fallback. The
+    // verdict publishes that fallback (it names the handler, not a clause).
     assert!(
         arcane.gap_details[0]
             .source_text
             .as_deref()
-            .is_some_and(|text| !text.trim().is_empty()),
-        "the deck-only gap still names its source: {:?}",
+            .is_some_and(|text| text.contains(ENTRY_PROJECTION_GAP)),
+        "the deck-only gap carries the handler fallback text: {:?}",
         arcane.gap_details[0]
     );
 
