@@ -19,7 +19,7 @@ use engine::types::ability::{
 use engine::types::actions::GameAction;
 use engine::types::game_state::{ExileLink, ExileLinkKind, WaitingFor};
 use engine::types::identifiers::ObjectId;
-use engine::types::mana::{ManaType, ManaUnit};
+use engine::types::mana::{parse_mtgjson_mana_cost, ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::triggers::TriggerMode;
 use engine::types::zones::Zone;
@@ -615,5 +615,102 @@ fn come_back_wrong_returns_a_destroyed_creature_card() {
         runner.state().objects[&bear].zone,
         Zone::Battlefield,
         "a creature card was put into a graveyard this way: it returns"
+    );
+}
+
+/// Verbatim Oracle text of Mimic Vat (Scryfall).
+const MIMIC_VAT: &str = "Imprint — Whenever a nontoken creature dies, you may exile that card. \
+If you do, return each other card exiled with this artifact to its owner's graveyard.\n{3}, \
+{T}: Create a token that's a copy of a card exiled with this artifact. It gains haste. Exile it \
+at the beginning of the next end step.";
+
+/// Cast `murder` at `victim` and resolve it plus the dies trigger the death
+/// raises, answering the Vat's optional imprint exile with yes (CR 603.5).
+fn murder_and_imprint(runner: &mut GameRunner, murder: ObjectId, victim: ObjectId) {
+    runner
+        .cast(murder)
+        .target_object(victim)
+        .accept_optional()
+        .resolve();
+    runner.advance_until_stack_empty();
+}
+
+/// CR 607.2a: the imprint trigger's exile and the ability that reads "exiled
+/// with this artifact" are linked, so the pile holds exactly the cards the
+/// trigger exiled — the first imprint's card and, after the second imprint,
+/// both cards. CR 608.2c: the trigger follows its instructions in order, so
+/// "return each other card exiled with this artifact" excludes the card the
+/// same resolution just exiled. The first imprint has no other card, so its
+/// card stays exiled; the second imprint returns only the first card to its
+/// owner's graveyard while the second card stays exiled.
+#[test]
+fn mimic_vat_imprint_returns_only_the_previously_exiled_card() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    // CR 301.1: Mimic Vat is a printed noncreature artifact, {3}.
+    let vat = scenario
+        .add_artifact_from_oracle(P0, "Mimic Vat", MIMIC_VAT)
+        .with_mana_cost(parse_mtgjson_mana_cost("{3}"))
+        .id();
+    // Two printed vanilla 2/2s for the Vat to imprint, one death each.
+    let first = scenario.add_creature(P1, "Grizzly Bears", 2, 2).id();
+    let second = scenario.add_creature(P1, "Runeclaw Bear", 2, 2).id();
+    let first_murder = scenario
+        .add_spell_to_hand_from_oracle(P0, "Murder", true, MURDER)
+        .with_mana_cost(parse_mtgjson_mana_cost("{1}{B}{B}"))
+        .id();
+    let second_murder = scenario
+        .add_spell_to_hand_from_oracle(P0, "Murder", true, MURDER)
+        .with_mana_cost(parse_mtgjson_mana_cost("{1}{B}{B}"))
+        .id();
+    // {1}{B}{B} twice: six black mana pays for both casts in this main phase.
+    scenario.with_mana_pool(
+        P0,
+        (0..6)
+            .map(|_| ManaUnit::new(ManaType::Black, ObjectId(0), false, vec![]))
+            .collect(),
+    );
+    let mut runner = scenario.build();
+    assert_eq!(
+        runner.state().objects[&vat].zone,
+        Zone::Battlefield,
+        "reach: Mimic Vat is on the battlefield"
+    );
+
+    // First imprint: the pile is empty, so nothing is returned and the card
+    // this resolution exiled must stay in exile.
+    murder_and_imprint(&mut runner, first_murder, first);
+    assert_eq!(
+        runner.state().objects[&first].zone,
+        Zone::Exile,
+        "the first imprinted card stays exiled: the pile held no other card"
+    );
+
+    // Second imprint: `first` is the only other card in the pile, so it returns
+    // to its owner's graveyard while `second` — the card just exiled — stays.
+    murder_and_imprint(&mut runner, second_murder, second);
+    let state = runner.state();
+    assert_eq!(
+        state.objects[&second].zone,
+        Zone::Exile,
+        "CR 608.2c: the card this resolution just exiled is not returned"
+    );
+    assert_eq!(
+        state.objects[&first].zone,
+        Zone::Graveyard,
+        "CR 607.2a: the previously exiled card returns to a graveyard"
+    );
+    assert_eq!(
+        state.objects[&first].owner, P1,
+        "the returned card is owned by P1"
+    );
+    assert!(
+        state.players[1].graveyard.contains(&first),
+        "CR 607.2a: it returns to its owner's graveyard"
+    );
+    assert_eq!(
+        state.objects[&vat].zone,
+        Zone::Battlefield,
+        "the Vat itself never left the battlefield"
     );
 }

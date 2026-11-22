@@ -3287,12 +3287,14 @@ pub(super) fn rebind_zone_changed_this_way_pronoun_to_moved_object(def: &mut Abi
     }
 }
 
-/// CR 608.2c + CR 607.2a: in "If a creature is put into exile this way,
-/// return each other card exiled with ~", "other" means other than the
-/// card(s) the gated instruction just moved (the ledger the
-/// `ZoneChangedThisWay` gate reads), so the `And` of the linked pile gains an
-/// explicit `Not { LastZoneChanged }` leg instead of the pile reader
-/// consulting that ledger.
+/// CR 608.2c + CR 607.2a: in "[exile it]. If a creature is put into exile this
+/// way, return each other card exiled with ~" (Mysterious Limousine) and
+/// "[exile it]. If you do, return each other card exiled with this artifact"
+/// (Mimic Vat), "other" means other than the card(s) the exile instruction just
+/// moved, so the `And` of the linked pile gains an explicit
+/// `Not { LastZoneChanged }` leg (the ledger of the instruction just performed)
+/// instead of the pile reader consulting that ledger. Whatever gates the
+/// return, the sub-ability that follows an exile `ChangeZone` directly carries it.
 pub(super) fn exclude_this_way_cards_from_other_linked_pile(def: &mut AbilityDefinition) {
     let parent_exiles = matches!(
         def.effect.as_ref(),
@@ -3302,39 +3304,31 @@ pub(super) fn exclude_this_way_cards_from_other_linked_pile(def: &mut AbilityDef
         }
     );
     if parent_exiles {
-        if let Some(sub) = def.sub_ability.as_deref_mut() {
-            let gate_binds_exile = matches!(
-                sub.condition.as_ref(),
-                Some(AbilityCondition::ZoneChangedThisWay {
-                    destination: Some(Zone::Exile),
-                    ..
-                })
-            );
-            if gate_binds_exile {
-                if let Effect::ChangeZoneAll {
-                    target: TargetFilter::And { filters },
-                    ..
-                } = sub.effect.as_mut()
-                {
-                    let pile_is_linked_exile = filters
-                        .iter()
-                        .any(|leg| matches!(leg, TargetFilter::ExiledBySource));
-                    let pile_says_other = filters.iter().any(|leg| {
-                        filter_contains_filter_prop(leg, &|prop| *prop == FilterProp::Another)
-                    });
-                    let pile_already_excludes = filters.iter().any(|leg| {
-                        matches!(
-                            leg,
-                            TargetFilter::Not { filter }
-                                if matches!(filter.as_ref(), TargetFilter::LastZoneChanged)
-                        )
-                    });
-                    if pile_is_linked_exile && pile_says_other && !pile_already_excludes {
-                        filters.push(TargetFilter::Not {
-                            filter: Box::new(TargetFilter::LastZoneChanged),
-                        });
-                    }
-                }
+        if let Some(Effect::ChangeZoneAll {
+            target: TargetFilter::And { filters },
+            ..
+        }) = def
+            .sub_ability
+            .as_deref_mut()
+            .map(|sub| sub.effect.as_mut())
+        {
+            let pile_is_linked_exile = filters
+                .iter()
+                .any(|leg| matches!(leg, TargetFilter::ExiledBySource));
+            let pile_says_other = filters
+                .iter()
+                .any(|leg| filter_contains_filter_prop(leg, &|prop| *prop == FilterProp::Another));
+            let pile_already_excludes = filters.iter().any(|leg| {
+                matches!(
+                    leg,
+                    TargetFilter::Not { filter }
+                        if matches!(filter.as_ref(), TargetFilter::LastZoneChanged)
+                )
+            });
+            if pile_is_linked_exile && pile_says_other && !pile_already_excludes {
+                filters.push(TargetFilter::Not {
+                    filter: Box::new(TargetFilter::LastZoneChanged),
+                });
             }
         }
     }
@@ -17642,29 +17636,69 @@ mod tests {
         }
     }
 
-    /// CR 608.2c + CR 607.2a: Mysterious Limousine's "If a creature is put
-    /// into exile this way, return each other card exiled with ~" must spell
-    /// the "other than the ones exiled this way" exclusion as a
-    /// `Not { LastZoneChanged }` leg on the linked pile's `And`, while
-    /// Banisher Priest — a plain exile-until with no "this way" gate — must
-    /// gain no such leg anywhere in its trigger.
-    #[test]
-    fn limousine_linked_pile_excludes_this_way_cards_and_priest_gains_no_leg() {
-        let limo = crate::parser::oracle::parse_oracle_text(
-            "Whenever this Vehicle enters or attacks, exile up to one other target creature until this Vehicle leaves the battlefield. If a creature is put into exile this way, return each other card exiled with this Vehicle to the battlefield under its owner's control.",
-            "Mysterious Limousine",
-            &[],
-            &["Artifact".to_string()],
-            &[],
-        );
-        let pile = limo
+    fn not_last_zone_changed() -> TargetFilter {
+        TargetFilter::Not {
+            filter: Box::new(TargetFilter::LastZoneChanged),
+        }
+    }
+
+    /// The `And` legs of every `ChangeZoneAll` reachable from `def` through its
+    /// sub- and else-ability chains, paired with whether its direct parent
+    /// effect is an exile `ChangeZone`.
+    fn change_zone_all_piles(def: &AbilityDefinition, out: &mut Vec<(bool, Vec<TargetFilter>)>) {
+        if let Some(sub) = def.sub_ability.as_deref() {
+            if let Effect::ChangeZoneAll {
+                target: TargetFilter::And { filters },
+                ..
+            } = sub.effect.as_ref()
+            {
+                let parent_exiles = matches!(
+                    def.effect.as_ref(),
+                    Effect::ChangeZone {
+                        destination: Zone::Exile,
+                        ..
+                    }
+                );
+                out.push((parent_exiles, filters.clone()));
+            }
+            change_zone_all_piles(sub, out);
+        }
+        if let Some(els) = def.else_ability.as_deref() {
+            change_zone_all_piles(els, out);
+        }
+    }
+
+    fn piles_of(
+        text: &str,
+        name: &str,
+        types: &[&str],
+        subtypes: &[&str],
+    ) -> Vec<(bool, Vec<TargetFilter>)> {
+        let types: Vec<String> = types.iter().map(|t| t.to_string()).collect();
+        let subtypes: Vec<String> = subtypes.iter().map(|t| t.to_string()).collect();
+        let parsed = crate::parser::oracle::parse_oracle_text(text, name, &[], &types, &subtypes);
+        let mut out = Vec::new();
+        for def in parsed
             .triggers
             .iter()
             .filter_map(|trigger| trigger.execute.as_deref())
-            .find_map(gated_exile_return_pile)
-            .expect("the gated return must lower to a ChangeZoneAll linked pile");
-        assert_eq!(
-            pile,
+            .chain(parsed.abilities.iter())
+        {
+            change_zone_all_piles(def, &mut out);
+        }
+        out
+    }
+
+    /// CR 608.2c + CR 607.2a: "each other card exiled with ~" in the sub-ability
+    /// that follows an exile spells "other than the card just exiled" as a
+    /// `Not { LastZoneChanged }` leg on the linked pile's `And`, whatever gates
+    /// the return: Mysterious Limousine ("If a creature is put into exile this
+    /// way") and Mimic Vat ("If you do"). Northampton Farm's "Return each other
+    /// card exiled with this land" follows no exile instruction, so it gains no
+    /// leg (its pile shape is the control, not a card that never parses).
+    #[test]
+    fn other_exiled_with_pile_after_an_exile_excludes_the_card_just_exiled() {
+        let other_card_pile = || {
             vec![
                 TargetFilter::Typed(TypedFilter {
                     type_filters: vec![TypeFilter::Card],
@@ -17672,88 +17706,46 @@ mod tests {
                     properties: vec![crate::types::ability::FilterProp::Another],
                 }),
                 TargetFilter::ExiledBySource,
-                TargetFilter::Not {
-                    filter: Box::new(TargetFilter::LastZoneChanged),
-                },
-            ],
-            "the linked pile must be the other-card exile set minus the cards exiled this way"
-        );
+            ]
+        };
+        let with_leg = || {
+            let mut legs = other_card_pile();
+            legs.push(not_last_zone_changed());
+            legs
+        };
 
-        let priest = crate::parser::oracle::parse_oracle_text(
-            "When this creature enters, exile target creature an opponent controls until this creature leaves the battlefield.",
-            "Banisher Priest",
+        let limousine = piles_of(
+            "Whenever this Vehicle enters or attacks, exile up to one other target creature until this Vehicle leaves the battlefield. If a creature is put into exile this way, return each other card exiled with this Vehicle to the battlefield under its owner's control.",
+            "Mysterious Limousine",
+            &["Artifact"],
+            &["Vehicle"],
+        );
+        assert_eq!(limousine, vec![(true, with_leg())]);
+
+        let vat = piles_of(
+            "Imprint \u{2014} Whenever a nontoken creature dies, you may exile that card. If you do, return each other card exiled with this artifact to its owner's graveyard.\n{3}, {T}: Create a token that's a copy of a card exiled with this artifact. It gains haste. Exile it at the beginning of the next end step.",
+            "Mimic Vat",
+            &["Artifact"],
             &[],
-            &["Creature".to_string()],
-            &["Human".to_string(), "Cleric".to_string()],
+        );
+        assert_eq!(vat, vec![(true, with_leg())]);
+
+        let farm = piles_of(
+            "{T}: Add {C}.\n{1}, {T}: Exile target creature you own.\n{2}, {T}, Sacrifice this land: Return a creature card exiled with this land to the battlefield under your control. Return each other card exiled with this land to its owner's hand.",
+            "Northampton Farm",
+            &["Land"],
+            &[],
         );
         assert!(
-            !priest
-                .triggers
-                .iter()
-                .filter_map(|trigger| trigger.execute.as_deref())
-                .any(def_tree_contains_not_last_zone_changed),
-            "no \"this way\" gate means no Not {{ LastZoneChanged }} leg anywhere"
+            farm.iter().any(|(_, legs)| *legs == other_card_pile()),
+            "reach: the Farm's other-card pile parses to the same shape, got {farm:?}"
         );
-    }
-
-    /// The `And` legs of the `ChangeZoneAll` that an exile `ChangeZone`'s
-    /// "put into exile this way" gate rides on, or `None` for other chains.
-    fn gated_exile_return_pile(def: &AbilityDefinition) -> Option<Vec<TargetFilter>> {
-        let mut cur = Some(def);
-        while let Some(d) = cur {
-            if matches!(
-                d.effect.as_ref(),
-                Effect::ChangeZone {
-                    destination: Zone::Exile,
-                    ..
-                }
-            ) {
-                if let Some(sub) = d.sub_ability.as_deref() {
-                    if matches!(
-                        sub.condition.as_ref(),
-                        Some(AbilityCondition::ZoneChangedThisWay {
-                            destination: Some(Zone::Exile),
-                            ..
-                        })
-                    ) {
-                        if let Effect::ChangeZoneAll {
-                            target: TargetFilter::And { filters },
-                            ..
-                        } = sub.effect.as_ref()
-                        {
-                            return Some(filters.clone());
-                        }
-                    }
-                }
-            }
-            cur = d.sub_ability.as_deref();
-        }
-        None
-    }
-
-    /// Whether any target filter reachable from `def`'s effect (sub- and
-    /// else-ability chains included) is `Not { LastZoneChanged }`.
-    fn def_tree_contains_not_last_zone_changed(def: &AbilityDefinition) -> bool {
-        let mut effect = def.effect.clone();
-        let mut found = false;
-        super::each_target_filter_mut(&mut effect, &mut |filter| {
-            found |= crate::types::ability::filter_grammar_any(filter, &|node| {
-                matches!(
-                    node,
-                    crate::types::ability::FilterGrammarNode::Filter(TargetFilter::Not { filter })
-                        if matches!(filter.as_ref(), TargetFilter::LastZoneChanged)
-                )
-            });
-        });
-        found
-            || def
-                .sub_ability
-                .as_deref()
-                .is_some_and(def_tree_contains_not_last_zone_changed)
-            || def
-                .else_ability
-                .as_deref()
-                .is_some_and(def_tree_contains_not_last_zone_changed)
+        assert!(
+            farm.iter()
+                .all(|(parent_exiles, legs)| !*parent_exiles
+                    && !legs.contains(&not_last_zone_changed())),
+            "no exile instruction precedes the Farm's return, so no leg: {farm:?}"
+        );
     }
 }
 #[cfg(test)]
