@@ -17648,12 +17648,8 @@ mod tests {
                 ..
             } = sub.effect.as_ref()
             {
-                let parent_exiles = matches!(
+                let parent_exiles = crate::parser::oracle_effect::chain_clause_is_exile_producer(
                     def.effect.as_ref(),
-                    Effect::ChangeZone {
-                        destination: Zone::Exile,
-                        ..
-                    }
                 );
                 out.push((parent_exiles, filters.clone()));
             }

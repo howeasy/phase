@@ -498,14 +498,28 @@ fn court_with_an_earlier_exile(monarch: bool) -> (GameRunner, ObjectId, ObjectId
         scenario.add_basic_land(P0, ManaColor::Black),
         scenario.add_basic_land(P0, ManaColor::Black),
     ];
-    let _court = scenario
-        .add_enchantment_from_oracle(P0, "Court of Locthwain", COURT_OF_LOCTHWAIN)
-        .id();
+    // The monarch's Court is cast from hand, so its printed "When this
+    // enchantment enters, you become the monarch." gives the crown; the other
+    // Court starts on the battlefield (no crown).
+    let court_in_hand = monarch.then(|| {
+        for _ in 0..4 {
+            scenario.add_basic_land(P0, ManaColor::Black);
+        }
+        scenario
+            .add_enchantment_to_hand_from_oracle(P0, "Court of Locthwain", COURT_OF_LOCTHWAIN)
+            .with_mana_cost(ManaCost::Cost {
+                shards: vec![ManaCostShard::Black, ManaCostShard::Black],
+                generic: 2,
+            })
+            .id()
+    });
+    if !monarch {
+        scenario.add_enchantment_from_oracle(P0, "Court of Locthwain", COURT_OF_LOCTHWAIN);
+    }
     let mut runner = scenario.build();
-    if monarch {
-        // Court's own ETB made its controller the monarch when it entered;
-        // the enchantment starts on the battlefield here, so set the crown.
-        runner.state_mut().monarch = Some(P0);
+    if let Some(court) = court_in_hand {
+        runner.cast(court).resolve();
+        assert_eq!(runner.state().monarch, Some(P0), "Court's ETB crowned P0");
     }
     // The earlier upkeep is played, not seeded: P0's first upkeep exiles
     // `first` through the real trigger (its link and paid permission are the
