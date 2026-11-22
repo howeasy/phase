@@ -1097,7 +1097,7 @@ fn assert_census_gap(
             "{key}: the census clause is printed Oracle text: {clause}"
         );
     }
-    assert!(card.gaps.contains(&class.handler().to_string()), "{key}");
+    assert!(card.gaps.iter().any(|gap| gap == class.handler()), "{key}");
     let census: Vec<&GapDetail> = card
         .gap_details
         .iter()
