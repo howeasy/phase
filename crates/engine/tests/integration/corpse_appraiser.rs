@@ -714,3 +714,85 @@ fn mimic_vat_imprint_returns_only_the_previously_exiled_card() {
         "the Vat itself never left the battlefield"
     );
 }
+
+/// Verbatim Oracle text of Mirror of Life Trapping (Scryfall).
+const MIRROR_OF_LIFE_TRAPPING: &str = "Whenever a creature enters, if it was cast, exile it, then \
+return all other permanent cards exiled with this artifact to the battlefield under their owners' \
+control.";
+
+/// CR 607.2a: the trigger's exile and the ability that reads "exiled with this
+/// artifact" are linked, so the pile holds exactly the creature cards the
+/// artifact's triggers exiled. CR 608.2c: the trigger follows its instructions
+/// in order, so the creature cast second is exiled first and is then excluded
+/// from "all other permanent cards exiled with this artifact" — only the
+/// creature exiled by the earlier trigger comes back. The first cast's trigger
+/// has no other card, so its creature stays exiled; the second cast's trigger
+/// returns that first creature to the battlefield while the second, just
+/// exiled, stays in exile.
+#[test]
+fn mirror_of_life_trapping_returns_the_earlier_creature_not_the_one_just_exiled() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    // CR 301.1: Mirror of Life Trapping is a printed noncreature artifact, {4}.
+    let mirror = scenario
+        .add_artifact_from_oracle(P0, "Mirror of Life Trapping", MIRROR_OF_LIFE_TRAPPING)
+        .with_mana_cost(parse_mtgjson_mana_cost("{4}"))
+        .id();
+    // Two printed vanilla 2/2s for P0 to cast, one per Mirror trigger.
+    let first = scenario
+        .add_creature_to_hand(P0, "Grizzly Bears", 2, 2)
+        .with_mana_cost(parse_mtgjson_mana_cost("{1}{G}"))
+        .id();
+    let second = scenario
+        .add_creature_to_hand(P0, "Runeclaw Bear", 2, 2)
+        .with_mana_cost(parse_mtgjson_mana_cost("{1}{G}"))
+        .id();
+    // {1}{G} twice: four green mana pays for both casts in this main phase.
+    scenario.with_mana_pool(
+        P0,
+        (0..4)
+            .map(|_| ManaUnit::new(ManaType::Green, ObjectId(0), false, vec![]))
+            .collect(),
+    );
+    let mut runner = scenario.build();
+    assert_eq!(
+        runner.state().objects[&mirror].zone,
+        Zone::Battlefield,
+        "reach: Mirror of Life Trapping is on the battlefield"
+    );
+
+    // First cast: the pile is empty, so nothing is returned and the creature
+    // this resolution exiled must stay in exile.
+    runner.cast(first).resolve();
+    runner.advance_until_stack_empty();
+    assert_eq!(
+        runner.state().objects[&first].zone,
+        Zone::Exile,
+        "reach: the first cast creature is exiled by the Mirror's trigger"
+    );
+
+    // Second cast: `first` is the only other card in the pile, so it returns to
+    // the battlefield while `second` — the creature just exiled — stays exiled.
+    runner.cast(second).resolve();
+    runner.advance_until_stack_empty();
+    let state = runner.state();
+    assert_eq!(
+        state.objects[&second].zone,
+        Zone::Exile,
+        "CR 608.2c: the creature this resolution just exiled is not returned"
+    );
+    assert_eq!(
+        state.objects[&first].zone,
+        Zone::Battlefield,
+        "CR 607.2a: the previously exiled creature returns to the battlefield"
+    );
+    assert_eq!(
+        state.objects[&first].owner, P0,
+        "the returned creature is owned by P0"
+    );
+    assert_eq!(
+        state.objects[&mirror].zone,
+        Zone::Battlefield,
+        "the Mirror itself never left the battlefield"
+    );
+}
