@@ -277,6 +277,11 @@ pub struct DeckCompatibilityResult {
 pub struct UnsupportedCard {
     pub name: String,
     pub gaps: Vec<String>,
+    /// The same gaps as `gaps`, in the order and shape the coverage report uses,
+    /// each with the printed clause or unhandled feature that makes the card
+    /// unsupported. The deck editor shows these as the reasons.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub gap_details: Vec<crate::game::coverage::GapDetail>,
     /// Number of copies of this card in the deck (main + sideboard + commander).
     #[serde(default = "default_one")]
     pub copies: usize,
@@ -3844,6 +3849,7 @@ fn evaluate_deck_coverage(db: &CardDatabase, request: &DeckCompatibilityRequest)
                 unsupported_cards.push(UnsupportedCard {
                     name: face.name.clone(),
                     gaps: coverage.gap_handlers(),
+                    gap_details: coverage.explained_gap_details(&db.lookup_key(name), face),
                     oracle_text: face.oracle_text.clone(),
                     parse_details: coverage.parse_details,
                     copies,

@@ -4,9 +4,14 @@ use std::collections::BTreeMap;
 use std::sync::LazyLock;
 
 use engine::database::CardDatabase;
-use engine::game::coverage::{analyze_coverage, card_face_gaps, CardCoverageResult, GapDiagnosis};
+use engine::game::coverage::{
+    analyze_coverage, card_face_coverage_with_subtypes, card_face_gaps, CardCoverageResult,
+    GapDiagnosis,
+};
 use engine::game::deck_loading::default_scheme_deck_entries;
-use engine::game::deck_validation::{evaluate_deck_compatibility, DeckCompatibilityRequest};
+use engine::game::deck_validation::{
+    evaluate_deck_compatibility, DeckCompatibilityRequest, UnsupportedCard,
+};
 use engine::game::gap_analysis::{analyze_gaps, GapClass};
 use engine::types::card::CardFace;
 use engine::types::card_type::CoreType;
@@ -739,4 +744,277 @@ Destroy target planeswalker that was activated this turn or tapped creature.";
         gap.source_text.as_deref(),
         Some("Destroy target planeswalker that was activated this turn or tapped creature.")
     );
+}
+
+// ---------------------------------------------------------------------------
+// Deck compatibility gap details
+//
+// `evaluate_deck_compatibility` feeds the deck editor's unsupported-card panel.
+// Its `gaps` stay the bare handler labels, while `gap_details` is the same
+// published-report shape the coverage dashboard reads: handler plus the printed
+// clause (or unhandled feature) that makes the card unsupported.
+// ---------------------------------------------------------------------------
+
+const ZUR_KEY: &str = "zur the enchanter";
+/// Verbatim Dominaria Remastered Oracle text (Scryfall, oracle id
+/// `d7950018-d744-48a8-81aa-0d8384703f48`).
+const ZUR_ORACLE: &str = "Flying\nWhenever Zur attacks, you may search your library for an enchantment card with mana value 3 or less, put it onto the battlefield, then shuffle.";
+/// The clause the census cites for Zur the Enchanter, verbatim from
+/// `crates/phase-ast/data/confirmed-misparses.toml`. It is also the trigger's
+/// printed Oracle line, because the card names itself by a shortened form.
+const ZUR_CENSUS_CLAUSE: &str = "Whenever Zur attacks, you may search your library for an enchantment card with mana value 3 or less, put it onto the battlefield, then shuffle.";
+
+/// Zur the Enchanter is not in the committed fixture, so build its face through
+/// the production MTGJSON -> Oracle path. Every printed field is verbatim from
+/// the Dominaria Remastered printing: {1}{W}{U}{B}, 1/4, Legendary Creature —
+/// Human Wizard, Flying. Parsing through `build_oracle_face` keeps the trigger
+/// shaped exactly as card data ships it, so the coverage verdict is the shipping
+/// one.
+fn zur_the_enchanter_face() -> CardFace {
+    use engine::database::mtgjson::{AtomicCard, AtomicIdentifiers, SetRelatedCards};
+    let card = AtomicCard {
+        name: "Zur the Enchanter".to_string(),
+        mana_cost: Some("{1}{W}{U}{B}".to_string()),
+        colors: vec!["B".to_string(), "U".to_string(), "W".to_string()],
+        color_identity: vec!["B".to_string(), "U".to_string(), "W".to_string()],
+        power: Some("1".to_string()),
+        toughness: Some("4".to_string()),
+        loyalty: None,
+        defense: None,
+        text: Some(ZUR_ORACLE.to_string()),
+        layout: "normal".to_string(),
+        type_line: Some("Legendary Creature — Human Wizard".to_string()),
+        types: vec!["Creature".to_string()],
+        subtypes: vec!["Human".to_string(), "Wizard".to_string()],
+        supertypes: vec!["Legendary".to_string()],
+        keywords: Some(vec!["Flying".to_string()]),
+        side: None,
+        face_name: None,
+        mana_value: 4.0,
+        legalities: Default::default(),
+        leadership_skills: None,
+        printings: Vec::new(),
+        rulings: Vec::new(),
+        is_game_changer: false,
+        identifiers: AtomicIdentifiers {
+            scryfall_oracle_id: Some("d7950018-d744-48a8-81aa-0d8384703f48".to_string()),
+            scryfall_id: Some("561cfc04-65ea-49a4-8638-b4631a7cf828".to_string()),
+        },
+        foreign_data: Vec::new(),
+        related_cards: SetRelatedCards::default(),
+    };
+    engine::database::synthesis::build_oracle_face(&card, None)
+}
+
+/// Zur's export face stamped by the committed census list, keyed by the exact
+/// export key the census lookup uses. The `marked` count is the reach guard: a
+/// census key/spelling drift would stamp nothing, and this test would otherwise
+/// degrade into "the unmarked card is supported".
+fn stamped_zur_export() -> Value {
+    let mut face = zur_the_enchanter_face();
+    let stamp = ConfirmedMisparses::committed().stamp_all(std::iter::once((ZUR_KEY, &mut face)));
+    assert_eq!(
+        stamp.marked, 1,
+        "the committed census must key Zur the Enchanter by the exact export key {ZUR_KEY}"
+    );
+    serde_json::to_value(&face).expect("stamped Zur the Enchanter face serializes")
+}
+
+fn deck_database(entries: impl IntoIterator<Item = (String, Value)>) -> CardDatabase {
+    let raw: Map<String, Value> = entries.into_iter().collect();
+    database(&raw)
+}
+
+/// The deck path publishes WHAT the confirmed misparse got wrong, not just the
+/// handler label: the census clauses joined with " / " and one typed diagnosis
+/// per clause. Before `UnsupportedCard::gap_details`, the deck editor received
+/// only `Misparse:wrong_object`.
+#[test]
+fn deck_compatibility_confirmed_misparse_publishes_census_clause() {
+    let entry = ConfirmedMisparses::committed()
+        .get(ZUR_KEY)
+        .expect("the committed list carries Zur the Enchanter");
+    assert_eq!(entry.class, MisparseClass::WrongObject);
+    assert_eq!(
+        entry.clauses,
+        [ZUR_CENSUS_CLAUSE],
+        "the pinned clause must match the committed census row"
+    );
+
+    let db = deck_database([(ZUR_KEY.to_string(), stamped_zur_export())]);
+    let request = DeckCompatibilityRequest {
+        main_deck: vec!["Zur the Enchanter".to_string()],
+        ..Default::default()
+    };
+    let coverage = evaluate_deck_compatibility(&db, &request)
+        .coverage
+        .expect("deck compatibility reports coverage");
+    assert_eq!((coverage.total_unique, coverage.supported_unique), (1, 0));
+    assert_eq!(coverage.unsupported_cards.len(), 1);
+    let unsupported = &coverage.unsupported_cards[0];
+    assert_eq!(unsupported.name, "Zur the Enchanter");
+    assert_eq!(unsupported.gaps, ["Misparse:wrong_object"]);
+    assert_eq!(
+        unsupported.gap_details.len(),
+        1,
+        "gaps and gap_details must describe the same set: {:?}",
+        unsupported.gaps
+    );
+    let detail = &unsupported.gap_details[0];
+    assert_eq!(detail.handler, "Misparse:wrong_object");
+    let expected_text = entry.clauses.join(" / ");
+    assert_eq!(detail.source_text.as_deref(), Some(expected_text.as_str()));
+    assert_eq!(
+        detail.diagnoses,
+        [GapDiagnosis::Misparse {
+            class: MisparseClass::WrongObject,
+            clause: ZUR_CENSUS_CLAUSE.to_string(),
+        }],
+        "the published gap carries the typed census diagnosis"
+    );
+}
+
+/// No published deck gap leaves `source_text` blank. The two witnesses are
+/// printed fixture faces already pinned as unsupported by
+/// `deck_validation`'s `deck_coverage_matches_report_for_printed_warning_and_silent_drop_witnesses`:
+/// Hinder's swallow warning (whose runtime text names the detector only) and
+/// Druid of the Emerald Grove's silent drop.
+#[test]
+fn deck_compatibility_gap_details_name_every_gap_source() {
+    const WITNESSES: [(&str, &str); 2] = [
+        ("Druid of the Emerald Grove", "SilentDrop:1_of_2"),
+        ("Hinder", "Swallow:Replacement_Instead"),
+    ];
+    let raw: Map<String, Value> = WITNESSES
+        .iter()
+        .map(|(name, _)| {
+            let key = name.to_lowercase();
+            (key.clone(), fixture()[key.as_str()].clone())
+        })
+        .collect();
+    let db = database(&raw);
+    let request = DeckCompatibilityRequest {
+        main_deck: WITNESSES.iter().map(|(name, _)| name.to_string()).collect(),
+        ..Default::default()
+    };
+    let coverage = evaluate_deck_compatibility(&db, &request)
+        .coverage
+        .expect("deck compatibility reports coverage");
+    assert_eq!((coverage.total_unique, coverage.supported_unique), (2, 0));
+    assert_eq!(coverage.unsupported_cards.len(), 2);
+    for (name, expected_gap) in WITNESSES {
+        let card = coverage
+            .unsupported_cards
+            .iter()
+            .find(|card| card.name == name)
+            .unwrap_or_else(|| panic!("{name} must be reported unsupported"));
+        assert_eq!(card.gaps, [expected_gap]);
+        assert_eq!(
+            card.gap_details
+                .iter()
+                .map(|gap| gap.handler.as_str())
+                .collect::<Vec<_>>(),
+            [expected_gap],
+            "{name}: gap_details must mirror gaps in order"
+        );
+        for gap in &card.gap_details {
+            let text = gap.source_text.as_deref().unwrap_or_else(|| {
+                panic!("{name}: {} must publish the text it concerns", gap.handler)
+            });
+            assert!(
+                !text.trim().is_empty(),
+                "{name}: {} publishes blank source text",
+                gap.handler
+            );
+        }
+    }
+    let hinder = coverage
+        .unsupported_cards
+        .iter()
+        .find(|card| card.name == "Hinder")
+        .expect("Hinder is reported unsupported");
+    let swallow_text = hinder.gap_details[0]
+        .source_text
+        .as_deref()
+        .expect("the swallow gap names its printed clause");
+    assert!(
+        swallow_text.contains("top or bottom of its owner's library"),
+        "the swallow source text is the printed rider, not the detector display: {swallow_text}"
+    );
+}
+
+/// The coverage report and the deck verdict share one explained-gap authority:
+/// for each unsupported face, `explained_gap_details` names the same handlers in
+/// the same order as `gap_handlers`, and the deck row's `gap_details` serialize
+/// byte-for-byte like the published report row's. A drift in either path (the
+/// clause lookup, the blank-text fallback, the key) fails here.
+#[test]
+fn deck_gap_details_match_report_and_face_handlers() {
+    let db = deck_database([
+        (
+            "druid of the emerald grove".to_string(),
+            fixture()["druid of the emerald grove"].clone(),
+        ),
+        ("hinder".to_string(), fixture()["hinder"].clone()),
+        (ZUR_KEY.to_string(), stamped_zur_export()),
+    ]);
+    let request = DeckCompatibilityRequest {
+        main_deck: vec![
+            "Zur the Enchanter".to_string(),
+            "Hinder".to_string(),
+            "Druid of the Emerald Grove".to_string(),
+        ],
+        ..Default::default()
+    };
+    let coverage = evaluate_deck_compatibility(&db, &request)
+        .coverage
+        .expect("deck compatibility reports coverage");
+    assert_eq!(coverage.unsupported_cards.len(), 3);
+    let report = report(&db);
+    for card in &coverage.unsupported_cards {
+        let key = card.name.to_lowercase();
+        let face = db
+            .get_face_by_name(&card.name)
+            .unwrap_or_else(|| panic!("{key} resolves in the deck database"));
+        let face_coverage = card_face_coverage_with_subtypes(face, db.valid_subtypes());
+        let explained = face_coverage.explained_gap_details(&key, face);
+        assert_eq!(
+            explained
+                .iter()
+                .map(|gap| gap.handler.clone())
+                .collect::<Vec<_>>(),
+            face_coverage.gap_handlers(),
+            "{key}: explained gaps keep the gap order"
+        );
+        let row = report
+            .get(&key)
+            .unwrap_or_else(|| panic!("{key} is in the published report"));
+        assert!(!row.supported, "{key}: the report agrees it is unsupported");
+        assert_eq!(
+            serde_json::to_value(&row.gap_details).unwrap(),
+            serde_json::to_value(&card.gap_details).unwrap(),
+            "{key}: report and deck paths must publish one gap shape"
+        );
+    }
+}
+
+/// Old deck-compatibility payloads (no `gap_details`) still deserialize, and an
+/// empty list stays off the wire, so the field is additive for every consumer.
+#[test]
+fn unsupported_card_gap_details_are_additive_on_the_wire() {
+    let legacy = serde_json::json!({
+        "name": "Hinder",
+        "gaps": ["Swallow:Replacement_Instead"],
+    });
+    let card: UnsupportedCard =
+        serde_json::from_value(legacy).expect("the pre-gap_details shape still deserializes");
+    assert!(card.gap_details.is_empty());
+    assert_eq!(card.gaps, ["Swallow:Replacement_Instead"]);
+    assert_eq!(card.copies, 1, "copies keeps its serde default");
+    let reserialized = serde_json::to_value(&card).expect("UnsupportedCard serializes");
+    assert!(
+        reserialized.get("gap_details").is_none(),
+        "an empty gap_details list is omitted: {reserialized}"
+    );
+    assert_eq!(reserialized["name"], "Hinder");
 }

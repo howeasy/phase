@@ -7758,8 +7758,7 @@ pub fn analyze_coverage(card_db: &CardDatabase) -> CoverageSummary {
             &valid_subtypes,
         );
         let supported = coverage.is_supported();
-        let mut gap_details = public_gap_details(&coverage.gaps);
-        explain_blank_gaps(key, face, &coverage.parse_details, &mut gap_details);
+        let gap_details = coverage.explained_gap_details(key, face);
         let gap_count = gap_details.len();
 
         for gap in &coverage.gaps {
@@ -8229,6 +8228,17 @@ impl CardFaceCoverage {
 
     pub fn gap_handlers(&self) -> Vec<String> {
         self.gaps.iter().map(|gap| gap.handler.clone()).collect()
+    }
+
+    /// The gaps in the published-report shape, each naming WHAT is unsupported:
+    /// the printed clause, the census-cited misparse clauses, or the unhandled
+    /// feature ([`explain_blank_gaps`]). `key` is the face's export key, the one
+    /// the confirmed-misparse list is looked up by. Shared by the coverage report
+    /// and the deck-compatibility verdict, so both say the same thing.
+    pub fn explained_gap_details(&self, key: &str, face: &CardFace) -> Vec<GapDetail> {
+        let mut details = public_gap_details(&self.gaps);
+        explain_blank_gaps(key, face, &self.parse_details, &mut details);
+        details
     }
 }
 
