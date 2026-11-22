@@ -511,3 +511,97 @@ fn borg_cube_doubled_entry_assimilates_the_card_the_first_trigger_exiled() {
     assert_eq!(other.controller, P1);
     assert!(other.counters.is_empty());
 }
+
+const SMASH_TO_SMITHEREENS: &str =
+    "Destroy target artifact. Smash to Smithereens deals 3 damage to that artifact's controller.";
+
+/// CR 400.7 + CR 607.2a + CR 608.2h (departed incarnation): Borg Cube's attack
+/// trigger is on the stack when Smash to Smithereens destroys the Cube in
+/// response. The trigger resolves from the pile of the incarnation it is bound to
+/// (its latch plus the linked-exile last-known information), not from the live
+/// links of an object that no longer exists, and assimilates the creature the
+/// Cube exiled — under the trigger's controller.
+///
+/// Mutant: read the pile of a trigger from live links only (drop the latch and
+/// LKI legs of `players::pile_entries`): the pile is empty, the trigger takes
+/// its "If you can't" branch and exiles the bystander instead, and the card
+/// stays exiled — every assertion below flips.
+#[test]
+fn borg_cube_destroyed_with_its_trigger_on_the_stack_still_assimilates() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let victim = scenario
+        .add_creature(P1, "Test Soldier", 2, 2)
+        .with_subtypes(vec!["Human", "Soldier"])
+        .id();
+    let bystander = scenario.add_creature(P1, "Test Bystander", 1, 1).id();
+    fund_borg_cube(&mut scenario);
+    scenario.add_basic_land(P0, ManaColor::Red);
+    scenario.add_basic_land(P0, ManaColor::Red);
+    let cube = borg_cube_in_hand(&mut scenario);
+    let smash = scenario
+        .add_spell_to_hand_from_oracle(P0, "Smash to Smithereens", true, SMASH_TO_SMITHEREENS)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Red],
+            generic: 1,
+        })
+        .id();
+    let mut runner = scenario.build();
+    seed_creature_types(&mut runner);
+
+    // The enters trigger exiles the victim (the pile was empty): linked to the Cube.
+    runner.cast(cube).commit();
+    resolve_with_trigger_target(&mut runner, Some(victim));
+    assert_eq!(runner.state().objects[&victim].zone, Zone::Exile);
+    assert!(is_linked_to(&runner, victim, cube));
+
+    // Station: a 6/6 artifact creature that may attack this turn.
+    {
+        let state = runner.state_mut();
+        let obj = state.objects.get_mut(&cube).unwrap();
+        obj.counters
+            .insert(CounterType::Generic("charge".to_string()), 12);
+        obj.summoning_sick = false;
+    }
+    relayer(&mut runner);
+    runner.advance_to_combat();
+    runner
+        .declare_attackers(&[(cube, AttackTarget::Player(P1))])
+        .expect("declare Borg Cube as attacker");
+    answer_trigger_targets(&mut runner, &[Some(bystander)]);
+    assert_eq!(
+        runner.state().stack.len(),
+        1,
+        "reach: the attack trigger waits on the stack"
+    );
+
+    // In response, Smash to Smithereens destroys the Cube: the bound incarnation
+    // departs while its trigger is still on the stack.
+    runner.cast(smash).target_object(cube).commit();
+    runner.resolve_top();
+    assert_eq!(
+        runner.state().objects[&cube].zone,
+        Zone::Graveyard,
+        "reach: the Cube left the battlefield"
+    );
+    assert_eq!(
+        runner.state().stack.len(),
+        1,
+        "reach: the attack trigger is still on the stack"
+    );
+
+    resolve_with_trigger_target(&mut runner, None);
+    let obj = &runner.state().objects[&victim];
+    assert_eq!(
+        obj.zone,
+        Zone::Battlefield,
+        "the departed Cube's trigger assimilates the card it exiled"
+    );
+    assert_eq!(obj.controller, P0, "under the trigger's controller");
+    assert_eq!(obj.counters.get(&CounterType::Plus1Plus1).copied(), Some(1));
+    assert_eq!(
+        runner.state().objects[&bystander].zone,
+        Zone::Battlefield,
+        "something could be assimilated, so the fallback exile does not run"
+    );
+}

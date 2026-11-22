@@ -73226,6 +73226,26 @@ fn cast_a_spell_from_linked_exile_under_a_duration_shares_one_budget() {
         .map(window)
         .expect("Jeleva's attack trigger casts from linked exile");
     assert_eq!(driver, CastFromZoneDriver::LingeringPermission);
+
+    // No stated duration (Kaho's activated ability, kaho_minamo_historian_linked_exile.rs):
+    // the per-object permission stays, so its behaviour is the base one.
+    let kaho = parse_oracle_text(
+        "When Kaho enters, search your library for up to three instant cards, exile them, then \
+         shuffle.\n\
+         {X}, {T}: You may cast a spell with mana value X from among cards exiled with Kaho \
+         without paying its mana cost.",
+        "Kaho, Minamo Historian",
+        &[],
+        &["Creature".to_string()],
+        &["Merfolk".to_string(), "Wizard".to_string()],
+    );
+    let (driver, _) = kaho
+        .abilities
+        .iter()
+        .find(|ability| cast_from_zone_in_chain(ability).is_some())
+        .map(window)
+        .expect("Kaho's activated ability casts from linked exile");
+    assert_eq!(driver, CastFromZoneDriver::LingeringPermission);
 }
 
 const CODIE_CONTINUATION_TEXT: &str = "Add {W}{U}{B}{R}{G}. When you next cast a spell this turn, \

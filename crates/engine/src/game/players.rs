@@ -1990,6 +1990,142 @@ mod tests {
         );
     }
 
+    /// Like `resolving_characteristic`, for an ability put on the stack while
+    /// `source` had incarnation `stamp` (a stale reader when `source` has since
+    /// become a new incarnation).
+    fn resolving_characteristic_at(
+        state: &mut GameState,
+        source: ObjectId,
+        stamp: u64,
+        set: crate::types::ability::CharacteristicSetRef,
+    ) {
+        resolving_ability_of(state, source, stamp);
+        let Some(StackEntryKind::ActivatedAbility { ability, .. }) = state
+            .resolving_stack_entry
+            .as_mut()
+            .map(|entry| &mut entry.kind)
+        else {
+            unreachable!("resolving_ability_of pushes an activated ability");
+        };
+        ability.set_source_ability_provenance_recursive(Some(
+            crate::types::ability::AbilityProvenance::Characteristic(set),
+        ));
+    }
+
+    /// CR 400.7 + CR 607.2a + CR 608.2h: a trigger bound to an incarnation that
+    /// has since left reads NONE of the links the object that replaced it holds,
+    /// whatever the link kind. `links_for_reader` admits `UntilSourceLeaves`,
+    /// `UntilOpponentBecomesMonarch`, `ParadigmSource`, `Cipher`, `Haunt` and
+    /// `CraftMaterial` links to every reader (the object they were made for may
+    /// be a later incarnation of the one that made them, CR 400.7d/j), so the
+    /// only thing that stops a stale reader from reading them is the live leg's
+    /// `identity.is_current` gate in `pile_entries`. The fixture makes the link's
+    /// pair EQUAL the stale reader's pair (the link was recorded by an ability of
+    /// the stale incarnation), so the pair filter admits it and only the gate
+    /// refuses; a reader bound to the live incarnation reads the same kind of
+    /// link (the positive control, so the refusal is not vacuous).
+    ///
+    /// Mutant: delete `source.identity.is_current(state)` from the live leg of
+    /// `pile_entries`: every stale-reader assertion below fails (all nine arms).
+    #[test]
+    fn a_stale_reader_never_reads_a_successor_incarnations_link_of_any_kind() {
+        use crate::game::game_object::LinkedAbilitySource;
+        use crate::types::ability::CharacteristicSetRef::Own;
+        use crate::types::game_state::{ExileLink, ExileLinkKind, LookGrant};
+        use crate::types::identifiers::ObjectIncarnationRef;
+
+        // Every kind `links_for_reader` matches, each in the form the live
+        // incarnation `live` itself would read.
+        let kinds = |live: u64| {
+            vec![
+                ExileLinkKind::TrackedBySource,
+                ExileLinkKind::CastCost,
+                ExileLinkKind::UntilSourceLeaves {
+                    return_zone: Zone::Battlefield,
+                },
+                ExileLinkKind::UntilOpponentBecomesMonarch {
+                    return_zone: Zone::Battlefield,
+                    controller: PlayerId(0),
+                },
+                ExileLinkKind::ParadigmSource {
+                    player: PlayerId(0),
+                },
+                ExileLinkKind::Cipher,
+                ExileLinkKind::Haunt,
+                ExileLinkKind::CraftMaterial,
+                ExileLinkKind::HideawayLookable {
+                    grant: LookGrant::SourceController,
+                    lookers: std::collections::BTreeSet::from([PlayerId(0)]),
+                    source_incarnation: live,
+                },
+            ]
+        };
+        let arms = kinds(0).len();
+        assert_eq!(arms, 9, "one row per ExileLinkKind arm");
+        for position in 0..arms {
+            let (mut state, source, stale_card, live_card) = live_source_with_exiles();
+            let stale_incarnation = state.objects[&source].incarnation;
+            let stale_context = crate::game::triggers::trigger_source_context_for_latch(
+                &state,
+                &state.objects[&source],
+            );
+            // The source leaves and returns: a new incarnation holds the id.
+            let mut events = Vec::new();
+            move_to_zone(&mut state, source, Zone::Graveyard, &mut events);
+            move_to_zone(&mut state, source, Zone::Battlefield, &mut events);
+            let live_incarnation = state.objects[&source].incarnation;
+            assert_ne!(live_incarnation, stale_incarnation, "a new incarnation");
+            let kind = kinds(live_incarnation)[position].clone();
+
+            // A link of this kind, recorded by an ability of the STALE
+            // incarnation's own pair, on the card the stale reader could read.
+            let pair = |incarnation| {
+                Some(LinkedAbilitySource {
+                    creator: ObjectIncarnationRef::of(source, incarnation),
+                    characteristic_set: Own,
+                })
+            };
+            state.exile_links.push(ExileLink {
+                exiled_id: stale_card,
+                source_id: source,
+                kind: kind.clone(),
+                supplier: pair(stale_incarnation),
+            });
+            resolving_characteristic_at(&mut state, source, stale_incarnation, Own);
+            assert!(
+                !pile_ids(&state, &stale_context).contains(&stale_card),
+                "{kind:?}: the stale reader must not read the successor's link"
+            );
+            assert!(
+                !linked_exile_pile_holds(&state, &stale_context, stale_card),
+                "{kind:?}: and the membership form agrees"
+            );
+
+            // Positive control: a reader bound to the live incarnation, latched
+            // before its own link existed, reads a link of the same kind made by
+            // an ability of ITS incarnation.
+            let live_context = crate::game::triggers::trigger_source_context_for_latch(
+                &state,
+                &state.objects[&source],
+            );
+            state.exile_links.push(ExileLink {
+                exiled_id: live_card,
+                source_id: source,
+                kind: kind.clone(),
+                supplier: pair(live_incarnation),
+            });
+            resolving_characteristic_at(&mut state, source, live_incarnation, Own);
+            assert!(
+                pile_ids(&state, &live_context).contains(&live_card),
+                "{kind:?}: the live reader reads a link of its own incarnation (control)"
+            );
+            assert!(
+                linked_exile_pile_holds(&state, &live_context, live_card),
+                "{kind:?}: control, membership form"
+            );
+        }
+    }
+
     /// CR 603.10a + CR 607.2a: a leaves record carrying a trigger source context
     /// also reads what the bound incarnation exiled after departing.
     #[test]

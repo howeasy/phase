@@ -30,9 +30,11 @@
 //!   die, exile it instead.)"
 
 use engine::game::combat::AttackTarget;
+use engine::game::layers::evaluate_layers;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::types::ability::{Effect, TargetRef};
 use engine::types::actions::GameAction;
+use engine::types::counter::CounterType;
 use engine::types::game_state::WaitingFor;
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaColor, ManaCost, ManaCostShard};
@@ -231,6 +233,179 @@ fn a_card_exiled_by_another_copiable_set_is_not_assimilated() {
         "settled: {:?} {:?}",
         runner.state().waiting_for,
         runner.state().stack
+    );
+    assert_eq!(
+        runner.state().objects[&victim].zone,
+        Zone::Exile,
+        "a card exiled by another ability pair is not assimilated"
+    );
+}
+
+const BORG_CUBE: &str = "Affinity for artifact creatures\n\
+     Whenever this Spacecraft enters or attacks, assimilate a creature card exiled with it. \
+     If you can't, exile up to one target creature. (To assimilate a card, put it onto the \
+     battlefield under your control with a +1/+1 counter. It's a Borg artifact creature and \
+     loses all other creature types.)\n\
+     Station (Tap another creature you control: Put charge counters equal to its power on this \
+     Spacecraft. Station only as a sorcery. It's an artifact creature at 12+.)\n\
+     12+ | Artifact creatures you control have flying.";
+
+/// CR 607.5 (the maintainer's scenario): Volrath copies a stationed Borg Cube
+/// ("it has all printed abilities, including the station symbols"; counters are
+/// not copied, so Volrath carries its own twelve charge counters) and attacks.
+/// The Cube's attack trigger, linked to the Cube-copy ability set, waits on the
+/// stack with an empty pile. In response Volrath becomes a copy of Intrepid
+/// Paleontologist and exiles a creature card from a graveyard with ITS ability,
+/// which is not linked to the Cube trigger's ability. The trigger's "assimilate a
+/// creature card exiled with it" finds nothing, so "If you can't" runs and exiles
+/// the trigger's chosen target instead; the graveyard card is not assimilated.
+///
+/// Positive reach guard for the negative: the fallback exile of the chosen
+/// creature happens (the trigger resolved and found its pile empty), and the
+/// graveyard card is in exile linked to Volrath by the Paleontologist's ability.
+///
+/// Mutant: drop the pair filters of `players::pile_entries` (admit a card exiled
+/// by another copiable set): the card is assimilated, the bystander stays put.
+#[test]
+fn volrath_as_borg_cube_does_not_assimilate_a_card_exiled_by_another_copiable_set() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let volrath = {
+        let mut b =
+            scenario.add_creature_from_oracle(P0, "Volrath, the Shapestealer", 7, 5, VOLRATH);
+        b.as_legendary()
+            .with_subtypes(vec!["Phyrexian", "Shapeshifter"])
+            .with_mana_cost(cost(
+                &[
+                    ManaCostShard::Black,
+                    ManaCostShard::Green,
+                    ManaCostShard::Blue,
+                ],
+                2,
+            ));
+        b.id()
+    };
+    // The stationed Borg Cube Volrath copies (a creature with a counter on it).
+    let cube = {
+        let mut b = scenario.add_creature_from_oracle(P0, "Borg Cube", 6, 6, "");
+        b.as_artifact()
+            .with_subtypes(vec!["Spacecraft"])
+            .with_mana_cost(cost(&[ManaCostShard::White, ManaCostShard::Black], 5))
+            .from_oracle_text_with_keywords(&["Affinity", "Station"], BORG_CUBE);
+        b.id()
+    };
+    let paleontologist = {
+        let mut b =
+            scenario.add_creature_from_oracle(P0, "Intrepid Paleontologist", 2, 2, PALEONTOLOGIST);
+        b.with_subtypes(vec!["Human", "Druid"])
+            .with_mana_cost(cost(&[ManaCostShard::Green], 1))
+            .with_plus_counters(1);
+        b.id()
+    };
+    let victim = scenario
+        .add_creature_to_graveyard(P1, "Grizzly Bears", 2, 2)
+        .with_subtypes(vec!["Bear"])
+        .with_mana_cost(cost(&[ManaCostShard::Green], 1))
+        .id();
+    let bystander = scenario.add_creature(P1, "Test Bystander", 1, 1).id();
+    for _ in 0..4 {
+        scenario.add_basic_land(P0, ManaColor::Green);
+    }
+    let mut runner = scenario.build();
+    runner.state_mut().all_creature_types = vec![
+        "Bear".to_string(),
+        "Borg".to_string(),
+        "Phyrexian".to_string(),
+        "Shapeshifter".to_string(),
+    ];
+    // Station both: the Cube is a creature with counters (Volrath's copy target),
+    // and Volrath's own charge counters (not copied) make its Cube copy a creature.
+    for id in [cube, volrath] {
+        let obj = runner.state_mut().objects.get_mut(&id).unwrap();
+        obj.counters
+            .insert(CounterType::Generic("charge".to_string()), 12);
+    }
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&volrath)
+        .unwrap()
+        .summoning_sick = false;
+    runner.state_mut().layers_dirty.mark_full();
+    evaluate_layers(runner.state_mut());
+
+    // Volrath becomes a copy of the stationed Borg Cube.
+    let copy_ability = ability_index(&runner, volrath, |e| matches!(e, Effect::BecomeCopy { .. }));
+    activate_on_stack(&mut runner, volrath, copy_ability, cube);
+    resolve_one(&mut runner);
+    assert_eq!(runner.state().objects[&volrath].name, "Borg Cube");
+
+    // Attack: the copied attack trigger goes on the stack with an empty pile; its
+    // "up to one target creature" is the bystander.
+    runner.advance_to_combat();
+    runner
+        .declare_attackers(&[(volrath, AttackTarget::Player(P1))])
+        .expect("declare the Borg Cube copy as attacker");
+    while let WaitingFor::TriggerTargetSelection { .. } = runner.state().waiting_for {
+        runner
+            .act(GameAction::ChooseTarget {
+                target: Some(TargetRef::Object(bystander)),
+            })
+            .expect("choose the fallback target");
+    }
+    assert_eq!(runner.state().stack.len(), 1, "the attack trigger waits");
+    assert!(
+        !runner
+            .state()
+            .exile_links
+            .iter()
+            .any(|link| link.source_id == volrath),
+        "reach: nothing is exiled with Volrath yet"
+    );
+
+    // With the trigger on the stack, Volrath becomes a copy of the Paleontologist
+    // and exiles the creature card from P1's graveyard with ITS ability.
+    let copy_ability = ability_index(&runner, volrath, |e| matches!(e, Effect::BecomeCopy { .. }));
+    activate_on_stack(&mut runner, volrath, copy_ability, paleontologist);
+    resolve_one(&mut runner);
+    assert_eq!(
+        runner.state().objects[&volrath].name,
+        "Intrepid Paleontologist"
+    );
+    let exile_ability = ability_index(&runner, volrath, |e| {
+        matches!(
+            e,
+            Effect::ChangeZone {
+                destination: Zone::Exile,
+                ..
+            }
+        )
+    });
+    activate_on_stack(&mut runner, volrath, exile_ability, victim);
+    resolve_one(&mut runner);
+    assert_eq!(runner.state().objects[&victim].zone, Zone::Exile);
+    assert!(
+        runner
+            .state()
+            .exile_links
+            .iter()
+            .any(|link| link.exiled_id == victim && link.source_id == volrath),
+        "reach: the exile is linked to Volrath by the Paleontologist ability"
+    );
+
+    // The Cube trigger resolves: its pair exiled nothing, so "If you can't" runs.
+    resolve_one(&mut runner);
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { .. })
+            && runner.state().stack.is_empty(),
+        "settled: {:?} {:?}",
+        runner.state().waiting_for,
+        runner.state().stack
+    );
+    assert_eq!(
+        runner.state().objects[&bystander].zone,
+        Zone::Exile,
+        "reach: the trigger found no card of its own pair and took its fallback"
     );
     assert_eq!(
         runner.state().objects[&victim].zone,
