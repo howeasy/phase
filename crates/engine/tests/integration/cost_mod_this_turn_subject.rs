@@ -402,7 +402,11 @@ fn spellbinding_soprano_attack_trigger_discounts_only_instant_and_sorcery_spells
         Zone::Stack,
         "the committed creature spell is on the stack"
     );
-    fund(&mut runner, P0, &[ManaType::Blue]);
+    {
+        let pool = &mut commit.state_mut().players[P0.0 as usize].mana_pool;
+        pool.clear();
+        pool.add(unit(ManaType::Blue, 0));
+    }
     let outcome = commit
         .cast(board.essence_scatter)
         .target_object(board.grizzly_bears)
@@ -617,7 +621,7 @@ fn urza_plus_two_discounts_artifacts_instants_and_sorceries_and_allows_a_second_
         Zone::Battlefield,
         "the reduced artifact resolves"
     );
-    assert_eq!(pool_total(&runner, P0), 0, "the artifact costs exactly {0}");
+    assert_eq!(pool_total(&runner, P0), 0, "the artifact costs exactly {{0}}");
 
     // A reduced sorcery pays exactly {U}.
     fund(&mut runner, P0, &[ManaType::Blue]);
@@ -808,7 +812,7 @@ fn armor_wars_chapter_two_discounts_only_artifact_spells() {
         Zone::Battlefield,
         "the reduced artifact resolves"
     );
-    assert_eq!(pool_total(&runner, P0), 0, "the artifact costs exactly {0}");
+    assert_eq!(pool_total(&runner, P0), 0, "the artifact costs exactly {{0}}");
 
     // The control creature pays its full printed {1}{G}.
     fund(&mut runner, P0, &[ManaType::Colorless, ManaType::Green]);

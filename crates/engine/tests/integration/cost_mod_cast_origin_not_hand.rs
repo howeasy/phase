@@ -96,7 +96,7 @@ fn assert_settled(r: &GameRunner, player: PlayerId, what: &str) {
     assert!(
         r.state().stack.is_empty(),
         "{what}: the stack is empty, found {:?}",
-        r.state().stack_names()
+        r.stack_names()
     );
     assert!(
         matches!(&r.state().waiting_for, WaitingFor::Priority { player: p } if *p == player),
@@ -171,6 +171,9 @@ fn savvy_trader_reduces_only_casts_from_outside_the_hand() {
     let savvy = scenario.add_real_card(P0, "Savvy Trader", Zone::Hand, db());
     let hand_bears = scenario.add_real_card(P0, "Grizzly Bears", Zone::Hand, db());
     let gy_bears = scenario.add_real_card(P0, "Grizzly Bears", Zone::Graveyard, db());
+    // A second permanent card in the graveyard keeps the target prompt open (the
+    // engine auto-commits a unique legal target) and is the wrong choice.
+    let gy_forest = scenario.add_real_card(P0, "Forest", Zone::Graveyard, db());
     // P1's printed flashback card, for the opponent-cost control only.
     let p1_looting = scenario.add_real_card(P1, "Faithless Looting", Zone::Graveyard, db());
 
@@ -208,10 +211,13 @@ fn savvy_trader_reduces_only_casts_from_outside_the_hand() {
     assert_eq!(target_slots.len(), 1, "the exile clause has exactly one target slot");
     let slot = &target_slots[0];
     assert!(!slot.optional, "the exile target is required, not optional");
+    let mut offered = slot.legal_targets.clone();
+    offered.sort_by_key(|target| format!("{target:?}"));
+    let mut expected = vec![TargetRef::Object(gy_bears), TargetRef::Object(gy_forest)];
+    expected.sort_by_key(|target| format!("{target:?}"));
     assert_eq!(
-        slot.legal_targets,
-        vec![TargetRef::Object(gy_bears)],
-        "the only offered target is the permanent card in P0's graveyard"
+        offered, expected,
+        "the offered targets are exactly the two permanent cards in P0's graveyard"
     );
     r.act(GameAction::ChooseTarget {
         target: Some(TargetRef::Object(gy_bears)),
@@ -221,6 +227,11 @@ fn savvy_trader_reduces_only_casts_from_outside_the_hand() {
 
     assert_eq!(zone_of(&r, savvy), Zone::Battlefield, "Savvy Trader resolved");
     assert_eq!(zone_of(&r, gy_bears), Zone::Exile, "the trigger exiled the Bears");
+    assert_eq!(
+        zone_of(&r, gy_forest),
+        Zone::Graveyard,
+        "the Forest, not chosen, stays in the graveyard"
+    );
     assert!(
         r.state().objects[&gy_bears]
             .casting_permissions
