@@ -2024,6 +2024,15 @@ mod tests {
             .any(|link| link.exiled_id == exiled && link.source_id == source)
     }
 
+    /// The live link for the pair, when `has_link` answered `true`.
+    fn link_of(state: &GameState, exiled: ObjectId, source: ObjectId) -> &ExileLink {
+        state
+            .exile_links
+            .iter()
+            .find(|link| link.exiled_id == exiled && link.source_id == source)
+            .expect("a live link for the pair")
+    }
+
     /// CR 607.1d + CR 607.2a: a card exiled by a characteristic activated
     /// ability of the creator is mirrored to the creator's consumer emblem when
     /// the incarnation and the copiable set match.
@@ -2369,6 +2378,71 @@ mod tests {
         push_tracked_by_source(&mut state, card, source);
         assert!(!has_link(&state, card, source));
         assert!(!state.linked_exile_lki.contains_key(&source));
+    }
+
+    /// CR 400.7 + CR 113.7a + CR 607.2a + CR 607.5: the supplier stamped on a
+    /// tracked exile names the ability pair that made it — the push-time
+    /// capture of the departed incarnation for an LKI snapshot, the live
+    /// object's incarnation for a link, and nothing when no ability of the
+    /// source is resolving. `PartialEq` on both `LinkedExileSnapshot` and
+    /// `ExileLink` ignores `supplier`, so each scenario asserts the field
+    /// itself: a `None` stamped anywhere would fail it.
+    #[test]
+    fn a_departed_incarnations_exile_records_the_exiling_pair_on_its_lki_snapshot() {
+        // Stamped 4 with characteristic provenance, live 6: the departed
+        // incarnation's snapshot carries the resolving pair.
+        let (mut state, source) = departed_creator_fixture();
+        resolving_characteristic(&mut state, source, CharacteristicSetRef::Own);
+        let expected = resolving_exile_supplier(&state, source);
+        assert!(expected.is_some(), "the resolving ability is attributable");
+        let card = exile_card(&mut state);
+        push_tracked_by_source(&mut state, card, source);
+        assert!(
+            !has_link(&state, card, source),
+            "the departed incarnation owns the exile"
+        );
+        let entries = &state.linked_exile_lki[&source];
+        assert_eq!(entries.len(), 1, "one LKI entry");
+        assert_eq!(entries[0].snapshot.len(), 1, "the card once");
+        assert_eq!(entries[0].snapshot[0].supplier, expected);
+        assert!(
+            entries[0].snapshot[0].supplier.is_some(),
+            "the snapshot names the exiling pair, not nothing"
+        );
+
+        // Stamped 6 (the live object), same provenance: the live link carries
+        // the live object's pair.
+        let (mut state, source) = departed_creator_fixture();
+        resolving_as(&mut state, source, ResolvingKind::Activated, |ability| {
+            ability.source_incarnation = Some(6);
+            ability.set_source_ability_provenance_recursive(Some(
+                AbilityProvenance::Characteristic(CharacteristicSetRef::Own),
+            ));
+        });
+        let card = exile_card(&mut state);
+        push_tracked_by_source(&mut state, card, source);
+        assert!(
+            has_link(&state, card, source),
+            "the live object's own exile"
+        );
+        assert_eq!(
+            link_of(&state, card, source).supplier,
+            Some(LinkedAbilitySource {
+                creator: ObjectIncarnationRef::of(source, 6),
+                characteristic_set: CharacteristicSetRef::Own,
+            })
+        );
+
+        // No resolving ability: an unattributed exile still links, with no pair.
+        let (mut state, source) = departed_creator_fixture();
+        state.resolving_stack_entry = None;
+        let card = exile_card(&mut state);
+        push_tracked_by_source(&mut state, card, source);
+        assert!(
+            has_link(&state, card, source),
+            "an exile with no resolving ability still links"
+        );
+        assert_eq!(link_of(&state, card, source).supplier, None);
     }
 
     /// CR 400.7 + CR 607.2a: a card the departed incarnation exiles, which then

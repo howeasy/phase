@@ -7363,6 +7363,98 @@ mod tests {
         assert_eq!(state.linked_exile_lki.get(&source), Some(&departures));
     }
 
+    /// CR 607.5 + CR 607.2a: each exile link's `supplier` — the ability pair that
+    /// performed the exile — is carried into the departure's LKI snapshot, so a
+    /// later reader (`players::pair_compatible`) can admit only the pile the
+    /// reading ability pair built. Both `ExileLink` and `LinkedExileSnapshot`
+    /// define a manual `PartialEq` that IGNORES `supplier`, so the field is
+    /// compared explicitly here; a producer that stamped `None` fails.
+    #[test]
+    fn a_battlefield_departure_keeps_each_links_supplier_in_its_lki_snapshot() {
+        use crate::game::game_object::LinkedAbilitySource;
+        use crate::types::ability::{CharacteristicSetRef, CopyEffectInstanceRef};
+
+        let mut state = setup();
+        let source = create_object(
+            &mut state,
+            CardId(67),
+            PlayerId(0),
+            "Supplier Source".to_string(),
+            Zone::Battlefield,
+        );
+        let incarnation = state.objects[&source].incarnation;
+        let own_pair = LinkedAbilitySource {
+            creator: ObjectIncarnationRef::of(source, incarnation),
+            characteristic_set: CharacteristicSetRef::Own,
+        };
+        let copied_pair = LinkedAbilitySource {
+            creator: ObjectIncarnationRef::of(source, incarnation),
+            characteristic_set: CharacteristicSetRef::Copied(CopyEffectInstanceRef {
+                continuous_effect_id: 7,
+                modification_index: 0,
+            }),
+        };
+
+        let mut events = Vec::new();
+        let mut linked = Vec::new();
+        for (card_id, supplier) in [(68, Some(own_pair)), (69, Some(copied_pair)), (70, None)] {
+            let exiled = create_object(
+                &mut state,
+                CardId(card_id),
+                PlayerId(1),
+                "Exiled With Source".to_string(),
+                Zone::Exile,
+            );
+            state.exile_links.push(crate::types::game_state::ExileLink {
+                source_id: source,
+                exiled_id: exiled,
+                kind: crate::types::game_state::ExileLinkKind::TrackedBySource,
+                supplier,
+            });
+            linked.push((exiled, supplier));
+        }
+
+        move_to_zone(&mut state, source, Zone::Graveyard, &mut events);
+
+        let entries = state
+            .linked_exile_lki
+            .get(&source)
+            .expect("the departure records its linked-exile entry");
+        assert_eq!(
+            entries.len(),
+            1,
+            "every non-cast-cost link shares one entry"
+        );
+        let snapshot = &entries[0].snapshot;
+        assert_eq!(snapshot.len(), 3, "every link contributes its own snapshot");
+        for &(exiled, supplier) in &linked {
+            let snap = snapshot
+                .iter()
+                .find(|snap| snap.exiled_id == exiled)
+                .expect("each linked card has its own LKI snapshot");
+            assert_eq!(
+                snap.supplier, supplier,
+                "the LKI snapshot keeps the supplier captured for {exiled:?}"
+            );
+        }
+
+        // CR 603.10a + CR 607.2a: the departure's zone-change record carries the
+        // same attribution for the look-back readers that consult it.
+        let record = departure_record(&events, source);
+        assert_eq!(record.linked_exile_snapshot.len(), 3);
+        for &(exiled, supplier) in &linked {
+            let snap = record
+                .linked_exile_snapshot
+                .iter()
+                .find(|snap| snap.exiled_id == exiled)
+                .expect("the zone-change record carries each linked card");
+            assert_eq!(
+                snap.supplier, supplier,
+                "the zone-change record keeps the supplier for {exiled:?}"
+            );
+        }
+    }
+
     /// CR 712.8a + CR 400.7: An MDFC permanent that entered the battlefield as
     /// its back face (modal_back_face = true) must revert to its front face when
     /// it leaves the battlefield (battlefield is the only non-stack zone where
