@@ -1,16 +1,16 @@
 //! Coverage metadata changes support classification, never parsed rules.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::LazyLock;
 
 use engine::database::CardDatabase;
 use engine::game::coverage::{
     analyze_coverage, card_face_coverage_with_subtypes, card_face_gaps, CardCoverageResult,
-    GapDiagnosis,
+    GapDetail, GapDiagnosis, ENTRY_CONSUMER_GAP, ENTRY_PROJECTION_GAP,
 };
 use engine::game::deck_loading::default_scheme_deck_entries;
 use engine::game::deck_validation::{
-    evaluate_deck_compatibility, DeckCompatibilityRequest, UnsupportedCard,
+    evaluate_deck_compatibility, DeckCompatibilityRequest, DeckCoverage, UnsupportedCard,
 };
 use engine::game::gap_analysis::{analyze_gaps, GapClass};
 use engine::types::card::CardFace;
@@ -1018,4 +1018,520 @@ fn unsupported_card_gap_details_are_additive_on_the_wire() {
         "an empty gap_details list is omitted: {reserialized}"
     );
     assert_eq!(reserialized["name"], "Hinder");
+}
+
+// ---------------------------------------------------------------------------
+// Deck compatibility gap details: printed-card witnesses
+//
+// Every card below is a printed face from the committed integration fixture,
+// with its verbatim Oracle text. The census clauses are asserted against the
+// committed `confirmed-misparses.toml` AND against the face's printed text, so a
+// paraphrase or a drifted census row fails here instead of passing vacuously.
+// ---------------------------------------------------------------------------
+
+/// A database holding exactly the named printed fixture faces (fixture keys), so
+/// one `analyze_coverage` call over it stays cheap.
+fn printed_pool(keys: &[&str]) -> CardDatabase {
+    deck_database(keys.iter().map(|key| {
+        let face = fixture()
+            .get(*key)
+            .unwrap_or_else(|| panic!("the integration fixture carries {key}"));
+        (key.to_string(), face.clone())
+    }))
+}
+
+/// The verdict's coverage for a deck of the named cards, through the production
+/// entry point.
+fn verdict_coverage(db: &CardDatabase, deck: &[&str]) -> DeckCoverage {
+    let request = DeckCompatibilityRequest {
+        main_deck: deck.iter().map(|name| name.to_string()).collect(),
+        ..Default::default()
+    };
+    evaluate_deck_compatibility(db, &request)
+        .coverage
+        .expect("deck compatibility reports coverage")
+}
+
+fn unsupported_named<'a>(coverage: &'a DeckCoverage, name: &str) -> &'a UnsupportedCard {
+    coverage
+        .unsupported_cards
+        .iter()
+        .find(|card| card.name == name)
+        .unwrap_or_else(|| {
+            panic!(
+                "{name} must be reported unsupported, got {:?}",
+                coverage
+                    .unsupported_cards
+                    .iter()
+                    .map(|card| card.name.as_str())
+                    .collect::<Vec<_>>()
+            )
+        })
+}
+
+fn printed_oracle(db: &CardDatabase, name: &str) -> String {
+    db.get_face_by_name(name)
+        .and_then(|face| face.oracle_text.clone())
+        .unwrap_or_else(|| panic!("{name} is a printed face with Oracle text"))
+}
+
+/// The card's single census gap: expected values come from the printed clauses
+/// (pinned against both the committed census row and the face's Oracle text), not
+/// from the coverage report.
+fn assert_census_gap(
+    db: &CardDatabase,
+    card: &UnsupportedCard,
+    key: &str,
+    class: MisparseClass,
+    clauses: &[&str],
+) {
+    let entry = ConfirmedMisparses::committed()
+        .get(key)
+        .unwrap_or_else(|| panic!("the committed census carries {key}"));
+    assert_eq!(entry.class, class, "{key}: census class");
+    assert_eq!(entry.clauses, clauses, "{key}: pinned census clauses");
+    let oracle = printed_oracle(db, &card.name);
+    for clause in clauses {
+        assert!(
+            oracle.contains(clause),
+            "{key}: the census clause is printed Oracle text: {clause}"
+        );
+    }
+    assert!(card.gaps.contains(&class.handler().to_string()), "{key}");
+    let census: Vec<&GapDetail> = card
+        .gap_details
+        .iter()
+        .filter(|gap| gap.handler == class.handler())
+        .collect();
+    assert_eq!(census.len(), 1, "{key}: one census gap in {:?}", card.gaps);
+    assert_eq!(
+        census[0].source_text.as_deref(),
+        Some(clauses.join(" / ").as_str()),
+        "{key}: the gap names the census clauses, joined in census order"
+    );
+    assert_eq!(
+        census[0].diagnoses,
+        clauses
+            .iter()
+            .map(|clause| GapDiagnosis::Misparse {
+                class,
+                clause: clause.to_string(),
+            })
+            .collect::<Vec<_>>(),
+        "{key}: one typed diagnosis per census clause, in order"
+    );
+}
+
+/// Multi-clause census gaps reach the deck verdict: the census clauses, joined
+/// with " / ", and one typed diagnosis per clause. Zurgo and Ojutai and Abandon
+/// Hope each cite two clauses, Aang's Journey one. Reach guards: Plains and
+/// Lightning Bolt (supported) are counted but not listed, so the three
+/// unsupported rows are not an upstream short circuit.
+#[test]
+fn deck_compatibility_publishes_multi_clause_census_gaps_for_printed_cards() {
+    let db = printed_pool(&[
+        "plains",
+        "lightning bolt",
+        "zurgo and ojutai",
+        "abandon hope",
+        "aang's journey",
+    ]);
+    let coverage = verdict_coverage(
+        &db,
+        &[
+            "Plains",
+            "Lightning Bolt",
+            "Zurgo and Ojutai",
+            "Abandon Hope",
+            "Aang's Journey",
+        ],
+    );
+    assert_eq!((coverage.total_unique, coverage.supported_unique), (5, 2));
+    assert_eq!(coverage.unsupported_cards.len(), 3);
+    for supported in ["Plains", "Lightning Bolt"] {
+        assert!(
+            !coverage
+                .unsupported_cards
+                .iter()
+                .any(|card| card.name == supported),
+            "{supported} is supported and carries no gap"
+        );
+    }
+    assert_census_gap(
+        &db,
+        unsupported_named(&coverage, "Zurgo and Ojutai"),
+        "zurgo and ojutai",
+        MisparseClass::DroppedQualifier,
+        &[
+            "Put one of them into your hand and the rest on the bottom of your library in any order.",
+            "You may return one of those Dragons to its owner's hand.",
+        ],
+    );
+    assert_census_gap(
+        &db,
+        unsupported_named(&coverage, "Abandon Hope"),
+        "abandon hope",
+        MisparseClass::WrongCount,
+        &[
+            "Look at target opponent's hand and choose X cards from it.",
+            "That player discards those cards.",
+        ],
+    );
+    assert_census_gap(
+        &db,
+        unsupported_named(&coverage, "Aang's Journey"),
+        "aang's journey",
+        MisparseClass::ExtraEffect,
+        &["Search your library for a basic land card. If this spell was kicked, instead search your library for a basic land card and a Shrine card."],
+    );
+    for card in &coverage.unsupported_cards {
+        assert_eq!(
+            card.gaps,
+            card.gap_details
+                .iter()
+                .map(|gap| gap.handler.clone())
+                .collect::<Vec<_>>(),
+            "{}: gaps and gap_details list the same handlers in the same order",
+            card.name
+        );
+    }
+}
+
+/// A deck that spells a card by an alias or a composite name resolves to the
+/// same export key the report uses, so the census lookup still finds its
+/// clauses. A key built from the raw spelling ("grima, saruman's footman") would
+/// miss the census row and fall back to a generic handler line, failing the
+/// clause assertions below.
+#[test]
+fn deck_compatibility_census_clauses_survive_alias_and_composite_spellings() {
+    const GRIMA_CLAUSE: &str = "Then that player puts the exiled cards that weren't cast this way on the bottom of their library in a random order.";
+    const ANNEX_CLAUSES: [&str; 2] = [
+        "If you control a Demon, each opponent loses 2 life and you gain 2 life.",
+        "Otherwise, you lose 2 life.",
+    ];
+    let db = printed_pool(&["plains", "gríma, saruman's footman", "unholy annex"]);
+
+    // Exact spelling first: the reference for the alias and composite rows.
+    let exact_grima = verdict_coverage(&db, &["Gríma, Saruman's Footman"]);
+    let exact_annex = verdict_coverage(&db, &["Unholy Annex"]);
+    assert_census_gap(
+        &db,
+        unsupported_named(&exact_grima, "Gríma, Saruman's Footman"),
+        "gríma, saruman's footman",
+        MisparseClass::DroppedQualifier,
+        &[GRIMA_CLAUSE],
+    );
+    assert_census_gap(
+        &db,
+        unsupported_named(&exact_annex, "Unholy Annex"),
+        "unholy annex",
+        MisparseClass::WrongPlayer,
+        &ANNEX_CLAUSES,
+    );
+
+    // Unaccented alias: `fold_card_name_key` resolves it to the accented key.
+    let alias = verdict_coverage(&db, &["Grima, Saruman's Footman"]);
+    assert_eq!(alias.unsupported_cards.len(), 1);
+    assert_eq!(
+        serde_json::to_value(&alias.unsupported_cards[0]).unwrap(),
+        serde_json::to_value(&exact_grima.unsupported_cards[0]).unwrap(),
+        "an alias spelling publishes the same unsupported card"
+    );
+    // Composite spelling: the front face names the stored face.
+    let composite = verdict_coverage(&db, &["Unholy Annex // Ritual Chamber"]);
+    assert_eq!(composite.unsupported_cards.len(), 1);
+    assert_eq!(
+        serde_json::to_value(&composite.unsupported_cards[0]).unwrap(),
+        serde_json::to_value(&exact_annex.unsupported_cards[0]).unwrap(),
+        "a composite spelling publishes the same unsupported card"
+    );
+
+    // One card under two spellings is one entry, counted twice, with one list.
+    let both = verdict_coverage(
+        &db,
+        &["Grima, Saruman's Footman", "Gríma, Saruman's Footman"],
+    );
+    assert_eq!(both.unsupported_cards.len(), 1);
+    assert_eq!(both.unsupported_cards[0].copies, 2);
+    assert_eq!(both.unsupported_cards[0].gap_details.len(), 1);
+
+    // The alias row equals the report's row for the stored key.
+    let report = report(&db);
+    assert_eq!(
+        serde_json::to_value(&report["gríma, saruman's footman"].gap_details).unwrap(),
+        serde_json::to_value(&alias.unsupported_cards[0].gap_details).unwrap()
+    );
+
+    // Hostile: a name no step resolves yields no entry and no panic, beside a
+    // resolvable unsupported card that does produce one.
+    let unknown = verdict_coverage(
+        &db,
+        &["Grima, Saruman's Footman", "Totally Not A Real Card Xyzzy"],
+    );
+    assert_eq!(unknown.total_unique, 1);
+    assert_eq!(unknown.unsupported_cards.len(), 1);
+    assert_eq!(
+        unknown.unsupported_cards[0].name,
+        "Gríma, Saruman's Footman"
+    );
+}
+
+/// The one intended divergence from the report: entry-projection gaps (CR 614.12,
+/// `EntryProjectionPolicy::Include`) are deck-only. Arcane Adaptation's printed
+/// as-enters choice is unsupported in the verdict with a published entry gap, but
+/// supported in the report; Metallic Mimic, the allowlisted same shape, is
+/// supported in both.
+#[test]
+fn deck_compatibility_entry_projection_gap_is_deck_only_and_explained() {
+    let db = printed_pool(&["plains", "arcane adaptation", "metallic mimic"]);
+    assert!(
+        printed_oracle(&db, "Arcane Adaptation")
+            .contains("As this enchantment enters, choose a creature type."),
+        "reach: the printed as-enters choice is the entry projection"
+    );
+    let coverage = verdict_coverage(&db, &["Plains", "Arcane Adaptation", "Metallic Mimic"]);
+    assert_eq!((coverage.total_unique, coverage.supported_unique), (3, 2));
+    assert_eq!(coverage.unsupported_cards.len(), 1);
+    let arcane = unsupported_named(&coverage, "Arcane Adaptation");
+    assert_eq!(arcane.gaps, [ENTRY_PROJECTION_GAP]);
+    assert_eq!(arcane.gap_details.len(), 1);
+    assert_eq!(arcane.gap_details[0].handler, ENTRY_PROJECTION_GAP);
+    assert!(
+        arcane.gap_details[0]
+            .source_text
+            .as_deref()
+            .is_some_and(|text| !text.trim().is_empty()),
+        "the deck-only gap still names its source: {:?}",
+        arcane.gap_details[0]
+    );
+
+    let report = report(&db);
+    assert!(
+        report["arcane adaptation"].supported && report["arcane adaptation"].gap_details.is_empty(),
+        "the report excludes the entry-projection check by policy"
+    );
+    assert!(report["metallic mimic"].supported);
+}
+
+/// Byte-for-byte parity between the verdict and the report across a pool of
+/// printed faces: the named witnesses of every gap family plus a bounded sorted
+/// slice of other fixture faces. Removing exactly the two deck-only entry
+/// labels from a verdict list leaves JSON equal to the report row, and the
+/// census cards also match the clauses derived from the committed census (not
+/// only the report).
+#[test]
+fn deck_gap_details_equal_report_for_every_unsupported_face_in_a_printed_pool() {
+    const WITNESSES: [&str; 13] = [
+        "plains",
+        "lightning bolt",
+        "metallic mimic",
+        "zurgo and ojutai",
+        "abandon hope",
+        "aang's journey",
+        "hinder",
+        "druid of the emerald grove",
+        "transcendent dragon",
+        "absolving lammasu",
+        "arcane adaptation",
+        "gríma, saruman's footman",
+        "unholy annex",
+    ];
+    let mut sorted: Vec<&String> = fixture().keys().collect();
+    sorted.sort();
+    let mut keys: BTreeSet<&str> = WITNESSES.into_iter().collect();
+    // Selection guard: the key is the lowercased printed name, so a verdict row
+    // (named by `face.name`) finds its report row by key.
+    keys.extend(
+        sorted
+            .iter()
+            .map(|key| key.as_str())
+            .filter(|key| !key.contains('['))
+            .filter(|key| {
+                fixture()[*key]["name"]
+                    .as_str()
+                    .is_some_and(|name| name.to_lowercase() == *key)
+            })
+            .take(60),
+    );
+    let key_list: Vec<&str> = keys.iter().copied().collect();
+    let db = printed_pool(&key_list);
+    let deck: Vec<&str> = key_list
+        .iter()
+        .map(|key| fixture()[*key]["name"].as_str().expect("printed name"))
+        .collect();
+    let coverage = verdict_coverage(&db, &deck);
+    assert_eq!(coverage.total_unique, key_list.len());
+    let report = report(&db);
+
+    let is_deck_only =
+        |gap: &GapDetail| gap.handler == ENTRY_PROJECTION_GAP || gap.handler == ENTRY_CONSUMER_GAP;
+    let mut families: BTreeSet<&str> = BTreeSet::new();
+    let mut deck_only_cards: Vec<&str> = Vec::new();
+    let mut census_cards = 0;
+    for card in &coverage.unsupported_cards {
+        let key = card.name.to_lowercase();
+        let row = report
+            .get(&key)
+            .unwrap_or_else(|| panic!("{key} is in the published report"));
+        assert!(!card.gaps.is_empty(), "{key}: an unsupported card has gaps");
+        assert_eq!(
+            card.gaps,
+            card.gap_details
+                .iter()
+                .map(|gap| gap.handler.clone())
+                .collect::<Vec<_>>(),
+            "{key}: gaps and gap_details list the same handlers in the same order"
+        );
+        let shared: Vec<&GapDetail> = card
+            .gap_details
+            .iter()
+            .filter(|gap| !is_deck_only(gap))
+            .collect();
+        assert_eq!(
+            serde_json::to_string(&shared).unwrap(),
+            serde_json::to_string(&row.gap_details).unwrap(),
+            "{key}: every gap but the deck-only entry gaps equals the report byte for byte"
+        );
+        if shared.len() == card.gap_details.len() {
+            assert!(!row.supported, "{key}: same gaps, so the report agrees");
+        } else {
+            deck_only_cards.push(card.name.as_str());
+        }
+        for gap in &card.gap_details {
+            assert!(
+                gap.source_text
+                    .as_deref()
+                    .is_some_and(|text| !text.trim().is_empty()),
+                "{key}: {} publishes blank source text",
+                gap.handler
+            );
+            families.insert(gap.handler.split(':').next().unwrap_or_default());
+        }
+        let face = db.get_face_by_name(&card.name).expect("pool face");
+        if let (Some(class), Some(entry)) = (
+            face.metadata.confirmed_misparse,
+            ConfirmedMisparses::committed().get(&key),
+        ) {
+            census_cards += 1;
+            let census = card
+                .gap_details
+                .iter()
+                .find(|gap| gap.handler == class.handler())
+                .unwrap_or_else(|| panic!("{key}: the census gap is published"));
+            assert_eq!(
+                census.source_text.as_deref(),
+                Some(entry.clauses.join(" / ").as_str()),
+                "{key}: the published text is the census clauses"
+            );
+        }
+    }
+    // The verdict never hides a gap the report publishes.
+    for (key, row) in &report {
+        if !row.supported {
+            assert!(
+                coverage
+                    .unsupported_cards
+                    .iter()
+                    .any(|card| card.name.to_lowercase() == *key),
+                "{key}: the report lists it unsupported, so the verdict must"
+            );
+        }
+    }
+    // Reach guards: every gap family the witnesses stand for, and the divergence.
+    for family in ["Misparse", "Swallow", "SilentDrop", "ResolverFeature"] {
+        assert!(
+            families.contains(family),
+            "no {family} gap reached: {families:?}"
+        );
+    }
+    assert!(
+        census_cards >= 5,
+        "census witnesses reached: {census_cards}"
+    );
+    unsupported_named(&coverage, "Absolving Lammasu");
+    assert!(deck_only_cards.contains(&"Arcane Adaptation"));
+    for supported in ["Plains", "Lightning Bolt", "Metallic Mimic"] {
+        assert!(
+            !coverage
+                .unsupported_cards
+                .iter()
+                .any(|card| card.name == supported),
+            "{supported} is supported"
+        );
+    }
+}
+
+/// The wire addition keeps every old field and adds `gap_details` only when
+/// there is something to say. The old fields are compared with the per-face
+/// computation the verdict made before this field existed.
+#[test]
+fn unsupported_card_old_fields_are_unchanged_beside_gap_details() {
+    let db = printed_pool(&["plains", "hinder"]);
+    let coverage = verdict_coverage(&db, &["Plains", "Hinder", "Hinder"]);
+    assert_eq!((coverage.total_unique, coverage.supported_unique), (2, 1));
+    let card = unsupported_named(&coverage, "Hinder");
+    let face = db.get_face_by_name("Hinder").expect("printed Hinder");
+    let face_coverage = card_face_coverage_with_subtypes(face, db.valid_subtypes());
+
+    assert_eq!(card.copies, 2);
+    assert_eq!(card.gaps, face_coverage.gap_handlers());
+    assert_eq!(card.oracle_text, face.oracle_text);
+    assert_eq!(
+        serde_json::to_value(&card.parse_details).unwrap(),
+        serde_json::to_value(&face_coverage.parse_details).unwrap()
+    );
+
+    let wire = serde_json::to_value(card).unwrap();
+    assert_eq!(wire["name"], "Hinder");
+    assert_eq!(wire["copies"], 2);
+    assert_eq!(
+        wire["gaps"],
+        serde_json::json!(["Swallow:Replacement_Instead"])
+    );
+    assert_eq!(
+        wire["gap_details"][0]["handler"], "Swallow:Replacement_Instead",
+        "the new field is on the wire: {wire}"
+    );
+    let round_trip: UnsupportedCard = serde_json::from_value(wire.clone()).unwrap();
+    assert_eq!(serde_json::to_value(&round_trip).unwrap(), wire);
+
+    // Sibling: without details the key is absent, so the old shape is unchanged.
+    let mut bare = card.clone();
+    bare.gap_details.clear();
+    assert!(serde_json::to_value(&bare)
+        .unwrap()
+        .get("gap_details")
+        .is_none());
+
+    // A whole pre-change payload (no `gap_details` anywhere) still deserializes.
+    let legacy: DeckCoverage = serde_json::from_value(serde_json::json!({
+        "total_unique": 2,
+        "supported_unique": 1,
+        "unsupported_cards": [{ "name": "Hinder", "gaps": ["Swallow:Replacement_Instead"] }],
+    }))
+    .expect("a payload from before gap_details deserializes");
+    assert!(legacy.unsupported_cards[0].gap_details.is_empty());
+    assert_eq!(legacy.unsupported_cards[0].copies, 1);
+}
+
+/// The summary-only hint path never builds coverage, so it is unchanged by the
+/// new field; the same request without `summary_only` does build it.
+#[test]
+fn deck_compatibility_summary_only_still_skips_coverage() {
+    let db = printed_pool(&["plains", "hinder"]);
+    let mut request = DeckCompatibilityRequest {
+        main_deck: vec!["Plains".to_string(), "Hinder".to_string()],
+        selected_format: Some(SelectedFormat::Tag(GameFormat::Vintage)),
+        ..Default::default()
+    };
+    let full = evaluate_deck_compatibility(&db, &request);
+    let full = full.coverage.expect("full verdict reports coverage");
+    assert!(
+        !full.unsupported_cards.is_empty(),
+        "reach: the same request builds coverage when not summary-only"
+    );
+    request.summary_only = true;
+    assert!(evaluate_deck_compatibility(&db, &request)
+        .coverage
+        .is_none());
 }

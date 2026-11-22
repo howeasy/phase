@@ -279,7 +279,11 @@ pub struct UnsupportedCard {
     pub gaps: Vec<String>,
     /// The same gaps as `gaps`, in the order and shape the coverage report uses,
     /// each with the printed clause or unhandled feature that makes the card
-    /// unsupported. The deck editor shows these as the reasons.
+    /// unsupported. The deck editor shows these as the reasons. Built by the
+    /// report's own authority (`CardFaceCoverage::explained_gap_details`), so for
+    /// a face the two are equal except for the deck-only entry-projection gaps
+    /// (`ENTRY_PROJECTION_GAP`, `ENTRY_CONSUMER_GAP`), which the verdict lists
+    /// and the report omits by policy.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub gap_details: Vec<crate::game::coverage::GapDetail>,
     /// Number of copies of this card in the deck (main + sideboard + commander).
@@ -3849,6 +3853,8 @@ fn evaluate_deck_coverage(db: &CardDatabase, request: &DeckCompatibilityRequest)
                 unsupported_cards.push(UnsupportedCard {
                     name: face.name.clone(),
                     gaps: coverage.gap_handlers(),
+                    // The census is looked up by the database export key, which
+                    // `lookup_key` resolves for an alias or composite spelling too.
                     gap_details: coverage.explained_gap_details(&db.lookup_key(name), face),
                     oracle_text: face.oracle_text.clone(),
                     parse_details: coverage.parse_details,
