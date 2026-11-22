@@ -73110,7 +73110,7 @@ fn assimilate_a_creature_card_exiled_with_it_lowers_to_linked_exile_pick() {
     );
 }
 
-/// CR 601.2a + CR 611.2a: the `CastFromZone` of an ability chain, if any.
+/// CR 608.2c + CR 611.2a: the `CastFromZone` of an ability chain, if any.
 fn cast_from_zone_in_chain(ability: &AbilityDefinition) -> Option<&AbilityDefinition> {
     if matches!(*ability.effect, Effect::CastFromZone { .. }) {
         return Some(ability);
@@ -73121,7 +73121,7 @@ fn cast_from_zone_in_chain(ability: &AbilityDefinition) -> Option<&AbilityDefini
         .and_then(cast_from_zone_in_chain)
 }
 
-/// CR 601.2a + CR 611.2a + CR 607.2a: "until end of turn, you may cast a [creature]
+/// CR 608.2c + CR 611.2a + CR 607.2a: "until end of turn, you may cast a [creature]
 /// spell from among cards exiled with [this object]" prints a cap of one cast over
 /// a persistent linked pile and states a duration, so its grant shares one budget
 /// (`LingeringWindow`) and its "may" stays inside the grant rather than becoming

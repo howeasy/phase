@@ -2978,7 +2978,7 @@ pub enum CastFromZoneDriver {
     /// a running-total budget has no faithful lingering form, so that degrade
     /// REFUSES (`None`) and the clause becomes an honest gap instead.
     ResolutionWindow { bounds: ResolutionCastWindow },
-    /// CR 601.2a + CR 611.2a: Grant a lingering permission on every card of a
+    /// CR 608.2c + CR 611.2a: Grant a lingering permission on every card of a
     /// persistent source-linked pile (Court of Locthwain, Idol of Endurance) AND
     /// enforce the printed cast cap across the whole grant: the permissions the
     /// one resolution writes share a budget (`single_use_group` on each
@@ -3084,7 +3084,7 @@ pub enum CastMechanism {
     /// At runtime a land//land modal DFC bound outside the graveyard also keeps
     /// a lingering grant (CR 712.12 election — follow-up).
     LingeringPermission,
-    /// CR 601.2a + CR 611.2a: a lingering permission over a persistent linked pile
+    /// CR 608.2c + CR 611.2a: a lingering permission over a persistent linked pile
     /// whose grant shares one cast budget across its per-card permissions.
     /// Enforces an exactly-one cap and nothing else.
     LingeringWindow,
@@ -3152,7 +3152,7 @@ impl CastFromZoneDriver {
             CastMechanism::LingeringPermission => {
                 bounds.is_unbounded().then_some(Self::LingeringPermission)
             }
-            // CR 601.2a + CR 611.2a: the grant-scoped budget counts exactly one
+            // CR 608.2c + CR 611.2a: the grant-scoped budget counts exactly one
             // cast across the permissions of one resolution.
             CastMechanism::LingeringWindow => bounds
                 .is_exactly_one_cast()
@@ -5393,7 +5393,7 @@ pub enum CastingPermission {
         /// legitimate carrier. `None` for every grant with no printed rider.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cast_cost_modifier: Option<CastCostModifier>,
-        /// CR 601.2a + CR 611.2a: Identity of the one cast budget this grant shares
+        /// CR 608.2c + CR 611.2a: Identity of the one cast budget this grant shares
         /// with its sibling permissions. `Some` only for a grant whose printed
         /// cap is exactly one cast over a source-linked pile ("until end of turn,
         /// you may cast a spell from among cards exiled with this enchantment" —

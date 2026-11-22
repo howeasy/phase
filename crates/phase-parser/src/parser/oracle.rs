@@ -3247,7 +3247,7 @@ fn coordinated_exile_play_effect(effect: &Effect) -> Option<Effect> {
                 // CR 611.2a: Magus of the Mind — "Until end of turn".
                 CastFromZoneDriver::LingeringPermission => duration.is_some(),
                 CastFromZoneDriver::DuringResolution => false,
-                // CR 601.2a: a grant-scoped cap of one cannot be folded into a
+                // CR 608.2c: a grant-scoped cap of one cannot be folded into a
                 // "play lands and cast spells" conjunct, which has no budget channel.
                 CastFromZoneDriver::LingeringWindow { .. } => false,
             };

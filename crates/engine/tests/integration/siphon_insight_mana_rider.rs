@@ -429,7 +429,7 @@ fn court_of_locthwain(monarch: bool) {
     assert_eq!(runner.state().objects[&deeper].zone, Zone::Library);
 
     // The paid permission carries the concession in both cases. The monarch's
-    // free cast adds one shared-budget permission (CR 601.2a, 611.2a).
+    // free cast adds one shared-budget permission (CR 608.2c, 611.2a).
     let expected_permissions = if monarch {
         vec![Some(ManaSpendPermission::AnyTypeOrColor), None]
     } else {
@@ -465,7 +465,7 @@ fn court_of_locthwain(monarch: bool) {
 /// it" permission that upkeep recorded) and the second upkeep's own exile
 /// (`second`). The printed "you may cast a spell from among cards exiled with
 /// this enchantment without paying its mana cost" covers both linked cards but
-/// authorizes ONE cast in all (CR 601.2a: "a spell"), whichever card it is spent
+/// authorizes ONE cast in all (CR 608.2c: "a spell" is one cast), whichever card it is spent
 /// on; the other stays castable only by paying, with the any-type concession of
 /// its own exile (CR 609.4b). Both upkeeps are played with real priority passes.
 fn court_with_an_earlier_exile(monarch: bool) -> (GameRunner, ObjectId, ObjectId, [ObjectId; 2]) {

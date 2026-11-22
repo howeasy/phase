@@ -1,5 +1,5 @@
 //! "Until end of turn, you may cast a [creature] spell from among cards exiled
-//! with this artifact" authorizes ONE cast in all (CR 601.2a: "a spell"), across
+//! with this artifact" authorizes ONE cast in all (CR 608.2c: "a spell" is one cast), across
 //! every card of the linked pile, not one per card. The permissions one
 //! resolution writes share a budget (`ExileWithAltCost::single_use_group`); the
 //! first cast spends it and the rest of the pile is no longer castable that way.

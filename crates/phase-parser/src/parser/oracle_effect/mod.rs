@@ -40042,7 +40042,7 @@ fn try_parse_cast_effect(lower: &str, ctx: &ParseContext) -> Option<Effect> {
     // AND it with `ExiledBySource` so the cast is restricted both by card
     // type and by the source-exile-link.
     //
-    // CR 601.2a + CR 611.2a: the pool here is a PERSISTENT per-source exile link that
+    // CR 608.2c + CR 611.2a: the pool here is a PERSISTENT per-source exile link that
     // grows across resolutions, and the printed "a spell" bounds each ACTIVATION
     // rather than the set. A cap of exactly one cast under a STATED duration (Court
     // of Locthwain, Idol of Endurance, Serpent's Soul-Jar) is read below and lowers
@@ -40083,7 +40083,7 @@ fn try_parse_cast_effect(lower: &str, ctx: &ParseContext) -> Option<Effect> {
             }
             _ => TargetFilter::ExiledBySource,
         };
-        // CR 601.2a + CR 611.2a: a printed cap of exactly one cast ("you may cast A
+        // CR 608.2c + CR 611.2a: a printed cap of exactly one cast ("you may cast A
         // spell from among cards exiled with ~") under a STATED duration ("until
         // end of turn" — Court of Locthwain, Idol of Endurance, Serpent's Soul-Jar)
         // bounds the whole grant, so the permissions it writes share one budget
