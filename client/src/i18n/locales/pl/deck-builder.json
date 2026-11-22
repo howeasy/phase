@@ -88,6 +88,8 @@
     "unsupportedExpand_other": "{{count}} nieobsługiwanych mechanik; rozwiń szczegóły",
     "unsupportedTitle_one": "{{count}} nieobsługiwana mechanika — kliknij, aby rozwinąć",
     "unsupportedTitle_other": "{{count}} nieobsługiwanych mechanik — kliknij, aby rozwinąć",
+    "unsupportedReasonsHeading": "Dlaczego ta karta nie jest obsługiwana",
+    "parseItemUnsupported": "{{label}} (nieobsługiwana)",
     "moveToTarget": "Przenieś jedną kartę {{name}} do {{target}}"
   },
   "grid": {

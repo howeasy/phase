@@ -88,6 +88,8 @@
     "unsupportedExpand_other": "{{count}} mecánicas no compatibles; expandir detalles",
     "unsupportedTitle_one": "{{count}} mecánica no compatible — haz clic para expandir",
     "unsupportedTitle_other": "{{count}} mecánicas no compatibles — haz clic para expandir",
+    "unsupportedReasonsHeading": "Por qué esta carta no es compatible",
+    "parseItemUnsupported": "{{label}} (no compatible)",
     "moveToTarget": "Mover un/a {{name}} a {{target}}"
   },
   "grid": {

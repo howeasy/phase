@@ -1,6 +1,10 @@
 import { useTranslation } from "react-i18next";
 
-import type { DeckColorDistributionEntry, DeckCompatibilityResult } from "../../services/deckCompatibility";
+import {
+  describeUnsupportedGaps,
+  type DeckColorDistributionEntry,
+  type DeckCompatibilityResult,
+} from "../../services/deckCompatibility";
 import { scryfallLegalityKey } from "../../services/scryfall";
 import { DECK_CONSTRUCTION_FORMATS } from "../../data/formatRegistry";
 import type {
@@ -148,7 +152,7 @@ export function StatsPanel({
                 <span
                   className="shrink-0 text-[10px] text-gray-400"
                   title={t("stats.unsupportedTitle", {
-                    list: coverage.unsupported_cards.map((c) => `${c.name}: ${c.gaps.join(", ")}`).join("\n"),
+                    list: coverage.unsupported_cards.map((c) => `${c.name}: ${describeUnsupportedGaps(c)}`).join("\n"),
                   })}
                 >
                   {coverage.supported_unique}/{coverage.total_unique}

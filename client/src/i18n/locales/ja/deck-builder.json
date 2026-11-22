@@ -88,7 +88,9 @@
     "unsupportedExpand_one": "未対応メカニック{{count}}件。詳細を展開",
     "unsupportedExpand_other": "未対応メカニック{{count}}件。詳細を展開",
     "unsupportedTitle_one": "未対応メカニック{{count}}件 — クリックして展開",
-    "unsupportedTitle_other": "未対応メカニック{{count}}件 — クリックして展開"
+    "unsupportedTitle_other": "未対応メカニック{{count}}件 — クリックして展開",
+    "unsupportedReasonsHeading": "このカードが未対応の理由",
+    "parseItemUnsupported": "{{label}}（未対応）"
   },
   "grid": {
     "allFormats": "すべて",

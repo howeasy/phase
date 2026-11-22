@@ -6,6 +6,7 @@ import type { ParsedItem, UnsupportedCard } from "../../services/deckCompatibili
 import { hasAlternatePrintingsSync, resolveOracleIdSync } from "../../services/scryfall";
 import { usePrintingsLoaded } from "../../hooks/usePrintingsLoaded";
 import { mouseHoverPreview, type CardHoverHandler } from "./hoverPreview";
+import { UnsupportedGapList } from "./UnsupportedGapList";
 
 const CATEGORY_COLORS: Record<string, string> = {
   keyword: "text-sky-400",
@@ -17,15 +18,18 @@ const CATEGORY_COLORS: Record<string, string> = {
 };
 
 function ParseItemPill({ item, depth = 0 }: { item: ParsedItem; depth?: number }) {
+  const { t } = useTranslation("deck-builder");
   return (
     <>
       <span
         className={`inline-flex items-center gap-1 rounded px-1 py-px text-[9px] leading-tight ${
           item.supported
             ? "bg-emerald-500/15 text-emerald-300"
-            : "bg-rose-500/15 text-rose-300"
+            : "bg-rose-500/15 text-rose-300 ring-1 ring-rose-400/60"
         }`}
+        data-supported={item.supported ? "true" : "false"}
         title={item.source_text ?? item.label}
+        aria-label={item.supported ? undefined : t("card.parseItemUnsupported", { label: item.label })}
       >
         <span className={`font-semibold uppercase ${CATEGORY_COLORS[item.category] ?? "text-gray-400"}`}>
           {item.category.slice(0, 3)}
@@ -253,6 +257,14 @@ export function CardEntryRow({
       </div>
       {expanded && unsupported && (
         <div className="mb-1.5 ml-4 mt-0.5 rounded-lg border border-white/6 bg-black/30 px-2 py-1.5">
+          {(unsupported.gap_details?.length ?? 0) > 0 || unsupported.gaps.length > 0 ? (
+            <div className="mb-1.5">
+              <div className="mb-1 text-[9px] font-semibold uppercase tracking-wider text-amber-300">
+                {t("card.unsupportedReasonsHeading")}
+              </div>
+              <UnsupportedGapList card={unsupported} />
+            </div>
+          ) : null}
           {unsupported.oracle_text && (
             <div className="mb-1.5 font-mono text-[10px] leading-snug text-slate-400 italic">
               {unsupported.oracle_text}
