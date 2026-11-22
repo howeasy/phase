@@ -9783,7 +9783,9 @@ pub(super) fn push_ability_entry(
 
     // CR 603.4: Stamp the printed-ability index for per-turn resolution tracking.
     resolved.ability_index = Some(ability_index);
-    let mode_chooser = resolved.context.mode_chooser;
+    // The latch is consumed here: the stack object must not carry it into a
+    // reflexive trigger that clones its context at resolution.
+    let mode_chooser = resolved.take_mode_chooser_recursive();
     stack::push_to_stack(
         state,
         StackEntry {
@@ -15605,7 +15607,9 @@ fn finalize_cast_with_phyrexian_choices_inner(
     let kickers_paid = ability.context.kickers_paid.clone();
     let gift_recipient = ability.context.gift_recipient;
     let chosen_modes = ability.context.chosen_modes.clone();
-    let mode_chooser = ability.context.mode_chooser;
+    // The latch is consumed here (see the activation placement): the spell object
+    // must not carry it into a reflexive trigger that clones its context.
+    let mode_chooser = ability.take_mode_chooser_recursive();
     let additional_cost_paid = ability.context.additional_cost_paid;
     let additional_cost_payment_count = ability.context.additional_cost_payment_count;
     let additional_cost_payments = ability.context.additional_cost_payments.clone();

@@ -1023,7 +1023,7 @@ fn minn_board(db: &CardDatabase) -> MinnBoard {
 /// stays where it was. The mutants killed: a pool read from the graveyard or
 /// an opponent's hand (the put's "from your hand" origin left unbound).
 #[test]
-fn minn_illusion_death_offers_hand_permanents_within_last_known_power() {
+fn minn_illusion_death_puts_only_from_the_controllers_hand() {
     let Some(db) = shared_card_db() else {
         return;
     };

@@ -727,8 +727,9 @@ fn counter_creatures_grow_once_per_dilemma() {
     assert_eq!(plus_counters(&runner, melkotian), 1);
 }
 
-/// R17 — CR 700.2b: Cult of Skaro's controller chooses its modes even when
-/// the choice is "at random", so the nonempty random draw faces one dilemma:
+/// R17 — CR 700.17 (edition effective 2026-11-06): no CR rule says who chooses a
+/// mode drawn at random; Cult of Skaro's draw is read as its controller choosing
+/// its modes, so the nonempty random draw faces one dilemma:
 /// Seven of Nine draws once and the history records one dilemma, with no mode
 /// prompt.
 #[test]

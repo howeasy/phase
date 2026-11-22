@@ -6141,6 +6141,19 @@ impl ResolvedAbility {
         }
     }
 
+    /// CR 700.17 (edition effective 2026-11-06): consume the mode-chooser latch of
+    /// this ability and clear every copy `propagate_shared_cast_context` stamped on
+    /// its sub/else branches, so a placed spell or activation carries none into a
+    /// reflexive trigger that clones its context at resolution (one mode choice
+    /// faces one dilemma).
+    pub fn take_mode_chooser_recursive(&mut self) -> Option<PlayerId> {
+        let chooser = self.context.mode_chooser.take();
+        for (_, child) in self.child_links_mut() {
+            child.take_mode_chooser_recursive();
+        }
+        chooser
+    }
+
     /// Propagate a chosen X value to this ability and every sub/else branch.
     /// CR 107.1b: X is one value per cast — the same for all effects produced.
     pub fn set_chosen_x_recursive(&mut self, value: u32) {
@@ -7380,6 +7393,33 @@ mod tests {
         ));
         let cloned = state.clone();
         assert_eq!(cloned, state);
+    }
+
+    /// CR 700.17 (edition effective 2026-11-06): the chooser latch is consumed
+    /// once with every copy `propagate_shared_cast_context` stamped on the
+    /// branches, so Slight Malfunction's "When you do" reflexive (which clones a
+    /// branch's context at resolution) cannot face a second dilemma. A building-
+    /// block test on a hand-built chain; the printed-card row needs the card in the
+    /// integration fixture.
+    #[test]
+    fn take_mode_chooser_recursive_clears_every_branch() {
+        let mut root = ResolvedAbility::new(Effect::NoOp, vec![], ObjectId(1), PlayerId(0));
+        let mut child = ResolvedAbility::new(Effect::NoOp, vec![], ObjectId(1), PlayerId(0));
+        child.context.mode_chooser = Some(PlayerId(0));
+        root.context.mode_chooser = Some(PlayerId(0));
+        root.sub_ability = Some(Box::new(child));
+
+        assert_eq!(root.take_mode_chooser_recursive(), Some(PlayerId(0)));
+        assert_eq!(root.context.mode_chooser, None);
+        assert_eq!(
+            root.sub_ability
+                .as_ref()
+                .expect("the branch exists")
+                .context
+                .mode_chooser,
+            None
+        );
+        assert_eq!(root.take_mode_chooser_recursive(), None, "consumed once");
     }
 
     #[test]

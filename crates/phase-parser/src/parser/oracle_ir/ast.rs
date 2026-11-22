@@ -3884,7 +3884,7 @@ pub(crate) struct ModalHeaderAst {
     /// CR 700.2e: The player who chooses the mode(s). `Controller` (CR 700.2a)
     /// for standard `Choose one —` headers and the `you choose —` alias.
     pub(crate) chooser: PlayerFilter,
-    /// CR 700.2b + CR 701.9b (analogous): `Random` for "choose one at random"
+    /// CR 701.9b (analogous): `Random` for "choose one at random"
     /// headers (Cult of Skaro) — the game draws the mode(s). No CR rule says who
     /// chooses a mode drawn at random; this reads it as the controller choosing
     /// one or more modes, so the choice faces a dilemma (CR 700.17, edition

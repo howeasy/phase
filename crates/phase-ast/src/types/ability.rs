@@ -8318,8 +8318,9 @@ impl TargetSelectionMode {
     }
 
     /// CR 701.9b (analogous): The game selects uniformly at random how the
-    /// choice is made (Cult of Skaro "choose one at random"; the controller
-    /// remains the modal chooser, CR 700.2b).
+    /// choice is made (Cult of Skaro "choose one at random"). No CR rule says
+    /// who chooses a mode drawn at random; this reads it as the controller
+    /// choosing one or more modes (CR 700.17).
     pub fn is_random(&self) -> bool {
         matches!(self, TargetSelectionMode::Random)
     }
@@ -37067,7 +37068,7 @@ pub struct ModalChoice {
     /// controller (CR 700.2a) for all standard modal spells/abilities.
     #[serde(default = "default_player_filter_controller")]
     pub chooser: PlayerFilter,
-    /// CR 700.2b + CR 701.9b (analogous): When `Random`, the game draws the
+    /// CR 701.9b (analogous): When `Random`, the game draws the
     /// mode(s) uniformly at random (Cult of Skaro "choose one at random"). No CR
     /// rule says who chooses a mode drawn at random; this reads it as the
     /// controller choosing one or more modes (CR 700.17). Default
