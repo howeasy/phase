@@ -669,7 +669,13 @@ pub(crate) fn try_parse_cost_modification(
                 .parse(from_text.trim_end())
                 {
                     origin_exclusion = Some(prop);
-                } else if !nom_primitives::scan_contains(from_text, "anywhere other than") {
+                } else if nom_primitives::scan_contains(from_text, "anywhere other than") {
+                    // CR 601.2f: an exclusion the typed surface does not model (any
+                    // origin but the hand form above) fails closed: skipping it would
+                    // reduce every spell the controller casts, the silent misparse
+                    // this clause used to produce.
+                    return None;
+                } else {
                     if nom_primitives::scan_contains(from_text, "graveyard") {
                         zones.push(Zone::Graveyard);
                     }

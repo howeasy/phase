@@ -45145,3 +45145,30 @@ fn cost_mod_cast_origin_composes_with_type_and_keeps_positive_zones() {
         vec![FilterProp::InZone { zone: Zone::Exile }]
     );
 }
+
+/// An origin exclusion other than the hand form is not modelled: the whole line
+/// declines instead of reducing every spell (CR 601.2f), and the opponents' scope
+/// takes the same "this turn" window as the controller's.
+#[test]
+fn cost_mod_unmodelled_origin_exclusion_declines_and_opponent_window_is_peeled() {
+    assert_eq!(
+        parse_static_line(
+            "Spells you cast from anywhere other than your graveyard cost {1} less to cast."
+        ),
+        None
+    );
+    let def =
+        parse_static_line("Artifact spells your opponents cast this turn cost {1} more to cast.")
+            .expect("cost increase should parse");
+    let StaticMode::ModifyCost {
+        spell_filter, mode, ..
+    } = def.mode
+    else {
+        panic!("expected ModifyCost");
+    };
+    assert_eq!(mode, CostModifyMode::Raise);
+    let Some(TargetFilter::Typed(tf)) = spell_filter else {
+        panic!("expected a Typed artifact filter, got {spell_filter:?}");
+    };
+    assert_eq!(tf.type_filters, vec![TypeFilter::Artifact]);
+}

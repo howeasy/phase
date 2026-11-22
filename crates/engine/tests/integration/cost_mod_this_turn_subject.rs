@@ -13,8 +13,17 @@
 //!
 //! CR 601.2f (cost determination), CR 611.2a (a continuous effect from a
 //! resolving spell or ability lasts as long as stated — here, this turn), and
-//! CR 400.11 / CR 601.2a (casting from a zone) are the only rules this file
-//! cites.
+//! CR 601.2a (casting from a zone) are the only rules this file cites.
+//!
+//! Scope of the claim: these witnesses prove that the restored spell filter works at
+//! runtime while the granting permanent stays on the battlefield. They do NOT release
+//! Spellbinding Soprano, Urza, Planeswalker or Armor Wars: the engine installs the
+//! granted cost reduction bound to the source object, so the reduction is pruned when
+//! that source leaves the battlefield (a measured probe moved Soprano to the graveyard
+//! after its attack trigger resolved and the instant's reduction vanished, although
+//! CR 611.2a keeps the effect for the turn). Those cards keep their census rows. The
+//! same mechanism blocks Ballad of the Black Flag (its Saga is sacrificed on chapter
+//! IV), and the command-zone cards Izzet Steam Maze and The Pieces Are Coming Together.
 use engine::database::card_db::CardDatabase;
 use engine::game::casting::display_spell_cost;
 use engine::game::combat::AttackTarget;
@@ -296,7 +305,7 @@ fn soprano_attack_and_resolve_trigger(runner: &mut GameRunner, soprano: ObjectId
 /// instant and sorcery spells you cast this turn cost {1} less to cast." The
 /// reduction covers exactly instant and sorcery spells (CR 601.2f), lasts for the
 /// turn (CR 611.2a), and a spell cast from the hand is the recorded case
-/// (CR 400.11 / CR 601.2a). Controls: a creature and an artifact keep their full
+/// (CR 601.2a). Controls: a creature and an artifact keep their full
 /// printed cost, and the opponent's instant is untouched because the card says
 /// "you cast".
 #[test]
@@ -451,7 +460,7 @@ fn spellbinding_soprano_attack_trigger_discounts_only_instant_and_sorcery_spells
 /// Spellbinding Soprano's window: the grant lasts only for the turn it was
 /// created (CR 611.2a), so it is gone in P0's next precombat main. The same
 /// printed instants and sorceries cost their printed price again (CR 601.2f),
-/// cast from the hand as before (CR 400.11 / CR 601.2a).
+/// cast from the hand as before (CR 601.2a).
 #[test]
 fn spellbinding_soprano_discount_lapses_at_end_of_turn() {
     let (mut runner, board) = soprano_board();
@@ -509,7 +518,7 @@ fn spellbinding_soprano_discount_lapses_at_end_of_turn() {
 /// {0}; a creature is the control the old filterless parse would have reduced.
 /// The card's "You may activate the loyalty abilities of Urza twice each turn
 /// rather than only once" is proven by a second successful activation in the same
-/// turn. The spell is cast from the hand (CR 400.11 / CR 601.2a).
+/// turn. The spell is cast from the hand (CR 601.2a).
 #[test]
 fn urza_plus_two_discounts_artifacts_instants_and_sorceries_and_allows_a_second_activation() {
     let mut scenario = GameScenario::new();
@@ -667,7 +676,7 @@ fn urza_plus_two_discounts_artifacts_instants_and_sorceries_and_allows_a_second_
 /// cast." Chapter I's optional draw is answered at its prompt; the chapter II
 /// grant installs on the lore counter added in P0's next precombat main
 /// (CR 611.2a), reduces only artifact spells (CR 601.2f), and the artifact is
-/// cast from the hand (CR 400.11 / CR 601.2a). A creature is the control class.
+/// cast from the hand (CR 601.2a). A creature is the control class.
 #[test]
 fn armor_wars_chapter_two_discounts_only_artifact_spells() {
     let mut scenario = GameScenario::new();
