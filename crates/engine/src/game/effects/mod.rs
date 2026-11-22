@@ -67361,10 +67361,14 @@ mod tests {
     /// investigate X times …" resolves once after every seat.
     #[test]
     fn player_scope_gated_instruction_stops_at_sequential_sibling() {
-        let resolved = scoped_trigger_resolved(
+        // Printed type line: Legendary Creature — Human (the helper takes card
+        // types and subtypes; the supertype does not reach the parser).
+        let resolved = scoped_trigger_resolved_with(
             "When Wernog, Rider's Chaplain enters or leaves the battlefield, each opponent may investigate. Each opponent who doesn't loses 1 life. You investigate X times, where X is one plus the number of opponents who investigated this way.\nPartner—Friends forever (You can have two commanders if both have this ability.)",
             "Wernog, Rider's Chaplain",
+            &[],
             &["Creature"],
+            &["Human"],
         );
         let (template, tail) = split_at_first_scope(&resolved);
         assert!(matches!(template.effect, Effect::Investigate));
@@ -67386,10 +67390,13 @@ mod tests {
     /// stays in the defending player's template.
     #[test]
     fn player_scope_positive_gated_instruction_keeps_its_continuation_step() {
-        let resolved = scoped_trigger_resolved(
+        // Printed type line: Creature — Ogre Warrior.
+        let resolved = scoped_trigger_resolved_with(
             "Menace\nWhenever this creature attacks, defending player may have you draw a card. If they do, untap this creature and remove it from combat.",
             "Shakedown Heavy",
+            &[],
             &["Creature"],
+            &["Ogre", "Warrior"],
         );
         let (template, tail) = split_at_first_scope(&resolved);
         assert!(matches!(template.effect, Effect::Draw { .. }));

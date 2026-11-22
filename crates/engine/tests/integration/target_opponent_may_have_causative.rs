@@ -521,8 +521,8 @@ fn influence(runner: &GameRunner, palantir: ObjectId) -> u32 {
 /// influence counters on Palantír of Orthanc" is 2 when the mill resolves,
 /// and P0's library top is a mana-value-2 card under a mana-value-5 card.
 /// The decline branch mills exactly those two, so the printed loss is
-/// 2 + 5 = 7; a recipient set that also counts Palantír of Orthanc's own {3}
-/// would lose 10.
+/// 2 + 5 = 7; the engine also counts Palantír of Orthanc's own {3} and loses
+/// 10 (the census row's defect, pinned by the rows that use this board).
 fn palantir_two_counters_board(db: &CardDatabase, leylines: &[PlayerId]) -> (GameRunner, ObjectId) {
     let mut scenario = three_players();
     scenario.at_phase(Phase::PostCombatMain);
@@ -541,9 +541,10 @@ fn palantir_two_counters_board(db: &CardDatabase, leylines: &[PlayerId]) -> (Gam
 /// T-Pal-d — CR 118.12: P0 gets the counter and scries 2; P2 declines; P0
 /// mills X = 1 (the influence counter the trigger just put) and P2 (only P2)
 /// loses life equal to the total mana value of those cards (CR 202.3): the
-/// milled card is "Palantír Library Top" with mana value 3, so P2 loses
-/// EXACTLY 3 — Palantír of Orthanc's own {3} is not among the milled cards,
-/// so a tracked set that also counts the source object loses 6 and fails.
+/// milled card is "Palantír Library Top" with mana value 3, so the printed loss
+/// is 3 — Palantír of Orthanc's own {3} is not among the milled cards. The
+/// engine's tracked set also counts the source object and loses 6; the row pins
+/// that observed amount (the `palantír of orthanc` census row's defect).
 #[test]
 fn palantir_decline_only_the_target_loses_life() {
     let Some(db) = shared_card_db() else {
@@ -627,8 +628,9 @@ fn palantir_no_legal_target_removes_the_whole_ability() {
 /// L-Pal paired positive, X = 2: with only P1 hexproof, P2 is the sole legal
 /// target and is chosen without a prompt; P2 declines, P0 mills the
 /// mana-value-2 and mana-value-5 cards, and P2 loses exactly their total
-/// mana value 2 + 5 = 7 (CR 202.3) — a tracked set that also counts Palantír
-/// of Orthanc's own {3} would lose 10 and fails.
+/// mana value 2 + 5 = 7 (CR 202.3); the engine's tracked set also counts
+/// Palantír of Orthanc's own {3} and loses 10, which this row pins (the census
+/// row's defect).
 #[test]
 fn palantir_sole_legal_target_is_chosen_without_prompt() {
     let Some(db) = shared_card_db() else {

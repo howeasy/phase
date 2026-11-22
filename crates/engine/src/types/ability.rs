@@ -2181,10 +2181,11 @@ pub struct SpellContext {
     /// CR 700.2a + CR 700.2e + CR 601.2b + CR 602.2b: the player who chose this
     /// spell's or activated ability's modes, when that choice faced a dilemma
     /// (`ability_utils::mode_choice_dilemma_chooser`). Latched at the mode choice
-    /// and read once at stack placement to record `PlayerActionKind::FaceDilemma`
-    /// in the per-turn history (CR 733.1: an announcement that is undone records
-    /// nothing). A copy carries the value (CR 707.10 copies decisions), but a
-    /// copy is never cast or activated, so it never reaches a placement authority.
+    /// and consumed once at stack placement (`take_mode_chooser_recursive`, which
+    /// also clears the copies stamped on the chain's branches) to record
+    /// `PlayerActionKind::FaceDilemma` in the per-turn history (CR 733.1: an
+    /// announcement that is undone records nothing). A copy of a spell is created
+    /// after placement, so it carries none (CR 700.2g: it faces no dilemma).
     /// A modal triggered ability whose chosen mode still needs a target latches it
     /// the same way; the trigger finisher reads it once (`Option::take`) as it
     /// puts the entry on the stack.
