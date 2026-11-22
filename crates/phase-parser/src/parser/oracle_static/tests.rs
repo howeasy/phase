@@ -21,7 +21,9 @@ use crate::types::card_type::CoreType;
 use crate::types::counter::CounterType;
 use crate::types::keywords::{Keyword, ProtectionColorSet, ProtectionTarget, WardCost};
 use crate::types::mana::{ManaColor, ManaCost};
-use crate::types::statics::{AdditionalCostTaxAction, CrewAction, CrewContributionKind};
+use crate::types::statics::{
+    AdditionalCostTaxAction, CostModifyMode, CrewAction, CrewContributionKind,
+};
 use crate::types::zones::Zone;
 
 fn dynamic_power_value(modification: &ContinuousModification) -> Option<&QuantityExpr> {
@@ -45007,5 +45009,139 @@ fn burden_of_proof_otherwise_branch_cannot_block_detectives() {
         parsed.parse_warnings.is_empty(),
         "no clause may be swallowed; warnings = {:?}",
         parsed.parse_warnings
+    );
+}
+
+/// CR 601.2f + CR 611.2a: a cost-modification subject ends "... spells you cast
+/// this turn cost {N} less". The "this turn" window sits between the "you cast"
+/// infix and "cost", so the trailing-infix trims never reached the type words and
+/// `spell_filter` came out `null`: EVERY spell was reduced, not just the named
+/// types (Armor Wars, Ballad of the Black Flag, Izzet Steam Maze, Spellbinding
+/// Soprano, The Pieces Are Coming Together, Urza, Planeswalker). The window is
+/// carried by the effect that grants the static, so the subject drops it.
+#[test]
+fn cost_mod_this_turn_window_keeps_the_spell_type_subject() {
+    fn filter(line: &str) -> TargetFilter {
+        let def = parse_static_line(line).unwrap_or_else(|| panic!("{line} should parse"));
+        let StaticMode::ModifyCost { spell_filter, .. } = def.mode else {
+            panic!("expected ModifyCost for {line}");
+        };
+        spell_filter.unwrap_or_else(|| panic!("{line} dropped its spell filter"))
+    }
+
+    let TargetFilter::Typed(artifact) =
+        filter("Artifact spells you cast this turn cost {1} less to cast.")
+    else {
+        panic!("expected a Typed artifact filter");
+    };
+    assert_eq!(artifact.type_filters, vec![TypeFilter::Artifact]);
+
+    let TargetFilter::Typed(historic) =
+        filter("Historic spells you cast this turn cost {2} less to cast.")
+    else {
+        panic!("expected a Typed historic filter");
+    };
+    assert!(
+        historic
+            .properties
+            .iter()
+            .any(|p| matches!(p, FilterProp::Historic)),
+        "historic restriction lost: {historic:?}"
+    );
+
+    // The shape without the window is the reference: both must agree.
+    assert_eq!(
+        filter("Instant and sorcery spells you cast this turn cost {3} less to cast."),
+        filter("Instant and sorcery spells you cast cost {3} less to cast."),
+    );
+    let TargetFilter::Or { filters } =
+        filter("Artifact, instant, and sorcery spells you cast this turn cost {2} less to cast.")
+    else {
+        panic!("expected an Or over artifact, instant and sorcery");
+    };
+    assert_eq!(filters.len(), 3, "three operand types: {filters:?}");
+}
+
+/// The "this turn" peel must not remove a restriction: a bare "Spells you cast
+/// this turn" subject still means every spell (The Legend of Arena class).
+#[test]
+fn cost_mod_this_turn_window_on_a_bare_subject_stays_unfiltered() {
+    let def = parse_static_line("Spells you cast this turn cost {1} less to cast.")
+        .expect("cost reduction should parse");
+    let StaticMode::ModifyCost { spell_filter, .. } = def.mode else {
+        panic!("expected ModifyCost");
+    };
+    assert_eq!(spell_filter, None);
+}
+
+/// CR 601.2a + CR 400.11: "Spells you cast from anywhere other than your hand
+/// cost {N} less" is the NEGATION of a hand origin. The "from anywhere other than"
+/// clause used to be skipped, so Savvy Trader, Sage of the Beyond, Fortune Teller's
+/// Talent and Advanced Reconstruction reduced every spell, hand casts included.
+#[test]
+fn cost_mod_cast_origin_not_hand_is_the_negation_of_a_hand_origin() {
+    for (line, mode) in [
+        (
+            "Spells you cast from anywhere other than your hand cost {1} less to cast.",
+            CostModifyMode::Reduce,
+        ),
+        (
+            "Spells you cast from anywhere other than your hand cost {2} more to cast.",
+            CostModifyMode::Raise,
+        ),
+    ] {
+        let def = parse_static_line(line).unwrap_or_else(|| panic!("{line} should parse"));
+        let StaticMode::ModifyCost {
+            spell_filter,
+            mode: parsed_mode,
+            ..
+        } = def.mode
+        else {
+            panic!("expected ModifyCost for {line}");
+        };
+        assert_eq!(parsed_mode, mode);
+        let Some(TargetFilter::Typed(tf)) = spell_filter else {
+            panic!("{line}: expected a Typed origin filter, got {spell_filter:?}");
+        };
+        assert_eq!(
+            tf.properties,
+            vec![FilterProp::Not {
+                prop: Box::new(FilterProp::InZone { zone: Zone::Hand }),
+            }],
+            "{line}"
+        );
+    }
+}
+
+/// The exclusion composes with a type restriction instead of replacing it, and
+/// the positive zone forms keep their own reading.
+#[test]
+fn cost_mod_cast_origin_composes_with_type_and_keeps_positive_zones() {
+    let def = parse_static_line(
+        "Creature spells you cast from anywhere other than your hand cost {1} less to cast.",
+    )
+    .expect("cost reduction should parse");
+    let StaticMode::ModifyCost { spell_filter, .. } = def.mode else {
+        panic!("expected ModifyCost");
+    };
+    let Some(TargetFilter::Typed(tf)) = spell_filter else {
+        panic!("expected a Typed filter, got {spell_filter:?}");
+    };
+    assert_eq!(tf.type_filters, vec![TypeFilter::Creature]);
+    assert!(tf.properties.contains(&FilterProp::Not {
+        prop: Box::new(FilterProp::InZone { zone: Zone::Hand }),
+    }));
+
+    let def = parse_static_line("Spells you cast from exile cost {1} less to cast.")
+        .expect("cost reduction should parse");
+    let StaticMode::ModifyCost { spell_filter, .. } = def.mode else {
+        panic!("expected ModifyCost");
+    };
+    let Some(TargetFilter::Typed(tf)) = spell_filter else {
+        panic!("expected a Typed filter, got {spell_filter:?}");
+    };
+    assert_eq!(
+        tf.properties,
+        vec![FilterProp::InZone { zone: Zone::Exile }]
     );
 }

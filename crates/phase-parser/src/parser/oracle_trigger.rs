@@ -23857,6 +23857,23 @@ fn x_in_cost_modifier(modifier: &str, slot: CostSlot) -> Option<TargetFilter> {
     (parsed == slot && rest.trim().is_empty()).then(|| slot.x_in_cost_filter())
 }
 
+/// CR 601.2a + CR 707.13 + CR 400.11: the cast-origin exclusion "anywhere other
+/// than your hand" — the NEGATION of `InZone(Hand)`, so a cast from outside the
+/// game (no zone) satisfies it. The single authority for this phrase: the
+/// spell-trigger post-modifier ([`parse_post_spell_modifier`]) and the
+/// cost-modification spell subject (Savvy Trader, Fortune Teller's Talent) both
+/// read it here. The leading "from " belongs to the caller, because the cost
+/// modifier consumes it with the rest of the "from [zones]" clause.
+pub(crate) fn parse_cast_origin_not_hand(input: &str) -> OracleResult<'_, FilterProp> {
+    value(
+        FilterProp::Not {
+            prop: Box::new(FilterProp::InZone { zone: Zone::Hand }),
+        },
+        tag::<_, _, OracleError<'_>>("anywhere other than your hand"),
+    )
+    .parse(input)
+}
+
 /// Parse a post-spell modifier phrase (text between "spell" and the timing tail).
 ///
 /// Supports, among others:
@@ -23933,18 +23950,16 @@ pub(crate) fn parse_post_spell_modifier(modifier: &str) -> Option<TargetFilter> 
     // "from exile" / "from your graveyard" match that single origin zone (Wild-Magic
     // Sorcerer class). Emits a `Not(InZone)` / `InZone` origin predicate consumed by
     // `spell_object_matches_filter_from_state` against the cast origin.
-    if let Ok((rest, ())) = value(
-        (),
-        tag::<_, _, OracleError<'_>>("from anywhere other than your hand"),
+    if let Ok((rest, prop)) = preceded(
+        tag::<_, _, OracleError<'_>>("from "),
+        parse_cast_origin_not_hand,
     )
     .parse(modifier)
     {
         if rest.trim().is_empty() {
-            return Some(TargetFilter::Typed(TypedFilter::default().properties(
-                vec![FilterProp::Not {
-                    prop: Box::new(FilterProp::InZone { zone: Zone::Hand }),
-                }],
-            )));
+            return Some(TargetFilter::Typed(
+                TypedFilter::default().properties(vec![prop]),
+            ));
         }
     }
     if let Ok((rest, zone)) = alt((
