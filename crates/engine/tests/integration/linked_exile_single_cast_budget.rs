@@ -17,9 +17,9 @@
 use engine::ai_support::legal_actions;
 use engine::game::scenario::{GameRunner, GameScenario, P0};
 use engine::types::actions::GameAction;
-use engine::types::game_state::{ExileLink, ExileLinkKind};
+use engine::types::game_state::ExileLink;
 use engine::types::identifiers::ObjectId;
-use engine::types::mana::{ManaColor, ManaCost, ManaCostShard};
+use engine::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::zones::Zone;
 
@@ -31,6 +31,10 @@ const IDOL_OF_ENDURANCE: &str = "When this artifact enters, exile all creature c
 const SERPENTS_SOUL_JAR: &str = "Whenever an Elf you control dies, exile it.\n\
      {T}, Pay 2 life: Until end of turn, you may cast a creature spell from among cards exiled \
      with this artifact.";
+
+const MURDER: &str = "Destroy target creature.";
+
+const VOLTAIC_KEY: &str = "{1}, {T}: Untap target artifact.";
 
 fn cost(shards: &[ManaCostShard], generic: u32) -> ManaCost {
     ManaCost::Cost {
@@ -141,8 +145,8 @@ fn idol_of_endurance_grants_one_free_creature_cast_across_its_pile() {
 }
 
 /// Two activations of the Idol before any cast are two grants: two free casts
-/// over the pile, no more (CR 611.2a). The Idol's untap stands in for an untap
-/// effect the scenario cannot provide.
+/// over the pile, no more (CR 611.2a). Voltaic Key's printed "{1}, {T}: Untap
+/// target artifact." is what frees the Idol for the second activation.
 #[test]
 fn idol_of_endurance_activated_twice_grants_two_free_casts() {
     let mut scenario = GameScenario::new();
@@ -160,17 +164,28 @@ fn idol_of_endurance_activated_twice_grants_two_free_casts() {
         .add_artifact_to_hand_from_oracle(P0, "Idol of Endurance", IDOL_OF_ENDURANCE)
         .with_mana_cost(cost(&[ManaCostShard::White], 2))
         .id();
-    let lands: Vec<ObjectId> = (0..7)
+    let key = scenario
+        .add_artifact_from_oracle(P0, "Voltaic Key", VOLTAIC_KEY)
+        .with_mana_cost(cost(&[], 1))
+        .id();
+    let lands: Vec<ObjectId> = (0..8)
         .map(|_| scenario.add_basic_land(P0, ManaColor::White))
         .collect();
     let mut runner = scenario.build();
 
     runner.cast(idol).resolve();
     runner.activate(idol, 0).resolve();
-    runner.state_mut().objects.get_mut(&idol).unwrap().tapped = false;
+    runner.activate(key, 0).target_object(idol).resolve();
+    assert!(
+        !runner.state().objects[&idol].tapped,
+        "Voltaic Key untapped the Idol"
+    );
     runner.activate(idol, 0).resolve();
     let spent = tapped_count(&runner, &lands);
-    assert_eq!(spent, 7, "the Idol and two activations were paid");
+    assert_eq!(
+        spent, 8,
+        "the Idol cast {{2}}{{W}}, its two activations {{1}}{{W}} each, and the Key's {{1}}"
+    );
     assert!(cast_is_offered(&runner, first));
     assert!(cast_is_offered(&runner, second));
 
@@ -185,8 +200,8 @@ fn idol_of_endurance_activated_twice_grants_two_free_casts() {
     assert_eq!(tapped_count(&runner, &lands), spent, "both casts were free");
 }
 
-/// Serpent's Soul-Jar: the paid form. Two linked Elf cards; one cast, paying
-/// its mana cost, spends the grant.
+/// Serpent's Soul-Jar: the paid form. The Jar's printed dies trigger exiles two
+/// Elves for real; one cast, paying its mana cost, spends the grant.
 #[test]
 fn serpents_soul_jar_grants_one_creature_cast_across_its_pile() {
     let mut scenario = GameScenario::new();
@@ -197,25 +212,52 @@ fn serpents_soul_jar_grants_one_creature_cast_across_its_pile() {
         .id();
     let elf = |scenario: &mut GameScenario, name: &str| {
         scenario
-            .add_creature_to_exile(P0, name, 2, 3)
+            .add_creature(P0, name, 2, 3)
             .with_subtypes(vec!["Elf", "Warrior"])
             .with_mana_cost(cost(&[ManaCostShard::Green, ManaCostShard::Green], 0))
             .id()
     };
     let first = elf(&mut scenario, "Elvish Warrior");
     let second = elf(&mut scenario, "Elvish Warrior");
+    let murders: Vec<ObjectId> = (0..2)
+        .map(|_| {
+            scenario
+                .add_spell_to_hand_from_oracle(P0, "Murder", true, MURDER)
+                .with_mana_cost(cost(&[ManaCostShard::Black, ManaCostShard::Black], 1))
+                .id()
+        })
+        .collect();
     let forests: Vec<ObjectId> = (0..4)
         .map(|_| scenario.add_basic_land(P0, ManaColor::Green))
         .collect();
+    // {1}{B}{B} twice: six black mana pays for both Murders in this main phase.
+    scenario.with_mana_pool(
+        P0,
+        (0..6)
+            .map(|_| ManaUnit::new(ManaType::Black, ObjectId(0), false, vec![]))
+            .collect(),
+    );
     let mut runner = scenario.build();
-    for card in [first, second] {
-        runner.state_mut().exile_links.push(ExileLink {
-            exiled_id: card,
-            source_id: jar,
-            kind: ExileLinkKind::TrackedBySource,
-            supplier: None,
-        });
+
+    // Real play: P0's own Elves die to printed Murder, and the Jar's trigger —
+    // not a fixture — creates the linked exile the cast permission reads.
+    for (murder, card) in murders.iter().zip([first, second]) {
+        runner.cast(*murder).target_object(card).resolve();
+        assert_eq!(
+            runner.state().objects[&card].zone,
+            Zone::Exile,
+            "the Jar's dies trigger exiled the dead Elf"
+        );
+        assert!(
+            runner
+                .state()
+                .exile_links
+                .iter()
+                .any(|link: &ExileLink| link.exiled_id == card && link.source_id == jar),
+            "{card:?} is exiled with the Jar"
+        );
     }
+
     runner.activate(jar, 0).resolve();
     assert!(cast_is_offered(&runner, first));
     assert!(cast_is_offered(&runner, second));

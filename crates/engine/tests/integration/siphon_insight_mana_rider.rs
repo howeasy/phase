@@ -467,8 +467,7 @@ fn court_of_locthwain(monarch: bool) {
 /// this enchantment without paying its mana cost" covers both linked cards but
 /// authorizes ONE cast in all (CR 601.2a: "a spell"), whichever card it is spent
 /// on; the other stays castable only by paying, with the any-type concession of
-/// its own exile (CR 609.4b). The earlier upkeep's state is seeded rather than
-/// replayed because the scenario's turn driver cannot cross two full turns here.
+/// its own exile (CR 609.4b). Both upkeeps are played with real priority passes.
 fn court_with_an_earlier_exile(monarch: bool) -> (GameRunner, ObjectId, ObjectId, [ObjectId; 2]) {
     let mut scenario = GameScenario::new_n_player(2, 42);
     scenario.at_phase(Phase::PreCombatMain);
@@ -476,6 +475,9 @@ fn court_with_an_earlier_exile(monarch: bool) -> (GameRunner, ObjectId, ObjectId
         shards: vec![ManaCostShard::Green],
         generic: 0,
     };
+    // P1's library, top to bottom: the card P1 draws on its first turn, First
+    // Sorcery (exiled at P0's first upkeep), the card P1 draws on its second
+    // turn, Second Sorcery (exiled at P0's second upkeep), Deeper.
     scenario.add_card_to_library_top(P1, "Deeper");
     let second = {
         let mut b = scenario.add_spell_to_library_top(P1, "Second Sorcery", false);
@@ -483,74 +485,64 @@ fn court_with_an_earlier_exile(monarch: bool) -> (GameRunner, ObjectId, ObjectId
         b.id()
     };
     scenario.add_card_to_library_top(P1, "P1 Draw");
-    for _ in 0..4 {
-        scenario.add_card_to_library_top(P0, "P0 Filler");
-    }
     let first = {
-        let mut b = scenario.add_spell_to_exile(P1, "First Sorcery", false);
+        let mut b = scenario.add_spell_to_library_top(P1, "First Sorcery", false);
         b.with_mana_cost(green_cost);
         b.id()
     };
+    scenario.add_card_to_library_top(P1, "P1 First Draw");
+    for _ in 0..6 {
+        scenario.add_card_to_library_top(P0, "P0 Filler");
+    }
     let swamps = [
         scenario.add_basic_land(P0, ManaColor::Black),
         scenario.add_basic_land(P0, ManaColor::Black),
     ];
-    let court = scenario
+    let _court = scenario
         .add_enchantment_from_oracle(P0, "Court of Locthwain", COURT_OF_LOCTHWAIN)
         .id();
     let mut runner = scenario.build();
-    runner
-        .state_mut()
-        .exile_links
-        .push(engine::types::game_state::ExileLink {
-            exiled_id: first,
-            source_id: court,
-            kind: engine::types::game_state::ExileLinkKind::TrackedBySource,
-            supplier: None,
-        });
-    // The permission the earlier upkeep's "you may play that card ..." recorded
-    // (the shape the first Court test reads off a real upkeep).
-    runner
-        .state_mut()
-        .objects
-        .get_mut(&first)
-        .expect("the earlier exile exists")
-        .casting_permissions
-        .push(CastingPermission::PlayFromExile {
-            provenance: engine::types::ability::PlayFromExileProvenance::Impulse,
-            mode: engine::types::ability::CardPlayMode::Play,
-            duration: engine::types::ability::Duration::Permanent,
-            granted_to: P0,
-            frequency: engine::types::statics::CastFrequency::Unlimited,
-            source_id: Some(court),
-            invalidation: None,
-            exiled_by_ability_controller: Some(P0),
-            mana_spend_permission: Some(ManaSpendPermission::AnyTypeOrColor),
-            card_filter: None,
-            single_use_group: None,
-            single_use: false,
-            cast_cost_modifier: None,
-            alt_ability_cost: None,
-            without_paying_mana_cost: false,
-            land_enter_tapped: engine::types::zones::EtbTapState::Unspecified,
-        });
     if monarch {
+        // Court's own ETB made its controller the monarch when it entered;
+        // the enchantment starts on the battlefield here, so set the crown.
         runner.state_mut().monarch = Some(P0);
     }
-    runner.advance_to_phase(Phase::Upkeep);
-    runner.advance_to_phase(Phase::PreCombatMain);
-    runner.advance_to_phase(Phase::Upkeep);
+    // The earlier upkeep is played, not seeded: P0's first upkeep exiles
+    // `first` through the real trigger (its link and paid permission are the
+    // production ones, and the monarch's free cast of that turn expires with it).
+    pass_priority_to_court_upkeep(&mut runner);
+    settle(&mut runner);
+    assert_eq!(runner.state().objects[&first].zone, Zone::Exile);
+    // Then P1's turn, and P0's second upkeep exiles `second`.
+    pass_priority_to_court_upkeep(&mut runner);
     assert_eq!(runner.state().active_player, P0);
-    assert_eq!(
-        runner.state().stack.len(),
-        1,
-        "Court's upkeep trigger waits"
-    );
     settle(&mut runner);
     assert_eq!(runner.state().objects[&second].zone, Zone::Exile);
     pass_priority_to(&mut runner, Phase::PreCombatMain);
     assert_eq!(runner.state().active_player, P0);
     (runner, first, second, swamps)
+}
+
+/// Pass priority until P0's upkeep has Court's trigger to put on the stack or
+/// answer (the waiting prompt or the stack entry), starting from wherever the
+/// game is now. Real `PassPriority` actions, for the reason `pass_priority_to`
+/// gives; it does not return while sitting in the upkeep it started in with
+/// nothing waiting, so it carries on to the next one.
+fn pass_priority_to_court_upkeep(runner: &mut GameRunner) {
+    for _ in 0..40 {
+        let state = runner.state();
+        let waiting = !matches!(state.waiting_for, WaitingFor::Priority { .. });
+        if state.active_player == P0
+            && state.phase == Phase::Upkeep
+            && (waiting || !state.stack.is_empty())
+        {
+            return;
+        }
+        runner
+            .act(GameAction::PassPriority)
+            .expect("PassPriority accepted");
+    }
+    panic!("P0's upkeep never offered Court's trigger");
 }
 
 /// Pass priority with real actions until the game reaches `phase`. Not
