@@ -460,6 +460,12 @@ fn push_first_no_legal_modes_modal_trigger_dropped_silently() {
         state.pending_trigger.is_none(),
         "no-legal-mode modal trigger must not leave a stashed pending_trigger",
     );
+    // CR 700.17 (edition effective 2026-11-06) + CR 603.3c: no mode can be chosen,
+    // so no mode was chosen and no dilemma was faced (ruling: "there are no legal
+    // modes to choose for a modal triggered ability"). The instrument is live: the
+    // random-mode test below asserts the same two readers see one dilemma.
+    assert_eq!(face_dilemma_events(&events, PlayerId(0)), 0);
+    assert_eq!(face_dilemma_history(&state, PlayerId(0)), 0);
 }
 
 /// CR 700.2b: the controller chooses the mode; "at random" fixes how it is

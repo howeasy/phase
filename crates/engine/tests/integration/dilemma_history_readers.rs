@@ -307,6 +307,42 @@ fn caretaker_does_not_trigger_without_a_dilemma() {
     assert_eq!(runner.life(P0), life);
 }
 
+/// C2b — ruling "The Caretaker's last ability will check as your end step
+/// starts ... Casting a modal spell or activating a modal ability during your
+/// end step won't cause the ability to trigger": a dilemma faced after the end
+/// step began does not trigger it. Positive reach: the same Abzan Charm is cast
+/// and resolves in that end step, and C1 above shows the trigger firing when
+/// the dilemma came first.
+#[test]
+fn caretaker_ignores_a_dilemma_faced_during_the_end_step() {
+    let Some(db) = shared_card_db() else {
+        return;
+    };
+    let (mut runner, charm) = caretaker_board(db);
+    runner.advance_to_end_step();
+    let record = drive(&mut runner, Plan::default());
+    assert_eq!(
+        record.target_prompts, 0,
+        "REACH: no dilemma yet, so the end-step trigger did not fire"
+    );
+    assert_eq!(runner.state().phase, Phase::End, "REACH: the end step");
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { player } if player == P0),
+        "REACH: P0 holds priority in the end step: {:?}",
+        runner.state().waiting_for
+    );
+    face_one_dilemma(&mut runner, charm);
+    assert_eq!(
+        runner.state().objects[&charm].zone,
+        Zone::Graveyard,
+        "REACH: the modal spell was cast and resolved in the end step"
+    );
+    assert!(
+        !exiled(&runner, "P1 Land A"),
+        "the Caretaker does not trigger for a dilemma faced after its check"
+    );
+}
+
 /// S4 — Sisko's activated ability: exile the top five; P0 may cast spells
 /// among them with mana value ≤ the number of Officers P0 controls (three
 /// here: Sisko is a Human Officer, plus two Officer tokens) without paying

@@ -822,3 +822,224 @@ fn a_free_cast_during_resolution_records_one_dilemma() {
     );
     assert_eq!(dilemmas(&runner, P0), 1);
 }
+
+/// R1b — ruling "It doesn't matter if that spell or ability goes on to resolve
+/// or not" (CR 700.17, edition effective 2026-11-06): a modal spell that is
+/// countered after its modes were chosen still faced its dilemma. Abzan Charm's
+/// draw mode is countered by Counterspell; Seven of Nine still draws once (its
+/// trigger sits above the charm and resolves even though the charm does not),
+/// the history holds one dilemma, and the charm's own draw and life loss never
+/// happen. Fails if the dilemma were recorded only when the spell resolves.
+#[test]
+fn a_countered_modal_spell_still_faced_its_dilemma() {
+    let Some(db) = shared_card_db() else { return };
+    let mut scenario = board();
+    add_seven(&mut scenario, P0, db);
+    let charm = add_abzan_charm(&mut scenario, db);
+    // Counterspell {U}{U}.
+    for _ in 0..2 {
+        scenario.add_basic_land(P0, ManaColor::Blue);
+    }
+    let counterspell = scenario.add_real_card(P0, "Counterspell", Zone::Hand, db);
+    let mut runner = scenario.build();
+    let hand = hand_len(&runner, P0);
+    let life = runner.life(P0);
+    cast(&mut runner, charm);
+    runner
+        .act(GameAction::SelectModes { indices: vec![1] })
+        .expect("choose the draw mode");
+    cast(&mut runner, counterspell);
+    drive(
+        &mut runner,
+        Plan {
+            targets: vec![TargetRef::Object(charm)],
+            ..Plan::default()
+        },
+    );
+    assert_eq!(
+        runner.state().objects[&charm].zone,
+        Zone::Graveyard,
+        "REACH: the charm was countered"
+    );
+    assert_eq!(
+        runner.life(P0),
+        life,
+        "REACH: the charm's life loss never happened"
+    );
+    // The charm and Counterspell left the hand; Seven drew once; the charm drew nothing.
+    assert_eq!(hand_len(&runner, P0), hand - 2 + 1);
+    assert_eq!(dilemmas(&runner, P0), 1);
+}
+
+/// R4b — CR 602.2b + CR 733.1 (positive path): an activated modal ability whose
+/// chosen mode needs a target (Cankerbloom's "Destroy target artifact", two
+/// legal artifacts so the target prompt is raised) faces one dilemma once it is
+/// on the stack; Seven of Nine's trigger fires exactly once. The cancelled
+/// counterpart is `a_cancelled_activation_records_no_dilemma`.
+#[test]
+fn a_targeted_modal_activation_faces_one_dilemma() {
+    let Some(db) = shared_card_db() else { return };
+    let mut scenario = board();
+    add_seven(&mut scenario, P0, db);
+    let cankerbloom = scenario.add_real_card(P0, "Cankerbloom", Zone::Battlefield, db);
+    let sol_ring = scenario.add_real_card(P1, "Sol Ring", Zone::Battlefield, db);
+    scenario.add_basic_land(P0, ManaColor::Green);
+    let mut runner = scenario.build();
+    let hand = hand_len(&runner, P0);
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: cankerbloom,
+            ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("activate Cankerbloom");
+    let record = drive(
+        &mut runner,
+        Plan {
+            modes: vec![vec![0]],
+            targets: vec![TargetRef::Object(sol_ring)],
+            ..Plan::default()
+        },
+    );
+    assert_eq!(record.mode_choosers, vec![P0]);
+    assert_eq!(
+        runner.state().objects[&sol_ring].zone,
+        Zone::Graveyard,
+        "REACH: the targeted mode resolved"
+    );
+    assert_eq!(hand_len(&runner, P0), hand + 1, "Seven drew exactly one");
+    assert_eq!(dilemmas(&runner, P0), 1);
+}
+
+/// Casts Charming Prince from P0's hand and answers its enters trigger's mode
+/// prompt with its third mode ("Exile another target creature you own"). P0 owns
+/// two Bears and Seven of Nine besides the Prince, so the mode raises a target
+/// prompt. Returns the runner at that `TriggerTargetSelection` prompt, the
+/// Prince, Seven of Nine, the first Bear and P0's hand size before the cast.
+fn prince_exile_mode_at_target_prompt(
+    db: &CardDatabase,
+) -> (GameRunner, ObjectId, ObjectId, ObjectId, usize) {
+    let mut scenario = board();
+    let seven = add_seven(&mut scenario, P0, db);
+    let bear = scenario.add_creature(P0, "Owned Bear A", 2, 2).id();
+    scenario.add_creature(P0, "Owned Bear B", 2, 2);
+    // Charming Prince {1}{W}.
+    for _ in 0..2 {
+        scenario.add_basic_land(P0, ManaColor::White);
+    }
+    let prince = scenario.add_real_card(P0, "Charming Prince", Zone::Hand, db);
+    let mut runner = scenario.build();
+    let hand = hand_len(&runner, P0);
+    cast(&mut runner, prince);
+    for _ in 0..8 {
+        if matches!(
+            runner.state().waiting_for,
+            WaitingFor::AbilityModeChoice { .. }
+        ) {
+            break;
+        }
+        runner
+            .act(GameAction::PassPriority)
+            .expect("pass priority so the Prince resolves");
+    }
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::AbilityModeChoice { player: P0, .. }
+        ),
+        "REACH: the enters trigger asks P0 for its modes: {:?}",
+        runner.state().waiting_for
+    );
+    runner
+        .act(GameAction::SelectModes { indices: vec![2] })
+        .expect("choose the exile mode");
+    eprintln!("PROBE0 after modes deferred={} stack={}", runner.state().deferred_triggers.len(), runner.state().stack.len());
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::TriggerTargetSelection { .. }
+        ),
+        "REACH: the exile mode asks for its target: {:?}",
+        runner.state().waiting_for
+    );
+    (runner, prince, seven, bear, hand)
+}
+
+/// R5c — CR 603.3c + CR 603.2 (construction span): while a modal trigger's
+/// targeted mode still waits for its target, the entry under construction is
+/// alone on the stack. The dilemma observer (Seven of Nine) has not been put
+/// above that half-built entry and has not drawn; the precedent is the
+/// target-lock events of `trigger_construction_target_events.rs`, which are held
+/// until the construction ends. Charming Prince's exile mode with three legal
+/// targets (two Bears and Seven of Nine).
+#[test]
+fn a_modal_trigger_waiting_for_its_target_has_no_observer_above_it() {
+    let Some(db) = shared_card_db() else { return };
+    let (runner, prince, _seven, _bear, hand) = prince_exile_mode_at_target_prompt(db);
+    let sources: Vec<ObjectId> = runner
+        .state()
+        .stack
+        .iter()
+        .map(|entry| entry.source_id)
+        .collect();
+    assert_eq!(
+        sources,
+        vec![prince],
+        "only the Prince's trigger under construction is on the stack"
+    );
+    assert_eq!(hand_len(&runner, P0), hand - 1, "Seven has not drawn yet");
+}
+
+/// R5d — CR 603.3c + CR 700.17 + ruling "An ability that triggers whenever a
+/// player faces a dilemma will resolve before the spell or ability that caused
+/// it to trigger": once the target is chosen the stack is the Prince's trigger
+/// with Seven of Nine's trigger above it, Seven resolves first (its draw
+/// happens while the Bear is still on the battlefield), the dilemma is faced
+/// exactly once, and the delayed-return trigger of the Prince's mode places no
+/// second dilemma.
+#[test]
+fn a_targeted_modal_trigger_faces_one_dilemma_and_its_observer_resolves_first() {
+    let Some(db) = shared_card_db() else { return };
+    let (mut runner, prince, seven, bear, hand) = prince_exile_mode_at_target_prompt(db);
+    runner
+        .act(GameAction::ChooseTarget {
+            target: Some(TargetRef::Object(bear)),
+        })
+        .expect("choose the first Bear");
+    eprintln!("PROBE deferred={} pending_trigger={} dil={}", runner.state().deferred_triggers.len(), runner.state().pending_trigger.is_some(), dilemmas(&runner, P0));
+    let sources: Vec<ObjectId> = runner
+        .state()
+        .stack
+        .iter()
+        .map(|entry| entry.source_id)
+        .collect();
+    assert_eq!(
+        sources,
+        vec![prince, seven],
+        "REACH: the Prince's trigger, with Seven's dilemma trigger above it"
+    );
+    runner.pass_both_players();
+    assert_eq!(
+        runner.state().stack.len(),
+        1,
+        "REACH: exactly Seven's trigger resolved"
+    );
+    assert_eq!(
+        hand_len(&runner, P0),
+        hand,
+        "Seven's draw resolved first (the Prince left the hand, Seven drew one)"
+    );
+    assert_eq!(
+        runner.state().objects[&bear].zone,
+        Zone::Battlefield,
+        "the Prince's trigger has not resolved yet"
+    );
+    drive(&mut runner, Plan::default());
+    assert_eq!(
+        runner.state().objects[&bear].zone,
+        Zone::Exile,
+        "REACH: the exile mode resolved"
+    );
+    assert_eq!(hand_len(&runner, P0), hand, "Seven drew exactly once");
+    assert_eq!(dilemmas(&runner, P0), 1);
+}

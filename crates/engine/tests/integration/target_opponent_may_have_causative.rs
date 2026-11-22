@@ -23,11 +23,13 @@
 use std::collections::VecDeque;
 
 use engine::database::card_db::CardDatabase;
+use engine::game::coverage::card_face_gaps;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::scenario_db::GameScenarioDbExt;
 use engine::game::triggers::drain_order_triggers_with_identity;
 use engine::types::ability::TargetRef;
 use engine::types::actions::GameAction;
+use engine::types::confirmed_misparse::{ConfirmedMisparses, MisparseClass};
 use engine::types::counter::CounterType;
 use engine::types::game_state::{CastPaymentMode, WaitingFor};
 use engine::types::identifiers::ObjectId;
@@ -741,4 +743,73 @@ fn risk_factor_without_legal_target_cannot_be_cast() {
     let record = drive(&mut runner, Answers::new(&[TargetRef::Player(P2)], &[true]));
     assert_eq!(record.optional_actors, vec![P2]);
     assert_eq!(lives(&runner), [before[0], before[1], before[2] - 4]);
+}
+
+// ── Census registry end state ──────────────────────────────────────────────
+
+/// Registry hygiene — the census rows of this class end as the runtime rows
+/// above leave them. Shakedown Heavy keeps its `wrong_object` row (its accept
+/// branch still binds "untap this creature" to the draw's parent target),
+/// Bane keeps `dropped_qualifier` (the "equal or lesser toughness" qualifier is
+/// not witnessed), and Palantír of Orthanc is marked `wrong_object` (its "total
+/// mana value of those cards" also counts the card itself, see the Palantír
+/// rows). Each committed row must agree with the regenerated integration
+/// fixture's face, and coverage must report the matching misparse gap, so a row
+/// deleted or a fixture left stale is caught. The unmarked members of the class
+/// are the paired positive control that the same readers report no misparse gap
+/// for a face that is claimed.
+#[test]
+fn the_census_rows_of_the_class_agree_with_the_regenerated_fixture() {
+    let db = CardDatabase::from_integration_fixture().expect("integration fixture loads");
+    let registry = ConfirmedMisparses::committed();
+    for (key, name, class) in [
+        (
+            "shakedown heavy",
+            "Shakedown Heavy",
+            MisparseClass::WrongObject,
+        ),
+        (
+            "bane, lord of darkness",
+            "Bane, Lord of Darkness",
+            MisparseClass::DroppedQualifier,
+        ),
+        (
+            "palantír of orthanc",
+            "Palantír of Orthanc",
+            MisparseClass::WrongObject,
+        ),
+    ] {
+        assert_eq!(registry.class_of(key), Some(class), "registry row {key}");
+        let face = db
+            .get_face_by_name(name)
+            .unwrap_or_else(|| panic!("{name} is in the integration fixture"));
+        assert_eq!(
+            face.metadata.confirmed_misparse,
+            Some(class),
+            "{name}: the fixture copy carries the registry marker"
+        );
+        assert!(
+            card_face_gaps(face)
+                .iter()
+                .any(|gap| gap == class.handler()),
+            "{name}: coverage reports the marked misparse"
+        );
+    }
+    for name in [
+        "Combustible Gearhulk",
+        "Terrapact Intimidator",
+        "Risk Factor",
+        "Tell Me What You See",
+    ] {
+        let face = db
+            .get_face_by_name(name)
+            .unwrap_or_else(|| panic!("{name} is in the integration fixture"));
+        assert_eq!(face.metadata.confirmed_misparse, None, "{name}");
+        assert!(
+            !card_face_gaps(face)
+                .iter()
+                .any(|gap| gap.starts_with("Misparse:")),
+            "{name}: no misparse gap is reported for a claimed face"
+        );
+    }
 }

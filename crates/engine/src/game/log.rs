@@ -2743,6 +2743,40 @@ mod tests {
         );
     }
 
+    /// CR 700.17 (edition effective 2026-11-06): a faced dilemma is public
+    /// information and is narrated through the generic player-action arm, as
+    /// "<player> faces a dilemma" (the scry entry above is the neighbouring
+    /// positive control that this arm family still renders).
+    #[test]
+    fn a_faced_dilemma_has_a_public_log_entry() {
+        let state = GameState::new_two_player(42);
+        let entries = resolve_log_entries(
+            &[GameEvent::PlayerPerformedAction {
+                player_id: PlayerId(0),
+                action: crate::types::events::PlayerActionKind::FaceDilemma,
+                look_count: None,
+                scry_bottom_count: None,
+                scry_top_count: None,
+            }],
+            &state,
+            &state,
+        );
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].presentation.visibility, LogVisibility::Public);
+        assert_eq!(
+            entries[0].segments,
+            vec![
+                LogSegment::PlayerName {
+                    name: "Player 1".to_string(),
+                    player_id: PlayerId(0),
+                },
+                LogSegment::Text(" ".to_string()),
+                LogSegment::Text("faces a dilemma".to_string()),
+            ]
+        );
+    }
+
     #[test]
     fn public_log_hides_hand_to_library_but_keeps_public_discard() {
         use crate::types::game_state::ZoneChangeRecord;

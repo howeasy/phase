@@ -26,11 +26,26 @@ use engine::types::zones::Zone;
 use crate::support::shared_card_db;
 
 fn attack(db: &CardDatabase, accept: bool) -> (GameRunner, ObjectId, Vec<PlayerId>, usize) {
-    let mut scenario = GameScenario::new();
+    attack_players(db, accept, 2, P1)
+}
+
+/// P0's Shakedown Heavy attacks `defender` in a `players`-seat game; every seat's
+/// prompt actor is recorded.
+fn attack_players(
+    db: &CardDatabase,
+    accept: bool,
+    players: u8,
+    defender: PlayerId,
+) -> (GameRunner, ObjectId, Vec<PlayerId>, usize) {
+    let mut scenario = if players == 2 {
+        GameScenario::new()
+    } else {
+        GameScenario::new_n_player(players, 42)
+    };
     scenario.at_phase(Phase::PreCombatMain);
-    for player in [P0, P1] {
+    for seat in 0..players {
         for index in 0..3 {
-            scenario.add_spell_to_library_top(player, &format!("Library {index}"), false);
+            scenario.add_spell_to_library_top(PlayerId(seat), &format!("Library {index}"), false);
         }
     }
     let heavy = scenario.add_real_card(P0, "Shakedown Heavy", Zone::Battlefield, db);
@@ -38,7 +53,7 @@ fn attack(db: &CardDatabase, accept: bool) -> (GameRunner, ObjectId, Vec<PlayerI
     let hand_before = runner.state().players[P0.0 as usize].hand.len();
     runner.advance_to_combat();
     runner
-        .declare_attackers(&[(heavy, AttackTarget::Player(P1))])
+        .declare_attackers(&[(heavy, AttackTarget::Player(defender))])
         .expect("declare Shakedown Heavy as an attacker");
     let mut actors = Vec::new();
     for _ in 0..128 {
@@ -93,4 +108,52 @@ fn decline_stays_tapped_and_attacking() {
     assert_eq!(hand_len(&runner), hand_before);
     assert!(tapped, "CR 118.12: a decline leaves Shakedown Heavy tapped");
     assert!(attacking, "CR 118.12: a decline leaves it attacking");
+}
+
+/// R4b — CR 506.2 + CR 608.2d: in a three-player game where P0 attacks P2, only
+/// the defending player P2 is asked (neither P1, who is not attacked, nor the
+/// controller); the decline leaves Shakedown Heavy tapped and attacking and the
+/// controller draws nothing.
+#[test]
+fn three_players_decline_asks_only_the_defending_player() {
+    const P2: PlayerId = PlayerId(2);
+    let Some(db) = shared_card_db() else {
+        return;
+    };
+    let (runner, heavy, actors, hand_before) = attack_players(db, false, 3, P2);
+    assert_eq!(actors, vec![P2], "only the attacked player decides");
+    assert_eq!(hand_len(&runner), hand_before);
+    assert!(
+        runner.state().objects[&heavy].tapped,
+        "a decline leaves Shakedown Heavy tapped"
+    );
+    assert!(
+        is_attacking(&runner, heavy),
+        "a decline leaves it attacking"
+    );
+}
+
+/// R4c — CR 506.2 + CR 118.12: the same three-player attack on P2, accepted. The
+/// defending player P2 is the only one asked, and "you draw a card" is the
+/// CONTROLLER's draw (CR 109.5), never the deciding defender's. The untap and
+/// removal from combat are not asserted: the census row keeps the card
+/// unsupported (see the module comment).
+#[test]
+fn three_players_accept_makes_the_controller_draw() {
+    const P2: PlayerId = PlayerId(2);
+    let Some(db) = shared_card_db() else {
+        return;
+    };
+    let (runner, _heavy, actors, hand_before) = attack_players(db, true, 3, P2);
+    assert_eq!(actors, vec![P2], "only the attacked player decides");
+    assert_eq!(
+        hand_len(&runner),
+        hand_before + 1,
+        "the controller drew the card the defender offered"
+    );
+    assert_eq!(
+        runner.state().players[P2.0 as usize].hand.len(),
+        0,
+        "the deciding defender drew nothing"
+    );
 }
