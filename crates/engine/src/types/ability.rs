@@ -2185,6 +2185,9 @@ pub struct SpellContext {
     /// in the per-turn history (CR 733.1: an announcement that is undone records
     /// nothing). A copy carries the value (CR 707.10 copies decisions), but a
     /// copy is never cast or activated, so it never reaches a placement authority.
+    /// A modal triggered ability whose chosen mode still needs a target latches it
+    /// the same way; the trigger finisher reads it once (`Option::take`) as it
+    /// puts the entry on the stack.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mode_chooser: Option<PlayerId>,
     /// Whether an optional "you may" effect was performed during resolution.

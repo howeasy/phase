@@ -91,9 +91,17 @@ enum FinalizedPlacement {
 fn place_trigger_targets(
     state: &mut GameState,
     mut trigger: Box<PendingTrigger>,
-    ability: Box<ResolvedAbility>,
+    mut ability: Box<ResolvedAbility>,
     events: &mut Vec<GameEvent>,
 ) -> FinalizedPlacement {
+    // CR 700.17 (edition effective 2026-11-06) + CR 603.3c: a modal trigger whose
+    // chosen mode needed a target faces its dilemma as the construction finishes;
+    // the choice of modes was latched on the pending ability. Emitted inside the
+    // finisher's span so the observer is held with the target-lock events.
+    if let Some(chooser) = ability.context.mode_chooser.take() {
+        super::ability_utils::emit_face_dilemma_event(chooser, events);
+        super::ability_utils::record_face_dilemma_after_stack_placement(state, Some(chooser));
+    }
     let assigned_targets = declared_targets_in_chain(&ability);
     let crime_candidate =
         casting::targets_commit_crime(state, &assigned_targets, trigger.controller);

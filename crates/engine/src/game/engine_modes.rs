@@ -129,10 +129,24 @@ pub(super) fn handle_ability_mode_choice(
         // put on the stack; the choice cannot be undone (no CancelCast for a
         // triggered mode prompt), so the event and the history are written
         // together.
-        if let Some(chooser) = dilemma_chooser {
-            super::ability_utils::emit_face_dilemma_event(chooser, events);
+        if let Some(pending) = state.pending_trigger.as_mut() {
+            // CR 603.3c + CR 603.3d: a chosen mode's target is still to be
+            // chosen, so the ability is not on the stack yet. The dilemma is
+            // faced when the construction finishes, inside the finisher's own
+            // span (`engine_stack::place_trigger_targets`), the same custody the
+            // target-lock events of this construction have: an observer that
+            // triggers on it is held until the finisher's drain and never lands
+            // above the half-built entry.
+            pending.ability.context.mode_chooser = dilemma_chooser;
+        } else {
+            if let Some(chooser) = dilemma_chooser {
+                super::ability_utils::emit_face_dilemma_event(chooser, events);
+            }
+            super::ability_utils::record_face_dilemma_after_stack_placement(
+                state,
+                dilemma_chooser,
+            );
         }
-        super::ability_utils::record_face_dilemma_after_stack_placement(state, dilemma_chooser);
         Ok(triggers::finish_trigger_construction_action(
             state, events, produced,
         ))
