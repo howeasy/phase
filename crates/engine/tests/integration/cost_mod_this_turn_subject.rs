@@ -110,9 +110,7 @@ fn zone_of(runner: &GameRunner, id: ObjectId) -> Zone {
 }
 
 fn lore_count(runner: &GameRunner, id: ObjectId) -> u32 {
-    runner
-        .state()
-        .objects[&id]
+    runner.state().objects[&id]
         .counters
         .get(&CounterType::Lore)
         .copied()
@@ -120,9 +118,7 @@ fn lore_count(runner: &GameRunner, id: ObjectId) -> u32 {
 }
 
 fn loyalty_count(runner: &GameRunner, id: ObjectId) -> u32 {
-    runner
-        .state()
-        .objects[&id]
+    runner.state().objects[&id]
         .counters
         .get(&CounterType::Loyalty)
         .copied()
@@ -309,10 +305,8 @@ fn spellbinding_soprano_attack_trigger_discounts_only_instant_and_sorcery_spells
 
     // The card's other printed clause: encore {3}{R}.
     assert!(
-        runner.state().objects[&board.soprano].has_keyword(&Keyword::Encore(cost(
-            &[ManaCostShard::Red],
-            3
-        ))),
+        runner.state().objects[&board.soprano]
+            .has_keyword(&Keyword::Encore(cost(&[ManaCostShard::Red], 3))),
         "Spellbinding Soprano has encore {{3}}{{R}}"
     );
 
@@ -621,7 +615,11 @@ fn urza_plus_two_discounts_artifacts_instants_and_sorceries_and_allows_a_second_
         Zone::Battlefield,
         "the reduced artifact resolves"
     );
-    assert_eq!(pool_total(&runner, P0), 0, "the artifact costs exactly {{0}}");
+    assert_eq!(
+        pool_total(&runner, P0),
+        0,
+        "the artifact costs exactly {{0}}"
+    );
 
     // A reduced sorcery pays exactly {U}.
     fund(&mut runner, P0, &[ManaType::Blue]);
@@ -655,7 +653,11 @@ fn urza_plus_two_discounts_artifacts_instants_and_sorceries_and_allows_a_second_
         11,
         "the second +2 is allowed this turn (7 -> 9 -> 11)"
     );
-    assert_eq!(outcome.life_delta(P0), 2, "the second activation gains 2 life");
+    assert_eq!(
+        outcome.life_delta(P0),
+        2,
+        "the second activation gains 2 life"
+    );
     settle_priority(&mut runner, "Urza's second activation");
 }
 
@@ -719,9 +721,7 @@ fn armor_wars_chapter_two_discounts_only_artifact_spells() {
         Zone::Battlefield,
         "the Saga resolved onto the battlefield"
     );
-    let lore = outcome
-        .state()
-        .objects[&armor_wars]
+    let lore = outcome.state().objects[&armor_wars]
         .counters
         .get(&CounterType::Lore)
         .copied()
@@ -812,7 +812,11 @@ fn armor_wars_chapter_two_discounts_only_artifact_spells() {
         Zone::Battlefield,
         "the reduced artifact resolves"
     );
-    assert_eq!(pool_total(&runner, P0), 0, "the artifact costs exactly {{0}}");
+    assert_eq!(
+        pool_total(&runner, P0),
+        0,
+        "the artifact costs exactly {{0}}"
+    );
 
     // The control creature pays its full printed {1}{G}.
     fund(&mut runner, P0, &[ManaType::Colorless, ManaType::Green]);

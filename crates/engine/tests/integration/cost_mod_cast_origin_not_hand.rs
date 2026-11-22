@@ -73,7 +73,10 @@ fn zone_of(r: &GameRunner, id: ObjectId) -> Zone {
 
 /// How many mana units `player` still has in their pool.
 fn pool_size(r: &GameRunner, player: PlayerId) -> usize {
-    r.state().players[player.0 as usize].mana_pool.units().count()
+    r.state().players[player.0 as usize]
+        .mana_pool
+        .units()
+        .count()
 }
 
 /// Index of the printed `{cost}: Level N` bar on `source`'s ability list.
@@ -81,7 +84,9 @@ fn level_bar_index(r: &GameRunner, source: ObjectId, level: u8) -> usize {
     r.state().objects[&source]
         .abilities
         .iter()
-        .position(|a| matches!(a.effect.as_ref(), Effect::SetClassLevel { level: l } if *l == level))
+        .position(
+            |a| matches!(a.effect.as_ref(), Effect::SetClassLevel { level: l } if *l == level),
+        )
         .unwrap_or_else(|| {
             panic!(
                 "the printed card must carry its Level {level} bar, found {:?}",
@@ -133,7 +138,10 @@ fn pass_until_stack_empty(r: &mut GameRunner, what: &str) {
 /// Pass priority until a triggered ability's target prompt appears.
 fn pass_until_trigger_target_prompt(r: &mut GameRunner, what: &str) {
     for _ in 0..16 {
-        if matches!(r.state().waiting_for, WaitingFor::TriggerTargetSelection { .. }) {
+        if matches!(
+            r.state().waiting_for,
+            WaitingFor::TriggerTargetSelection { .. }
+        ) {
             return;
         }
         match r.state().waiting_for.clone() {
@@ -207,8 +215,15 @@ fn savvy_trader_reduces_only_casts_from_outside_the_hand() {
     else {
         panic!("Savvy Trader: the enters trigger's target prompt is open");
     };
-    assert_eq!(player, P0, "P0 chooses the exile target, got prompt for {player:?}");
-    assert_eq!(target_slots.len(), 1, "the exile clause has exactly one target slot");
+    assert_eq!(
+        player, P0,
+        "P0 chooses the exile target, got prompt for {player:?}"
+    );
+    assert_eq!(
+        target_slots.len(),
+        1,
+        "the exile clause has exactly one target slot"
+    );
     let slot = &target_slots[0];
     assert!(!slot.optional, "the exile target is required, not optional");
     let mut offered = slot.legal_targets.clone();
@@ -225,8 +240,16 @@ fn savvy_trader_reduces_only_casts_from_outside_the_hand() {
     .expect("answer the exile target through the public action");
     pass_until_stack_empty(&mut r, "Savvy Trader enters trigger");
 
-    assert_eq!(zone_of(&r, savvy), Zone::Battlefield, "Savvy Trader resolved");
-    assert_eq!(zone_of(&r, gy_bears), Zone::Exile, "the trigger exiled the Bears");
+    assert_eq!(
+        zone_of(&r, savvy),
+        Zone::Battlefield,
+        "Savvy Trader resolved"
+    );
+    assert_eq!(
+        zone_of(&r, gy_bears),
+        Zone::Exile,
+        "the trigger exiled the Bears"
+    );
     assert_eq!(
         zone_of(&r, gy_forest),
         Zone::Graveyard,
@@ -535,10 +558,18 @@ fn advanced_reconstruction_level_3_reduces_the_exiled_cast_and_level_2_deals_dam
     );
     let level_two_bar = level_bar_index(&r, ar, 2);
     r.activate(ar, level_two_bar).resolve();
-    assert_eq!(r.state().objects[&ar].class_level, Some(2), "the {{1}}{{R}} bar set level 2");
+    assert_eq!(
+        r.state().objects[&ar].class_level,
+        Some(2),
+        "the {{1}}{{R}} bar set level 2"
+    );
     let level_three_bar = level_bar_index(&r, ar, 3);
     r.activate(ar, level_three_bar).resolve();
-    assert_eq!(r.state().objects[&ar].class_level, Some(3), "the {{1}}{{R}} bar set level 3");
+    assert_eq!(
+        r.state().objects[&ar].class_level,
+        Some(3),
+        "the {{1}}{{R}} bar set level 3"
+    );
     assert_eq!(
         pool_size(&r, P0),
         0,
@@ -553,14 +584,30 @@ fn advanced_reconstruction_level_3_reduces_the_exiled_cast_and_level_2_deals_dam
     r.state_mut().priority_player = P0;
     r.state_mut().waiting_for = WaitingFor::Priority { player: P0 };
     let waiting = r.auto_advance_to_main_phase();
-    assert_eq!(r.state().phase, Phase::PreCombatMain, "the turn reached its first main phase");
+    assert_eq!(
+        r.state().phase,
+        Phase::PreCombatMain,
+        "the turn reached its first main phase"
+    );
     assert!(
         matches!(waiting, WaitingFor::Priority { player } if player == P0),
         "P0 holds priority with the trigger queued, got {waiting:?}"
     );
-    assert_eq!(r.state().stack.len(), 1, "the level 1 phase trigger is on the stack");
-    assert_eq!(zone_of(&r, draw_step_card), Zone::Hand, "the draw step took the top card");
-    assert_eq!(zone_of(&r, milled), Zone::Library, "the Divination is now the top card");
+    assert_eq!(
+        r.state().stack.len(),
+        1,
+        "the level 1 phase trigger is on the stack"
+    );
+    assert_eq!(
+        zone_of(&r, draw_step_card),
+        Zone::Hand,
+        "the draw step took the top card"
+    );
+    assert_eq!(
+        zone_of(&r, milled),
+        Zone::Library,
+        "the Divination is now the top card"
+    );
     assert!(
         r.state().players[P0.0 as usize].graveyard.is_empty(),
         "reach guard: the graveyard is empty, so the random exile must pick the milled card"
