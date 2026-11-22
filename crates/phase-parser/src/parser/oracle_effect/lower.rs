@@ -3294,15 +3294,11 @@ pub(super) fn rebind_zone_changed_this_way_pronoun_to_moved_object(def: &mut Abi
 /// moved, so the `And` of the linked pile gains an explicit
 /// `Not { LastZoneChanged }` leg (the ledger of the instruction just performed)
 /// instead of the pile reader consulting that ledger. Whatever gates the
-/// return, the sub-ability that follows an exile `ChangeZone` directly carries it.
+/// return, and whichever exile instruction precedes it (`chain_clause_is_exile_producer`:
+/// Duplicity's and Moonring Mirror's "exile all cards from your hand" included), the
+/// sub-ability that follows it directly carries it.
 pub(super) fn exclude_this_way_cards_from_other_linked_pile(def: &mut AbilityDefinition) {
-    let parent_exiles = matches!(
-        def.effect.as_ref(),
-        Effect::ChangeZone {
-            destination: Zone::Exile,
-            ..
-        }
-    );
+    let parent_exiles = super::chain_clause_is_exile_producer(def.effect.as_ref());
     if parent_exiles {
         if let Some(Effect::ChangeZoneAll {
             target: TargetFilter::And { filters },
@@ -3314,7 +3310,7 @@ pub(super) fn exclude_this_way_cards_from_other_linked_pile(def: &mut AbilityDef
         {
             let pile_is_linked_exile = filters
                 .iter()
-                .any(|leg| matches!(leg, TargetFilter::ExiledBySource));
+                .any(TargetFilter::references_exiled_by_source);
             let pile_says_other = filters
                 .iter()
                 .any(|leg| filter_contains_filter_prop(leg, &|prop| *prop == FilterProp::Another));
@@ -17693,7 +17689,7 @@ mod tests {
     /// that follows an exile spells "other than the card just exiled" as a
     /// `Not { LastZoneChanged }` leg on the linked pile's `And`, whatever gates
     /// the return: Mysterious Limousine ("If a creature is put into exile this
-    /// way") and Mimic Vat ("If you do"). Northampton Farm's "Return each other
+    /// way") and Mimic Vat ("If you do"), and after a mass exile (Duplicity, Moonring Mirror). Northampton Farm's "Return each other
     /// card exiled with this land" follows no exile instruction, so it gains no
     /// leg (its pile shape is the control, not a card that never parses).
     #[test]
@@ -17729,6 +17725,29 @@ mod tests {
             &[],
         );
         assert_eq!(vat, vec![(true, with_leg())]);
+
+        // Duplicity and Moonring Mirror: the exiling parent is a mass `ChangeZoneAll`.
+        for (name, text, types) in [
+            (
+                "Duplicity",
+                "When this enchantment enters, exile the top five cards of your library face down.\nAt the beginning of your upkeep, you may exile all cards from your hand face down. If you do, put all other cards you own exiled with this enchantment into your hand.\nAt the beginning of your end step, discard a card.\nWhen you lose control of this enchantment, put all cards exiled with this enchantment into their owner's graveyard.",
+                "Enchantment",
+            ),
+            (
+                "Moonring Mirror",
+                "Whenever you draw a card, exile the top card of your library face down.\nAt the beginning of your upkeep, you may exile all cards from your hand face down. If you do, put all other cards you own exiled with this artifact into your hand.",
+                "Artifact",
+            ),
+        ] {
+            let piles = piles_of(text, name, &[types], &[]);
+            assert!(
+                piles.len() == 1
+                    && piles[0].0
+                    && piles[0].1.last() == Some(&not_last_zone_changed())
+                    && piles[0].1.contains(&TargetFilter::ExiledBySource),
+                "{name}: the return after the hand exile excludes the cards just exiled, got {piles:?}"
+            );
+        }
 
         let farm = piles_of(
             "{T}: Add {C}.\n{1}, {T}: Exile target creature you own.\n{2}, {T}, Sacrifice this land: Return a creature card exiled with this land to the battlefield under your control. Return each other card exiled with this land to its owner's hand.",

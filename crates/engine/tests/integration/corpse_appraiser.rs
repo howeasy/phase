@@ -796,3 +796,159 @@ fn mirror_of_life_trapping_returns_the_earlier_creature_not_the_one_just_exiled(
         "the Mirror itself never left the battlefield"
     );
 }
+
+/// Verbatim Oracle text of Moonring Mirror (Scryfall).
+const MOONRING_MIRROR: &str = "Whenever you draw a card, exile the top card of your library face down.\nAt the beginning of your upkeep, you may exile all cards from your hand face down. If you do, put all other cards you own exiled with this artifact into your hand.";
+
+/// Drive the game with real actions until `done` holds: pass priority, decline
+/// to attack or block, and accept the only optional effect this board offers.
+/// Returns how many `OptionalEffectChoice` prompts were answered. Any other
+/// prompt fails the test by name.
+fn cycle_until(runner: &mut GameRunner, done: impl Fn(&GameRunner) -> bool) -> usize {
+    let mut optional_choices = 0;
+    for _ in 0..600 {
+        if done(runner) {
+            return optional_choices;
+        }
+        let action = match runner.state().waiting_for.clone() {
+            WaitingFor::DeclareAttackers { .. } => GameAction::DeclareAttackers {
+                attacks: vec![],
+                bands: vec![],
+            },
+            WaitingFor::DeclareBlockers { .. } => GameAction::DeclareBlockers {
+                assignments: vec![],
+            },
+            // CR 608.2d: the only optional effect here is Moonring Mirror's
+            // "you may exile all cards from your hand"; accept it.
+            WaitingFor::OptionalEffectChoice { .. } => {
+                optional_choices += 1;
+                GameAction::DecideOptionalEffect { accept: true }
+            }
+            WaitingFor::Priority { .. } => GameAction::PassPriority,
+            other => panic!("unexpected prompt {other:?}"),
+        };
+        runner.act(action).expect("the turn cycle advances");
+    }
+    panic!("the turn cycle never reached the awaited state");
+}
+
+/// CR 607.2a: every card Moonring Mirror's triggers exile is linked to it, so
+/// "all other cards you own exiled with this artifact" reads exactly the pile
+/// those triggers built. CR 608.2c: the upkeep trigger follows its instructions
+/// in order, so the hand it just exiled is not "other" and cannot come back
+/// within the same resolution, while the card an earlier upkeep exiled is not
+/// excluded and does.
+///
+/// Board: the Mirror plus one printed vanilla creature in P0's hand. At P0's
+/// first upkeep the optional hand exile takes that creature; the pile is empty
+/// (P0 has not drawn yet), so nothing returns. At the draw step P0 draws the
+/// stacked top card (the Mirror's own "whenever you draw" trigger exiles the
+/// next library card, which this test ignores). At P0's second upkeep the
+/// optional hand exile takes the drawn card: "all other cards you own exiled
+/// with this artifact" returns the first upkeep's creature to hand, and the
+/// card just exiled stays in exile.
+#[test]
+fn moonring_mirror_upkeep_returns_the_earlier_hand_exile_not_the_one_just_exiled() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    // CR 301.1: Moonring Mirror is a printed noncreature artifact, {5}.
+    let mirror = scenario
+        .add_artifact_from_oracle(P0, "Moonring Mirror", MOONRING_MIRROR)
+        .with_mana_cost(parse_mtgjson_mana_cost("{5}"))
+        .id();
+    // The only card in hand for the first upkeep's optional exile.
+    let first = scenario
+        .add_creature_to_hand(P0, "Grizzly Bears", 2, 2)
+        .with_mana_cost(parse_mtgjson_mana_cost("{1}{G}"))
+        .id();
+    // Both players must draw through the turn cycle without decking. P0's top
+    // card is added last, so `drawn` is what its first draw step takes; the
+    // card beneath it feeds the Mirror's own draw trigger.
+    for n in 0..5 {
+        scenario.add_card_to_library_top(P0, &format!("P0 Library {n}"));
+        scenario.add_card_to_library_top(P1, &format!("P1 Library {n}"));
+    }
+    let drawn = scenario.add_card_to_library_top(P0, "P0 Draw");
+    scenario.add_card_to_library_top(P1, "P1 Draw");
+    let mut runner = scenario.build();
+    let start = runner.state().turn_number;
+    assert_eq!(
+        runner.state().objects[&mirror].zone,
+        Zone::Battlefield,
+        "reach: Moonring Mirror is on the battlefield"
+    );
+
+    // First upkeep (P0's next turn): the optional hand exile takes `first`, and
+    // the pile is empty, so nothing comes back.
+    let choices = cycle_until(&mut runner, |runner| {
+        runner.state().objects[&first].zone == Zone::Exile
+    });
+    assert_eq!(choices, 1, "the upkeep trigger offered its optional exile");
+    assert_eq!(
+        runner.state().objects[&first].zone,
+        Zone::Exile,
+        "the first upkeep's exile takes the only card in hand"
+    );
+    assert_eq!(runner.state().active_player, P0, "reach: P0's upkeep");
+    assert_eq!(
+        runner.state().phase,
+        Phase::Upkeep,
+        "reach: the upkeep step"
+    );
+    assert!(
+        runner.state().turn_number >= start + 2,
+        "reach: the exile happened on P0's next turn"
+    );
+
+    // Draw step: P0 draws the stacked `drawn`; the Mirror's draw trigger then
+    // exiles the next library card, which this test does not track.
+    let choices = cycle_until(&mut runner, |runner| {
+        runner.state().players[0].hand.contains(&drawn)
+    });
+    assert_eq!(choices, 0, "the draw step asks nothing optional");
+    assert_eq!(runner.state().active_player, P0, "reach: P0's draw step");
+    assert!(
+        runner.state().turn_number < start + 4,
+        "reach: the draw is before P0's second upkeep"
+    );
+    assert_eq!(
+        runner.state().objects[&drawn].zone,
+        Zone::Hand,
+        "reach: P0 drew the stacked card"
+    );
+
+    // Second upkeep (two turns later): the optional hand exile takes `drawn`,
+    // and "all other cards you own exiled with this artifact" returns `first`
+    // while the card just exiled is not returned (CR 608.2c).
+    let choices = cycle_until(&mut runner, |runner| {
+        let state = runner.state();
+        state.objects[&first].zone == Zone::Hand && state.objects[&drawn].zone == Zone::Exile
+    });
+    assert_eq!(choices, 1, "the second upkeep offered its optional exile");
+    let state = runner.state();
+    assert_eq!(state.active_player, P0, "reach: P0's second upkeep");
+    assert_eq!(state.phase, Phase::Upkeep, "reach: the upkeep step");
+    assert!(
+        state.turn_number >= start + 4,
+        "reach: the second upkeep is two turns later"
+    );
+    assert_eq!(
+        state.objects[&first].zone,
+        Zone::Hand,
+        "CR 607.2a: the earlier upkeep's exiled card returns"
+    );
+    assert!(
+        state.players[0].hand.contains(&first),
+        "the earlier card is back in its owner's hand"
+    );
+    assert_eq!(
+        state.objects[&drawn].zone,
+        Zone::Exile,
+        "CR 608.2c: the card this resolution just exiled is not returned"
+    );
+    assert_eq!(
+        state.objects[&mirror].zone,
+        Zone::Battlefield,
+        "the Mirror itself never left the battlefield"
+    );
+}
