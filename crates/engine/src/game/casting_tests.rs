@@ -47820,7 +47820,7 @@ fn exile_permission_pools_cannot_offer_card_scoped_exit() {
         .unwrap()
         .counters
         .insert(CounterType::Generic("stash".to_string()), 1);
-    let snapshot = exiled_card_snapshot(&state, candidate).expect("candidate live in exile");
+    let snapshot = exiled_card_snapshot(&state, candidate, None).expect("candidate live in exile");
     state
         .linked_exile_lki
         .entry(source)
@@ -47922,7 +47922,7 @@ fn persistent_permission_c1_elsewhere_admission_refuses_while_discovery_offers()
         .insert(CounterType::Generic("stash".to_string()), 1);
     // Successor-LKI pile, mirroring `record_linked_exile_departure`'s
     // successor entry: admits the live incarnation; snapshot live in exile.
-    let snapshot = exiled_card_snapshot(&state, candidate).expect("candidate live in exile");
+    let snapshot = exiled_card_snapshot(&state, candidate, None).expect("candidate live in exile");
     state
         .linked_exile_lki
         .entry(source_id)
