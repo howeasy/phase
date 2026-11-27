@@ -19614,12 +19614,20 @@ fn its_a_subtype_spell_in_a_cast_trigger_binds_the_event_spell() {
             other => panic!("expected a referent condition, got {other:?}"),
         }
     }
-    for oracle in [
-        "Whenever you cast an enchantment spell, draw a card. If it's a Saga spell, ~ deals 2 damage to each opponent.",
-        "Whenever you cast a creature spell, draw a card. If it's a Dragon spell, ~ deals 2 damage to each opponent.",
-    ] {
-        assert_eq!(rider_subject(oracle), ObjectScope::EventSource, "{oracle}");
-    }
+    // Dathon, His Heart Open is the sole printed consumer; the phrase is the class.
+    assert_eq!(
+        rider_subject(
+            "Whenever you cast an enchantment spell, draw a card. If it's a Saga spell, ~ deals 2 damage to each opponent."
+        ),
+        ObjectScope::EventSource
+    );
+    // Without the "spell" noun the referent stays the live target/object.
+    assert_ne!(
+        rider_subject(
+            "Whenever you cast an enchantment spell, draw a card. If it's a Saga, ~ deals 2 damage to each opponent."
+        ),
+        ObjectScope::EventSource
+    );
     assert!(names_spell_phrase("saga spell"));
     assert!(!names_spell_phrase("saga"));
     assert!(!names_spell_phrase("spellshaper"));

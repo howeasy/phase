@@ -392,6 +392,34 @@ fn a_countered_saga_spell_still_triggers_dathons_damage() {
             ManaUnit::new(ManaType::White, ObjectId(0), false, vec![]),
         ],
     );
+    let p1_life = counter_the_cast_copy(&mut runner, saga);
+    assert_eq!(
+        p1_life, 18,
+        "the countered Saga spell still earns the 2 damage"
+    );
+}
+
+/// Hostile sibling: the same countered-copy path for a non-Saga enchantment draws
+/// but deals no damage, so the last-known-information read is not vacuously true.
+#[test]
+fn a_countered_non_saga_enchantment_copy_draws_without_damage() {
+    let (mut runner, moon) = dathon_cast_setup(
+        "Bad Moon",
+        vec![
+            ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]),
+            ManaUnit::new(ManaType::Black, ObjectId(0), false, vec![]),
+        ],
+    );
+    let p1_life = counter_the_cast_copy(&mut runner, moon);
+    assert_eq!(p1_life, 20, "not a Saga: no damage");
+}
+
+/// Casts `spell`, marks it a copy (the CR 704.5e state a copied spell reaches; no
+/// printed card in the fixture produces one through Dathon's own trigger), counters
+/// it through the production Counter resolver while Dathon's trigger waits above it,
+/// runs state-based actions, then settles. Returns P1's life; asserts Dathon drew.
+fn counter_the_cast_copy(runner: &mut GameRunner, spell: ObjectId) -> i32 {
+    let saga = spell;
     drop(runner.cast(saga).commit());
     assert_eq!(
         runner.state().stack.len(),
@@ -428,13 +456,9 @@ fn a_countered_saga_spell_still_triggers_dathons_damage() {
         "only Dathon's trigger remains"
     );
 
-    settle_without_prompts(&mut runner);
-    assert_eq!(hand_cards(&runner, P0).len(), 1, "Dathon still draws");
-    assert_eq!(
-        runner.life(P1),
-        18,
-        "the countered Saga spell still earns the 2 damage"
-    );
+    settle_without_prompts(runner);
+    assert_eq!(hand_cards(runner, P0).len(), 1, "Dathon still draws");
+    runner.life(P1)
 }
 
 /// CR 603.2 + CR 109.5: Dathon's "Whenever YOU cast an enchantment spell" is its
