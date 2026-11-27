@@ -1275,6 +1275,27 @@ fn parse_one_of_your_opponents(input: &str) -> OracleResult<'_, ()> {
     .parse(input)
 }
 
+/// CR 508.1b + CR 508.3a: both legs name attack destinations. The
+/// planeswalker leg carries the same opponent relation as the player leg.
+fn parse_opponent_attack_destination(input: &str) -> OracleResult<'_, AttackTargetFilter> {
+    let (rest, ()) = parse_one_of_your_opponents(input)?;
+    alt((
+        value(
+            AttackTargetFilter::PlayerOrPlaneswalker,
+            (
+                tag(" or a planeswalker "),
+                alt((tag("they control"), tag("an opponent controls"))),
+                nom_primitives::peek_clause_terminator,
+            ),
+        ),
+        value(
+            AttackTargetFilter::Player,
+            not(tag::<_, _, OracleError<'_>>(" or ")),
+        ),
+    ))
+    .parse(rest)
+}
+
 fn parse_referenced_player_phrase(input: &str) -> OracleResult<'_, ()> {
     alt((
         value(
@@ -1307,6 +1328,67 @@ fn parse_attacked_player_phrase(input: &str) -> OracleResult<'_, ()> {
         value((), tag::<_, _, OracleError<'_>>("one or more players")),
     ))
     .parse(input)
+}
+
+fn parse_attack_on_controller_or_planeswalker(input: &str) -> OracleResult<'_, ()> {
+    value(
+        (),
+        (
+            tag("you "),
+            alt((
+                tag("or a planeswalker "),
+                tag("and/or one or more planeswalkers "),
+            )),
+            tag("you control"),
+        ),
+    )
+    .parse(input)
+}
+
+fn parse_enchanted_attack_player(input: &str) -> OracleResult<'_, &str> {
+    recognize((tag("enchanted "), alt((tag("player"), tag("opponent"))))).parse(input)
+}
+
+fn parse_attached_player_attack_destination(input: &str) -> OracleResult<'_, &str> {
+    terminated(
+        parse_enchanted_attack_player,
+        (tag(" or a planeswalker "), tag("they control")),
+    )
+    .parse(input)
+}
+
+/// CR 109.5 + CR 303.4e + CR 508.3e: the Aura's controller and attached
+/// player occupy separate actor and defender slots on these attack heads.
+fn try_parse_attached_player_attack(lower: &str) -> Option<(TriggerMode, TriggerDefinition)> {
+    let (head, _) = parse_trigger_keyword_prefix(lower).ok()?;
+    let (tail, (actor, defender)) = alt((
+        value(
+            (TargetFilter::Controller, TargetFilter::AttachedTo),
+            preceded(tag("you attack "), parse_attached_player_attack_destination),
+        ),
+        value(
+            (
+                TargetFilter::Typed(
+                    TypedFilter::default().controller(ControllerRef::EnchantedPlayer),
+                ),
+                TargetFilter::Controller,
+            ),
+            preceded(
+                (parse_enchanted_attack_player, tag(" attacks ")),
+                parse_attack_on_controller_or_planeswalker,
+            ),
+        ),
+    ))
+    .parse(head)
+    .ok()?;
+    parse_you_attack_tail_end(tail).ok()?;
+
+    let mut def = make_base();
+    def.mode = TriggerMode::Attacks;
+    def.valid_source = Some(actor);
+    def.valid_target = Some(defender);
+    def.attack_target_filter = Some(AttackTargetFilter::PlayerOrPlaneswalker);
+    Some((TriggerMode::Attacks, def))
 }
 
 /// What follows "you attack" in a player attack-trigger head.
@@ -12652,12 +12734,42 @@ fn split_cast_or_activate_compound(
 /// EntersOrAttacks, EntersOrHauntedCreatureDies) are intentionally left unsplit
 /// by `split_or_event_compound`.
 ///
-/// Serial is tried first so a comma list ("A, B, or C") is not mis-split by the
-/// 2-way scanner; this preserves the prior dispatch order exactly.
+/// Resolve reciprocal attack clauses before the generic splitters so their
+/// destination disjunctions stay intact. Among the generic splitters, try
+/// serial lists before searching for a two-way disjunction.
 fn split_shared_subject_event_list(cond_lower: &str, condition: &str) -> Option<Vec<String>> {
-    split_serial_event_compound(cond_lower, condition)
+    split_reciprocal_attached_player_attacks(cond_lower)
+        .or_else(|| split_serial_event_compound(cond_lower, condition))
         .or_else(|| split_cross_subject_event_compound(cond_lower, condition))
         .or_else(|| split_or_event_compound(cond_lower, condition))
+}
+
+/// CR 603.2 + CR 508.3e: the repeated trigger keyword separates two
+/// player-led events. The first event's enchanted player is the antecedent
+/// of the second event's actor, while each planeswalker phrase belongs to
+/// its own attack destination.
+fn split_reciprocal_attached_player_attacks(lower: &str) -> Option<Vec<String>> {
+    let (after_keyword, keyword) = parse_trigger_keyword_prefix(lower).ok()?;
+    let (after_actor, _) = tag::<_, _, OracleError<'_>>("you attack ")
+        .parse(after_keyword)
+        .ok()?;
+    let (after_destination, attached_player) =
+        parse_attached_player_attack_destination(after_actor).ok()?;
+    let (after_or, _) = tag::<_, _, OracleError<'_>>(" or ")
+        .parse(after_destination)
+        .ok()?;
+    let (after_second_keyword, second_keyword) = parse_trigger_keyword_prefix(after_or).ok()?;
+    let (destination, _) = tag::<_, _, OracleError<'_>>("they attack ")
+        .parse(after_second_keyword)
+        .ok()?;
+    let (tail, _) = parse_attack_on_controller_or_planeswalker(destination).ok()?;
+    parse_you_attack_tail_end(tail).ok()?;
+
+    let first_head = &after_keyword[..after_keyword.len() - after_destination.len()];
+    Some(vec![
+        format!("{keyword}{first_head}"),
+        format!("{second_keyword}{attached_player} attacks {destination}"),
+    ])
 }
 
 /// Split compound events with different subjects — the cross-subject branch.
@@ -14529,6 +14641,10 @@ pub fn parse_trigger_condition(
     let lower = condition.to_lowercase();
 
     if let Some(result) = try_parse_named_trigger_mode(&lower) {
+        return result;
+    }
+
+    if let Some(result) = try_parse_attached_player_attack(&lower) {
         return result;
     }
 
@@ -17442,19 +17558,13 @@ fn try_parse_event(
             alt((
                 value(
                     AttackTargetFilter::PlayerOrPlaneswalker,
-                    alt((
-                        tag(" you or a planeswalker you control"),
-                        tag(" you and/or one or more planeswalkers you control"),
-                    )),
+                    preceded(tag(" "), parse_attack_on_controller_or_planeswalker),
                 ),
                 value(
                     AttackTargetFilter::Planeswalker { subtype: None },
                     tag(" a planeswalker"),
                 ),
-                value(
-                    AttackTargetFilter::Player,
-                    preceded(tag(" "), parse_one_of_your_opponents),
-                ),
+                preceded(tag(" "), parse_opponent_attack_destination),
                 value(AttackTargetFilter::Player, tag(" a player")),
                 // CR 508.3a: an attack head naming players restricts its
                 // attackers to player attacks.
@@ -17517,6 +17627,9 @@ fn try_parse_event(
         )
         .parse(after)
         .is_ok();
+        if attacks_one_of_your_opponents && attack_target_parsed.is_none() {
+            return Some(unknown_trigger_definition(full_lower));
+        }
         let mut def = make_base();
         // CR 508.3d: "Whenever [a player] attacks" triggers fire once per attack declaration,
         // not once per attacker. This applies to "opponent attacks you" patterns (e.g., Lulu,
@@ -17559,12 +17672,9 @@ fn try_parse_event(
         // would wrongly remove the ability from the stack if the defender's life
         // changed in response.
         //
-        // `AttackTargetFilter::PlayerOrPlaneswalker` is deliberately NOT in this
-        // gate: it is produced only by the "you or a planeswalker you control"
-        // tags, after which a `who`-headed clause is grammatically impossible,
-        // and `attack_target_matches` would resolve such a candidate through
-        // `defending_player_for_target_or` (a planeswalker's CONTROLLER) — a
-        // different referent that needs its own fixture, not a quiet inclusion.
+        // The player/planeswalker union binds its controller scope below.
+        // A player-only predicate here would otherwise read the controller of
+        // the planeswalker rather than the attacked player named by the text.
         let mut declined_unmodelled_predicate = false;
         if matches!(def.attack_target_filter, Some(AttackTargetFilter::Player)) {
             if let Some((rest_after_noun, _)) = &attack_target_parsed {
