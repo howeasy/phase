@@ -40302,8 +40302,7 @@ fn parse_other_untapped_creatures_you_control_declines_new_fallback() {
     );
 }
 
-// ====================================================================}
-
+// ===========================================================================
 // Issue #6566 — classify_quoted_inner routes a `~`-normalized leave-battlefield
 // exile rider to ContinuousModification::GrantReplacement (Layer 6).
 // ===========================================================================
@@ -45522,6 +45521,9 @@ fn cost_mod_this_turn_window_on_a_bare_subject_stays_unfiltered() {
 /// cost {N} less" is the NEGATION of a hand origin. The "from anywhere other than"
 /// clause used to be skipped, so Savvy Trader, Sage of the Beyond, Fortune Teller's
 /// Talent and Advanced Reconstruction reduced every spell, hand casts included.
+/// The "more" row is synthetic (no printed card raises cost this way); its nearest
+/// printed card is Savvy Trader, and it only pins that the Raise direction shares
+/// the same origin handling.
 #[test]
 fn cost_mod_cast_origin_not_hand_is_the_negation_of_a_hand_origin() {
     for (line, mode) in [
@@ -45615,7 +45617,8 @@ fn cost_mod_unmodelled_origin_exclusion_declines_and_opponent_window_is_peeled()
         panic!("expected a Typed artifact filter, got {spell_filter:?}");
     };
     assert_eq!(tf.type_filters, vec![TypeFilter::Artifact]);
-=======
+}
+
 /// SHAPE: the quoted static keeps the entire definition on the resolving effect.
 #[test]
 fn resolving_quote_keeps_full_static_definition() {

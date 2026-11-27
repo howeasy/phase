@@ -24393,7 +24393,7 @@ fn x_in_cost_modifier(modifier: &str, slot: CostSlot) -> Option<TargetFilter> {
     (parsed == slot && rest.trim().is_empty()).then(|| slot.x_in_cost_filter())
 }
 
-/// CR 601.2a + CR 707.13 + CR 400.11: the cast-origin exclusion "anywhere other
+/// CR 601.2a + CR 400.11: the cast-origin exclusion "anywhere other
 /// than your hand" — the NEGATION of `InZone(Hand)`, so a cast from outside the
 /// game (no zone) satisfies it. The single authority for this phrase: the
 /// spell-trigger post-modifier ([`parse_post_spell_modifier`]) and the
