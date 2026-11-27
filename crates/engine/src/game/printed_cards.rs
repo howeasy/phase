@@ -5969,6 +5969,7 @@ mod tests {
                 definition: Box::new(conjure_ability("token_static", Zone::Hand)),
             });
         let token = Effect::Token {
+            enters_blocking: None,
             name: "T".to_string(),
             power: PtValue::Fixed(1),
             toughness: PtValue::Fixed(1),
@@ -5984,6 +5985,7 @@ mod tests {
             supertypes: vec![],
             static_abilities: vec![token_static],
             enter_with_counters: vec![],
+            additional_members: Vec::new(),
         };
         walk_effect(&token, &mut names);
 

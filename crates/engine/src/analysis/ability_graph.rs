@@ -474,6 +474,10 @@ fn type_filter_excludes_creature(tf: &TypeFilter) -> bool {
         | TypeFilter::Planeswalker
         | TypeFilter::Battle
         | TypeFilter::Kindred
+        // CR 314.1: Scheme is a positive type — same conservative `false` as
+        // Battle (a scheme filter is not a creature exclusion, and `Non`'s
+        // duality reads the sibling predicate below).
+        | TypeFilter::Scheme
         | TypeFilter::Permanent
         | TypeFilter::Card
         | TypeFilter::Any
@@ -501,6 +505,8 @@ fn type_filter_matches_all_creatures(tf: &TypeFilter) -> bool {
         | TypeFilter::Planeswalker
         | TypeFilter::Battle
         | TypeFilter::Kindred
+        // CR 314.1: not every creature is a scheme (none is).
+        | TypeFilter::Scheme
         | TypeFilter::Permanent
         | TypeFilter::Card
         | TypeFilter::Subtype(_) => false,
@@ -685,22 +691,29 @@ fn effect_projection(effect: &Effect) -> Projection {
     let mut b = Proj::default();
     // CR 111.1 + CR 603.6a: a token's entry is an enters-the-battlefield event.
     if let Some(count) = resolution_token_mint(effect) {
-        let (a, mag) = count_seed(count);
-        b.add_tokens(a, mag);
-        b.add_etb(a, mag);
-        for ability in minted_mana_abilities(effect) {
-            let mut resolved = Vec::new();
-            collect_effects(&ability, &mut resolved);
-            for (added, _) in resolved {
-                if let Effect::Mana { produced, .. } = added {
-                    let (seeds, each) = project_mana_production(produced);
-                    // A fixed number of tokens each adding a fixed amount is a fixed amount.
-                    let mag = match (mag, each) {
-                        (AxisMagnitude::Fixed(_), AxisMagnitude::Fixed(_)) => mag,
-                        _ => AxisMagnitude::Unbounded,
-                    };
-                    for (slot, amount) in seeds {
-                        b.add_mana(slot, a * amount, mag);
+        let additional_mints = effect.token_creation_members().skip(1).map(|effect| {
+            let count =
+                resolution_token_mint(effect).expect("a token creation member mints tokens");
+            (effect, count)
+        });
+        for (member, count) in std::iter::once((effect, count)).chain(additional_mints) {
+            let (a, mag) = count_seed(count);
+            b.add_tokens(a, mag);
+            b.add_etb(a, mag);
+            for ability in minted_mana_abilities(member) {
+                let mut resolved = Vec::new();
+                collect_effects(&ability, &mut resolved);
+                for (added, _) in resolved {
+                    if let Effect::Mana { produced, .. } = added {
+                        let (seeds, each) = project_mana_production(produced);
+                        // A fixed number of tokens each adding a fixed amount is a fixed amount.
+                        let mag = match (mag, each) {
+                            (AxisMagnitude::Fixed(_), AxisMagnitude::Fixed(_)) => mag,
+                            _ => AxisMagnitude::Unbounded,
+                        };
+                        for (slot, amount) in seeds {
+                            b.add_mana(slot, a * amount, mag);
+                        }
                     }
                 }
             }
@@ -922,7 +935,7 @@ fn effect_projection(effect: &Effect) -> Projection {
         // CR 701.21a: sacrificing produces sac + LTB (+ dies for creature filters,
         // §3.5) — same polarity as the 4a `AbilityCost::Sacrifice` cost arm.
         Effect::Sacrifice { target, count, .. } => {
-            let (a, mag) = count_seed(count);
+            let (a, mag) = count.count_expr().map_or((1, AxisMagnitude::Unbounded), count_seed);
             b.add_sac(a, mag);
             b.add_ltb(a, mag);
             if sac_produces_death(target) {
@@ -1113,6 +1126,10 @@ fn effect_projection(effect: &Effect) -> Projection {
         | Effect::ArrangePlanarDeckTop { .. }
         | Effect::Planeswalk
         | Effect::AbandonScheme
+        // CR 701.32b: re-firing projects no axis (no modeled zone change,
+        // mana, or counters) — the re-fired triggers project as their own
+        // resolutions, not this node's.
+        | Effect::SetSchemeInMotion { .. }
         | Effect::ChaosEnsues
         | Effect::RedistributeLifeTotals
         | Effect::ReverseTurnOrder
@@ -3230,6 +3247,7 @@ mod tests {
     }
     fn token(count: QuantityExpr) -> Effect {
         Effect::Token {
+            enters_blocking: None,
             name: "Servo".into(),
             power: PtValue::Fixed(1),
             toughness: PtValue::Fixed(1),
@@ -3245,12 +3263,13 @@ mod tests {
             supertypes: Vec::new(),
             static_abilities: Vec::new(),
             enter_with_counters: Vec::new(),
+            additional_members: Vec::new(),
         }
     }
     fn sacrifice(target: TargetFilter) -> Effect {
         Effect::Sacrifice {
             target,
-            count: fixed(1),
+            count: fixed(1).into(),
             min_count: 0,
         }
     }
@@ -4006,6 +4025,12 @@ mod tests {
     /// ("They have "Sacrifice this token: Add {C}.""), in a fixed number or not.
     #[test]
     fn a_mint_produces_the_mana_its_tokens_add() {
+        let fae = first_trigger_node("Fae Offering");
+        assert_eq!(fae.net.tokens_created, 3);
+        assert_eq!(fae.net.etb_triggers, 3);
+        assert_eq!(fae.net.mana.iter().sum::<i64>(), 1);
+        assert!(fae.produces.contains(&AxisKey::Mana));
+
         let gnawbone = first_trigger_node("Old Gnawbone");
         assert!(gnawbone.produces.contains(&AxisKey::Mana));
         assert!(gnawbone.unbounded_production.contains(&AxisKey::Mana));

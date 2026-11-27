@@ -64,9 +64,11 @@ pub fn resolve(
             attach_to: None,
             enters_attacking: false,
             attack_destination: TokenAttackDestination::ControllerChooses,
+            enters_blocking: None,
             supertypes: vec![],
             static_abilities: vec![],
             enter_with_counters: vec![],
+            additional_members: Vec::new(),
         },
     );
     token_branch.description = Some(format!("Create a {amount}/{amount} white Spirit token."));

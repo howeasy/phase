@@ -271,6 +271,7 @@ mod tests {
         AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::Token {
+                enters_blocking: None,
                 name: "Giant".into(),
                 power: PtValue::Fixed(4),
                 toughness: PtValue::Fixed(4),
@@ -286,6 +287,7 @@ mod tests {
                 supertypes: Vec::new(),
                 static_abilities: Vec::new(),
                 enter_with_counters: Vec::new(),
+                additional_members: Vec::new(),
             },
         )
     }

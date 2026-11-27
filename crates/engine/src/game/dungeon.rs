@@ -810,7 +810,7 @@ pub fn room_effects(
         (DungeonId::TombOfAnnihilation, 2) => {
             let sac = |filter: TypedFilter| Effect::Sacrifice {
                 target: TargetFilter::Typed(filter),
-                count: QuantityExpr::Fixed { value: 1 },
+                count: QuantityExpr::Fixed { value: 1 }.into(),
                 min_count: 0,
             };
             let sac_land = simple(sac(TypedFilter::land()), source_id, controller);
@@ -870,10 +870,12 @@ pub fn room_effects(
                     attach_to: None,
                     enters_attacking: false,
                     attack_destination: TokenAttackDestination::ControllerChooses,
+                    enters_blocking: None,
                     // CR 205.4a: The Atropal is legendary.
                     supertypes: vec![crate::types::card_type::Supertype::Legendary],
                     static_abilities: vec![],
                     enter_with_counters: vec![],
+                    additional_members: Vec::new(),
                 },
                 source_id,
                 controller,
@@ -1002,7 +1004,7 @@ pub fn room_effects(
             let mut ability = simple(
                 Effect::Sacrifice {
                     target: TargetFilter::Any,
-                    count: QuantityExpr::Fixed { value: 1 },
+                    count: QuantityExpr::Fixed { value: 1 }.into(),
                     min_count: 0,
                 },
                 source_id,
@@ -1166,6 +1168,7 @@ pub fn room_effects(
             simple(
                 Effect::CreateEmblem {
                     statics: vec![StaticDefinition {
+                        origin: Default::default(),
                         mode: StaticMode::Continuous,
                         affected: Some(TargetFilter::Typed(
                             TypedFilter::creature().controller(ControllerRef::You),
@@ -1286,9 +1289,11 @@ fn creature_token(
         attach_to: None,
         enters_attacking: false,
         attack_destination: TokenAttackDestination::ControllerChooses,
+        enters_blocking: None,
         supertypes: vec![],
         static_abilities: vec![],
         enter_with_counters: vec![],
+        additional_members: Vec::new(),
     }
 }
 
@@ -1609,9 +1614,11 @@ fn treasure_token() -> Effect {
         attach_to: None,
         enters_attacking: false,
         attack_destination: TokenAttackDestination::ControllerChooses,
+        enters_blocking: None,
         supertypes: vec![],
         static_abilities: vec![],
         enter_with_counters: vec![],
+        additional_members: Vec::new(),
     }
 }
 

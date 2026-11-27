@@ -199,6 +199,7 @@ mod tests {
                 let oid =
                     create_object(state, card_id, AI, "Token Factory".to_string(), Zone::Hand);
                 let token_effect = Effect::Token {
+                    enters_blocking: None,
                     name: "Saproling".to_string(),
                     power: PtValue::Fixed(1),
                     toughness: PtValue::Fixed(1),
@@ -215,6 +216,7 @@ mod tests {
                     supertypes: Vec::new(),
                     static_abilities: Vec::new(),
                     enter_with_counters: Vec::new(),
+                    additional_members: Vec::new(),
                 };
                 let ability = AbilityDefinition::new(AbilityKind::Spell, token_effect);
                 let obj = state.objects.get_mut(&oid).unwrap();

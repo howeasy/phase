@@ -171,7 +171,7 @@ pub(crate) fn link_search_look(
     source_id: Option<ObjectId>,
 ) {
     // A scoped search names a set of searchers, not the one player a fixed grant needs.
-    let searcher = match &state.pending_library_search_delivery {
+    let searcher = match state.pending_library_search_delivery.as_deref() {
         Some(LibrarySearchDeliveryResume::Standard { searcher, .. }) => Some(*searcher),
         Some(LibrarySearchDeliveryResume::Scoped { .. }) | None => None,
     };
@@ -1320,6 +1320,7 @@ mod tests {
     fn player_scope_counts_as_linked_exile_consumer() {
         let mut ability = ResolvedAbility::new(
             Effect::Token {
+                enters_blocking: None,
                 name: "Illusion".to_string(),
                 power: crate::types::ability::PtValue::Quantity(QuantityExpr::Ref {
                     qty: QuantityRef::CardsExiledBySource,
@@ -1340,6 +1341,7 @@ mod tests {
                 supertypes: vec![],
                 static_abilities: vec![],
                 enter_with_counters: vec![],
+                additional_members: Vec::new(),
             },
             vec![],
             ObjectId(1),

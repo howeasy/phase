@@ -206,6 +206,7 @@ fn create_gift_token(
 ) -> Result<(), EffectError> {
     let creation = ResolvedAbility::new(
         Effect::Token {
+            enters_blocking: None,
             name: token.name.to_string(),
             power: PtValue::Fixed(token.power_toughness),
             toughness: PtValue::Fixed(token.power_toughness),
@@ -221,6 +222,7 @@ fn create_gift_token(
             supertypes: Vec::new(),
             static_abilities: Vec::new(),
             enter_with_counters: Vec::new(),
+            additional_members: Vec::new(),
         },
         Vec::new(),
         ability.source_id,

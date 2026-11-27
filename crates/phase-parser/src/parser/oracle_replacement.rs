@@ -48,13 +48,15 @@ use super::oracle_nom::target::{
 use super::oracle_quantity::capitalize_first;
 use super::oracle_target::{
     parse_declared_damage_source_target, parse_target, parse_target_with_ctx,
-    parse_type_phrase_folding, parse_type_phrase_union,
+    parse_type_phrase_folding, parse_type_phrase_folding_with_ctx, parse_type_phrase_union,
+    scope_target_spell_phrase, split_source_is_blocking_relative,
 };
 use super::oracle_trigger::self_recursion_trigger_zone;
 use super::oracle_util::{
     first_sentence, merge_or_filters, normalize_card_name_refs, parse_count_expr, parse_number,
     parse_ordinal, rewrite_quantity_expr_rounding, strip_after, strip_reminder_text, TextPair,
 };
+use crate::types::ability::filter_contains_filter_prop;
 use crate::types::ability::TurnWindow;
 use crate::types::ability::{
     AbilityCost, AbilityDefinition, AbilityKind, CastVariantPaid, ChoiceType, ChooseOneOfKind,
@@ -809,15 +811,8 @@ fn parse_replacement_line_inner(
     // those tokens plus an additional <subtype> token" (Xorn class).
     // Distinguished from the Chatterfang/Doubling-Season class above by its
     // subtype condition AND inverted "instead create" word order.
-    if nom_primitives::scan_contains(&lower, "would create one or more")
-        && nom_primitives::scan_contains(&lower, "instead create those tokens plus")
-    {
-        if let Some(def) = parse_xorn_subtype_token_replacement(&lower, &text) {
-            return Some(def);
-        }
-        if let Some(def) = parse_generic_additional_token_replacement(&lower, &text) {
-            return Some(def);
-        }
+    if let Some(def) = parse_active_additional_token_replacement(&lower, &text) {
+        return Some(def);
     }
 
     // CR 614.1a + CR 111.1: Manufactor-class ensure-all token replacement —
@@ -8077,6 +8072,7 @@ fn replacement_condition_from_static(
         | StaticCondition::SourceIsAttacking
         | StaticCondition::SourceIsBlocking
         | StaticCondition::SourceIsBlocked
+        | StaticCondition::IsDefendingPlayer { .. }
         | StaticCondition::IsInitiative
         | StaticCondition::NoMonarch
         | StaticCondition::HasCityBlessing
@@ -9592,6 +9588,7 @@ fn parse_graveyard_redirect_replacement(
         // judgement as `stated_clause_expiry` and `expiry_from_duration`.
         Some(Duration::UntilNextTurnOf { .. })
         | Some(Duration::UntilEndOfNextTurnOf { .. })
+        | Some(Duration::UntilEndOfGrantedTurn { .. })
         | Some(Duration::UntilNextStepOf { .. }) => return None,
         // CR 604.2 + CR 611.2b: these end on an event or a condition rather
         // than a turn window, so `expiry: None` is the CORRECT answer, not an
@@ -11483,7 +11480,22 @@ impl DamageSourceScope {
 }
 
 /// Three-state form of `finish_damage_source_subject` (see its doc comment).
+/// Reads the subject under a blank parse context — every caller that has no
+/// recipient to arm uses this entry.
 fn damage_source_subject_scope(subject: &str) -> DamageSourceScope {
+    damage_source_subject_scope_with_ctx(subject, &mut ParseContext::default())
+}
+
+/// CR 608.2c: `damage_source_subject_scope` for a caller that has armed the
+/// context with the clause's damage recipient — the prevention route, whose
+/// passive "dealt to <recipient> by <subject>" clause makes a bare "it" in
+/// the subject name that recipient (see
+/// `parse_damage_source_subject_filter_with_ctx`). The controlled-leg
+/// recursion passes the same context through.
+fn damage_source_subject_scope_with_ctx(
+    subject: &str,
+    ctx: &mut ParseContext,
+) -> DamageSourceScope {
     let subject = subject.trim();
 
     // Handle ability word prefixes ("Revolt — ..., if a source you control")
@@ -11539,8 +11551,8 @@ fn damage_source_subject_scope(subject: &str) -> DamageSourceScope {
         if nom_primitives::parse_article.parse(tail).is_ok() {
             let first_leg = &subject[..head.len() + " you control".len()];
             return match (
-                damage_source_subject_scope(first_leg),
-                damage_source_subject_scope(tail),
+                damage_source_subject_scope_with_ctx(first_leg, ctx),
+                damage_source_subject_scope_with_ctx(tail, ctx),
             ) {
                 (DamageSourceScope::Scoped(first), DamageSourceScope::Scoped(second)) => {
                     DamageSourceScope::Scoped(merge_or_filters(first, second))
@@ -11568,7 +11580,7 @@ fn damage_source_subject_scope(subject: &str) -> DamageSourceScope {
         return DamageSourceScope::AnySource;
     }
 
-    parse_damage_source_subject_filter(subject)
+    parse_damage_source_subject_filter_with_ctx(subject, ctx)
         .map_or(DamageSourceScope::Unrecognized, DamageSourceScope::Scoped)
 }
 
@@ -11633,9 +11645,22 @@ fn parse_damage_source_filter_passive(norm_lower: &str) -> Option<TargetFilter> 
 /// CR 615.1a: the passive-voice source axis of a damage clause. `None` when the
 /// text prints no passive "by <subject>" source clause; otherwise the subject's
 /// scope, read through `damage_source_subject_scope` — the same postprocessing
-/// authority the active-voice extraction uses.
+/// authority the active-voice extraction uses. Reads the subject under a blank
+/// parse context (a bare "it" stays unbound).
 fn parse_damage_source_scope_passive(norm_lower: &str) -> Option<DamageSourceScope> {
     passive_damage_source_subject(norm_lower).map(damage_source_subject_scope)
+}
+
+/// CR 615.1a + CR 608.2c: `parse_damage_source_scope_passive` with the caller's
+/// parse context armed for the clause's recipient, so a bare "it" inside the
+/// subject names the host only when the caller established it as the
+/// self-reference (the prevention route's "dealt to ~ by ..." shape).
+fn parse_damage_source_scope_passive_with_ctx(
+    norm_lower: &str,
+    ctx: &mut ParseContext,
+) -> Option<DamageSourceScope> {
+    passive_damage_source_subject(norm_lower)
+        .map(|subject| damage_source_subject_scope_with_ctx(subject, ctx))
 }
 
 /// CR 615.1a: "dealt to <recipient> [<duration>] by <subject>" (Champion
@@ -11706,6 +11731,31 @@ fn parse_damage_source_filter(norm_lower: &str) -> Option<TargetFilter> {
         .or_else(|| parse_damage_source_filter_passive(norm_lower))
 }
 
+/// CR 614.1a: fail-closed reader for the chain-position damage-modification
+/// lift (`try_parse_global_damage_modification_replacement`). Reports whether
+/// the antecedent's damage-source subject is printed but unreadable
+/// (`DamageSourceScope::Unrecognized` — e.g. Jeska, Thrice Reborn's anaphoric
+/// "that creature"), so the lift can decline and record the honest gap
+/// instead of emitting an unscoped replacement that would triple/double every
+/// source's damage. Mirrors the `WhileAntecedent::Unparsed` fail-closed arm in
+/// `parse_damage_modification_replacement`. Genuinely unscoped subjects ("a
+/// source" — Rankle and Torbran, Approach My Molten Realm) read `AnySource`
+/// and pass; the passive-voice fallback ("...would be dealt ... by
+/// <subject>") rescues clauses whose active subject is empty but whose "by"
+/// subject parses.
+pub(crate) fn damage_source_subject_unrecognized(norm_lower: &str) -> bool {
+    let Ok((_, (subject, _))) = nom_primitives::split_once_on(norm_lower, "would deal") else {
+        return false;
+    };
+    if !matches!(
+        damage_source_subject_scope(subject),
+        DamageSourceScope::Unrecognized
+    ) {
+        return false;
+    }
+    parse_damage_source_filter_passive(norm_lower).is_none()
+}
+
 /// CR 301.5 + CR 702.6: "equipped creature" (Equipment) and "enchanted
 /// creature" (Aura) both name the host object the permanent is attached to,
 /// which the runtime resolves via `TargetFilter::AttachedTo`. Mirrors the
@@ -11723,38 +11773,85 @@ fn parse_attached_host_subject(input: &str) -> OracleResult<'_, TargetFilter> {
 }
 
 pub(crate) fn parse_damage_source_subject_filter(subject: &str) -> Option<TargetFilter> {
-    // CR 608.2c + CR 615.2: source-scoped prevention can name its own source
-    // with a deictic object phrase (Barbed Wire: "by this artifact"). The
-    // vocabulary is the shared `parse_self_reference` authority
-    // (oracle_nom::target), which now also covers "this source"; composing it
-    // here keeps every subject grammar in sync instead of maintaining a second
-    // phrase list. `all_consuming` keeps the contract that the whole subject
-    // must be consumed.
+    damage_source_subject_deixis(subject)
+        .or_else(|| parse_damage_source_subject(subject))
+        .or_else(|| {
+            // Typed damage sources ("creature you control with a +1/+1 counter on it",
+            // "creatures you control with counters on them", ...) share the normal
+            // target grammar; damage replacement parsing should not maintain a parallel
+            // counter/property grammar.
+            let (filter, rest) = parse_type_phrase_folding(subject);
+            (rest.trim().is_empty() && !matches!(filter, TargetFilter::Any)).then_some(filter)
+        })
+}
+
+/// CR 608.2c + CR 615.1a: the recipient-aware variant the prevention route reads
+/// a passive "by <subject>" clause with. Two differences from the default
+/// variant, both required by the recipient being named in the SAME clause:
+///
+/// * the type phrase is folded under the caller's `ParseContext`, so a bare
+///   "it" inside the subject ("creatures blocking it", "spells that target
+///   it") binds to the host ONLY when the caller armed the context with the
+///   self-reference recipient — any other recipient leaves the pronoun
+///   unbound and the subject unrecognized (fail closed);
+/// * the folded filter is scoped by `scope_target_spell_phrase`, so a
+///   "spell"/"spells" head noun (CR 109.2) denotes a spell on the stack, never
+///   the default variant's over-broad bare `Card` reading.
+fn parse_damage_source_subject_filter_with_ctx(
+    subject: &str,
+    ctx: &mut ParseContext,
+) -> Option<TargetFilter> {
+    damage_source_subject_deixis(subject)
+        .or_else(|| parse_damage_source_subject(subject))
+        .or_else(|| {
+            // CR 509.1g: "creatures it's blocking" carries its relation after the
+            // head noun; the shared type-phrase grammar has no such suffix, so the
+            // clause is split off and added as the pairing prop below.
+            let (head, blocking_relation) = match split_source_is_blocking_relative(subject, ctx) {
+                Some((head, relation)) => (head, Some(relation)),
+                None => (subject, None),
+            };
+            let (mut filter, rest) = parse_type_phrase_folding_with_ctx(head, ctx);
+            if !rest.trim().is_empty() || matches!(filter, TargetFilter::Any) {
+                return None;
+            }
+            if let Some(relation) = blocking_relation {
+                let TargetFilter::Typed(typed) = &mut filter else {
+                    return None;
+                };
+                typed.properties.push(relation);
+            }
+            // CR 109.2 + CR 115.9b: "spells that target it" names spells on the
+            // stack; the head noun "spells" alone folds to a bare `Card`, so the
+            // stack scoping is applied only to the targeting relative clause. Every
+            // other spell phrase keeps the reading the default variant always had.
+            let names_targeting_spell = filter_contains_filter_prop(&filter, &|prop| {
+                matches!(prop, FilterProp::Targets { filter: _ })
+            });
+            Some(if names_targeting_spell {
+                scope_target_spell_phrase(filter, subject)
+            } else {
+                filter
+            })
+        })
+}
+
+/// CR 608.2c + CR 615.2: deictic damage-source subjects that resolve before
+/// the typed-source grammar, shared by both context variants of the subject
+/// filter: the source itself ("~", "this artifact" — Barbed Wire) via the
+/// shared `parse_self_reference` authority, and the attached host ("equipped
+/// creature" / "enchanted creature", CR 301.5 + CR 702.6) via
+/// `parse_attached_host_subject`.
+fn damage_source_subject_deixis(subject: &str) -> Option<TargetFilter> {
+    // `all_consuming` keeps the contract that the whole subject must be consumed.
     if all_consuming(parse_self_reference).parse(subject).is_ok() {
         return Some(TargetFilter::SelfRef);
     }
-
-    // CR 301.5 + CR 702.6: host-relative subjects ("equipped creature",
-    // "enchanted creature") resolve to the attached object before the generic
-    // typed-source grammar, which would otherwise treat "creature" as a type.
     if let Ok((rest, filter)) = parse_attached_host_subject(subject) {
         if rest.trim().is_empty() {
             return Some(filter);
         }
     }
-    if let Some(filter) = parse_damage_source_subject(subject) {
-        return Some(filter);
-    }
-
-    // Typed damage sources ("creature you control with a +1/+1 counter on it",
-    // "creatures you control with counters on them", ...) share the normal
-    // target grammar; damage replacement parsing should not maintain a parallel
-    // counter/property grammar.
-    let (filter, rest) = parse_type_phrase_folding(subject);
-    if rest.trim().is_empty() && !matches!(filter, TargetFilter::Any) {
-        return Some(filter);
-    }
-
     None
 }
 
@@ -11763,6 +11860,7 @@ pub(crate) fn parse_damage_source_subject_filter(subject: &str) -> Option<Target
 /// - "Giant source you control"
 /// - "Goblin sources you control"
 /// - "sources you control of the chosen type"
+/// - "sources with the chosen name" (Gideon's Intervention)
 fn parse_damage_source_subject(subject: &str) -> Option<TargetFilter> {
     let (qualifier, tail) = split_damage_source_noun(subject)?;
     if qualifier.trim().is_empty() && tail.trim().is_empty() {
@@ -11809,6 +11907,37 @@ fn parse_damage_source_subject(subject: &str) -> Option<TargetFilter> {
             return None;
         }
         props.push(prop);
+    } else if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("with the chosen name").parse(tail) {
+        // CR 201.2a + CR 201.4: "with the chosen name" restricts the source to
+        // objects whose name equals the card name the host's linked "choose a
+        // card name" ability recorded — the same `TargetFilter::HasChosenName`
+        // leg the target grammar's "<type-phrase> with the chosen name" arm
+        // composes. A bare "sources with the chosen name" carries no typed
+        // restriction, so the filter is the name predicate alone; a qualifier
+        // or a controller-axis restriction ANDs with it.
+        if !rest.trim().is_empty() {
+            return None;
+        }
+        let mut scope = filter.clone();
+        scope.properties = props.clone();
+        if let Some(union) = parse_type_phrase_union(qualifier.trim(), &scope) {
+            return Some(TargetFilter::And {
+                filters: vec![union, TargetFilter::HasChosenName],
+            });
+        }
+        apply_damage_source_qualifier(&mut filter, &mut props, qualifier.trim());
+        if !props.is_empty() {
+            filter.properties = props;
+        }
+        if filter.type_filters.is_empty()
+            && filter.controller.is_none()
+            && filter.properties.is_empty()
+        {
+            return Some(TargetFilter::HasChosenName);
+        }
+        return Some(TargetFilter::And {
+            filters: vec![TargetFilter::Typed(filter), TargetFilter::HasChosenName],
+        });
     } else if !tail.is_empty() {
         return None;
     }
@@ -13563,13 +13692,13 @@ fn parse_copy_count_replacement(lower: &str, original_text: &str) -> Option<Repl
 
 /// CR 614.1a + CR 608.2d: "If you would create one or more tokens, you may
 /// instead create that many <token A> or that many <token B>" (Jinnie Fay).
+/// Scoped to the controller's own token creations (`token_owner_scope`), like every 'you would create' sibling.
 fn parse_optional_token_substitution_choice(
     lower: &str,
     original_text: &str,
 ) -> Option<ReplacementDefinition> {
-    use nom::combinator::{map, peek, success};
+    use nom::combinator::{map, peek};
     use nom::multi::separated_list1;
-    use nom::sequence::preceded;
 
     fn parse_jinnie_token_branch_segment(input: &str) -> OracleResult<'_, &str> {
         alt((
@@ -13580,10 +13709,13 @@ fn parse_optional_token_substitution_choice(
         .parse(input)
     }
 
-    let (segments, remainder) = nom_on_lower(original_text, lower, |input| {
-        let (input, ()) = preceded(
-            tag("if you would create one or more tokens, "),
-            preceded(tag("you may instead "), success(())),
+    let ((owner_scope, segments), remainder) = nom_on_lower(original_text, lower, |input| {
+        let (input, owner_scope) = terminated(
+            value(
+                ControllerRef::You,
+                tag("if you would create one or more tokens, "),
+            ),
+            tag("you may instead "),
         )
         .parse(input)?;
         let (input, _) = tag("create ").parse(input)?;
@@ -13592,10 +13724,13 @@ fn parse_optional_token_substitution_choice(
                 .parse(input)?;
         Ok((
             input,
-            segments
-                .into_iter()
-                .map(|segment| segment.to_string())
-                .collect::<Vec<_>>(),
+            (
+                owner_scope,
+                segments
+                    .into_iter()
+                    .map(|segment| segment.to_string())
+                    .collect::<Vec<_>>(),
+            ),
         ))
     })?;
 
@@ -13624,6 +13759,8 @@ fn parse_optional_token_substitution_choice(
 
     Some(
         ReplacementDefinition::new(ReplacementEvent::CreateToken)
+            // CR 109.5 + CR 111.2: "If you would create" — "you" is this object's controller and the creator of a token is its owner, so the substitution reaches only its controller's token creations (the "you would create" tag maps to ControllerRef::You, as in every sibling).
+            .token_owner_scope(owner_scope)
             .mode(ReplacementMode::Optional { decline: None })
             .execute(AbilityDefinition::new(
                 AbilityKind::Spell,
@@ -13827,8 +13964,8 @@ pub(crate) fn parse_token_replacement(
         TokenReplacementShape::Half => {
             def = def.quantity_modification(QuantityModification::Half);
         }
-        TokenReplacementShape::PlusSpec { spec } => {
-            def = def.additional_token_spec(*spec);
+        TokenReplacementShape::PlusSpec { payload } => {
+            def.additional_token_spec = Some(payload);
         }
         TokenReplacementShape::Substitute { token } => {
             // CR 614.1a + CR 111.1: Full token substitution (Divine Visitation).
@@ -13875,7 +14012,7 @@ enum TokenReplacementShape {
     Half,
     /// "those tokens plus [spec] are created instead" (Chatterfang, Donatello).
     PlusSpec {
-        spec: Box<crate::types::token_spec::TokenSpec>,
+        payload: Box<crate::types::ability::AdditionalTokenSpec>,
     },
     /// "that many [spec] are created instead" — full token substitution
     /// (Divine Visitation). The substitute characteristics are carried as an
@@ -13903,9 +14040,9 @@ fn parse_token_replacement_shape(lower: &str) -> Option<TokenReplacementShape> {
     }
 
     // "those tokens plus <spec> (is|are) created instead" → Chatterfang / Donatello.
-    if let Some(spec) = parse_token_plus_spec_shape(lower) {
+    if nom_primitives::scan_contains(lower, "those tokens plus ") {
         return Some(TokenReplacementShape::PlusSpec {
-            spec: Box::new(spec),
+            payload: Box::new(parse_token_plus_spec_shape(lower)?),
         });
     }
 
@@ -13954,27 +14091,21 @@ fn scan_token_multiplier_factor(lower: &str) -> Option<u32> {
 /// CR 614.1a + CR 111.1: Extract the "those tokens plus <spec> (is|are) created
 /// instead" appended-token spec (Chatterfang / Donatello). Returns the parsed
 /// `TokenSpec` for the appended token, or `None` if the phrase is absent.
-fn parse_token_plus_spec_shape(lower: &str) -> Option<crate::types::token_spec::TokenSpec> {
-    // Extract the spec descriptor between "those tokens plus " and the trailing
-    // "are/is created instead" clause using nom combinators.
-    let ((descriptor_start, descriptor_len), _rest) = nom_on_lower(lower, lower, |i| {
-        let (i, pre) = take_until::<_, _, OracleError<'_>>("those tokens plus ").parse(i)?;
-        let start_offset = pre.len() + "those tokens plus ".len();
-        let (i, _) = tag("those tokens plus ").parse(i)?;
-        let (_, descriptor) = alt((
-            take_until::<_, _, OracleError<'_>>(" are created instead"),
-            take_until::<_, _, OracleError<'_>>(" is created instead"),
-        ))
-        .parse(i)?;
-        Ok((i, (start_offset, descriptor.len())))
-    })?;
-
-    let descriptor = lower
-        .get(descriptor_start..descriptor_start + descriptor_len)?
-        .trim();
-    let descriptor = normalize_additional_token_descriptor(descriptor)?;
-    let token = super::oracle_effect::parse_token_description(&descriptor)?;
-    token_description_to_spec(&token)
+fn parse_token_plus_spec_shape(lower: &str) -> Option<crate::types::ability::AdditionalTokenSpec> {
+    let suffix = || alt((tag(" are created instead"), tag(" is created instead")));
+    let (_, descriptor) = all_consuming(terminated(
+        preceded(
+            (take_until("those tokens plus "), tag("those tokens plus ")),
+            alt((
+                take_until::<_, _, OracleError<'_>>(" are created instead"),
+                take_until(" is created instead"),
+            )),
+        ),
+        (suffix(), opt(tag("."))),
+    ))
+    .parse(lower)
+    .ok()?;
+    parse_additional_token_descriptor(descriptor)
 }
 
 /// CR 614.1a + CR 111.1: Extract the "that many <spec> (is|are) created instead"
@@ -14083,102 +14214,72 @@ fn parse_token_core_type_gate(lower: &str) -> Option<crate::types::card_type::Co
 /// CR 614.1a + CR 111.1: Normalize the optional "additional" modifier on
 /// token descriptors before delegating to `parse_token_description`, whose token
 /// grammar expects an article or numeric count prefix.
-fn normalize_additional_token_descriptor(descriptor: &str) -> Option<String> {
-    let (rest, stripped_additional) = opt(value(
-        (),
-        preceded(
-            opt(alt((tag::<_, _, OracleError<'_>>("a "), tag("an ")))),
-            tag("additional "),
-        ),
+fn parse_additional_token_descriptor(
+    descriptor: &str,
+) -> Option<crate::types::ability::AdditionalTokenSpec> {
+    let (body, (count, _)) = (
+        alt((
+            value("a ", alt((tag::<_, _, OracleError<'_>>("a "), tag("an ")))),
+            tag("that many "),
+        )),
+        opt(tag("additional ")),
+    )
+        .parse(descriptor)
+        .ok()?;
+    let (_, (_, _, keywords)) = all_consuming((
+        take_until::<_, _, OracleError<'_>>(" token"),
+        (tag(" token"), opt(tag("s"))),
+        opt(preceded(tag(" with "), nom::combinator::rest)),
     ))
-    .parse(descriptor)
+    .parse(body)
     .ok()?;
-    let descriptor = rest.trim();
-    if descriptor.is_empty() {
-        return None;
+    if let Some(keywords) = keywords {
+        super::oracle_effect::token::parse_complete_token_keyword_list(keywords)?;
     }
-    if stripped_additional.is_some() {
-        let (_, article) = peek(opt(alt((tag::<_, _, OracleError<'_>>("a "), tag("an ")))))
-            .parse(descriptor)
-            .ok()?;
-        if article.is_none() && additional_token_descriptor_needs_leading_article(descriptor) {
-            return Some(format!("a {descriptor}"));
-        }
-    }
-    Some(descriptor.to_string())
+    let token = super::oracle_effect::parse_token_description(&format!("{count}{body}"))?;
+    Some(crate::types::ability::AdditionalTokenSpec {
+        spec: token_description_to_spec(&token)?,
+        count: token.count,
+    })
 }
 
-/// True when the descriptor needs a leading `"a "` before `parse_token_description`.
-/// Subtype-only specs (`"Food token"`) have no count and require an article.
-/// P/T-led specs (`"1/1 …"`, `"10/10 …"`) also require one: without it
-/// the token count position (`oracle_util::parse_count_slot`'s `parse_count_expr`
-/// head) mis-reads the leading digits before `/` as a bare count and leaves
-/// `/toughness …`, breaking P/T parsing.
-fn additional_token_descriptor_needs_leading_article(descriptor: &str) -> bool {
-    let trimmed = descriptor.trim_start();
-    if nom_primitives::parse_pt_value(trimmed).is_ok() {
-        return true;
-    }
-    parse_count_expr(trimmed).is_none()
-}
-
-/// CR 614.1a + CR 111.1: Parse Xorn-class subtype-gated additional-token
-/// replacements. Matches the shape:
-///
-/// ```text
-/// "If you would create one or more <subtype> tokens, instead create
-///  those tokens plus an additional <subtype> token."
-/// ```
-///
-/// Differs from `parse_token_replacement` (Chatterfang) in two ways:
-/// (1) the original event already creates tokens of the listed subtype, so a
-/// `ReplacementCondition::TokenSubtypeMatches` gate is emitted; (2) the
-/// "instead create those tokens plus X" word order is inverted from
-/// Chatterfang's "those tokens plus X are created instead." Manufactor
-/// ("instead create one of each") shares the same prefix and is parsed
-/// separately in Item 5b.
-fn parse_xorn_subtype_token_replacement(
+/// CR 614.1a + CR 111.1: Parse active additional-token replacements, with
+/// an optional core-type or subtype gate on the original tokens.
+fn parse_active_additional_token_replacement(
     lower: &str,
     original_text: &str,
 ) -> Option<ReplacementDefinition> {
-    // Extract the subtype after "would create one or more ".
-    // Stops at " tokens," — the comma separator before "instead create".
-    let ((subtype_start, subtype_len), _) = nom_on_lower(lower, lower, |i| {
-        let (i, pre) = take_until::<_, _, OracleError<'_>>("would create one or more ").parse(i)?;
-        let start_offset = pre.len() + "would create one or more ".len();
-        let (i, _) = tag("would create one or more ").parse(i)?;
-        let (_, subtype) = take_until::<_, _, OracleError<'_>>(" tokens,").parse(i)?;
-        Ok((i, (start_offset, subtype.len())))
-    })?;
-
-    let subtype_phrase = lower
-        .get(subtype_start..subtype_start + subtype_len)?
-        .trim();
-    if subtype_phrase.is_empty() || subtype_phrase.contains(' ') {
-        // Multi-word subtypes (e.g., "or more Treasure") indicate the prefix
-        // didn't isolate a single canonical subtype — bail and let a future
-        // multi-subtype branch (Manufactor) handle it.
-        return None;
+    let (_, (gate, _, descriptor, _)) = all_consuming(preceded(
+        tag("if you would create one or more "),
+        (
+            opt(terminated(
+                nom::character::complete::alpha1::<_, OracleError<'_>>,
+                tag(" "),
+            )),
+            tag("tokens, instead create those tokens plus "),
+            nom::bytes::complete::take_till(|c| c == '.'),
+            opt(tag(".")),
+        ),
+    ))
+    .parse(lower)
+    .ok()?;
+    let payload = parse_additional_token_descriptor(descriptor)?;
+    let mut def = ReplacementDefinition::new(ReplacementEvent::CreateToken)
+        .token_owner_scope(ControllerRef::You)
+        .additional_token_spec(payload.spec, payload.count)
+        .description(original_text.to_string());
+    if let Some(gate) = gate {
+        let gate = canonicalize_subtype(gate);
+        def = def.condition(match crate::types::card_type::CoreType::from_str(&gate) {
+            Ok(core) => ReplacementCondition::TokenCoreTypeMatches {
+                core_types: vec![core],
+            },
+            Err(()) => ReplacementCondition::TokenSubtypeMatches {
+                subtypes: vec![gate],
+            },
+        });
     }
-
-    let spec = parse_instead_create_those_tokens_plus_spec(lower)?;
-
-    // Capitalize the subtype to match the parser's existing convention
-    // (TokenSpec.subtypes uses title-case: "Treasure", not "treasure").
-    let canonical_subtype = canonicalize_subtype(subtype_phrase);
-
-    Some(
-        ReplacementDefinition::new(ReplacementEvent::CreateToken)
-            .condition(ReplacementCondition::TokenSubtypeMatches {
-                subtypes: vec![canonical_subtype],
-            })
-            // CR 614.1a + CR 109.5: "If *you* would create..." scopes the
-            // replacement to the source's controller — it must not fire for
-            // tokens created by other players (issue #1967).
-            .token_owner_scope(ControllerRef::You)
-            .additional_token_spec(spec)
-            .description(original_text.to_string()),
-    )
+    Some(def)
 }
 
 /// CR 614.1a + CR 111.1: Parse subtype-gated replacements that preserve the
@@ -14230,57 +14331,12 @@ fn parse_same_subtype_plus_additional_token_replacement(
             // CR 109.5 + CR 111.2: "you" is the source controller, and only
             // token batches that player creates are affected.
             .token_owner_scope(ControllerRef::You)
-            .additional_token_spec(spec)
+            .additional_token_spec(
+                spec,
+                crate::types::ability::AdditionalTokenSpec::proportional_count(),
+            )
             .description(original_text.to_string()),
     )
-}
-
-/// CR 614.1a + CR 111.1: Tippy-Toe class — generic additional token without subtype gate.
-fn parse_generic_additional_token_replacement(
-    lower: &str,
-    original_text: &str,
-) -> Option<ReplacementDefinition> {
-    if !nom_primitives::scan_contains(lower, "would create one or more tokens") {
-        return None;
-    }
-    let spec = parse_instead_create_those_tokens_plus_spec(lower)?;
-
-    Some(
-        ReplacementDefinition::new(ReplacementEvent::CreateToken)
-            // CR 614.1a + CR 109.5: "If you would create..." scopes this
-            // replacement to the source's controller, without Xorn's subtype gate.
-            .token_owner_scope(ControllerRef::You)
-            .additional_token_spec(spec)
-            .description(original_text.to_string()),
-    )
-}
-
-/// CR 614.1a + CR 111.1: Extract the appended token spec from the
-/// "instead create those tokens plus ..." wording shared by Xorn- and
-/// Tippy-Toe-class replacement effects.
-fn parse_instead_create_those_tokens_plus_spec(
-    lower: &str,
-) -> Option<crate::types::token_spec::TokenSpec> {
-    let total_len = lower.len();
-    let ((descriptor_start, descriptor_len), _) = nom_on_lower(lower, lower, |i| {
-        let (i, _) =
-            take_until::<_, _, OracleError<'_>>("instead create those tokens plus ").parse(i)?;
-        let (i, _) = tag("instead create those tokens plus ").parse(i)?;
-        let start_offset = total_len - i.len();
-        let (i, descriptor) = alt((
-            take_until::<_, _, OracleError<'_>>("."),
-            nom::combinator::rest,
-        ))
-        .parse(i)?;
-        Ok((i, (start_offset, descriptor.len())))
-    })?;
-
-    let descriptor = lower
-        .get(descriptor_start..descriptor_start + descriptor_len)?
-        .trim();
-    let descriptor = normalize_additional_token_descriptor(descriptor)?;
-    let token = super::oracle_effect::parse_token_description(&descriptor)?;
-    token_description_to_spec(&token)
 }
 
 /// Title-case a single-word subtype string for canonical TokenSpec storage.
@@ -14463,6 +14519,9 @@ fn token_description_to_spec(
         // Replacement-created tokens ("instead, create a token") are not the
         // "attached to" Aura/Role class; that path flows through `Effect::Token`.
         attach_to: crate::types::token_spec::TokenHostRequest::NotRequested,
+        // Replacement-created tokens carry no blocking rider either.
+        blocking_attacker: None,
+        blocking_attacker_incarnation: None,
     })
 }
 
@@ -15700,6 +15759,7 @@ fn stated_clause_expiry(clause_lower: &str, window_anchor: &str) -> StatedClause
         // silently shorten the card's stated duration.
         Some(Duration::UntilNextTurnOf { .. })
         | Some(Duration::UntilEndOfNextTurnOf { .. })
+        | Some(Duration::UntilEndOfGrantedTurn { .. })
         | Some(Duration::UntilNextStepOf { .. }) => StatedClauseExpiry::Unsupported,
         // Not turn windows: these end on an event or a condition, so `None` is the
         // CORRECT answer, not an unmapped one — the battlefield-exit prune in
@@ -16271,8 +16331,7 @@ fn parse_damage_prevention_replacement_with_provenance(
     // anchor ("dealt to ", "would deal to ", "would deal damage to ",
     // "would deal combat damage to ", "deal damage to ") but neither
     // `damage_target_filter`, `valid_card_filter`, nor `parse_damage_recipient_scope`
-    // parsed it, the recipient qualification is unrecognized or incomplete (e.g.
-    // Light of Sanction's "to creatures you control by sources you control").
+    // parsed it, the recipient qualification is unrecognized or incomplete.
     // Fail closed (return None) rather than falling through to an un-scoped shield
     // that would wrongly prevent damage to all targets in the game.
     let has_recipient_clause = [
@@ -16297,16 +16356,30 @@ fn parse_damage_prevention_replacement_with_provenance(
     // same way the recipient clause does (mirror of the recipient guard above):
     // a subject the runtime cannot evaluate must not become an unscoped shield
     // that prevents damage from every source.
+    //
+    // CR 608.2c: in "dealt to <recipient> by <subject>", a bare "it" inside the
+    // source subject names the RECIPIENT — the host only when the recipient is
+    // the shield's own self-reference ("dealt to ~"). The passive subject is
+    // read under a context armed with that recipient, so the pronoun binds
+    // there and only there; every other recipient ("enchanted creature",
+    // "you") leaves a bare "it" unbound and the source fails closed instead of
+    // silently binding the host.
     let damage_source_filter = match parse_damage_source_filter_active(working_lower) {
         Some(filter) => Some(filter),
-        None => match parse_damage_source_scope_passive(working_lower) {
-            Some(DamageSourceScope::Unrecognized) => {
-                return Err(PreventionDecline::FailsClosed(
-                    PreventionFailClosed::SourceScope,
-                ));
+        None => {
+            let mut recipient_ctx = ParseContext::default();
+            if matches!(valid_card_filter, Some(TargetFilter::SelfRef)) {
+                recipient_ctx.subject = Some(TargetFilter::SelfRef);
             }
-            scope => scope.and_then(DamageSourceScope::into_filter),
-        },
+            match parse_damage_source_scope_passive_with_ctx(working_lower, &mut recipient_ctx) {
+                Some(DamageSourceScope::Unrecognized) => {
+                    return Err(PreventionDecline::FailsClosed(
+                        PreventionFailClosed::SourceScope,
+                    ));
+                }
+                scope => scope.and_then(DamageSourceScope::into_filter),
+            }
+        }
     };
 
     // --- 5. Build the replacement definition ---
@@ -16580,10 +16653,12 @@ fn parse_damage_recipient_valid_card_filter(working_lower: &str) -> Option<Targe
 ///    or without an intervening duration window:
 ///    e.g. `, prevent that damage.` or `this turn, prevent that damage.` (Invulnerability),
 ///    or `, you may prevent...` (Battletide Alchemist).
+/// 3. A trailing passive source clause (`by <source>`), left unconsumed.
 ///
 /// The prevention imperative continuation is matched via `peek` without consuming it,
-/// preserving ownership for downstream replacement parsing. Unparsed trailing qualifiers
-/// (e.g. Light of Sanction's "...by sources you control") fail closed.
+/// preserving ownership for downstream replacement parsing. A trailing "by <source>" clause
+/// (Light of Sanction's "...by sources you control") also ends the recipient: the source
+/// extractor reads it and fails closed when it cannot.
 fn parse_damage_recipient_terminator(input: &str) -> OracleResult<'_, ()> {
     let (input, _) = multispace0.parse(input)?;
     let (input, _) = opt(alt((
@@ -16609,6 +16684,11 @@ fn parse_damage_recipient_terminator(input: &str) -> OracleResult<'_, ()> {
                 tag::<_, _, OracleError<'_>>(", you may prevent"),
             ))),
         ),
+        // CR 615.1a + CR 609.7c: a trailing passive source clause ("... by sources
+        // with the chosen name") ends the recipient phrase. It is matched via `peek`
+        // and left for the source extractor, which fails closed on a subject it
+        // cannot read, so no shield is ever installed unscoped.
+        value((), peek(tag::<_, _, OracleError<'_>>("by "))),
     ))
     .parse(input)
 }
@@ -17347,7 +17427,7 @@ fn parse_opponent_put_land_sacrifice_replacement(
             // of this class with a different permanent noun stays consistent. For
             // Land Equilibrium this is byte-identical to `TypedFilter::land()`.
             target: inject_controller(sacrifice_type_filter, ControllerRef::ScopedPlayer),
-            count: QuantityExpr::Fixed { value: 1 },
+            count: QuantityExpr::Fixed { value: 1 }.into(),
             min_count: 0,
         },
     );
@@ -17928,6 +18008,8 @@ mod tests {
     /// subject it cannot read apart from an unscoped "by sources".
     #[test]
     fn passive_source_scope_reads_recipient_then_by_subject() {
+        use crate::types::ability::{BlockPairDirection, CombatRelation, CombatRelationSubject};
+
         let typed = |type_filters: Vec<TypeFilter>, properties: Vec<FilterProp>| {
             DamageSourceScope::Scoped(TargetFilter::Typed(TypedFilter {
                 type_filters,
@@ -17990,7 +18072,9 @@ mod tests {
                 "prevent all damage that would be dealt to you by sources of the chosen color.",
                 typed(vec![], vec![FilterProp::IsChosenColor]),
             ),
-            // Subjects no filter expresses.
+            // Subjects no filter expresses under a BLANK context — a bare "it"
+            // stays unbound (CR 608.2c): these are the armed-context readings
+            // asserted after the loop.
             (
                 "prevent all damage that would be dealt to ~ by spells that target it.",
                 DamageSourceScope::Unrecognized,
@@ -18002,6 +18086,19 @@ mod tests {
             (
                 "prevent all combat damage that would be dealt to ~ by creatures blocking it.",
                 DamageSourceScope::Unrecognized,
+            ),
+            // CR 608.2c: a non-self recipient ("enchanted creature") leaves the
+            // source phrase's bare "it" unbound even though the grammar knows
+            // the clause — the pronoun must not silently bind the host.
+            (
+                "prevent all damage that would be dealt to enchanted creature by creatures blocking it.",
+                DamageSourceScope::Unrecognized,
+            ),
+            // A deictic "this creature" in the source phrase binds the source
+            // outright, with no context needed.
+            (
+                "prevent all combat damage that would be dealt to ~ by creatures blocking this creature.",
+                typed(vec![TypeFilter::Creature], vec![FilterProp::BlockingSource]),
             ),
             // "The last chosen color" (Chromatic Armor): re-choice persistence is unverified, so it fails closed.
             (
@@ -18016,6 +18113,59 @@ mod tests {
         ] {
             assert_eq!(
                 parse_damage_source_scope_passive(text),
+                Some(expected),
+                "{text}"
+            );
+        }
+        // CR 608.2c: the same subjects bind once the recipient is the
+        // self-reference and the context is armed with it — the prevention
+        // route's passive subject reader does exactly this (step 4).
+        let mut self_ref_ctx = ParseContext {
+            subject: Some(TargetFilter::SelfRef),
+            ..ParseContext::default()
+        };
+        for (text, expected) in [
+            // CR 509.1g: Armored Transport — the creatures blocking the host.
+            (
+                "prevent all combat damage that would be dealt to ~ by creatures blocking it.",
+                typed(vec![TypeFilter::Creature], vec![FilterProp::BlockingSource]),
+            ),
+            // CR 509.1g: Wall of Vapor — the active-voice pairing clause.
+            (
+                "prevent all damage that would be dealt to ~ by creatures it's blocking.",
+                typed(
+                    vec![TypeFilter::Creature],
+                    vec![FilterProp::CombatRelation {
+                        relation: CombatRelation::BlockPairing {
+                            direction: BlockPairDirection::SubjectIsBlocker,
+                            scope: None,
+                        },
+                        subject: CombatRelationSubject::Source,
+                    }],
+                ),
+            ),
+            // CR 115.9b + CR 109.2: Bronze Horse — a stack spell targeting the host.
+            (
+                "prevent all damage that would be dealt to ~ by spells that target it.",
+                DamageSourceScope::Scoped(TargetFilter::And {
+                    filters: vec![
+                        TargetFilter::StackSpell,
+                        TargetFilter::Typed(TypedFilter::default().properties(vec![
+                            FilterProp::Targets {
+                                filter: Box::new(TargetFilter::SelfRef),
+                            },
+                        ])),
+                    ],
+                }),
+            ),
+            // CR 201.2a + CR 201.4: Gideon's Intervention — the chosen card name.
+            (
+                "prevent all damage that would be dealt to you by sources with the chosen name.",
+                DamageSourceScope::Scoped(TargetFilter::HasChosenName),
+            ),
+        ] {
+            assert_eq!(
+                parse_damage_source_scope_passive_with_ctx(text, &mut self_ref_ctx),
                 Some(expected),
                 "{text}"
             );
@@ -18036,6 +18186,39 @@ mod tests {
         ] {
             assert_eq!(parse_damage_source_scope_passive(text), None, "{text}");
         }
+    }
+
+    /// CR 614.1a: the chain-position damage-modification lift's fail-closed
+    /// gate. An anaphoric active-voice subject ("that creature" — Jeska,
+    /// Thrice Reborn's duration-stripped `[0]` clause) reads unrecognized so
+    /// the lift declines and records the honest gap, instead of emitting an
+    /// unscoped replacement that would triple every source's damage. The
+    /// positive legs pin the corpus subjects that must keep lifting.
+    #[test]
+    fn damage_source_subject_unrecognized_gate() {
+        // Positive reach-guards: genuinely unscoped "a source" (Rankle and
+        // Torbran, Approach My Molten Realm) and scoped "a source you
+        // control" (I Call for Slaughter) both lift.
+        for text in [
+            "if a source would deal damage, it deals double that damage instead",
+            "if a source you control would deal damage this turn, it deals that much damage plus 1 instead",
+        ] {
+            assert!(!damage_source_subject_unrecognized(text), "{text}");
+        }
+        // The anaphoric subject declines: no filter expresses "that creature".
+        assert!(damage_source_subject_unrecognized(
+            "if that creature would deal combat damage to one of your opponents, it deals triple that damage to that player instead"
+        ));
+        // No "would deal" anchor (passive-only shield): nothing to read, no veto.
+        assert!(!damage_source_subject_unrecognized(
+            "prevent all damage that would be dealt to you by sources you don't control"
+        ));
+        // Synthetic rescue: an unrecognized active subject with a parseable
+        // passive "by" subject does not veto (mirrors the `or_else` chain in
+        // `parse_damage_source_filter`).
+        assert!(!damage_source_subject_unrecognized(
+            "if that creature would deal damage. prevent all damage that would be dealt to you by red sources"
+        ));
     }
 
     /// Corpus regression, found via PR #7615's card-data.json parse-diff:
@@ -21750,7 +21933,10 @@ mod tests {
                 TypedFilter::new(TypeFilter::Artifact)
                     .with_type(TypeFilter::Creature)
                     .controller(ControllerRef::You)
-                    .properties(vec![FilterProp::Attacking { defender: None }])
+                    .properties(vec![FilterProp::Attacking {
+                        scope: Default::default(),
+                        defender: None
+                    }])
             ))
         );
         assert!(def.damage_target_filter.is_none());
@@ -29257,6 +29443,28 @@ mod tests {
         assert_eq!(def.token_owner_scope, Some(ControllerRef::You));
     }
 
+    /// CR 109.5 + CR 111.2: the optional token substitution scopes to its controller's tokens.
+    #[test]
+    fn optional_token_substitution_choice_scopes_to_controller() {
+        let def = parse_replacement_line(
+            "If you would create one or more tokens, you may instead create that many 2/2 green Cat creature tokens with haste or that many 3/1 green Dog creature tokens with vigilance.",
+            "Jinnie Fay, Jetmir's Second",
+        )
+        .expect("Jinnie Fay's optional token substitution must lower to a replacement");
+        // Reach guards: the optional-substitution-choice constructor built `def`.
+        assert_eq!(def.event, ReplacementEvent::CreateToken);
+        assert_eq!(def.mode, ReplacementMode::Optional { decline: None });
+        let Some(execute) = def.execute.as_deref() else {
+            panic!("expected an execute ability, got {:?}", def.execute);
+        };
+        assert!(
+            matches!(&*execute.effect, Effect::ChooseOneOf { branches, .. } if branches.len() == 2),
+            "expected a two-branch ChooseOneOf, got {:?}",
+            execute.effect
+        );
+        assert_eq!(def.token_owner_scope, Some(ControllerRef::You));
+    }
+
     #[test]
     fn ojer_taq_token_triplication_replacement() {
         // CR 614.1a + CR 111.1: "three times that many" parameterizes the ×N
@@ -32320,15 +32528,82 @@ mod tests {
             def.quantity_modification.is_none(),
             "Chatterfang adds tokens, not a count modifier"
         );
-        let spec = def
+        let spec = &def
             .additional_token_spec
-            .as_ref()
-            .expect("additional_token_spec set");
+            .as_deref()
+            .expect("additional_token_spec set")
+            .spec;
         assert_eq!(spec.characteristics.power, Some(1));
         assert_eq!(spec.characteristics.toughness, Some(1));
         assert_eq!(spec.characteristics.core_types, vec![CoreType::Creature]);
         assert_eq!(spec.characteristics.subtypes, vec!["Squirrel".to_string()]);
         assert_eq!(spec.characteristics.colors, vec![ManaColor::Green]);
+    }
+
+    #[test]
+    fn printed_additional_token_replacements_preserve_the_append_count() {
+        use crate::types::ability::AdditionalTokenSpec;
+        let single = QuantityExpr::Fixed { value: 1 };
+        let proportional = AdditionalTokenSpec::proportional_count();
+        // CR 614.5 + CR 616.1f: an article adds one token per event;
+        // "that many" reads the admitted count, as does Bilbo's singular antecedent.
+        let rows = [
+            ("Bilbo, Fellow Conspirator", "If you would create a Food token, instead create a Food token and a Treasure token.", &proportional),
+            ("Case of the Pilfered Proof", "Solved — If one or more tokens would be created under your control, those tokens plus a Clue token are created instead. (It's an artifact with \"{2}, Sacrifice this token: Draw a card.\")", &single),
+            ("Chatterfang, Squirrel General", "If one or more tokens would be created under your control, those tokens plus that many 1/1 green Squirrel creature tokens are created instead.", &proportional),
+            ("Donatello, the Brains", "If one or more tokens would be created under your control, those tokens plus a Mutagen token are created instead.", &single),
+            ("Jolene, the Plunder Queen", "If you would create one or more Treasure tokens, instead create those tokens plus an additional Treasure token.", &single),
+            ("Peregrin Took", "If one or more tokens would be created under your control, those tokens plus an additional Food token are created instead. (It's an artifact with \"{2}, {T}, Sacrifice this token: You gain 3 life.\")", &single),
+            ("Queen Allenal of Ruadach", "If one or more creature tokens would be created under your control, those tokens plus a 1/1 white Soldier creature token are created instead.", &single),
+            ("Quina, Qu Gourmet", "If one or more tokens would be created under your control, those tokens plus a 1/1 green Frog creature token are created instead.", &single),
+            ("Stridehangar Automaton", "If one or more artifact tokens would be created under your control, those tokens plus an additional 1/1 colorless Thopter artifact creature token with flying are created instead.", &single),
+            ("Tippy-Toe, Terrific Partner", "If you would create one or more tokens, instead create those tokens plus an additional Food token. (It's an artifact with \"{2}, {T}, Sacrifice this token: You gain 3 life.\")", &single),
+            ("Worldwalker Helm", "If you would create one or more artifact tokens, instead create those tokens plus an additional Map token. (It's an artifact with \"{1}, {T}, Sacrifice this token: Target creature you control explores. Activate only as a sorcery.\")", &single),
+            ("Xorn", "If you would create one or more Treasure tokens, instead create those tokens plus an additional Treasure token.", &single),
+        ];
+        for (name, text, expected) in rows {
+            let def = parse_replacement_line(text, name)
+                .unwrap_or_else(|| panic!("{name}: expected a replacement"));
+            let append = def
+                .additional_token_spec
+                .unwrap_or_else(|| panic!("{name}: expected an additional token payload"));
+            assert_eq!(&append.count, expected, "{name}");
+            if name == "Worldwalker Helm" {
+                assert_eq!(
+                    def.condition,
+                    Some(ReplacementCondition::TokenCoreTypeMatches {
+                        core_types: vec![CoreType::Artifact],
+                    })
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn former_additional_token_payload_decodes_as_proportional() {
+        use crate::types::ability::AdditionalTokenSpec;
+        let def = parse_replacement_line(
+            "If one or more tokens would be created under your control, those tokens plus an additional Food token are created instead.",
+            "Peregrin Took",
+        ).expect("Peregrin replacement");
+        let mut json = serde_json::to_value(def).unwrap();
+        let former_payload = json["additional_token_spec"].as_object_mut().unwrap();
+        assert!(former_payload.remove("count").is_some());
+        assert!(former_payload.contains_key("characteristics"));
+        let decoded: ReplacementDefinition = serde_json::from_value(json).unwrap();
+        let append = decoded.additional_token_spec.unwrap();
+        assert_eq!(append.spec.characteristics.subtypes, ["Food"]);
+        assert_eq!(append.count, AdditionalTokenSpec::proportional_count());
+    }
+
+    #[test]
+    fn malformed_plus_clause_cannot_become_token_substitution() {
+        let passive = "If one or more tokens would be created under your control, those tokens plus that many 1/1 green Squirrel creature tokens with flying nonsense are created instead.";
+        let active = "If you would create one or more tokens, instead create those tokens plus an additional Food token and then draw a card.";
+        assert!(parse_token_replacement_shape(&passive.to_lowercase()).is_none());
+        assert!(
+            parse_active_additional_token_replacement(&active.to_lowercase(), active).is_none()
+        );
     }
 
     /// CR 614.1a + CR 111.1: Peregrin Took's "those tokens plus an additional
@@ -32339,10 +32614,11 @@ mod tests {
         let def = parse_replacement_line(text, "Peregrin Took").expect("should parse Peregrin");
         assert_eq!(def.event, ReplacementEvent::CreateToken);
         assert_eq!(def.token_owner_scope, Some(ControllerRef::You));
-        let spec = def
+        let spec = &def
             .additional_token_spec
-            .as_ref()
-            .expect("additional Food token spec");
+            .as_deref()
+            .expect("additional Food token spec")
+            .spec;
         assert_eq!(spec.characteristics.subtypes, vec!["Food".to_string()]);
     }
 
@@ -32363,10 +32639,11 @@ mod tests {
             "artifact tokens gate must be TokenCoreTypeMatches, got {:?}",
             def.condition
         );
-        let spec = def
+        let spec = &def
             .additional_token_spec
-            .as_ref()
-            .expect("additional Thopter token spec");
+            .as_deref()
+            .expect("additional Thopter token spec")
+            .spec;
         assert_eq!(spec.characteristics.power, Some(1));
         assert_eq!(spec.characteristics.toughness, Some(1));
         assert_eq!(spec.characteristics.subtypes, vec!["Thopter".to_string()]);
@@ -32390,10 +32667,11 @@ mod tests {
         let def =
             parse_replacement_line(text, "Eldrazi Spawn").expect("should parse multi-digit P/T");
         assert_eq!(def.event, ReplacementEvent::CreateToken);
-        let spec = def
+        let spec = &def
             .additional_token_spec
-            .as_ref()
-            .expect("additional Eldrazi token spec");
+            .as_deref()
+            .expect("additional Eldrazi token spec")
+            .spec;
         assert_eq!(spec.characteristics.power, Some(10));
         assert_eq!(spec.characteristics.toughness, Some(10));
         assert_eq!(spec.characteristics.subtypes, vec!["Eldrazi".to_string()]);
@@ -32444,10 +32722,11 @@ mod tests {
             Some(ControllerRef::You),
             "Xorn 'if you would create' must scope to the controller's tokens"
         );
-        let spec = def
+        let spec = &def
             .additional_token_spec
-            .as_ref()
-            .expect("Xorn must populate additional_token_spec");
+            .as_deref()
+            .expect("Xorn must populate additional_token_spec")
+            .spec;
         assert!(
             spec.characteristics
                 .subtypes
@@ -32476,7 +32755,8 @@ mod tests {
         ));
         let additional = def
             .additional_token_spec
-            .expect("Bilbo must append a token spec");
+            .expect("Bilbo must append a token spec")
+            .spec;
         assert_eq!(
             additional.characteristics.subtypes,
             vec!["Treasure".to_string()]
@@ -33363,10 +33643,11 @@ mod tests {
             def.condition.is_none(),
             "generic token wording must not inherit Xorn's subtype gate"
         );
-        let spec = def
+        let spec = &def
             .additional_token_spec
-            .as_ref()
-            .expect("additional Food token spec");
+            .as_deref()
+            .expect("additional Food token spec")
+            .spec;
         assert_eq!(spec.characteristics.display_name, "Food");
         assert_eq!(spec.characteristics.core_types, vec![CoreType::Artifact]);
         assert_eq!(spec.characteristics.subtypes, vec!["Food".to_string()]);
@@ -34401,12 +34682,13 @@ mod tests {
         }
     }
 
-    /// CR 604.2 + CR 614.1d: Bronze Horse's "as long as you control another
-    /// creature" gate still bridges to an object-count gate; the line declines
-    /// only because its "by spells that target it" source scope does not parse
-    /// (CR 615.1a), so the route lands it instead of an unscoped shield.
+    /// CR 604.2 + CR 614.1d + CR 115.9b: Bronze Horse's "as long as you control
+    /// another creature" gate bridges to an object-count gate, and its
+    /// "by spells that target it" source scope reads as a stack-spell filter
+    /// targeting the host — the gated, source-scoped shield the printed line
+    /// states, never an unscoped one.
     #[test]
-    fn bronze_horse_gate_bridges_but_source_scope_fails_closed() {
+    fn bronze_horse_gate_bridges_and_source_scope_parses() {
         const LINE: &str = "As long as you control another creature, prevent all damage that would be dealt to this creature by spells that target it.";
         let norm_lower = replace_self_refs(LINE, "Bronze Horse").to_lowercase();
         let AsLongAsGate::Parsed { condition, .. } = strip_as_long_as_condition_prefix(&norm_lower)
@@ -34432,11 +34714,36 @@ mod tests {
         assert_eq!(tf.controller, Some(ControllerRef::You));
         assert!(tf.properties.contains(&FilterProp::Another));
 
-        assert!(parse_replacement_line(LINE, "Bronze Horse").is_none());
+        let def = parse_replacement_line(LINE, "Bronze Horse")
+            .expect("the gated, source-scoped shield must parse");
         assert_eq!(
-            damage_prevention_fails_closed(LINE, "Bronze Horse"),
-            Some(PreventionFailClosed::SourceScope)
+            def.condition,
+            Some(ReplacementCondition::OnlyIfQuantity {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::ObjectCount {
+                        filter: TargetFilter::Typed(tf.clone())
+                    },
+                },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 1 },
+                active_player_req: None,
+            })
         );
+        assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
+        assert_eq!(
+            def.damage_source_filter,
+            Some(TargetFilter::And {
+                filters: vec![
+                    TargetFilter::StackSpell,
+                    TargetFilter::Typed(TypedFilter::default().properties(vec![
+                        FilterProp::Targets {
+                            filter: Box::new(TargetFilter::SelfRef),
+                        },
+                    ])),
+                ],
+            })
+        );
+        assert_eq!(damage_prevention_fails_closed(LINE, "Bronze Horse"), None);
     }
 
     /// CR 604.2 + CR 122.1: Woolly Razorback's "has an ice counter" gate still
@@ -34884,43 +35191,65 @@ mod tests {
         );
     }
 
-    /// CR 615.1a: an ungated prevention line whose "by <subject>" source scope
-    /// does not parse lands at the Priority-8 route as a line-owned
-    /// `Effect::unimplemented` — never an unscoped shield, and never a later
-    /// route's one-shot `PreventDamage` reading of a static shield.
+    /// CR 615.1a + CR 608.2c: an ungated prevention line whose "by <subject>"
+    /// source scope does not parse lands at the Priority-8 route as a
+    /// line-owned `Effect::unimplemented` — never an unscoped shield, and never
+    /// a later route's one-shot `PreventDamage` reading of a static shield. Two
+    /// fail-closed shapes: a subject no filter expresses at all, and — the
+    /// CR 608.2c anaphor rule — a bare "it" in the source subject when the
+    /// recipient is NOT the shield's own self-reference, so the pronoun must not
+    /// silently bind the host.
     #[test]
     fn prevention_source_scope_fails_closed_at_the_route() {
-        const LINE: &str =
-            "Prevent all damage that would be dealt to ~ by creatures it's blocking.";
-        let parsed = parse_oracle_text(
-            "Defender (This creature can't attack.)\nPrevent all damage that would be dealt to this creature by creatures it's blocking.\nThis creature can't be the target of spells that can target only Walls or of abilities that can target only Walls.",
-            "Wall of Shadows",
-            &["Defender".to_string()],
-            &["Creature".to_string()],
-            &["Wall".to_string()],
-        );
-        let line_abilities: Vec<_> = parsed
-            .abilities
-            .iter()
-            .filter(|a| a.description.as_deref() == Some(LINE))
-            .collect();
-        assert_eq!(line_abilities.len(), 1, "abilities: {:?}", parsed.abilities);
-        assert!(
-            matches!(
-                &*line_abilities[0].effect,
-                Effect::Unimplemented { name, .. } if name == "prevention_source_scope"
+        for (line, full_text) in [
+            // An unrecognized source phrase.
+            (
+                "Prevent all damage that would be dealt to ~ by spells n.",
+                "Prevent all damage that would be dealt to this creature by spells n.",
             ),
-            "{:?}",
-            line_abilities[0].effect
-        );
-        assert!(
-            parsed
-                .replacements
+            // CR 608.2c: the recipient is the attached creature, not the host,
+            // so the source phrase's bare "it" stays unbound and the line
+            // fails closed rather than scoping the shield to the host.
+            (
+                "Prevent all damage that would be dealt to enchanted creature by creatures blocking it.",
+                "Prevent all damage that would be dealt to enchanted creature by creatures blocking it.",
+            ),
+        ] {
+            let parsed = parse_oracle_text(
+                full_text,
+                "Probe Card",
+                &[],
+                &["Creature".to_string()],
+                &[],
+            );
+            let line_abilities: Vec<_> = parsed
+                .abilities
                 .iter()
-                .all(|r| r.event != ReplacementEvent::DamageDone),
-            "no unscoped shield: {:?}",
-            parsed.replacements
-        );
+                .filter(|a| a.description.as_deref() == Some(line))
+                .collect();
+            assert_eq!(
+                line_abilities.len(),
+                1,
+                "{full_text}: abilities: {:?}",
+                parsed.abilities
+            );
+            assert!(
+                matches!(
+                    &*line_abilities[0].effect,
+                    Effect::Unimplemented { name, .. } if name == "prevention_source_scope"
+                ),
+                "{full_text}: {:?}",
+                line_abilities[0].effect
+            );
+            assert!(
+                parsed
+                    .replacements
+                    .iter()
+                    .all(|r| r.event != ReplacementEvent::DamageDone),
+                "{full_text}: no unscoped shield: {:?}",
+                parsed.replacements
+            );
+        }
 
         // Reach-guard: a typed subject through the same entry is a scoped shield.
         let lancer = parse_oracle_text(
@@ -34938,6 +35267,161 @@ mod tests {
             }),
             "{:?}",
             lancer.replacements
+        );
+    }
+
+    /// CR 615.1a + CR 608.2c + CR 509.1g + CR 109.2 + CR 201.2a: the printed
+    /// prevention shields whose source scope names a combat pairing, a stack
+    /// spell, a tap status, or the host's chosen card name install with that
+    /// exact `damage_source_filter` — the five-card class the
+    /// `prevention_source_scope` gap used to swallow.
+    #[test]
+    fn prevention_source_scope_printed_cards_install_scoped_shields() {
+        use crate::types::ability::{BlockPairDirection, CombatRelation, CombatRelationSubject};
+
+        // CR 509.1g: Armored Transport — "creatures blocking it" with the
+        // recipient ("this creature") normalized to the host self-reference.
+        let transport = parse_oracle_text(
+            "Prevent all combat damage that would be dealt to this creature by creatures blocking it.",
+            "Armored Transport",
+            &[],
+            &["Artifact".to_string(), "Creature".to_string()],
+            &["Construct".to_string()],
+        );
+        assert!(
+            transport.replacements.iter().any(|r| {
+                r.event == ReplacementEvent::DamageDone
+                    && r.valid_card == Some(TargetFilter::SelfRef)
+                    && r.combat_scope == Some(CombatDamageScope::CombatOnly)
+                    && matches!(
+                        r.shield_kind,
+                        ShieldKind::Prevention {
+                            amount: PreventionAmount::All
+                        }
+                    )
+                    && r.damage_source_filter
+                        == Some(TargetFilter::Typed(
+                            TypedFilter::creature().properties(vec![FilterProp::BlockingSource]),
+                        ))
+            }),
+            "{:?}",
+            transport.replacements
+        );
+
+        // CR 509.1g: Wall of Vapor — "creatures it's blocking" is the active
+        // voice of the "blocked by <subject>" pairing.
+        let vapor = parse_oracle_text(
+            "Defender (This creature can't attack.)\nPrevent all damage that would be dealt to this creature by creatures it's blocking.",
+            "Wall of Vapor",
+            &["Defender".to_string()],
+            &["Creature".to_string()],
+            &["Wall".to_string()],
+        );
+        assert!(
+            vapor.replacements.iter().any(|r| {
+                r.event == ReplacementEvent::DamageDone
+                    && r.valid_card == Some(TargetFilter::SelfRef)
+                    && r.combat_scope.is_none()
+                    && r.damage_source_filter
+                        == Some(TargetFilter::Typed(TypedFilter::creature().properties(
+                            vec![FilterProp::CombatRelation {
+                                relation: CombatRelation::BlockPairing {
+                                    direction: BlockPairDirection::SubjectIsBlocker,
+                                    scope: None,
+                                },
+                                subject: CombatRelationSubject::Source,
+                            }],
+                        )))
+            }),
+            "{:?}",
+            vapor.replacements
+        );
+
+        // CR 115.9b + CR 109.2: Bronze Horse — the gate still bridges, and
+        // "spells that target it" is a stack spell that targets the host.
+        let horse = parse_oracle_text(
+            "Trample\nAs long as you control another creature, prevent all damage that would be dealt to this creature by spells that target it.",
+            "Bronze Horse",
+            &["Trample".to_string()],
+            &["Artifact".to_string(), "Creature".to_string()],
+            &["Horse".to_string()],
+        );
+        assert!(
+            horse.replacements.iter().any(|r| {
+                r.event == ReplacementEvent::DamageDone
+                    && r.valid_card == Some(TargetFilter::SelfRef)
+                    && r.condition.is_some()
+                    && r.damage_source_filter
+                        == Some(TargetFilter::And {
+                            filters: vec![
+                                TargetFilter::StackSpell,
+                                TargetFilter::Typed(TypedFilter::default().properties(vec![
+                                    FilterProp::Targets {
+                                        filter: Box::new(TargetFilter::SelfRef),
+                                    },
+                                ])),
+                            ],
+                        })
+            }),
+            "{:?}",
+            horse.replacements
+        );
+        assert!(
+            !horse.abilities.iter().any(|a| matches!(
+                &*a.effect,
+                Effect::Unimplemented { name, .. } if name == "prevention_source_scope"
+            )),
+            "{:?}",
+            horse.abilities
+        );
+
+        // CR 509.1a + CR 110.5: New Master of Arms — "blocking creatures that
+        // are tapped" carries both status predicates on the source filter.
+        let master = parse_oracle_text(
+            "First strike\nPrevent all combat damage that would be dealt by blocking creatures that are tapped.",
+            "New Master of Arms",
+            &["First strike".to_string()],
+            &["Creature".to_string()],
+            &["Human".to_string(), "Soldier".to_string()],
+        );
+        assert!(
+            master.replacements.iter().any(|r| {
+                r.event == ReplacementEvent::DamageDone
+                    && r.combat_scope == Some(CombatDamageScope::CombatOnly)
+                    && r.damage_source_filter
+                        == Some(TargetFilter::Typed(
+                            TypedFilter::creature()
+                                .properties(vec![FilterProp::Blocking, FilterProp::Tapped]),
+                        ))
+            }),
+            "{:?}",
+            master.replacements
+        );
+
+        // CR 201.2a + CR 201.4: Gideon's Intervention — "sources with the chosen
+        // name" reads the host's chosen card name.
+        let intervention = parse_oracle_text(
+            "As this enchantment enters, choose a card name.\nYour opponents can't cast spells with the chosen name.\nPrevent all damage that would be dealt to you and permanents you control by sources with the chosen name.",
+            "Gideon's Intervention",
+            &[],
+            &["Enchantment".to_string()],
+            &[],
+        );
+        assert!(
+            intervention.replacements.iter().any(|r| {
+                r.event == ReplacementEvent::DamageDone
+                    && r.damage_source_filter == Some(TargetFilter::HasChosenName)
+                    && matches!(
+                        &r.damage_target_filter,
+                        Some(DamageTargetFilter::PlayerOrPermanentsControlledBy {
+                            player: DamageTargetPlayerScope::Controller,
+                            permanent_type: None,
+                            ..
+                        })
+                    )
+            }),
+            "{:?}",
+            intervention.replacements
         );
     }
 
@@ -36295,10 +36779,11 @@ mod tests {
                     );
                 }
                 (
-                    ContinuousModification::AddStaticMode { mode },
+                    ContinuousModification::GrantStaticAbility { definition },
                     ExpectedGrant::CanAttack,
                 ) => {
-                    assert_eq!(*mode, StaticMode::CanAttackWithDefender);
+                    assert_eq!(definition.affected, Some(TargetFilter::SelfRef));
+                    assert_eq!(definition.mode, StaticMode::CanAttackWithDefender);
                 }
                 (other, _) => panic!("{card}: wrong grant shape, got {other:?}"),
             }
@@ -39445,17 +39930,43 @@ mod opposition_agent_parser_tests {
             "CR 615.1a: recipient must include both creatures and planeswalkers you control"
         );
 
-        // CR 615.1a: Light of Sanction contains unsupported controller-relative
-        // constraints ("creatures you control by sources you control"). The unconsumed
-        // source-clause residue must cause the replacement to fail closed (None) rather
-        // than dropping the qualifiers and emitting an overly broad prevention shield.
+        // CR 615.1a + CR 609.7c: Light of Sanction's trailing "by sources you control"
+        // ends the recipient phrase and is read as the damage source, so the shield is
+        // scoped on BOTH axes (recipient: creatures you control; source: sources you
+        // control) instead of dropping either restriction.
         let ls = parse_replacement_line(
             "Prevent all damage that would be dealt to creatures you control by sources you control.",
             "Light of Sanction",
+        )
+        .expect("Light of Sanction's recipient and source clauses both parse");
+        assert_eq!(
+            ls.valid_card,
+            Some(TargetFilter::Typed(
+                TypedFilter::creature().controller(ControllerRef::You)
+            )),
+            "recipient: creatures you control"
         );
         assert_eq!(
-            ls, None,
-            "CR 615.1a: unsupported qualifiers must fail closed rather than dropping restrictions"
+            ls.damage_source_filter,
+            Some(TargetFilter::Typed(
+                TypedFilter::default().controller(ControllerRef::You)
+            )),
+            "source: sources you control"
+        );
+        assert_eq!(
+            ls.shield_kind,
+            ShieldKind::Prevention {
+                amount: PreventionAmount::All
+            }
+        );
+        // An unreadable trailing source clause still fails closed.
+        assert_eq!(
+            parse_replacement_line(
+                "Prevent all damage that would be dealt to creatures you control by sources named like this.",
+                "Fixture",
+            ),
+            None,
+            "CR 615.1a: an unrecognised source clause must not install an unscoped shield"
         );
     }
 
@@ -39779,6 +40290,42 @@ mod damage_source_union {
                 "{phrase}"
             );
         }
+    }
+
+    /// CR 201.2a + CR 201.4: "sources with the chosen name" reads the card name
+    /// the host's linked "choose a card name" ability recorded (Gideon's
+    /// Intervention); a typed qualifier or a controller axis ANDs with it.
+    #[test]
+    fn chosen_name_source_scopes_the_shield() {
+        assert_eq!(
+            parse_damage_source_subject("sources with the chosen name"),
+            Some(TargetFilter::HasChosenName)
+        );
+        // A card-type qualifier composes by AND, like the target grammar's
+        // "<type-phrase> with the chosen name" arm.
+        let qualified = parse_damage_source_subject("artifact sources with the chosen name")
+            .expect("the qualified chosen-name subject parses");
+        assert_eq!(
+            qualified,
+            TargetFilter::And {
+                filters: vec![
+                    TargetFilter::Typed(TypedFilter::new(TypeFilter::Artifact)),
+                    TargetFilter::HasChosenName,
+                ],
+            }
+        );
+        // A controller-axis tail composes the same way.
+        let controlled = parse_damage_source_subject("sources you control with the chosen name")
+            .expect("the controlled chosen-name subject parses");
+        assert_eq!(
+            controlled,
+            TargetFilter::And {
+                filters: vec![
+                    TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::You)),
+                    TargetFilter::HasChosenName,
+                ],
+            }
+        );
     }
 }
 
