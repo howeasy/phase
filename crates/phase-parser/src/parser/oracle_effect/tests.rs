@@ -61733,6 +61733,19 @@ fn cast_mechanism_bound_pairing_table_is_exact() {
         );
     }
 
+    // The grant-scoped budget carries exactly one cast.
+    assert_eq!(
+        CastFromZoneDriver::for_batch_bounds(CastMechanism::LingeringWindow, one),
+        Some(CastFromZoneDriver::LingeringWindow { bounds: one })
+    );
+    for rejected in [unbounded, two, budget] {
+        assert_eq!(
+            CastFromZoneDriver::for_batch_bounds(CastMechanism::LingeringWindow, rejected),
+            None,
+            "the grant-scoped budget cannot carry {rejected:?}"
+        );
+    }
+
     // The two one-card mechanisms accept an exact single-card cap and nothing
     // else — including not an unbounded clause, which they would narrow.
     for (mechanism, expected) in [
@@ -74821,6 +74834,284 @@ fn assimilate_without_a_graveyard_target_stays_unimplemented() {
         matches!(real, Effect::ChangeZone { .. }),
         "reach-guard: the printed phrasing must lower to a ChangeZone, got {real:?}"
     );
+}
+
+/// CR 607.2a + CR 608.2d: the linked-exile `assimilate` form (Borg Cube,
+/// Assimilation Assessor) lowers to the same move-then-retype chain as the
+/// graveyard form, choosing its card from the source's "exiled with" pool while
+/// the ability resolves (no stack target).
+#[test]
+fn assimilate_a_creature_card_exiled_with_it_lowers_to_linked_exile_pick() {
+    const BORG_CUBE: &str = "Affinity for artifact creatures\n\
+         Whenever this Spacecraft enters or attacks, assimilate a creature card exiled with it. \
+         If you can't, exile up to one target creature. (To assimilate a card, put it onto the \
+         battlefield under your control with a +1/+1 counter. It's a Borg artifact creature and \
+         loses all other creature types.)\n\
+         Station (Tap another creature you control: Put charge counters equal to its power on \
+         this Spacecraft. Station only as a sorcery. It's an artifact creature at 12+.)\n\
+         12+ | Artifact creatures you control have flying.";
+    let parsed = parse_oracle_text(
+        BORG_CUBE,
+        "Borg Cube",
+        &["Affinity".to_string(), "Station".to_string()],
+        &["Artifact".to_string()],
+        &["Spacecraft".to_string()],
+    );
+    let execute = parsed.triggers[0]
+        .execute
+        .as_deref()
+        .expect("the enters-or-attacks trigger must carry an execute body");
+    assert!(
+        !ability_chain_has_unimplemented(execute),
+        "the linked-exile assimilate must lower with no residual Unimplemented node: {execute:#?}"
+    );
+    let Effect::ChangeZone {
+        origin,
+        destination,
+        enters_under,
+        target,
+        enter_with_counters,
+        ..
+    } = &*execute.effect
+    else {
+        panic!(
+            "assimilate must lower to a ChangeZone head, got {:#?}",
+            execute.effect
+        );
+    };
+    assert_eq!(*origin, Some(Zone::Exile));
+    assert_eq!(*destination, Zone::Battlefield);
+    assert_eq!(*enters_under, Some(ControllerRef::You));
+    assert_eq!(
+        *enter_with_counters,
+        vec![(
+            crate::types::counter::CounterType::Plus1Plus1,
+            QuantityExpr::Fixed { value: 1 }
+        )]
+    );
+    let TargetFilter::And { filters } = target else {
+        panic!("expected a creature-card AND linked-exile filter, got {target:#?}");
+    };
+    assert!(
+        filters.contains(&TargetFilter::ExiledBySource),
+        "{filters:#?}"
+    );
+    assert_eq!(
+        execute.target_choice_timing,
+        TargetChoiceTiming::Resolution,
+        "CR 608.2d: an untargeted pick from the linked pool is made at resolution"
+    );
+    let retype = execute
+        .sub_ability
+        .as_deref()
+        .expect("the retype continuation must be a direct child");
+    assert!(matches!(
+        &*retype.effect,
+        Effect::GenericEffect {
+            duration: Some(Duration::Permanent),
+            ..
+        }
+    ));
+
+    // The "If you can't" fallback: exile up to one target creature, gated on the
+    // assimilate having moved nothing.
+    let mut node = Some(execute);
+    let mut fallback = None;
+    while let Some(def) = node {
+        if matches!(
+            &*def.effect,
+            Effect::ChangeZone {
+                destination: Zone::Exile,
+                ..
+            }
+        ) {
+            fallback = Some(def);
+        }
+        node = def.sub_ability.as_deref();
+    }
+    let fallback = fallback.expect("the If-you-can't exile must be chained");
+    assert!(
+        fallback.condition.is_some(),
+        "the fallback exile must be conditioned on the assimilate failing"
+    );
+
+    // Assimilation Assessor: the attack-only sibling of the same phrase.
+    const ASSESSOR: &str = "When this creature enters, exile target opponent's graveyard.\n\
+         Whenever this creature attacks, assimilate a creature card exiled with it. (Put it onto \
+         the battlefield under your control with a +1/+1 counter. It's a Borg artifact creature \
+         and loses all other creature types.)";
+    let parsed = parse_oracle_text(
+        ASSESSOR,
+        "Assimilation Assessor",
+        &[],
+        &["Artifact".to_string(), "Creature".to_string()],
+        &["Borg".to_string()],
+    );
+    assert_eq!(
+        parsed.triggers.len(),
+        2,
+        "Assimilation Assessor must parse its enters and attacks triggers"
+    );
+    for trigger in &parsed.triggers {
+        let execute = trigger.execute.as_deref().expect("execute body");
+        assert!(
+            !ability_chain_has_unimplemented(execute),
+            "Assimilation Assessor must lower fully: {execute:#?}"
+        );
+    }
+    assert!(
+        parsed
+            .triggers
+            .iter()
+            .filter_map(|trigger| trigger.execute.as_deref())
+            .any(|execute| matches!(
+                &*execute.effect,
+                Effect::ChangeZone {
+                    origin: Some(Zone::Exile),
+                    destination: Zone::Battlefield,
+                    ..
+                }
+            )),
+        "the Assessor attack trigger must lower to the linked-exile ChangeZone shape"
+    );
+}
+
+/// CR 608.2c + CR 611.2a: the `CastFromZone` of an ability chain, if any.
+fn cast_from_zone_in_chain(ability: &AbilityDefinition) -> Option<&AbilityDefinition> {
+    if matches!(*ability.effect, Effect::CastFromZone { .. }) {
+        return Some(ability);
+    }
+    ability
+        .sub_ability
+        .as_deref()
+        .and_then(cast_from_zone_in_chain)
+}
+
+/// CR 608.2c + CR 611.2a + CR 607.2a: "until end of turn, you may cast a [creature]
+/// spell from among cards exiled with [this object]" prints a cap of one cast over
+/// a persistent linked pile and states a duration, so its grant shares one budget
+/// (`LingeringWindow`) and its "may" stays inside the grant rather than becoming
+/// an accept/decline prompt. A plural clause, or one stating no duration
+/// (Jeleva, Nephalia's Scourge), keeps the per-object permission.
+#[test]
+fn cast_a_spell_from_linked_exile_under_a_duration_shares_one_budget() {
+    use crate::types::ability::ResolutionCastWindow;
+
+    let window = |def: &AbilityDefinition| {
+        let found = cast_from_zone_in_chain(def).expect("a CastFromZone in the chain");
+        let Effect::CastFromZone { driver, .. } = &*found.effect else {
+            unreachable!("matched above");
+        };
+        (*driver, found.optional)
+    };
+    let one = ResolutionCastWindow {
+        max_casts: Some(1),
+        max_total_mv: None,
+    };
+
+    // Court of Locthwain: the third sentence, behind the monarch condition.
+    let court = parse_oracle_text(
+        "When this enchantment enters, you become the monarch.\n\
+         At the beginning of your upkeep, exile the top card of target opponent's library. You may \
+         play that card for as long as it remains exiled, and mana of any type can be spent to \
+         cast it. If you're the monarch, until end of turn, you may cast a spell from among cards \
+         exiled with this enchantment without paying its mana cost.",
+        "Court of Locthwain",
+        &[],
+        &["Enchantment".to_string()],
+        &[],
+    );
+    let (driver, optional) = court
+        .triggers
+        .iter()
+        .filter_map(|trigger| trigger.execute.as_deref())
+        .find(|execute| cast_from_zone_in_chain(execute).is_some())
+        .map(window)
+        .expect("Court's upkeep trigger casts from linked exile");
+    assert_eq!(driver, CastFromZoneDriver::LingeringWindow { bounds: one });
+    assert!(
+        !optional,
+        "the grant's own accept lives in the cast, not a prompt"
+    );
+
+    // Idol of Endurance: the activated form, free.
+    let idol = parse_oracle_text(
+        "When this artifact enters, exile all creature cards with mana value 3 or less from \
+         your graveyard until this artifact leaves the battlefield.\n\
+         {1}{W}, {T}: Until end of turn, you may cast a creature spell from among cards exiled \
+         with this artifact without paying its mana cost.",
+        "Idol of Endurance",
+        &[],
+        &["Artifact".to_string()],
+        &[],
+    );
+    let def = idol
+        .abilities
+        .iter()
+        .find(|ability| cast_from_zone_in_chain(ability).is_some())
+        .expect("Idol's activated ability casts from linked exile");
+    assert_eq!(
+        window(def),
+        (CastFromZoneDriver::LingeringWindow { bounds: one }, false)
+    );
+
+    // Serpent's Soul-Jar: the paid form.
+    let jar = parse_oracle_text(
+        "Whenever an Elf you control dies, exile it.\n\
+         {T}, Pay 2 life: Until end of turn, you may cast a creature spell from among cards \
+         exiled with this artifact.",
+        "Serpent's Soul-Jar",
+        &[],
+        &["Artifact".to_string()],
+        &[],
+    );
+    let def = jar
+        .abilities
+        .iter()
+        .find(|ability| cast_from_zone_in_chain(ability).is_some())
+        .expect("Soul-Jar's activated ability casts from linked exile");
+    assert_eq!(
+        window(def),
+        (CastFromZoneDriver::LingeringWindow { bounds: one }, false)
+    );
+
+    // No stated duration (Jeleva's attack trigger): the per-object permission stays.
+    let jeleva = parse_oracle_text(
+        "Whenever Jeleva attacks, you may cast an instant or sorcery spell from among cards \
+         exiled with Jeleva without paying its mana cost.",
+        "Jeleva, Nephalia's Scourge",
+        &[],
+        &["Creature".to_string()],
+        &["Vampire".to_string(), "Wizard".to_string()],
+    );
+    let (driver, _) = jeleva
+        .triggers
+        .iter()
+        .filter_map(|trigger| trigger.execute.as_deref())
+        .find(|execute| cast_from_zone_in_chain(execute).is_some())
+        .map(window)
+        .expect("Jeleva's attack trigger casts from linked exile");
+    assert_eq!(driver, CastFromZoneDriver::LingeringPermission);
+
+    // No stated duration (Kaho's activated ability, kaho_minamo_historian_linked_exile.rs):
+    // the per-object permission stays, so its behaviour is the base one.
+    let kaho = parse_oracle_text(
+        "When Kaho enters, search your library for up to three instant cards, exile them, then \
+         shuffle.\n\
+         {X}, {T}: You may cast a spell with mana value X from among cards exiled with Kaho \
+         without paying its mana cost.",
+        "Kaho, Minamo Historian",
+        &[],
+        &["Creature".to_string()],
+        &["Merfolk".to_string(), "Wizard".to_string()],
+    );
+    let (driver, _) = kaho
+        .abilities
+        .iter()
+        .find(|ability| cast_from_zone_in_chain(ability).is_some())
+        .map(window)
+        .expect("Kaho's activated ability casts from linked exile");
+    assert_eq!(driver, CastFromZoneDriver::LingeringPermission);
 }
 
 const CODIE_CONTINUATION_TEXT: &str = "Add {W}{U}{B}{R}{G}. When you next cast a spell this turn, \

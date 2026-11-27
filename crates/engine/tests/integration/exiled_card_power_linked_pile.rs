@@ -346,6 +346,7 @@ fn dreadnought_condition_and_x_read_the_linked_card_on_a_later_turn() {
         exiled_id: giant,
         source_id: dreadnought,
         kind: ExileLinkKind::TrackedBySource,
+        supplier: None,
     });
     to_controllers_next_turn(&mut runner, dreadnought);
     assert_eq!(linked_pile(runner.state(), dreadnought), vec![giant]);

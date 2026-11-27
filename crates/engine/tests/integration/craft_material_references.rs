@@ -97,6 +97,7 @@ fn craft_state_with_materials(
             exiled_id: id,
             source_id,
             kind: ExileLinkKind::CraftMaterial,
+            supplier: None,
         });
         ids.push(id);
     }

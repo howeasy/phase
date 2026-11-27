@@ -19,7 +19,7 @@ use engine::types::ability::{
 use engine::types::actions::GameAction;
 use engine::types::game_state::{ExileLink, ExileLinkKind, WaitingFor};
 use engine::types::identifiers::ObjectId;
-use engine::types::mana::{ManaType, ManaUnit};
+use engine::types::mana::{parse_mtgjson_mana_cost, ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::triggers::TriggerMode;
 use engine::types::zones::Zone;
@@ -287,6 +287,7 @@ fn limousine_attack(choose_opposing: bool) -> (GameRunner, ObjectId, ObjectId) {
         exiled_id: prior,
         source_id: limo,
         kind: ExileLinkKind::TrackedBySource,
+        supplier: None,
     });
 
     // CR 702.122a: crew 2 with the 2/2.
@@ -614,5 +615,340 @@ fn come_back_wrong_returns_a_destroyed_creature_card() {
         runner.state().objects[&bear].zone,
         Zone::Battlefield,
         "a creature card was put into a graveyard this way: it returns"
+    );
+}
+
+/// Verbatim Oracle text of Mimic Vat (Scryfall).
+const MIMIC_VAT: &str = "Imprint — Whenever a nontoken creature dies, you may exile that card. \
+If you do, return each other card exiled with this artifact to its owner's graveyard.\n{3}, \
+{T}: Create a token that's a copy of a card exiled with this artifact. It gains haste. Exile it \
+at the beginning of the next end step.";
+
+/// Cast `murder` at `victim` and resolve it plus the dies trigger the death
+/// raises, answering the Vat's optional imprint exile with yes (CR 603.5).
+fn murder_and_imprint(runner: &mut GameRunner, murder: ObjectId, victim: ObjectId) {
+    runner
+        .cast(murder)
+        .target_object(victim)
+        .accept_optional()
+        .resolve();
+    runner.advance_until_stack_empty();
+}
+
+/// CR 607.2a: the imprint trigger's exile and the ability that reads "exiled
+/// with this artifact" are linked, so the pile holds exactly the cards the
+/// trigger exiled — the first imprint's card and, after the second imprint,
+/// both cards. CR 608.2c: the trigger follows its instructions in order, so
+/// "return each other card exiled with this artifact" excludes the card the
+/// same resolution just exiled. The first imprint has no other card, so its
+/// card stays exiled; the second imprint returns only the first card to its
+/// owner's graveyard while the second card stays exiled.
+#[test]
+fn mimic_vat_imprint_returns_only_the_previously_exiled_card() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    // CR 301.1: Mimic Vat is a printed noncreature artifact, {3}.
+    let vat = scenario
+        .add_artifact_from_oracle(P0, "Mimic Vat", MIMIC_VAT)
+        .with_mana_cost(parse_mtgjson_mana_cost("{3}"))
+        .id();
+    // Two printed vanilla 2/2s for the Vat to imprint, one death each.
+    let first = scenario.add_creature(P1, "Grizzly Bears", 2, 2).id();
+    let second = scenario.add_creature(P1, "Runeclaw Bear", 2, 2).id();
+    let first_murder = scenario
+        .add_spell_to_hand_from_oracle(P0, "Murder", true, MURDER)
+        .with_mana_cost(parse_mtgjson_mana_cost("{1}{B}{B}"))
+        .id();
+    let second_murder = scenario
+        .add_spell_to_hand_from_oracle(P0, "Murder", true, MURDER)
+        .with_mana_cost(parse_mtgjson_mana_cost("{1}{B}{B}"))
+        .id();
+    // {1}{B}{B} twice: six black mana pays for both casts in this main phase.
+    scenario.with_mana_pool(
+        P0,
+        (0..6)
+            .map(|_| ManaUnit::new(ManaType::Black, ObjectId(0), false, vec![]))
+            .collect(),
+    );
+    let mut runner = scenario.build();
+    assert_eq!(
+        runner.state().objects[&vat].zone,
+        Zone::Battlefield,
+        "reach: Mimic Vat is on the battlefield"
+    );
+
+    // First imprint: the pile is empty, so nothing is returned and the card
+    // this resolution exiled must stay in exile.
+    murder_and_imprint(&mut runner, first_murder, first);
+    assert_eq!(
+        runner.state().objects[&first].zone,
+        Zone::Exile,
+        "the first imprinted card stays exiled: the pile held no other card"
+    );
+
+    // Second imprint: `first` is the only other card in the pile, so it returns
+    // to its owner's graveyard while `second` — the card just exiled — stays.
+    murder_and_imprint(&mut runner, second_murder, second);
+    let state = runner.state();
+    assert_eq!(
+        state.objects[&second].zone,
+        Zone::Exile,
+        "CR 608.2c: the card this resolution just exiled is not returned"
+    );
+    assert_eq!(
+        state.objects[&first].zone,
+        Zone::Graveyard,
+        "CR 607.2a: the previously exiled card returns to a graveyard"
+    );
+    assert_eq!(
+        state.objects[&first].owner, P1,
+        "the returned card is owned by P1"
+    );
+    assert!(
+        state.players[1].graveyard.contains(&first),
+        "CR 607.2a: it returns to its owner's graveyard"
+    );
+    assert_eq!(
+        state.objects[&vat].zone,
+        Zone::Battlefield,
+        "the Vat itself never left the battlefield"
+    );
+}
+
+/// Verbatim Oracle text of Mirror of Life Trapping (Scryfall).
+const MIRROR_OF_LIFE_TRAPPING: &str = "Whenever a creature enters, if it was cast, exile it, then \
+return all other permanent cards exiled with this artifact to the battlefield under their owners' \
+control.";
+
+/// CR 607.2a: the trigger's exile and the ability that reads "exiled with this
+/// artifact" are linked, so the pile holds exactly the creature cards the
+/// artifact's triggers exiled. CR 608.2c: the trigger follows its instructions
+/// in order, so the creature cast second is exiled first and is then excluded
+/// from "all other permanent cards exiled with this artifact" — only the
+/// creature exiled by the earlier trigger comes back. The first cast's trigger
+/// has no other card, so its creature stays exiled; the second cast's trigger
+/// returns that first creature to the battlefield while the second, just
+/// exiled, stays in exile.
+#[test]
+fn mirror_of_life_trapping_returns_the_earlier_creature_not_the_one_just_exiled() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    // CR 301.1: Mirror of Life Trapping is a printed noncreature artifact, {4}.
+    let mirror = scenario
+        .add_artifact_from_oracle(P0, "Mirror of Life Trapping", MIRROR_OF_LIFE_TRAPPING)
+        .with_mana_cost(parse_mtgjson_mana_cost("{4}"))
+        .id();
+    // Two printed vanilla 2/2s for P0 to cast, one per Mirror trigger.
+    let first = scenario
+        .add_creature_to_hand(P0, "Grizzly Bears", 2, 2)
+        .with_mana_cost(parse_mtgjson_mana_cost("{1}{G}"))
+        .id();
+    let second = scenario
+        .add_creature_to_hand(P0, "Runeclaw Bear", 2, 2)
+        .with_mana_cost(parse_mtgjson_mana_cost("{1}{G}"))
+        .id();
+    // {1}{G} twice: four green mana pays for both casts in this main phase.
+    scenario.with_mana_pool(
+        P0,
+        (0..4)
+            .map(|_| ManaUnit::new(ManaType::Green, ObjectId(0), false, vec![]))
+            .collect(),
+    );
+    let mut runner = scenario.build();
+    assert_eq!(
+        runner.state().objects[&mirror].zone,
+        Zone::Battlefield,
+        "reach: Mirror of Life Trapping is on the battlefield"
+    );
+
+    // First cast: the pile is empty, so nothing is returned and the creature
+    // this resolution exiled must stay in exile.
+    runner.cast(first).resolve();
+    runner.advance_until_stack_empty();
+    assert_eq!(
+        runner.state().objects[&first].zone,
+        Zone::Exile,
+        "reach: the first cast creature is exiled by the Mirror's trigger"
+    );
+
+    // Second cast: `first` is the only other card in the pile, so it returns to
+    // the battlefield while `second` — the creature just exiled — stays exiled.
+    runner.cast(second).resolve();
+    runner.advance_until_stack_empty();
+    let state = runner.state();
+    assert_eq!(
+        state.objects[&second].zone,
+        Zone::Exile,
+        "CR 608.2c: the creature this resolution just exiled is not returned"
+    );
+    assert_eq!(
+        state.objects[&first].zone,
+        Zone::Battlefield,
+        "CR 607.2a: the previously exiled creature returns to the battlefield"
+    );
+    assert_eq!(
+        state.objects[&first].owner, P0,
+        "the returned creature is owned by P0"
+    );
+    assert_eq!(
+        state.objects[&mirror].zone,
+        Zone::Battlefield,
+        "the Mirror itself never left the battlefield"
+    );
+}
+
+/// Verbatim Oracle text of Moonring Mirror (Scryfall).
+const MOONRING_MIRROR: &str = "Whenever you draw a card, exile the top card of your library face down.\nAt the beginning of your upkeep, you may exile all cards from your hand face down. If you do, put all other cards you own exiled with this artifact into your hand.";
+
+/// Drive the game with real actions until `done` holds: pass priority, decline
+/// to attack or block, and accept the only optional effect this board offers.
+/// Returns how many `OptionalEffectChoice` prompts were answered. Any other
+/// prompt fails the test by name.
+fn cycle_until(runner: &mut GameRunner, done: impl Fn(&GameRunner) -> bool) -> usize {
+    let mut optional_choices = 0;
+    for _ in 0..600 {
+        if done(runner) {
+            return optional_choices;
+        }
+        let action = match runner.state().waiting_for.clone() {
+            WaitingFor::DeclareAttackers { .. } => GameAction::DeclareAttackers {
+                attacks: vec![],
+                bands: vec![],
+            },
+            WaitingFor::DeclareBlockers { .. } => GameAction::DeclareBlockers {
+                assignments: vec![],
+            },
+            // CR 608.2d: the only optional effect here is Moonring Mirror's
+            // "you may exile all cards from your hand"; accept it.
+            WaitingFor::OptionalEffectChoice { .. } => {
+                optional_choices += 1;
+                GameAction::DecideOptionalEffect { accept: true }
+            }
+            WaitingFor::Priority { .. } => GameAction::PassPriority,
+            other => panic!("unexpected prompt {other:?}"),
+        };
+        runner.act(action).expect("the turn cycle advances");
+    }
+    panic!("the turn cycle never reached the awaited state");
+}
+
+/// CR 607.2a: every card Moonring Mirror's triggers exile is linked to it, so
+/// "all other cards you own exiled with this artifact" reads exactly the pile
+/// those triggers built. CR 608.2c: the upkeep trigger follows its instructions
+/// in order, so the hand it just exiled is not "other" and cannot come back
+/// within the same resolution, while the card an earlier upkeep exiled is not
+/// excluded and does.
+///
+/// Board: the Mirror plus one printed vanilla creature in P0's hand. At P0's
+/// first upkeep the optional hand exile takes that creature; the pile is empty
+/// (P0 has not drawn yet), so nothing returns. At the draw step P0 draws the
+/// stacked top card (the Mirror's own "whenever you draw" trigger exiles the
+/// next library card, which this test ignores). At P0's second upkeep the
+/// optional hand exile takes the drawn card: "all other cards you own exiled
+/// with this artifact" returns the first upkeep's creature to hand, and the
+/// card just exiled stays in exile.
+#[test]
+fn moonring_mirror_upkeep_returns_the_earlier_hand_exile_not_the_one_just_exiled() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    // CR 301.1: Moonring Mirror is a printed noncreature artifact, {5}.
+    let mirror = scenario
+        .add_artifact_from_oracle(P0, "Moonring Mirror", MOONRING_MIRROR)
+        .with_mana_cost(parse_mtgjson_mana_cost("{5}"))
+        .id();
+    // The only card in hand for the first upkeep's optional exile.
+    let first = scenario
+        .add_creature_to_hand(P0, "Grizzly Bears", 2, 2)
+        .with_mana_cost(parse_mtgjson_mana_cost("{1}{G}"))
+        .id();
+    // Both players must draw through the turn cycle without decking. P0's top
+    // card is added last, so `drawn` is what its first draw step takes; the
+    // card beneath it feeds the Mirror's own draw trigger.
+    for n in 0..5 {
+        scenario.add_card_to_library_top(P0, &format!("P0 Library {n}"));
+        scenario.add_card_to_library_top(P1, &format!("P1 Library {n}"));
+    }
+    let drawn = scenario.add_card_to_library_top(P0, "P0 Draw");
+    scenario.add_card_to_library_top(P1, "P1 Draw");
+    let mut runner = scenario.build();
+    let start = runner.state().turn_number;
+    assert_eq!(
+        runner.state().objects[&mirror].zone,
+        Zone::Battlefield,
+        "reach: Moonring Mirror is on the battlefield"
+    );
+
+    // First upkeep (P0's next turn): the optional hand exile takes `first`, and
+    // the pile is empty, so nothing comes back.
+    let choices = cycle_until(&mut runner, |runner| {
+        runner.state().objects[&first].zone == Zone::Exile
+    });
+    assert_eq!(choices, 1, "the upkeep trigger offered its optional exile");
+    assert_eq!(
+        runner.state().objects[&first].zone,
+        Zone::Exile,
+        "the first upkeep's exile takes the only card in hand"
+    );
+    assert_eq!(runner.state().active_player, P0, "reach: P0's upkeep");
+    assert_eq!(
+        runner.state().phase,
+        Phase::Upkeep,
+        "reach: the upkeep step"
+    );
+    assert!(
+        runner.state().turn_number >= start + 2,
+        "reach: the exile happened on P0's next turn"
+    );
+
+    // Draw step: P0 draws the stacked `drawn`; the Mirror's draw trigger then
+    // exiles the next library card, which this test does not track.
+    let choices = cycle_until(&mut runner, |runner| {
+        runner.state().players[0].hand.contains(&drawn)
+    });
+    assert_eq!(choices, 0, "the draw step asks nothing optional");
+    assert_eq!(runner.state().active_player, P0, "reach: P0's draw step");
+    assert!(
+        runner.state().turn_number < start + 4,
+        "reach: the draw is before P0's second upkeep"
+    );
+    assert_eq!(
+        runner.state().objects[&drawn].zone,
+        Zone::Hand,
+        "reach: P0 drew the stacked card"
+    );
+
+    // Second upkeep (two turns later): the optional hand exile takes `drawn`,
+    // and "all other cards you own exiled with this artifact" returns `first`
+    // while the card just exiled is not returned (CR 608.2c).
+    let choices = cycle_until(&mut runner, |runner| {
+        let state = runner.state();
+        state.objects[&first].zone == Zone::Hand && state.objects[&drawn].zone == Zone::Exile
+    });
+    assert_eq!(choices, 1, "the second upkeep offered its optional exile");
+    let state = runner.state();
+    assert_eq!(state.active_player, P0, "reach: P0's second upkeep");
+    assert_eq!(state.phase, Phase::Upkeep, "reach: the upkeep step");
+    assert!(
+        state.turn_number >= start + 4,
+        "reach: the second upkeep is two turns later"
+    );
+    assert_eq!(
+        state.objects[&first].zone,
+        Zone::Hand,
+        "CR 607.2a: the earlier upkeep's exiled card returns"
+    );
+    assert!(
+        state.players[0].hand.contains(&first),
+        "the earlier card is back in its owner's hand"
+    );
+    assert_eq!(
+        state.objects[&drawn].zone,
+        Zone::Exile,
+        "CR 608.2c: the card this resolution just exiled is not returned"
+    );
+    assert_eq!(
+        state.objects[&mirror].zone,
+        Zone::Battlefield,
+        "the Mirror itself never left the battlefield"
     );
 }

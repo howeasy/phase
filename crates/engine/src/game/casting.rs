@@ -4780,9 +4780,19 @@ pub(super) fn exile_alt_cost_permission_supports_cast(
         crate::types::ability::CastingPermission::ExileWithAltCost {
             granted_to,
             constraint,
+            single_use_group,
             ..
+        } => {
+            // CR 608.2c + CR 611.2a: a spent shared budget no longer authorizes
+            // another cast (the sweep in `consume_single_use_play_from_exile`
+            // strips the siblings; this is the gate for a stale copy).
+            single_use_group
+                .as_ref()
+                .is_none_or(|group| !state.exile_play_single_use_consumed.contains(group))
+                && exile_alt_cost_permission_grants_to_player(player, *granted_to)
+                && cast_permission_constraint_allows_cast(state, obj, constraint, resulting_mv)
         }
-        | crate::types::ability::CastingPermission::ExileWithAltAbilityCost {
+        crate::types::ability::CastingPermission::ExileWithAltAbilityCost {
             granted_to,
             constraint,
             ..
@@ -5072,6 +5082,34 @@ pub(super) fn selected_exile_alt_cost_permission_graveyard_replacement(
             ..
         } => graveyard_replacement.clone(),
         _ => None,
+    }
+}
+
+/// CR 608.2c + CR 611.2a: the shared cast budget the cast of `object_id` spends:
+/// the `single_use_group` of the `ExileWithAltCost` permission elected for THIS
+/// cast, read before the stack move drops the object's permissions. Mirrors
+/// `selected_exile_alt_cost_permission_graveyard_replacement`, so a sibling
+/// permission's group cannot be spent by a cast made under another.
+pub(super) fn selected_exile_alt_cost_permission_single_use_group(
+    state: &GameState,
+    object_id: ObjectId,
+    player: PlayerId,
+    casting_permission_index: Option<CastingPermissionIndex>,
+) -> Option<TrackedSetId> {
+    let obj = state.objects.get(&object_id)?;
+    let permission =
+        selected_exile_alt_cost_permission(state, obj, player, casting_permission_index)?;
+    match permission {
+        crate::types::ability::CastingPermission::ExileWithAltCost {
+            single_use_group, ..
+        } => *single_use_group,
+        crate::types::ability::CastingPermission::AdventureCreature
+        | crate::types::ability::CastingPermission::ExileWithAltAbilityCost { .. }
+        | crate::types::ability::CastingPermission::PlayFromExile { .. }
+        | crate::types::ability::CastingPermission::ExileWithEnergyCost
+        | crate::types::ability::CastingPermission::WarpExile { .. }
+        | crate::types::ability::CastingPermission::Plotted { .. }
+        | crate::types::ability::CastingPermission::Foretold { .. } => None,
     }
 }
 
@@ -5565,7 +5603,7 @@ pub(crate) fn single_use_play_from_exile_group(
     })
 }
 
-/// CR 601.2a + CR 611.2a: Spend a single-use `PlayFromExile` grant. Records the
+/// CR 608.2c + CR 611.2a: Spend a single-use `PlayFromExile` or `ExileWithAltCost` grant. Records the
 /// `group` in `exile_play_single_use_consumed` and strips the now-void
 /// `PlayFromExile { single_use_group == group, single_use: true }` permission
 /// from every object still carrying it, so the remaining cards in that tracked
@@ -5577,7 +5615,7 @@ pub(crate) fn single_use_play_from_exile_group(
 /// is any other zone: Locke, Treasure Hunter's batch is MILLED, so its siblings
 /// sit in graveyards and kept a permission this call had just declared spent.
 /// The sweep reads the grant's own population: every object carrying this
-/// group's single-use `PlayFromExile`, wherever it is. That population includes
+/// group's single-use `PlayFromExile` or `ExileWithAltCost`, wherever it is. That population includes
 /// the CR 730.3c components the grant found outside the set and outside exile,
 /// and it subsumes the former set and exile legs, a deserialized or legacy grant
 /// included. It can strip only permissions carrying this exact group. It does
@@ -5598,6 +5636,9 @@ pub(crate) fn consume_single_use_play_from_exile(state: &mut GameState, group: T
             crate::types::ability::CastingPermission::PlayFromExile {
                 single_use_group,
                 single_use: true,
+                ..
+            } | crate::types::ability::CastingPermission::ExileWithAltCost {
+                single_use_group,
                 ..
             } if *single_use_group == Some(group)
         )
@@ -19741,6 +19782,7 @@ fn install_resolution_cast_permission(
             enters_with_modifications: request.enters_with_modifications.clone(),
             mana_spend_permission,
             cast_cost_modifier: None,
+            single_use_group: None,
         });
     Ok(ResolutionCastPermission {
         index,
@@ -39356,6 +39398,7 @@ mod castable_zone_authority_tests {
             enters_with_modifications: Default::default(),
             mana_spend_permission: None,
             cast_cost_modifier: None,
+            single_use_group: None,
         };
 
         let mut ungranteed = bare.clone();
@@ -39393,6 +39436,7 @@ mod castable_zone_authority_tests {
             enters_with_modifications: Default::default(),
             mana_spend_permission: None,
             cast_cost_modifier: None,
+            single_use_group: None,
         }];
 
         assert!(
@@ -39581,6 +39625,7 @@ mod castable_zone_authority_tests {
             enters_with_modifications: Default::default(),
             mana_spend_permission: None,
             cast_cost_modifier: None,
+            single_use_group: None,
         };
 
         assert!(
@@ -39808,6 +39853,7 @@ mod castable_zone_authority_tests {
             enters_with_modifications: Default::default(),
             mana_spend_permission: None,
             cast_cost_modifier: None,
+            single_use_group: None,
         };
 
         let land_id = card(&mut state, 1, PlayerId(0), Zone::Graveyard);
@@ -39943,6 +39989,7 @@ mod castable_zone_authority_tests {
                         enters_with_modifications: Default::default(),
                         mana_spend_permission: None,
                         cast_cost_modifier: None,
+                        single_use_group: None,
                     }];
                 }
                 let non_land = state.objects[&id].clone();
@@ -41430,6 +41477,7 @@ mod selected_impulse_authority_tests {
                     enters_with_counter: None,
                     enters_with_modifications: Default::default(),
                     cast_cost_modifier: None,
+                    single_use_group: None,
                 },
                 free,
             ]);

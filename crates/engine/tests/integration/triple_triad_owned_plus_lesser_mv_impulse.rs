@@ -141,6 +141,7 @@ fn triple_triad_grants_free_play_to_owned_and_lesser_mv_exiled_cards_only() {
             exiled_id: id,
             source_id: source,
             kind: ExileLinkKind::TrackedBySource,
+            supplier: None,
         });
     }
     state.last_zone_changed_ids = vec![owned_mv3, opp_mv1, opp_mv3, opp_mv4];
@@ -250,6 +251,7 @@ fn triple_triad_does_not_fall_back_to_stale_owned_card_when_current_batch_has_no
             exiled_id: id,
             source_id: source,
             kind: ExileLinkKind::TrackedBySource,
+            supplier: None,
         });
     }
     state.last_zone_changed_ids = vec![current_opp_mv1, current_opp_mv4];

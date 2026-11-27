@@ -866,6 +866,9 @@ pub fn prune_end_of_turn_casting_permissions(state: &mut GameState) {
                         single_use: true,
                         ..
                     } => *single_use_group,
+                    CastingPermission::ExileWithAltCost {
+                        single_use_group, ..
+                    } => *single_use_group,
                     _ => None,
                 })
             })
@@ -23014,6 +23017,7 @@ mod tests {
             exiled_id: exiled,
             source_id: host,
             kind: ExileLinkKind::TrackedBySource,
+            supplier: None,
         });
 
         state.layers_dirty.mark_full();
@@ -24226,6 +24230,7 @@ mod tests {
             exiled_id: material,
             source_id: locus,
             kind: ExileLinkKind::CraftMaterial,
+            supplier: None,
         });
 
         // A card exiled by a DIFFERENT source (not Locus) with a {T}: gain 9
@@ -24258,6 +24263,7 @@ mod tests {
             exiled_id: other_exiled,
             source_id: other_source,
             kind: ExileLinkKind::CraftMaterial,
+            supplier: None,
         });
 
         state.layers_dirty.mark_full();
@@ -24667,6 +24673,7 @@ mod tests {
             exiled_id: exiled_creature,
             source_id: cauldron,
             kind: ExileLinkKind::TrackedBySource,
+            supplier: None,
         });
 
         // Exiled NON-creature (artifact) card with {T}: gain 7 life — excluded by
@@ -24697,6 +24704,7 @@ mod tests {
             exiled_id: exiled_artifact,
             source_id: cauldron,
             kind: ExileLinkKind::TrackedBySource,
+            supplier: None,
         });
 
         // A creature you control WITH a +1/+1 counter — SHOULD receive the grant.
@@ -25364,6 +25372,7 @@ mod tests {
                 exiled_id: provider,
                 source_id: host,
                 kind: ExileLinkKind::TrackedBySource,
+                supplier: None,
             });
             provider_abilities.push((provider, ability));
         }
@@ -25469,6 +25478,7 @@ mod tests {
             exiled_id: provider,
             source_id: host,
             kind: ExileLinkKind::TrackedBySource,
+            supplier: None,
         });
 
         let m = state.objects.len() as u64;
@@ -28073,6 +28083,7 @@ mod tests {
             enters_with_modifications: Default::default(),
             mana_spend_permission: None,
             cast_cost_modifier: None,
+            single_use_group: None,
         }
     }
 

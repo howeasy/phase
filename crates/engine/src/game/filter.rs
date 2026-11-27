@@ -8285,18 +8285,19 @@ fn filter_inner_for_object(
                 )
         }
         // CR 603.10a + CR 607.2a: "cards exiled with [this object]" on a
-        // trigger resolves from `players::linked_exile_pile` of the trigger's
-        // bound incarnation; other contexts fall back to live exile links.
+        // trigger resolves from the pile of the trigger's bound incarnation
+        // (`players::linked_exile_pile_holds`); other contexts fall back to live exile links.
         // CR 400.7: an entry names the object it captured, so a card that left
         // exile (and any later exile of it) does not match.
         TargetFilter::ExiledBySource => {
-            let linked = match trigger_source {
-                Some(source) => crate::game::players::linked_exile_pile(state, source),
-                None => crate::game::players::linked_exile_cards_for_source(state, source_id),
-            };
-            linked
-                .iter()
-                .any(|entry| entry.exiled_id == object_id && entry.is_still_exiled(state))
+            match trigger_source {
+                Some(source) => {
+                    crate::game::players::linked_exile_pile_holds(state, source, object_id)
+                }
+                None => crate::game::players::linked_exile_cards_for_source(state, source_id)
+                    .iter()
+                    .any(|entry| entry.exiled_id == object_id && entry.is_still_exiled(state)),
+            }
         }
         // CR 607.2a: References a specific card exiled by the source, indexed by order.
         // Used by The Mimeoplasm to distinguish "the first card exiled this way" from
@@ -21019,6 +21020,7 @@ mod tests {
             exiled_id: exiled,
             source_id: source,
             kind: ExileLinkKind::TrackedBySource,
+            supplier: None,
         });
 
         let filter = TargetFilter::ExiledBySource;
@@ -21073,6 +21075,7 @@ mod tests {
             exiled_id: linked_creature,
             source_id: source,
             kind: ExileLinkKind::TrackedBySource,
+            supplier: None,
         });
 
         let filter = TargetFilter::And {
@@ -21138,9 +21141,10 @@ mod tests {
             .snapshot_for_zone_change(source, Some(Zone::Battlefield), Zone::Battlefield)
             .trigger_source_context
             .expect("a battlefield object has a trigger source context");
-        trigger_source.linked_exile_snapshot =
-            vec![crate::game::exile_links::exiled_card_snapshot(&state, card)
-                .expect("the card is in exile")];
+        trigger_source.linked_exile_snapshot = vec![
+            crate::game::exile_links::exiled_card_snapshot(&state, card, None)
+                .expect("the card is in exile"),
+        ];
         let matches_snapshot = |state: &GameState| {
             super::matches_target_filter(
                 state,
@@ -21168,6 +21172,7 @@ mod tests {
             exiled_id: card,
             source_id: source,
             kind: crate::types::game_state::ExileLinkKind::TrackedBySource,
+            supplier: None,
         });
         assert!(
             matches_target_filter(&state, card, &TargetFilter::ExiledBySource, source),
@@ -22934,6 +22939,7 @@ mod tests {
                 exiled_id: exiled,
                 source_id: lens,
                 kind: ExileLinkKind::TrackedBySource,
+                supplier: None,
             });
         }
 

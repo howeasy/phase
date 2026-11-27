@@ -65,6 +65,7 @@ fn stage_exiled_with_source(
         exiled_id: card,
         source_id: source,
         kind: ExileLinkKind::TrackedBySource,
+        supplier: None,
     });
     state
         .cards_exiled_with_source_this_turn

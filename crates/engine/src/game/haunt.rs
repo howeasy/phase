@@ -39,6 +39,7 @@ fn add_haunt_link(state: &mut GameState, card: ObjectId, creature: ObjectId) {
         exiled_id: card,
         source_id: creature,
         kind: ExileLinkKind::Haunt,
+        supplier: None,
     });
 }
 

@@ -36,6 +36,7 @@ fn exile_return_source_leaves_battlefield_returns_exiled_card() {
         kind: ExileLinkKind::UntilSourceLeaves {
             return_zone: Zone::Battlefield,
         },
+        supplier: None,
     });
 
     // Simulate events where source leaves the battlefield
@@ -187,6 +188,7 @@ fn exile_return_to_hand_when_exiled_from_hand() {
         kind: ExileLinkKind::UntilSourceLeaves {
             return_zone: Zone::Hand,
         },
+        supplier: None,
     });
 
     let events = vec![GameEvent::ZoneChanged {
@@ -244,6 +246,7 @@ fn exile_return_card_already_gone_no_error() {
         kind: ExileLinkKind::UntilSourceLeaves {
             return_zone: Zone::Battlefield,
         },
+        supplier: None,
     });
 
     let events = vec![GameEvent::ZoneChanged {
@@ -307,6 +310,7 @@ fn exile_return_link_removed_after_return() {
         kind: ExileLinkKind::UntilSourceLeaves {
             return_zone: Zone::Battlefield,
         },
+        supplier: None,
     });
     state.exile_links.push(ExileLink {
         exiled_id: other_exiled,
@@ -314,6 +318,7 @@ fn exile_return_link_removed_after_return() {
         kind: ExileLinkKind::UntilSourceLeaves {
             return_zone: Zone::Battlefield,
         },
+        supplier: None,
     });
 
     let events = vec![GameEvent::ZoneChanged {
@@ -378,6 +383,7 @@ fn exile_return_end_to_end_through_pipeline() {
         kind: ExileLinkKind::UntilSourceLeaves {
             return_zone: Zone::Battlefield,
         },
+        supplier: None,
     });
 
     // Destroy the source via move_to_zone, then run the post-action pipeline
@@ -470,6 +476,7 @@ fn until_source_leaves_return_brings_back_all_merge_components() {
         kind: ExileLinkKind::UntilSourceLeaves {
             return_zone: Zone::Battlefield,
         },
+        supplier: None,
     });
 
     // The source leaves the battlefield → the implicit return fires.
@@ -557,6 +564,7 @@ fn exile_return_after_destroy_resolution_via_apply() {
         kind: ExileLinkKind::UntilSourceLeaves {
             return_zone: Zone::Battlefield,
         },
+        supplier: None,
     });
 
     // P1 casts a Destroy ability targeting WA: push ResolvedAbility with
@@ -659,6 +667,7 @@ fn exile_return_occurs_before_a_pending_resolution_choice() {
         kind: ExileLinkKind::UntilSourceLeaves {
             return_zone: Zone::Battlefield,
         },
+        supplier: None,
     });
 
     let mut events = Vec::new();
@@ -1221,6 +1230,7 @@ fn exile_return_fires_returned_creatures_etb_trigger() {
         kind: ExileLinkKind::UntilSourceLeaves {
             return_zone: Zone::Battlefield,
         },
+        supplier: None,
     });
 
     let hand_before = state.players[0].hand.len();
@@ -1386,6 +1396,7 @@ fn exile_return_combines_normal_and_delayed_triggers_in_one_ordering_prompt() {
         kind: ExileLinkKind::UntilSourceLeaves {
             return_zone: Zone::Battlefield,
         },
+        supplier: None,
     });
 
     let mut events = Vec::new();
@@ -1587,6 +1598,7 @@ fn reanimator_aura_reenters_from_exile_and_attaches_to_graveyard_creature() {
         kind: ExileLinkKind::UntilSourceLeaves {
             return_zone: Zone::Battlefield,
         },
+        supplier: None,
     });
 
     // The source leaves → the Aura's implicit return fires and consults the host
@@ -1684,6 +1696,7 @@ fn battlefield_scoped_aura_reenters_only_when_a_legal_host_exists() {
         kind: ExileLinkKind::UntilSourceLeaves {
             return_zone: Zone::Battlefield,
         },
+        supplier: None,
     });
 
     let mut events_a = vec![source_leaves_battlefield_event(source_a)];
@@ -1725,6 +1738,7 @@ fn battlefield_scoped_aura_reenters_only_when_a_legal_host_exists() {
         kind: ExileLinkKind::UntilSourceLeaves {
             return_zone: Zone::Battlefield,
         },
+        supplier: None,
     });
 
     let mut events_b = vec![source_leaves_battlefield_event(source_b)];
@@ -1795,6 +1809,7 @@ fn graveyard_scoped_aura_stays_in_exile_when_no_legal_graveyard_creature() {
         kind: ExileLinkKind::UntilSourceLeaves {
             return_zone: Zone::Battlefield,
         },
+        supplier: None,
     });
 
     let mut events = vec![source_leaves_battlefield_event(source_id)];

@@ -120,6 +120,7 @@ fn build_locus_state(cap: Option<ActivationRestriction>) -> (GameState, ObjectId
         exiled_id: material,
         source_id: locus,
         kind: ExileLinkKind::CraftMaterial,
+        supplier: None,
     });
 
     // Materialize the layer-6 grant so the donated ability lands on Locus.

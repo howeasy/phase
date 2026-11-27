@@ -284,6 +284,7 @@ pub(crate) fn tracked_exile_of_acting_incarnation(
 pub(crate) fn exiled_card_snapshot(
     state: &GameState,
     exiled_id: ObjectId,
+    supplier: Option<LinkedAbilitySource>,
 ) -> Option<LinkedExileSnapshot> {
     state
         .objects
@@ -296,6 +297,7 @@ pub(crate) fn exiled_card_snapshot(
             // split card records its combined mana value.
             mana_value: obj.effective_mana_value(),
             incarnation: obj.incarnation,
+            supplier,
         })
 }
 
@@ -404,6 +406,10 @@ pub(crate) fn push_with_kind_as(
 ) {
     let live = state.objects.get(&source_id).map(|obj| obj.incarnation);
     let departed_creator = creator.filter(|creator| live != Some(*creator));
+    // CR 607.5 + CR 607.2a: the ability pair doing this exile, kept on the link
+    // (and on its LKI snapshot) so a later reader of the pile can tell whether
+    // the card was exiled by an ability linked to its own.
+    let supplier = resolving_exile_supplier(state, source_id);
     let recorded = match (&kind, departed_creator) {
         // CR 610.3 + CR 400.7: the incarnation that made an "until it leaves"
         // exile had already left the battlefield (a copy of its ability put
@@ -413,7 +419,7 @@ pub(crate) fn push_with_kind_as(
         (
             ExileLinkKind::TrackedBySource | ExileLinkKind::UntilSourceLeaves { .. },
             Some(creator),
-        ) => record_departed_linked_exile(state, exiled_id, source_id, creator),
+        ) => record_departed_linked_exile(state, exiled_id, source_id, creator, supplier),
         // The live object's own exile, or a kind that is never diverted: a
         // look link carries its creator (`push_look_link`); a craft material is
         // linked at cost time; a cast-cost link is made while the spell is the
@@ -430,7 +436,7 @@ pub(crate) fn push_with_kind_as(
             | ExileLinkKind::CraftMaterial
             | ExileLinkKind::CastCost,
             _,
-        ) => record_link(state, exiled_id, source_id, kind),
+        ) => record_link(state, exiled_id, source_id, kind, supplier),
     };
     if recorded {
         mirror_link_to_linked_emblems(state, exiled_id, source_id);
@@ -449,9 +455,10 @@ fn record_departed_linked_exile(
     exiled_id: ObjectId,
     source_id: ObjectId,
     creator: u64,
+    supplier: Option<LinkedAbilitySource>,
 ) -> bool {
     // The exile was replaced: nothing was exiled with any incarnation.
-    let Some(snapshot) = exiled_card_snapshot(state, exiled_id) else {
+    let Some(snapshot) = exiled_card_snapshot(state, exiled_id, supplier) else {
         return false;
     };
     let entries = state.linked_exile_lki.entry(source_id).or_default();
@@ -489,6 +496,7 @@ fn record_link(
     exiled_id: ObjectId,
     source_id: ObjectId,
     kind: ExileLinkKind,
+    supplier: Option<LinkedAbilitySource>,
 ) -> bool {
     if let Some(existing) = state
         .exile_links
@@ -506,6 +514,7 @@ fn record_link(
         exiled_id,
         source_id,
         kind,
+        supplier,
     });
     push_exiled_with_source_this_turn(state, exiled_id, source_id);
     true
@@ -533,7 +542,10 @@ pub(crate) fn linked_exile_incarnation(state: &GameState, source_id: ObjectId) -
 /// of `source_id` is resolving (a replacement redirect, a state-based action,
 /// another object's effect, a spell), or when that ability is granted or its
 /// provenance is not attributable: such an exile pairs with no emblem.
-fn resolving_exile_supplier(state: &GameState, source_id: ObjectId) -> Option<LinkedAbilitySource> {
+pub(crate) fn resolving_exile_supplier(
+    state: &GameState,
+    source_id: ObjectId,
+) -> Option<LinkedAbilitySource> {
     let entry = state
         .resolving_stack_entry
         .as_ref()
@@ -586,7 +598,13 @@ fn mirror_link_to_linked_emblems(state: &mut GameState, exiled_id: ObjectId, sou
         .collect();
     for emblem_id in emblems {
         // `record_link`, not `push_with_kind`: a mirror link never mirrors again.
-        record_link(state, exiled_id, emblem_id, ExileLinkKind::TrackedBySource);
+        record_link(
+            state,
+            exiled_id,
+            emblem_id,
+            ExileLinkKind::TrackedBySource,
+            None,
+        );
     }
 }
 
@@ -938,6 +956,7 @@ mod tests {
                 enters_with_modifications: Default::default(),
                 mana_spend_permission: None,
                 cast_cost_modifier: None,
+                single_use_group: None,
             },
         );
         let play_grant = exiled(
@@ -990,6 +1009,7 @@ mod tests {
                 enters_with_modifications: Default::default(),
                 mana_spend_permission: None,
                 cast_cost_modifier: None,
+                single_use_group: None,
             },
         );
 
@@ -2005,6 +2025,15 @@ mod tests {
             .any(|link| link.exiled_id == exiled && link.source_id == source)
     }
 
+    /// The live link for the pair, when `has_link` answered `true`.
+    fn link_of(state: &GameState, exiled: ObjectId, source: ObjectId) -> &ExileLink {
+        state
+            .exile_links
+            .iter()
+            .find(|link| link.exiled_id == exiled && link.source_id == source)
+            .expect("a live link for the pair")
+    }
+
     /// CR 607.1d + CR 607.2a: a card exiled by a characteristic activated
     /// ability of the creator is mirrored to the creator's consumer emblem when
     /// the incarnation and the copiable set match.
@@ -2268,7 +2297,7 @@ mod tests {
     }
 
     fn snapshot_of(state: &GameState, card: ObjectId) -> LinkedExileSnapshot {
-        exiled_card_snapshot(state, card).expect("the card is in exile")
+        exiled_card_snapshot(state, card, None).expect("the card is in exile")
     }
 
     /// CR 400.7 + CR 113.7a + CR 607.2a: a tracked exile made by an ability of
@@ -2350,6 +2379,71 @@ mod tests {
         push_tracked_by_source(&mut state, card, source);
         assert!(!has_link(&state, card, source));
         assert!(!state.linked_exile_lki.contains_key(&source));
+    }
+
+    /// CR 400.7 + CR 113.7a + CR 607.2a + CR 607.5: the supplier stamped on a
+    /// tracked exile names the ability pair that made it — the push-time
+    /// capture of the departed incarnation for an LKI snapshot, the live
+    /// object's incarnation for a link, and nothing when no ability of the
+    /// source is resolving. `PartialEq` on both `LinkedExileSnapshot` and
+    /// `ExileLink` ignores `supplier`, so each scenario asserts the field
+    /// itself: a `None` stamped anywhere would fail it.
+    #[test]
+    fn a_departed_incarnations_exile_records_the_exiling_pair_on_its_lki_snapshot() {
+        // Stamped 4 with characteristic provenance, live 6: the departed
+        // incarnation's snapshot carries the resolving pair.
+        let (mut state, source) = departed_creator_fixture();
+        resolving_characteristic(&mut state, source, CharacteristicSetRef::Own);
+        let expected = resolving_exile_supplier(&state, source);
+        assert!(expected.is_some(), "the resolving ability is attributable");
+        let card = exile_card(&mut state);
+        push_tracked_by_source(&mut state, card, source);
+        assert!(
+            !has_link(&state, card, source),
+            "the departed incarnation owns the exile"
+        );
+        let entries = &state.linked_exile_lki[&source];
+        assert_eq!(entries.len(), 1, "one LKI entry");
+        assert_eq!(entries[0].snapshot.len(), 1, "the card once");
+        assert_eq!(entries[0].snapshot[0].supplier, expected);
+        assert!(
+            entries[0].snapshot[0].supplier.is_some(),
+            "the snapshot names the exiling pair, not nothing"
+        );
+
+        // Stamped 6 (the live object), same provenance: the live link carries
+        // the live object's pair.
+        let (mut state, source) = departed_creator_fixture();
+        resolving_as(&mut state, source, ResolvingKind::Activated, |ability| {
+            ability.source_incarnation = Some(6);
+            ability.set_source_ability_provenance_recursive(Some(
+                AbilityProvenance::Characteristic(CharacteristicSetRef::Own),
+            ));
+        });
+        let card = exile_card(&mut state);
+        push_tracked_by_source(&mut state, card, source);
+        assert!(
+            has_link(&state, card, source),
+            "the live object's own exile"
+        );
+        assert_eq!(
+            link_of(&state, card, source).supplier,
+            Some(LinkedAbilitySource {
+                creator: ObjectIncarnationRef::of(source, 6),
+                characteristic_set: CharacteristicSetRef::Own,
+            })
+        );
+
+        // No resolving ability: an unattributed exile still links, with no pair.
+        let (mut state, source) = departed_creator_fixture();
+        state.resolving_stack_entry = None;
+        let card = exile_card(&mut state);
+        push_tracked_by_source(&mut state, card, source);
+        assert!(
+            has_link(&state, card, source),
+            "an exile with no resolving ability still links"
+        );
+        assert_eq!(link_of(&state, card, source).supplier, None);
     }
 
     /// CR 400.7 + CR 607.2a: a card the departed incarnation exiles, which then
@@ -2480,6 +2574,7 @@ mod tests {
             exiled_id: live_card,
             source_id: source,
             kind: ExileLinkKind::TrackedBySource,
+            supplier: None,
         });
         state.linked_exile_lki.insert(
             source,
@@ -2562,6 +2657,7 @@ mod tests {
                 exiled_id,
                 source_id: source,
                 kind,
+                supplier: None,
             });
         }
         let read = |reader| kinds_of(links_for_reader(&state, source, Some(reader)));

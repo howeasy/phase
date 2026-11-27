@@ -1065,6 +1065,7 @@ fn valki_x_ignores_mv_x_card_exiled_by_another_source() {
         exiled_id: foreign,
         source_id: other_source,
         kind: ExileLinkKind::TrackedBySource,
+        supplier: None,
     });
 
     let cards = activate_x(&mut runner, valki, 3).expect("X=3 must prompt");
@@ -2606,6 +2607,7 @@ fn stage_exiled_with_emblem(
         exiled_id: card,
         source_id: emblem,
         kind: ExileLinkKind::TrackedBySource,
+        supplier: None,
     });
     state.objects.get_mut(&card).unwrap().exiled_by = Some(exiler);
 }

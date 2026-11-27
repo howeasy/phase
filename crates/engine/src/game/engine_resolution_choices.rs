@@ -13672,6 +13672,7 @@ mod tests {
                 enters_with_modifications: Default::default(),
                 mana_spend_permission: None,
                 cast_cost_modifier: None,
+                single_use_group: None,
             });
 
         let window = WaitingFor::CastOffer {

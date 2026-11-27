@@ -3419,6 +3419,7 @@ fn foretell_cast_does_not_inherit_sibling_alt_cost_or_spend_rider() {
                 enters_with_counter: None,
                 enters_with_modifications: Default::default(),
                 cast_cost_modifier: None,
+                single_use_group: None,
             });
     }
 
@@ -4706,6 +4707,7 @@ fn exile_with_alt_cost_zero_uses_no_cost_path() {
             enters_with_counter: None,
             enters_with_modifications: Default::default(),
             cast_cost_modifier: None,
+            single_use_group: None,
         });
     let prepared = prepare_spell_cast(&state, PlayerId(0), exiled).unwrap();
     assert!(matches!(prepared.mana_cost, ManaCost::NoCost));
@@ -21175,6 +21177,7 @@ fn graveyard_in_place_alt_cost_grant_is_consumed_after_one_cast() {
                 enters_with_counter: None,
                 enters_with_modifications: Default::default(),
                 cast_cost_modifier: None,
+                single_use_group: None,
             });
     }
 
@@ -21702,6 +21705,7 @@ fn enters_with_counter_does_not_leak_from_non_consumed_permission() {
                     enters_with_counter: rider_on_consumed.clone(),
                     enters_with_modifications: Default::default(),
                     cast_cost_modifier: None,
+                    single_use_group: None,
                 });
             // P2: foreign-granted (to the opponent) so it never supports
             // PlayerId(0)'s cast — it is the non-consumed sibling carrying the
@@ -21721,6 +21725,7 @@ fn enters_with_counter_does_not_leak_from_non_consumed_permission() {
                     enters_with_counter: Some(CounterType::Finality),
                     enters_with_modifications: Default::default(),
                     cast_cost_modifier: None,
+                    single_use_group: None,
                 });
         }
 
@@ -21821,6 +21826,7 @@ fn exact_permission_does_not_inherit_sibling_etb_counter() {
                     enters_with_modifications: Default::default(),
                     mana_spend_permission: None,
                     cast_cost_modifier: None,
+                    single_use_group: None,
                 });
         }
     }
@@ -21920,6 +21926,7 @@ fn exact_permission_does_not_inherit_sibling_permanent_modification() {
                     },
                     mana_spend_permission: None,
                     cast_cost_modifier: None,
+                    single_use_group: None,
                 });
         }
     }
@@ -22151,6 +22158,7 @@ fn resolution_request_mods_do_not_leak_from_sibling_permission() {
                     },
                     mana_spend_permission: None,
                     cast_cost_modifier: None,
+                    single_use_group: None,
                 });
         }
     }
@@ -22224,6 +22232,7 @@ fn hand_alt_cost_permission_overrides_printed_mana_cost() {
                 enters_with_counter: None,
                 enters_with_modifications: Default::default(),
                 cast_cost_modifier: None,
+                single_use_group: None,
             });
     }
 
@@ -22276,6 +22285,7 @@ fn beseech_style_permission() -> CastingPermission {
         enters_with_counter: None,
         enters_with_modifications: Default::default(),
         cast_cost_modifier: None,
+        single_use_group: None,
     }
 }
 
@@ -22319,6 +22329,7 @@ fn failing_mana_value_permission_does_not_override_unconstrained_permission() {
                 enters_with_counter: None,
                 enters_with_modifications: Default::default(),
                 cast_cost_modifier: None,
+                single_use_group: None,
             });
     }
 
@@ -29469,6 +29480,7 @@ fn prototype_from_exile_uses_play_permission_any_color_not_alt_cost_sibling() {
             enters_with_counter: None,
             enters_with_modifications: Default::default(),
             cast_cost_modifier: None,
+            single_use_group: None,
         },
         CastingPermission::PlayFromExile {
             provenance: crate::types::ability::PlayFromExileProvenance::Impulse,
@@ -31410,6 +31422,7 @@ fn cast_only_from_zones_blocks_affected_opponent_from_exile() {
             enters_with_counter: None,
             enters_with_modifications: Default::default(),
             cast_cost_modifier: None,
+            single_use_group: None,
         });
 
     assert!(is_blocked_by_cast_only_from_zones(
@@ -34730,6 +34743,7 @@ fn cast_with_keyword_convoke_uses_caster_not_stored_controller() {
                 enters_with_counter: None,
                 enters_with_modifications: Default::default(),
                 cast_cost_modifier: None,
+                single_use_group: None,
             });
     }
 
@@ -48128,6 +48142,7 @@ fn normal_cost_grant(player: PlayerId, cost: ManaCost) -> crate::types::ability:
         enters_with_modifications: Default::default(),
         mana_spend_permission: None,
         cast_cost_modifier: None,
+        single_use_group: None,
     }
 }
 
@@ -48453,6 +48468,7 @@ fn free_cast_grant(player: PlayerId) -> crate::types::ability::CastingPermission
         enters_with_modifications: Default::default(),
         mana_spend_permission: None,
         cast_cost_modifier: None,
+        single_use_group: None,
     }
 }
 
@@ -49095,6 +49111,7 @@ fn resolution_offer_grant(
         enters_with_modifications: Default::default(),
         mana_spend_permission: None,
         cast_cost_modifier: None,
+        single_use_group: None,
     }
 }
 
@@ -50066,6 +50083,7 @@ fn link_exiled_to_source(state: &mut GameState, exiled_id: ObjectId, source_id: 
         exiled_id,
         source_id,
         kind: ExileLinkKind::TrackedBySource,
+        supplier: None,
     });
 }
 
@@ -57153,6 +57171,7 @@ fn graveyard_paid_offer_uses_exact_appended_permission_over_conflicting_sibling(
             enters_with_modifications: Default::default(),
             mana_spend_permission: None,
             cast_cost_modifier: None,
+            single_use_group: None,
         });
     add_mana(&mut state, PlayerId(0), ManaType::Red, 1);
     resolve_graveyard_paid_grant_with_exile_rider(&mut state, spell);
@@ -58674,6 +58693,7 @@ fn exact_resolution_offer_does_not_inherit_sibling_cast_transformed() {
                 enters_with_modifications: Default::default(),
                 mana_spend_permission: None,
                 cast_cost_modifier: None,
+                single_use_group: None,
             });
     }
     let face_policy = crate::types::ability::ResolutionCastFacePolicy::new(
@@ -58850,6 +58870,7 @@ fn exact_resolution_offer_without_concession_does_not_inherit_later_any_color_si
                 enters_with_modifications: Default::default(),
                 mana_spend_permission: None,
                 cast_cost_modifier: None,
+                single_use_group: None,
             });
         obj.casting_permissions
             .push(CastingPermission::ExileWithAltCost {
@@ -58866,6 +58887,7 @@ fn exact_resolution_offer_without_concession_does_not_inherit_later_any_color_si
                 enters_with_modifications: Default::default(),
                 mana_spend_permission: Some(ManaSpendPermission::AnyColor),
                 cast_cost_modifier: None,
+                single_use_group: None,
             });
     }
     add_mana(&mut state, PlayerId(0), ManaType::Red, 1);

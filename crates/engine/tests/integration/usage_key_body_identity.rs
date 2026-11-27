@@ -553,6 +553,7 @@ fn cauldron_granted_capped_untap_enforces_cap_through_announced_key() {
         source_id: cauldron,
         exiled_id: exiled,
         kind: ExileLinkKind::TrackedBySource,
+        supplier: None,
     });
     mark_layers_full(runner.state_mut());
     flush_layers(runner.state_mut());

@@ -3086,6 +3086,7 @@ fn a_room_cast_from_exile_offers_the_face_choice_per_cast() {
         exiled_id: room,
         source_id: permission_source,
         kind: ExileLinkKind::TrackedBySource,
+        supplier: None,
     });
 
     cast_room_choosing_front(&mut state, room, CardId(908), "exile");
@@ -3103,6 +3104,7 @@ fn a_room_cast_from_exile_offers_the_face_choice_per_cast() {
         exiled_id: room,
         source_id: permission_source,
         kind: ExileLinkKind::TrackedBySource,
+        supplier: None,
     });
     let second = apply_as_current(
         &mut state,

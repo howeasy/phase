@@ -24674,6 +24674,7 @@ mod tests {
             exiled_id: oid,
             source_id: link_host,
             kind: ExileLinkKind::TrackedBySource,
+            supplier: None,
         });
         oid
     }

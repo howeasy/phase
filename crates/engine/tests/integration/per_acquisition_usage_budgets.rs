@@ -117,6 +117,7 @@ fn native_and_granted_ranger_copies_activate_independently() {
         source_id: cauldron,
         exiled_id: exiled,
         kind: ExileLinkKind::TrackedBySource,
+        supplier: None,
     });
     mark_layers_full(runner.state_mut());
     flush_layers(runner.state_mut());
@@ -250,6 +251,7 @@ fn marvin_holds_one_instance_per_carrier() {
         source_id: cauldron,
         exiled_id: exiled,
         kind: ExileLinkKind::TrackedBySource,
+        supplier: None,
     });
     mark_layers_full(runner.state_mut());
     flush_layers(runner.state_mut());
@@ -343,6 +345,7 @@ fn marvin_with_a_single_carrier_holds_one_instance() {
         source_id: cauldron,
         exiled_id: exiled,
         kind: ExileLinkKind::TrackedBySource,
+        supplier: None,
     });
     mark_layers_full(runner.state_mut());
     flush_layers(runner.state_mut());
@@ -575,6 +578,7 @@ fn marvin_redonated_twins_hold_independent_budgets() {
         source_id: cauldron,
         exiled_id: exiled,
         kind: ExileLinkKind::TrackedBySource,
+        supplier: None,
     });
     mark_layers_full(runner.state_mut());
     flush_layers(runner.state_mut());

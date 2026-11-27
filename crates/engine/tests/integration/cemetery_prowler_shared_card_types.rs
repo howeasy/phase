@@ -80,6 +80,7 @@ fn cemetery_prowler_counts_only_shared_types_from_its_own_linked_exile() {
                 source_id: prowler,
                 exiled_id: exiled,
                 kind: ExileLinkKind::TrackedBySource,
+                supplier: None,
             }),
             ExileCase::Empty => {}
             ExileCase::Unlinked => {}
@@ -87,6 +88,7 @@ fn cemetery_prowler_counts_only_shared_types_from_its_own_linked_exile() {
                 source_id: other_source,
                 exiled_id: exiled,
                 kind: ExileLinkKind::TrackedBySource,
+                supplier: None,
             }),
         }
 

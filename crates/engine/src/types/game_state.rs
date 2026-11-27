@@ -3082,7 +3082,7 @@ pub struct AttachmentSnapshot {
 /// CR 603.10a + CR 607.2a: Snapshot of a single card linked as "exiled with"
 /// a source at the instant before that source leaves the battlefield.
 /// Readers that consult the live card gate on [`Self::is_still_exiled`].
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Eq, Serialize, Deserialize)]
 pub struct LinkedExileSnapshot {
     pub exiled_id: ObjectId,
     pub owner: PlayerId,
@@ -3094,6 +3094,47 @@ pub struct LinkedExileSnapshot {
     /// no live object has (fail-closed, mirroring `CostPaidObjectSnapshot`).
     #[serde(default = "crate::types::ability::legacy_incarnation")]
     pub incarnation: u64,
+    /// CR 607.5 + CR 607.2a: the ability pair that exiled this card (the exiling
+    /// object's incarnation and the copiable set of the ability), copied from the
+    /// link it was captured from. `None` when the exile was not made by an
+    /// attributable activated or triggered ability (a cost, a replacement effect,
+    /// a granted ability) or predates the field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supplier: Option<crate::game::game_object::LinkedAbilitySource>,
+}
+
+/// CR 607.5: the `supplier` is attribution metadata read by a pile reader, not part of
+/// what a position is. It carries the exiling object's incarnation and copy-effect ids,
+/// which advance every cycle of a loop, so comparing it would make two otherwise
+/// identical positions of a repeating game differ (loop detection compares
+/// `GameState`s). Everything else about the card compares.
+impl PartialEq for LinkedExileSnapshot {
+    fn eq(&self, other: &Self) -> bool {
+        let LinkedExileSnapshot {
+            exiled_id,
+            owner,
+            mana_value,
+            incarnation,
+            supplier: _,
+        } = self;
+        *exiled_id == other.exiled_id
+            && *owner == other.owner
+            && *mana_value == other.mana_value
+            && *incarnation == other.incarnation
+    }
+}
+
+/// See the `PartialEq` of [`LinkedExileSnapshot`]: the `supplier` is not part of a position.
+impl PartialEq for ExileLink {
+    fn eq(&self, other: &Self) -> bool {
+        let ExileLink {
+            exiled_id,
+            source_id,
+            kind,
+            supplier: _,
+        } = self;
+        *exiled_id == other.exiled_id && *source_id == other.source_id && *kind == other.kind
+    }
 }
 
 impl LinkedExileSnapshot {
@@ -4075,11 +4116,19 @@ pub enum LookGrant {
     Player { player: PlayerId },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Eq, Serialize, Deserialize)]
 pub struct ExileLink {
     pub exiled_id: ObjectId,
     pub source_id: ObjectId,
     pub kind: ExileLinkKind,
+    /// CR 607.5 + CR 607.2a: the ability pair that made this link — the exiling
+    /// object's incarnation and the copiable set of the resolving ability
+    /// (`exile_links::resolving_exile_supplier`). An ability that reads the pile
+    /// is linked only to abilities of its own set (CR 607.5), so a reader of a
+    /// later link compares this against its own pair. `None` when the exile was
+    /// not made by an attributable activated or triggered ability.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supplier: Option<crate::game::game_object::LinkedAbilitySource>,
 }
 
 /// CR 702.xxx: Paradigm (Strixhaven) first-resolution record.
@@ -45209,6 +45258,9 @@ impl GameState {
                 owner: _,
                 mana_value: _,
                 incarnation,
+                // Attribution metadata, not part of a position (see the manual
+                // `PartialEq` on `LinkedExileSnapshot`).
+                supplier: _,
             } in snapshots
             {
                 f(*exiled_id, incarnation);
@@ -60948,6 +61000,7 @@ Go for the Goal! — {3}, {T}: Until end of turn, target creature gains \"Whenev
                 owner: PlayerId(0),
                 mana_value: 0,
                 incarnation,
+                supplier: None,
             };
             record.attachments = vec![attachment.clone()];
             record.linked_exile_snapshot = vec![linked.clone()];
@@ -70455,6 +70508,7 @@ Go for the Goal! — {3}, {T}: Until end of turn, target creature gains \"Whenev
             kind: ExileLinkKind::UntilSourceLeaves {
                 return_zone: Zone::Battlefield,
             },
+            supplier: None,
         };
         let json = serde_json::to_string(&link).unwrap();
         let deserialized: ExileLink = serde_json::from_str(&json).unwrap();
@@ -72796,6 +72850,7 @@ Go for the Goal! — {3}, {T}: Until end of turn, target creature gains \"Whenev
             kind: ExileLinkKind::UntilSourceLeaves {
                 return_zone: Zone::Battlefield,
             },
+            supplier: None,
         });
         state.pending_trigger = Some(Box::new(PendingTrigger {
             source_id: ObjectId(5),

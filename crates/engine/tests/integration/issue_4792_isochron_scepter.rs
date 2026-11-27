@@ -43,6 +43,7 @@ fn link_imprinted_instant(
         source_id: scepter,
         exiled_id: imprint,
         kind: ExileLinkKind::TrackedBySource,
+        supplier: None,
     });
     state
         .tracked_object_sets

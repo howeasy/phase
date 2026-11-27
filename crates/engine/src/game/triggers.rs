@@ -41636,6 +41636,7 @@ pub mod tests {
                 source_id: skyclave,
                 exiled_id: exiled,
                 kind: crate::types::game_state::ExileLinkKind::TrackedBySource,
+                supplier: None,
             });
         }
 

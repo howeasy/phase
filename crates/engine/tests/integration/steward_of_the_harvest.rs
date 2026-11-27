@@ -462,6 +462,7 @@ fn non_land_card_exiled_with_steward_donates_nothing() {
             exiled_id: id,
             source_id: other_exiler,
             kind: ExileLinkKind::TrackedBySource,
+            supplier: None,
         });
         id
     };
@@ -489,6 +490,7 @@ fn non_land_card_exiled_with_steward_donates_nothing() {
             exiled_id: id,
             source_id: b.steward,
             kind: ExileLinkKind::TrackedBySource,
+            supplier: None,
         });
     }
     evaluate_layers(b.runner.state_mut());

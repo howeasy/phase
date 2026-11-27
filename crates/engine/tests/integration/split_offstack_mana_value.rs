@@ -108,6 +108,7 @@ fn exile_cast_permission_mv_le(ceiling: i32) -> CastingPermission {
         // Added on main after this test was written; no modifications on entry.
         enters_with_modifications: Default::default(),
         cast_cost_modifier: None,
+        single_use_group: None,
     }
 }
 

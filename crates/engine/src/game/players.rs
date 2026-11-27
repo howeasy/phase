@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 
+use crate::game::game_object::{LinkedAbilitySource, ObjectIdentityBindingExt};
 use crate::types::ability::{AggregateFunction, ControllerRef, PlayerRelation, SeatDirection};
 use crate::types::events::{GameEvent, PlayerActionKind};
 use crate::types::game_state::GameState;
@@ -446,7 +447,7 @@ pub fn linked_exile_cards_for_source(
     let linked: Vec<LinkedExileSnapshot> =
         crate::game::exile_links::links_for_reader(state, source_id, reader)
             .filter_map(|link| {
-                crate::game::exile_links::exiled_card_snapshot(state, link.exiled_id)
+                crate::game::exile_links::exiled_card_snapshot(state, link.exiled_id, link.supplier)
             })
             .collect();
     if !linked.is_empty() {
@@ -462,15 +463,72 @@ pub fn linked_exile_cards_for_source(
         .collect()
 }
 
-/// CR 607.2a + CR 400.7: The cards linked to a trigger bound to `source`: its
-/// latched snapshot plus the linked-exile LKI recorded for that incarnation
-/// (its departure pile and what it exiled after departing).
-pub fn linked_exile_pile(
+/// CR 607.5 + CR 607.2a: the ability pair a pile read is made for — the exiling
+/// object's incarnation and the copiable set of the ability that is resolving
+/// from the bound source (`exile_links::resolving_exile_supplier`). `None` when no
+/// activated or triggered ability of the bound source is resolving, or when its
+/// provenance is not attributable (a granted ability).
+fn pile_reader_pair(
     state: &GameState,
     source: &TriggerSourceContext,
-) -> Vec<LinkedExileSnapshot> {
+) -> Option<LinkedAbilitySource> {
+    crate::game::exile_links::resolving_exile_supplier(state, source.identity.reference.object_id)
+}
+
+/// CR 607.5: an entry captured at the latch or kept in LKI is dropped only when
+/// both its exiling ability and the reading ability are known and are not the
+/// same pair; an unattributed entry (a cost, a replacement effect, a link that
+/// predates the field) keeps the reading it had before pairs were recorded.
+fn pair_compatible(
+    supplier: Option<LinkedAbilitySource>,
+    reader: Option<LinkedAbilitySource>,
+) -> bool {
+    match (supplier, reader) {
+        (Some(supplier), Some(reader)) => supplier == reader,
+        (None, _) | (_, None) => true,
+    }
+}
+
+/// CR 607.2a + CR 400.7 + CR 607.5: every entry of the pile of a trigger bound to
+/// `source`, in order, possibly repeating a card: its latched snapshot, then —
+/// while the bound incarnation is still the current object in its observed
+/// zone — the links that object has made since, then the linked-exile LKI
+/// recorded for that incarnation (its departure pile and what it exiled after
+/// departing). The one admission rule behind both [`linked_exile_pile`] and
+/// [`linked_exile_pile_holds`].
+fn pile_entries<'a>(
+    state: &'a GameState,
+    source: &'a TriggerSourceContext,
+) -> impl Iterator<Item = LinkedExileSnapshot> + 'a {
     let bound = source.identity.reference;
-    let mut pile = source.linked_exile_snapshot.clone();
+    let reader = pile_reader_pair(state, source);
+    let latched = source
+        .linked_exile_snapshot
+        .iter()
+        .filter(move |snap| pair_compatible(snap.supplier, reader))
+        .cloned();
+    // CR 608.2h + CR 607.2a: the pile is read when the effect is applied, so a
+    // card exiled with the source after the trigger latched (by an earlier
+    // instance of the same doubled trigger, CR 603.2d) belongs to it. CR 400.7: only while the bound incarnation is
+    // still current in the zone it was observed in; a source that changed zones
+    // is a new object whose links are not this trigger's. CR 607.5: and only a
+    // card exiled by an ability of the reading ability's own pair; with no known
+    // reading pair no later link is admitted. The read is the latch's own
+    // surface (`live_linked_exile_snapshots`), so an off-battlefield source
+    // still reads no live links.
+    let live = source
+        .identity
+        .is_current(state)
+        .then(|| {
+            crate::game::zones::live_linked_exile_snapshots(
+                state,
+                bound.object_id,
+                source.identity.expected_zone,
+            )
+        })
+        .into_iter()
+        .flatten()
+        .filter(move |snap| snap.supplier.is_some() && snap.supplier == reader);
     // `departed`, not `admits`: an entry whose successor is this incarnation
     // belongs to an earlier departure, a different object.
     let later = state
@@ -478,17 +536,36 @@ pub fn linked_exile_pile(
         .get(&bound.object_id)
         .into_iter()
         .flatten()
-        .filter(|lki| lki.departed == bound.incarnation)
-        .flat_map(|lki| &lki.snapshot);
-    for snap in later {
-        if !pile
-            .iter()
-            .any(|p| p.exiled_id == snap.exiled_id && p.incarnation == snap.incarnation)
-        {
-            pile.push(snap.clone());
-        }
-    }
-    pile
+        .filter(move |lki| lki.departed == bound.incarnation)
+        .flat_map(|lki| &lki.snapshot)
+        .filter(move |snap| pair_compatible(snap.supplier, reader))
+        .cloned();
+    latched.chain(live).chain(later)
+}
+
+/// CR 607.2a + CR 400.7 + CR 607.5: The cards linked to a trigger bound to
+/// `source` (see [`pile_entries`]), once per card incarnation.
+pub fn linked_exile_pile(
+    state: &GameState,
+    source: &TriggerSourceContext,
+) -> Vec<LinkedExileSnapshot> {
+    let mut seen = std::collections::HashSet::new();
+    pile_entries(state, source)
+        .filter(|snap| seen.insert((snap.exiled_id, snap.incarnation)))
+        .collect()
+}
+
+/// CR 607.2a + CR 400.7: whether `exiled_id` is a card of the pile of a trigger
+/// bound to `source` that is still in exile as the same object. The same answer
+/// as `linked_exile_pile(..).any(..)`, without building and de-duplicating the
+/// pile for every candidate of a zone scan.
+pub fn linked_exile_pile_holds(
+    state: &GameState,
+    source: &TriggerSourceContext,
+    exiled_id: ObjectId,
+) -> bool {
+    pile_entries(state, source)
+        .any(|snap| snap.exiled_id == exiled_id && snap.is_still_exiled(state))
 }
 
 /// CR 406.6 + CR 607.1: Returns true if `player` owns at least one card currently
@@ -1539,6 +1616,7 @@ mod tests {
                 mana_value: 0,
                 // `departed_pile` makes the card directly in exile.
                 incarnation: 0,
+                supplier: None,
             }],
         }
     }
@@ -1631,6 +1709,7 @@ mod tests {
             owner: PlayerId(1),
             mana_value: 0,
             incarnation: 0,
+            supplier: None,
         };
         let entries = state.linked_exile_lki.get_mut(&source).unwrap();
         entries.push(LinkedExileLki {
@@ -1656,6 +1735,397 @@ mod tests {
         assert_eq!(ids, vec![card, later]);
     }
 
+    /// A battlefield source and two cards in exile, neither linked yet.
+    fn live_source_with_exiles() -> (GameState, ObjectId, ObjectId, ObjectId) {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Source".into(),
+            Zone::Battlefield,
+        );
+        let [first, second] = [CardId(2), CardId(3)].map(|card_id| {
+            create_object(
+                &mut state,
+                card_id,
+                PlayerId(1),
+                "Exiled Card".into(),
+                Zone::Exile,
+            )
+        });
+        (state, source, first, second)
+    }
+
+    fn pile_ids(state: &GameState, context: &TriggerSourceContext) -> Vec<ObjectId> {
+        linked_exile_pile(state, context)
+            .iter()
+            .map(|snapshot| snapshot.exiled_id)
+            .collect()
+    }
+
+    /// An activated ability of `source` whose copiable set is `set` is resolving
+    /// (the live object's incarnation names its creator).
+    fn resolving_characteristic(
+        state: &mut GameState,
+        source: ObjectId,
+        set: crate::types::ability::CharacteristicSetRef,
+    ) {
+        resolving_ability_of(state, source, state.objects[&source].incarnation);
+        let Some(StackEntryKind::ActivatedAbility { ability, .. }) = state
+            .resolving_stack_entry
+            .as_mut()
+            .map(|entry| &mut entry.kind)
+        else {
+            unreachable!("resolving_ability_of pushes an activated ability");
+        };
+        ability.set_source_ability_provenance_recursive(Some(
+            crate::types::ability::AbilityProvenance::Characteristic(set),
+        ));
+    }
+
+    fn copied_set(effect: u64) -> crate::types::ability::CharacteristicSetRef {
+        crate::types::ability::CharacteristicSetRef::Copied(
+            crate::types::ability::CopyEffectInstanceRef {
+                continuous_effect_id: effect,
+                modification_index: 0,
+            },
+        )
+    }
+
+    /// CR 608.2h + CR 607.2a + CR 607.5: while the bound incarnation is still
+    /// current, a card linked to it after the trigger latched by an ability of
+    /// the reading ability's own pair is in the pile, alongside (and
+    /// deduplicated against) the latched snapshot.
+    #[test]
+    fn linked_exile_pile_reads_links_made_after_the_latch_by_the_bound_incarnation() {
+        use crate::types::ability::CharacteristicSetRef::Own;
+        let (mut state, source, first, second) = live_source_with_exiles();
+        resolving_characteristic(&mut state, source, Own);
+        crate::game::exile_links::push_tracked_by_source(&mut state, first, source);
+        let context = crate::game::triggers::trigger_source_context_for_latch(
+            &state,
+            &state.objects[&source],
+        );
+        assert_eq!(pile_ids(&state, &context), vec![first]);
+
+        crate::game::exile_links::push_tracked_by_source(&mut state, second, source);
+        assert_eq!(pile_ids(&state, &context), vec![first, second]);
+        assert!(linked_exile_pile_holds(&state, &context, second));
+    }
+
+    /// CR 607.2a: the pile reader holds no exclusion of its own for "the card the
+    /// preceding instruction moved" (a card the resolution's ledger names); an
+    /// "other" that means that is written into the reading ability's filter.
+    #[test]
+    fn linked_exile_pile_keeps_a_link_the_resolution_ledger_names() {
+        use crate::types::ability::CharacteristicSetRef::Own;
+        let (mut state, source, first, second) = live_source_with_exiles();
+        resolving_characteristic(&mut state, source, Own);
+        crate::game::exile_links::push_tracked_by_source(&mut state, first, source);
+        let context = crate::game::triggers::trigger_source_context_for_latch(
+            &state,
+            &state.objects[&source],
+        );
+        crate::game::exile_links::push_tracked_by_source(&mut state, second, source);
+        state.last_zone_changed_ids = vec![second];
+        assert_eq!(pile_ids(&state, &context), vec![first, second]);
+        assert!(linked_exile_pile_holds(&state, &context, second));
+    }
+
+    /// CR 607.5: a card exiled after the latch by another ability pair of the
+    /// same object (a later copy effect's ability) is not the reading
+    /// ability's, whether it is read live or from the latch.
+    #[test]
+    fn linked_exile_pile_excludes_links_of_another_ability_pair() {
+        use crate::types::ability::CharacteristicSetRef::Own;
+        let (mut state, source, first, second) = live_source_with_exiles();
+        resolving_characteristic(&mut state, source, Own);
+        crate::game::exile_links::push_tracked_by_source(&mut state, first, source);
+        let context = crate::game::triggers::trigger_source_context_for_latch(
+            &state,
+            &state.objects[&source],
+        );
+        // After the latch, an ability of another copiable set exiles `second`.
+        resolving_characteristic(&mut state, source, copied_set(7));
+        crate::game::exile_links::push_tracked_by_source(&mut state, second, source);
+        // The reading ability is the original pair.
+        resolving_characteristic(&mut state, source, Own);
+        assert_eq!(pile_ids(&state, &context), vec![first]);
+        assert!(!linked_exile_pile_holds(&state, &context, second));
+        assert!(linked_exile_pile_holds(&state, &context, first));
+
+        // Reverse order: a card exiled by the other pair BEFORE the latch is
+        // dropped from the latched snapshot when the reader is the original pair.
+        let latched_late = crate::game::triggers::trigger_source_context_for_latch(
+            &state,
+            &state.objects[&source],
+        );
+        assert_eq!(latched_late.linked_exile_snapshot.len(), 2);
+        assert_eq!(pile_ids(&state, &latched_late), vec![first]);
+    }
+
+    /// CR 607.5: a later link no attributable ability made (a cost, a
+    /// replacement effect), and any later link read with no resolving ability of
+    /// the bound source, is not admitted; the latched snapshot is read as before.
+    #[test]
+    fn linked_exile_pile_admits_no_later_link_without_a_known_pair() {
+        use crate::types::ability::CharacteristicSetRef::Own;
+        let (mut state, source, first, second) = live_source_with_exiles();
+        crate::game::exile_links::push_tracked_by_source(&mut state, first, source);
+        let context = crate::game::triggers::trigger_source_context_for_latch(
+            &state,
+            &state.objects[&source],
+        );
+        // Unattributed exile, read by an attributable reader.
+        crate::game::exile_links::push_tracked_by_source(&mut state, second, source);
+        resolving_characteristic(&mut state, source, Own);
+        assert_eq!(pile_ids(&state, &context), vec![first]);
+        // Attributed exile, read with no resolving ability.
+        let third = create_object(
+            &mut state,
+            CardId(4),
+            PlayerId(1),
+            "Third".into(),
+            Zone::Exile,
+        );
+        resolving_characteristic(&mut state, source, Own);
+        crate::game::exile_links::push_tracked_by_source(&mut state, third, source);
+        state.resolving_stack_entry = None;
+        assert_eq!(pile_ids(&state, &context), vec![first]);
+    }
+
+    /// CR 607.5: the linked-exile LKI of the bound incarnation is pair-scoped like
+    /// the live links: an entry whose exiling ability is another pair is dropped,
+    /// an entry of the reading pair and an unattributed one are kept.
+    #[test]
+    fn linked_exile_pile_scopes_lki_entries_to_the_reading_pair() {
+        use crate::game::game_object::LinkedAbilitySource;
+        use crate::types::ability::CharacteristicSetRef::Own;
+        use crate::types::identifiers::ObjectIncarnationRef;
+        let (mut state, source, own, other) = live_source_with_exiles();
+        let unattributed = create_object(
+            &mut state,
+            CardId(4),
+            PlayerId(1),
+            "Unattributed".into(),
+            Zone::Exile,
+        );
+        let incarnation = state.objects[&source].incarnation;
+        let pair = |set| {
+            Some(LinkedAbilitySource {
+                creator: ObjectIncarnationRef::of(source, incarnation),
+                characteristic_set: set,
+            })
+        };
+        let snap = |id, supplier| LinkedExileSnapshot {
+            exiled_id: id,
+            owner: PlayerId(1),
+            mana_value: 0,
+            incarnation: state.objects[&id].incarnation,
+            supplier,
+        };
+        let entry = LinkedExileLki {
+            departed: incarnation,
+            successor: incarnation + 1,
+            snapshot: vec![
+                snap(own, pair(Own)),
+                snap(other, pair(copied_set(7))),
+                snap(unattributed, None),
+            ],
+        };
+        state.linked_exile_lki.insert(source, vec![entry]);
+        let context = crate::game::triggers::trigger_source_context_for_latch(
+            &state,
+            &state.objects[&source],
+        );
+        resolving_characteristic(&mut state, source, Own);
+        assert_eq!(pile_ids(&state, &context), vec![own, unattributed]);
+        assert!(!linked_exile_pile_holds(&state, &context, other));
+    }
+
+    /// The membership form answers exactly what the vector form does.
+    #[test]
+    fn linked_exile_pile_holds_agrees_with_the_pile() {
+        use crate::types::ability::CharacteristicSetRef::Own;
+        let (mut state, source, first, second) = live_source_with_exiles();
+        resolving_characteristic(&mut state, source, Own);
+        crate::game::exile_links::push_tracked_by_source(&mut state, first, source);
+        let context = crate::game::triggers::trigger_source_context_for_latch(
+            &state,
+            &state.objects[&source],
+        );
+        crate::game::exile_links::push_tracked_by_source(&mut state, second, source);
+        let mut events = Vec::new();
+        for card in [first, second] {
+            for leave_first in [false, true] {
+                if leave_first {
+                    move_to_zone(&mut state, card, Zone::Graveyard, &mut events);
+                }
+                let expected = linked_exile_pile(&state, &context)
+                    .iter()
+                    .any(|entry| entry.exiled_id == card && entry.is_still_exiled(&state));
+                assert_eq!(linked_exile_pile_holds(&state, &context, card), expected);
+            }
+        }
+    }
+
+    /// CR 400.7: once the bound incarnation has left, the object that later
+    /// holds the same id is a new object, and its links are not the trigger's.
+    #[test]
+    fn linked_exile_pile_ignores_links_of_a_later_incarnation() {
+        let (mut state, source, first, _) = live_source_with_exiles();
+        let context = crate::game::triggers::trigger_source_context_for_latch(
+            &state,
+            &state.objects[&source],
+        );
+        let mut events = Vec::new();
+        move_to_zone(&mut state, source, Zone::Graveyard, &mut events);
+        move_to_zone(&mut state, source, Zone::Battlefield, &mut events);
+        crate::game::exile_links::push_tracked_by_source(&mut state, first, source);
+        assert!(linked_ids(&state, source).contains(&first));
+        assert!(
+            pile_ids(&state, &context).is_empty(),
+            "the departed incarnation's trigger must not read its successor's links"
+        );
+    }
+
+    /// Like `resolving_characteristic`, for an ability put on the stack while
+    /// `source` had incarnation `stamp` (a stale reader when `source` has since
+    /// become a new incarnation).
+    fn resolving_characteristic_at(
+        state: &mut GameState,
+        source: ObjectId,
+        stamp: u64,
+        set: crate::types::ability::CharacteristicSetRef,
+    ) {
+        resolving_ability_of(state, source, stamp);
+        let Some(StackEntryKind::ActivatedAbility { ability, .. }) = state
+            .resolving_stack_entry
+            .as_mut()
+            .map(|entry| &mut entry.kind)
+        else {
+            unreachable!("resolving_ability_of pushes an activated ability");
+        };
+        ability.set_source_ability_provenance_recursive(Some(
+            crate::types::ability::AbilityProvenance::Characteristic(set),
+        ));
+    }
+
+    /// CR 400.7 + CR 607.2a + CR 608.2h: a trigger bound to an incarnation that
+    /// has since left reads NONE of the links the object that replaced it holds,
+    /// whatever the link kind. `links_for_reader` admits `UntilSourceLeaves`,
+    /// `UntilOpponentBecomesMonarch`, `ParadigmSource`, `Cipher`, `Haunt` and
+    /// `CraftMaterial` links to every reader (the object they were made for may
+    /// be a later incarnation of the one that made them, CR 400.7d/j), so the
+    /// only thing that stops a stale reader from reading them is the live leg's
+    /// `identity.is_current` gate in `pile_entries`. The fixture makes the link's
+    /// pair EQUAL the stale reader's pair (the link was recorded by an ability of
+    /// the stale incarnation), so the pair filter admits it and only the gate
+    /// refuses; a reader bound to the live incarnation reads the same kind of
+    /// link (the positive control, so the refusal is not vacuous).
+    ///
+    /// Mutant: delete `source.identity.is_current(state)` from the live leg of
+    /// `pile_entries`: every stale-reader assertion below fails (all nine arms).
+    #[test]
+    fn a_stale_reader_never_reads_a_successor_incarnations_link_of_any_kind() {
+        use crate::game::game_object::LinkedAbilitySource;
+        use crate::types::ability::CharacteristicSetRef::Own;
+        use crate::types::game_state::{ExileLink, ExileLinkKind, LookGrant};
+        use crate::types::identifiers::ObjectIncarnationRef;
+
+        // Every kind `links_for_reader` matches, each in the form the live
+        // incarnation `live` itself would read.
+        let kinds = |live: u64| {
+            vec![
+                ExileLinkKind::TrackedBySource,
+                ExileLinkKind::CastCost,
+                ExileLinkKind::UntilSourceLeaves {
+                    return_zone: Zone::Battlefield,
+                },
+                ExileLinkKind::UntilOpponentBecomesMonarch {
+                    return_zone: Zone::Battlefield,
+                    controller: PlayerId(0),
+                },
+                ExileLinkKind::ParadigmSource {
+                    player: PlayerId(0),
+                },
+                ExileLinkKind::Cipher,
+                ExileLinkKind::Haunt,
+                ExileLinkKind::CraftMaterial,
+                ExileLinkKind::HideawayLookable {
+                    grant: LookGrant::SourceController,
+                    lookers: std::collections::BTreeSet::from([PlayerId(0)]),
+                    source_incarnation: live,
+                },
+            ]
+        };
+        let arms = kinds(0).len();
+        assert_eq!(arms, 9, "one row per ExileLinkKind arm");
+        for position in 0..arms {
+            let (mut state, source, stale_card, live_card) = live_source_with_exiles();
+            let stale_incarnation = state.objects[&source].incarnation;
+            let stale_context = crate::game::triggers::trigger_source_context_for_latch(
+                &state,
+                &state.objects[&source],
+            );
+            // The source leaves and returns: a new incarnation holds the id.
+            let mut events = Vec::new();
+            move_to_zone(&mut state, source, Zone::Graveyard, &mut events);
+            move_to_zone(&mut state, source, Zone::Battlefield, &mut events);
+            let live_incarnation = state.objects[&source].incarnation;
+            assert_ne!(live_incarnation, stale_incarnation, "a new incarnation");
+            let kind = kinds(live_incarnation)[position].clone();
+
+            // A link of this kind, recorded by an ability of the STALE
+            // incarnation's own pair, on the card the stale reader could read.
+            let pair = |incarnation| {
+                Some(LinkedAbilitySource {
+                    creator: ObjectIncarnationRef::of(source, incarnation),
+                    characteristic_set: Own,
+                })
+            };
+            state.exile_links.push(ExileLink {
+                exiled_id: stale_card,
+                source_id: source,
+                kind: kind.clone(),
+                supplier: pair(stale_incarnation),
+            });
+            resolving_characteristic_at(&mut state, source, stale_incarnation, Own);
+            assert!(
+                !pile_ids(&state, &stale_context).contains(&stale_card),
+                "{kind:?}: the stale reader must not read the successor's link"
+            );
+            assert!(
+                !linked_exile_pile_holds(&state, &stale_context, stale_card),
+                "{kind:?}: and the membership form agrees"
+            );
+
+            // Positive control: a reader bound to the live incarnation, latched
+            // before its own link existed, reads a link of the same kind made by
+            // an ability of ITS incarnation.
+            let live_context = crate::game::triggers::trigger_source_context_for_latch(
+                &state,
+                &state.objects[&source],
+            );
+            state.exile_links.push(ExileLink {
+                exiled_id: live_card,
+                source_id: source,
+                kind: kind.clone(),
+                supplier: pair(live_incarnation),
+            });
+            resolving_characteristic_at(&mut state, source, live_incarnation, Own);
+            assert!(
+                pile_ids(&state, &live_context).contains(&live_card),
+                "{kind:?}: the live reader reads a link of its own incarnation (control)"
+            );
+            assert!(
+                linked_exile_pile_holds(&state, &live_context, live_card),
+                "{kind:?}: control, membership form"
+            );
+        }
+    }
+
     /// CR 603.10a + CR 607.2a: a leaves record carrying a trigger source context
     /// also reads what the bound incarnation exiled after departing.
     #[test]
@@ -1673,6 +2143,7 @@ mod tests {
             owner: PlayerId(1),
             mana_value: 0,
             incarnation: 0,
+            supplier: None,
         };
         state
             .linked_exile_lki

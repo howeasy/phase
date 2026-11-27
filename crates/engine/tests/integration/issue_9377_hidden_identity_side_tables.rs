@@ -795,6 +795,7 @@ fn hideaway_source_leaving_blanks_hidden_linked_exile_member() {
         exiled_id: lapse,
         source_id: windbrisk,
         kind: ExileLinkKind::TrackedBySource,
+        supplier: None,
     });
     fund(&mut runner, P0, &[(ManaType::Red, 3)]);
     runner.cast(rain).target_objects(&[windbrisk]).resolve();

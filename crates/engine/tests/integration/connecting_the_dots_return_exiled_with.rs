@@ -54,6 +54,7 @@ fn connecting_the_dots_returns_all_exiled_with_source_to_owners_hands() {
             exiled_id: exiled,
             source_id: source,
             kind: ExileLinkKind::TrackedBySource,
+            supplier: None,
         });
     }
     // A control card exiled by a DIFFERENT source must NOT be returned.

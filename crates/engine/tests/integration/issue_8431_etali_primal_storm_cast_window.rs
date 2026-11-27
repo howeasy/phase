@@ -659,6 +659,7 @@ fn etali_window_with_a_prior_exile(blink: bool) -> EtaliWindow {
         exiled_id: prior,
         source_id: etali,
         kind: ExileLinkKind::TrackedBySource,
+        supplier: None,
     });
     let incarnation_before = runner.state().objects[&etali].incarnation;
 

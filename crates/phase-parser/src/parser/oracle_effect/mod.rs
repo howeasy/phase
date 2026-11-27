@@ -6125,11 +6125,11 @@ fn entry_counter_rider_clause(
     // the permission (`lower::fold_cast_rider_into_graveyard_grant`).
     let prior_grants_a_lingering_cast = match prior {
         Some(Effect::CastFromZone {
-            driver: CastFromZoneDriver::LingeringPermission,
+            driver,
             duration: Some(_),
             alt_ability_cost: None,
             ..
-        }) => true,
+        }) if driver.is_lingering() => true,
         Some(effect) => crate::parser::oracle_ir::ast::is_graveyard_permission_grant(effect),
         None => false,
     };
@@ -8782,6 +8782,7 @@ fn try_parse_airbend_clause(tp: TextPair<'_>) -> Option<ParsedEffectClause> {
                         enters_with_modifications: Default::default(),
                         mana_spend_permission: None,
                         cast_cost_modifier: None,
+                        single_use_group: None,
                     },
                     target: TargetFilter::TrackedSet {
                         id: TrackedSetId(0),
@@ -41345,30 +41346,20 @@ fn try_parse_cast_effect(lower: &str, ctx: &ParseContext) -> Option<Effect> {
     // AND it with `ExiledBySource` so the cast is restricted both by card
     // type and by the source-exile-link.
     //
-    // KNOWN RESIDUAL (pre-existing, deliberately NOT closed here). This surface
-    // has never read a printed cast cap at all, so it does not go through
-    // `from_among_batch_bounds` / `CastFromZoneDriver::for_batch_bounds` the way
-    // the four batch arms above now do. Its singular members — Idol of
-    // Endurance, Court of Locthwain, Jeleva, Kaho, Kylox's Voltstrider, Tasha,
-    // Shell of the Last Kappa, Skyway Robber, Scarlet Witch and ~15 more — print
-    // "cast A <filter> spell from among cards exiled with ~" and receive a
-    // per-object permission over the whole accumulated exile link.
+    // CR 608.2c + CR 611.2a: the pool here is a PERSISTENT per-source exile link that
+    // grows across resolutions, and the printed "a spell" bounds each ACTIVATION
+    // rather than the set. A cap of exactly one cast under a STATED duration (Court
+    // of Locthwain, Idol of Endurance, Serpent's Soul-Jar) is read below and lowers
+    // to `CastFromZoneDriver::LingeringWindow`: the per-object permissions that one
+    // resolution writes share one budget (`ExileWithAltCost::single_use_group`).
     //
-    // It is a DIFFERENT question from the one the pairing authority answers, and
-    // that is why it is left open rather than folded in. The batch arms produce
-    // their pool inside the resolving instruction, so "one of them" is a bound on
-    // a set that exists exactly once. Here the pool is a PERSISTENT per-source
-    // exile link that grows across resolutions, and the printed "a spell" bounds
-    // each ACTIVATION rather than the set — a per-grant budget the permission
-    // ledger has no concept of (`CastingPermission::ExileWithAltCost` is written
-    // per object, with no grant identity to hang a budget on). Modelling it means
-    // adding a grant-scoped ledger with its own decrement, expiry and zone-change
-    // invalidation, which is a mechanism, not a bound reader — and refusing all
-    // ~20 cards in the meantime would trade one silent rules error for a large
-    // coverage loss on a class this change never touched.
-    //
-    // Recorded here, in the PR body, and in the review reply so the next reader
-    // finds it documented rather than discovers it.
+    // KNOWN RESIDUAL (pre-existing, deliberately NOT closed here): the singular
+    // members that state NO duration (Jeleva, Kylox's Voltstrider, Kaho, Tasha,
+    // Shell of the Last Kappa, Skyway Robber, Scarlet Witch) and any cap other than
+    // one still receive a per-object permission over the whole accumulated exile
+    // link with no shared budget. Their permission has no lifetime either, which is
+    // a separate defect from the cap; refusing them here would trade one silent rules
+    // error for a large coverage loss on a class this change does not touch.
     if has_from_among_cards_exiled_with_self(rest) {
         // First try the composed type-list form ("an instant or sorcery
         // spell ...") since `parse_type_phrase_folding` doesn't handle connectors
@@ -41396,6 +41387,27 @@ fn try_parse_cast_effect(lower: &str, ctx: &ParseContext) -> Option<Effect> {
             }
             _ => TargetFilter::ExiledBySource,
         };
+        // CR 608.2c + CR 611.2a: a printed cap of exactly one cast ("you may cast A
+        // spell from among cards exiled with ~") under a STATED duration ("until
+        // end of turn" — Court of Locthwain, Idol of Endurance, Serpent's Soul-Jar)
+        // bounds the whole grant, so the permissions it writes share one budget
+        // (`CastFromZoneDriver::LingeringWindow`, chosen through the pairing
+        // authority). Every other shape keeps the per-object permission; see the
+        // residual above.
+        let driver = if mode == CardPlayMode::Cast
+            && (ctx.stated_clause_duration.is_some() || clause_states_a_duration(rest))
+        {
+            from_among_batch_bounds(rest)
+                .and_then(|bounds| {
+                    crate::types::ability::CastFromZoneDriver::for_batch_bounds(
+                        CastMechanism::LingeringWindow,
+                        bounds,
+                    )
+                })
+                .unwrap_or(crate::types::ability::CastFromZoneDriver::LingeringPermission)
+        } else {
+            crate::types::ability::CastFromZoneDriver::LingeringPermission
+        };
         return Some(Effect::CastFromZone {
             target,
             without_paying_mana_cost: without_paying,
@@ -41404,7 +41416,7 @@ fn try_parse_cast_effect(lower: &str, ctx: &ParseContext) -> Option<Effect> {
             alt_ability_cost: None,
             constraint,
             duration: None,
-            driver: crate::types::ability::CastFromZoneDriver::LingeringPermission,
+            driver,
             mana_spend_permission: None,
             cast_cost_modifier: None,
             additional_cost: None,

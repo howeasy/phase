@@ -1100,6 +1100,7 @@ fn fallowsage_granted_whisper_cost_preserves_its_tap_trigger_after_sacrifice() {
             exiled_id: whisper,
             source_id: cauldron,
             kind: ExileLinkKind::TrackedBySource,
+            supplier: None,
         });
         runner.state_mut().layers_dirty.mark_full();
         engine::game::layers::evaluate_layers(runner.state_mut());

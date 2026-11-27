@@ -138,6 +138,7 @@ fn fight_rigging_counters_the_target_and_casts_only_the_hidden_card() {
             lookers: [P0].into(),
             source_incarnation: incarnation,
         },
+        supplier: None,
     });
 
     runner.pass_both_players();
@@ -223,6 +224,7 @@ fn fight_rigging_below_power_threshold_only_places_the_counter() {
             lookers: [P0].into(),
             source_incarnation: incarnation,
         },
+        supplier: None,
     });
 
     runner.pass_both_players();
@@ -298,6 +300,7 @@ fn watcher_for_tomorrow_leaving_the_battlefield_finds_the_hideaway_linked_card()
             lookers: [P0].into(),
             source_incarnation: incarnation,
         },
+        supplier: None,
     });
 
     // Destroy Watcher through the REAL casting/resolution/zone pipeline —

@@ -792,6 +792,7 @@ fn magus_of_the_minds_dated_grant_lets_the_exiled_land_be_played_this_turn() {
             exiled_id: forest,
             source_id: magus,
             kind: ExileLinkKind::TrackedBySource,
+            supplier: None,
         });
         state
             .cards_exiled_with_source_this_turn

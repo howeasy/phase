@@ -52,6 +52,7 @@ fn semblance_anvil_reduces_only_matching_card_type() {
             source_id: anvil,
             exiled_id: exiled_creature,
             kind: engine::types::game_state::ExileLinkKind::TrackedBySource,
+            supplier: None,
         });
 
     let matching_creature = create_object(

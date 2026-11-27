@@ -457,6 +457,7 @@ fn hostile_cleanup_offer_object_and_departed_stack() {
         enters_with_modifications: Default::default(),
         mana_spend_permission: None,
         cast_cost_modifier: None,
+        single_use_group: None,
     };
     state.objects.get_mut(&object).unwrap().casting_permissions = vec![permission];
     let departed = DepartedStackSpell {

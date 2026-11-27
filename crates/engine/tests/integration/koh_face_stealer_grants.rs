@@ -509,6 +509,7 @@ fn koh_can_choose_opponent_owned_creature_exiled_with_koh() {
         exiled_id: opp_face,
         source_id: koh,
         kind: ExileLinkKind::TrackedBySource,
+        supplier: None,
     });
 
     // Negative baseline: with nothing chosen yet, Koh is granted no ability —

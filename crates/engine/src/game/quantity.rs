@@ -281,10 +281,11 @@ fn linked_exile_for_context(
     ctx.trigger_source
         .as_ref()
         .map(|source| {
-            // CR 607.2a + CR 400.7: the linked pile is the cards still in the exile zone
-            // as the objects the trigger latched; a card that left exile after the
-            // trigger latched its pile (a CR 610.3 return, for one) is not "the exiled
-            // card", including when another effect exiled it again.
+            // CR 607.2a + CR 400.7 + CR 608.2h: the linked pile (`linked_exile_pile`:
+            // the latched cards plus, while the bound incarnation is still current,
+            // cards it has exiled since) filtered to cards still in exile as the same
+            // objects; a card that left exile (a CR 610.3 return, for one) is not "the
+            // exiled card", including when another effect exiled it again.
             crate::game::players::linked_exile_pile(state, source)
                 .into_iter()
                 .filter(|linked| linked.is_still_exiled(state))
@@ -18810,16 +18811,19 @@ mod tests {
             source_id: source,
             exiled_id: linked_artifact,
             kind: ExileLinkKind::TrackedBySource,
+            supplier: None,
         });
         state.exile_links.push(ExileLink {
             source_id: source,
             exiled_id: linked_creature,
             kind: ExileLinkKind::TrackedBySource,
+            supplier: None,
         });
         state.exile_links.push(ExileLink {
             source_id: other_source,
             exiled_id: unlinked,
             kind: ExileLinkKind::TrackedBySource,
+            supplier: None,
         });
 
         let expr = QuantityExpr::Ref {
@@ -18870,6 +18874,7 @@ mod tests {
             source_id: source,
             exiled_id: linked,
             kind: ExileLinkKind::TrackedBySource,
+            supplier: None,
         });
 
         let expr = QuantityExpr::Ref {
@@ -18925,6 +18930,7 @@ mod tests {
                 source_id: source,
                 exiled_id: id,
                 kind: ExileLinkKind::TrackedBySource,
+                supplier: None,
             });
             linked_ids.push(id);
         }
@@ -18943,6 +18949,7 @@ mod tests {
             source_id: other_source,
             exiled_id: other_exiled,
             kind: ExileLinkKind::TrackedBySource,
+            supplier: None,
         });
 
         let expr = QuantityExpr::Ref {
@@ -25120,6 +25127,7 @@ mod tests {
                 source_id: source,
                 exiled_id: exiled,
                 kind: ExileLinkKind::TrackedBySource,
+                supplier: None,
             });
         }
 
@@ -25197,18 +25205,21 @@ mod tests {
                         owner: PlayerId(0),
                         mana_value: 2,
                         incarnation: state.objects[&exiled_a].incarnation,
+                        supplier: None,
                     },
                     crate::types::game_state::LinkedExileSnapshot {
                         exiled_id: exiled_b,
                         owner: PlayerId(0),
                         mana_value: 3,
                         incarnation: state.objects[&exiled_b].incarnation,
+                        supplier: None,
                     },
                     crate::types::game_state::LinkedExileSnapshot {
                         exiled_id: exiled_c,
                         owner: PlayerId(1),
                         mana_value: 4,
                         incarnation: state.objects[&exiled_c].incarnation,
+                        supplier: None,
                     },
                 ],
                 ..ZoneChangeRecord::test_minimal(source, Some(Zone::Battlefield), Zone::Graveyard)
@@ -25276,6 +25287,7 @@ mod tests {
                     owner: PlayerId(1),
                     mana_value: 0,
                     incarnation: state.objects[&exiled].incarnation,
+                    supplier: None,
                 }],
             }],
         );
@@ -28142,6 +28154,7 @@ mod tests {
                 source_id: source,
                 exiled_id: exiled,
                 kind: ExileLinkKind::TrackedBySource,
+                supplier: None,
             });
         }
 
@@ -30559,7 +30572,7 @@ mod player_count_list_tests {
             .trigger_source_context
             .expect("the source snapshot carries a trigger context");
         trigger_source.linked_exile_snapshot =
-            vec![exiled_card_snapshot(&state, card).expect("the card is in exile")];
+            vec![exiled_card_snapshot(&state, card, None).expect("the card is in exile")];
         let mut ability = draw_ability(P0, source);
         ability.trigger_source = Some(trigger_source);
 

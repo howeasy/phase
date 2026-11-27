@@ -1912,6 +1912,7 @@ fn link_exiled_with(runner: &mut GameRunner, exiled: ObjectId, source: ObjectId)
         exiled_id: exiled,
         source_id: source,
         kind: ExileLinkKind::TrackedBySource,
+        supplier: None,
     });
 }
 

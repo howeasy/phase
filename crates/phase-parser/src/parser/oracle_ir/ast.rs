@@ -956,6 +956,11 @@ pub(crate) enum ImperativeFamilyAst {
         /// The card the keyword action moves — "target creature card from an
         /// opponent's graveyard" (CR 115.2: a non-battlefield-zone target).
         target: TargetFilter,
+        /// CR 115.2 + CR 607.2a: `None` for the graveyard form (the zone
+        /// constraint travels on the target filter); `Some(Exile)` for the
+        /// linked-exile form ("a creature card exiled with it"), an untargeted
+        /// off-battlefield pick made while the ability resolves (CR 608.2d).
+        origin: Option<Zone>,
     },
     /// CR 509.1c: Block this turn/combat if able.
     ForceBlock {
@@ -2764,13 +2769,13 @@ pub(crate) fn cast_cost_modifier_without_host_gap(
 /// Twin of [`refuse_additional_cost_on_lingering_cast`], inverted on the driver
 /// axis because the two riders ride opposite mechanisms:
 /// `record_lingering_permissions` is the one site that stamps a cost modifier
-/// onto the permissions the grant creates, so `LingeringPermission` is the only
-/// driver with a slot — while an additional cost is charged only by the
+/// onto the permissions the grant creates, so a lingering driver
+/// (`LingeringPermission` or `LingeringWindow`) is the only kind with a slot — while an additional cost is charged only by the
 /// during-resolution cast.
 ///
 /// Called at the one seam that can DEGRADE an already-stamped grant off the
 /// lingering mechanism (`attach_alt_cost_to_prior_cast_from_zone`, beside its
-/// twin); the absorption site refuses a non-`LingeringPermission` host up front
+/// twin); the absorption site refuses a non-lingering host up front
 /// (`attach_cast_cost_modifier_to_prior_cast_from_zone`), so that path never
 /// stamps one for this to find. Zero printed carriers today.
 pub(crate) fn refuse_cast_cost_modifier_on_unsupported_driver(effect: &mut Effect) {
@@ -2782,7 +2787,7 @@ pub(crate) fn refuse_cast_cost_modifier_on_unsupported_driver(effect: &mut Effec
     else {
         return;
     };
-    if *driver == crate::types::ability::CastFromZoneDriver::LingeringPermission {
+    if driver.is_lingering() {
         return;
     }
     let gap = cast_cost_modifier_without_host_gap(modifier);

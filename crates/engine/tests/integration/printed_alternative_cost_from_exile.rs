@@ -91,6 +91,7 @@ fn free_exile_grant(granted_to: PlayerId) -> CastingPermission {
         enters_with_counter: None,
         enters_with_modifications: Default::default(),
         cast_cost_modifier: None,
+        single_use_group: None,
     }
 }
 

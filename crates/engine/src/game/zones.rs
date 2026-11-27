@@ -2861,13 +2861,23 @@ pub(crate) fn capture_linked_exile_snapshot(
     source_id: ObjectId,
     from: Zone,
 ) -> Vec<crate::types::game_state::LinkedExileSnapshot> {
-    if from != Zone::Battlefield {
-        return Vec::new();
-    }
+    live_linked_exile_snapshots(state, source_id, from).collect()
+}
 
-    crate::game::exile_links::live_links_for_source(state, source_id)
-        .filter_map(|link| crate::game::exile_links::exiled_card_snapshot(state, link.exiled_id))
-        .collect()
+/// The lazy form of [`capture_linked_exile_snapshot`], for readers that ask one
+/// card's membership and must not build the whole pile per candidate.
+pub(crate) fn live_linked_exile_snapshots(
+    state: &GameState,
+    source_id: ObjectId,
+    from: Zone,
+) -> impl Iterator<Item = crate::types::game_state::LinkedExileSnapshot> + '_ {
+    (from == Zone::Battlefield)
+        .then(|| crate::game::exile_links::live_links_for_source(state, source_id))
+        .into_iter()
+        .flatten()
+        .filter_map(move |link| {
+            crate::game::exile_links::exiled_card_snapshot(state, link.exiled_id, link.supplier)
+        })
 }
 
 /// CR 607.2a + CR 607.2b + CR 113.7a: Persist a battlefield departure's
@@ -7282,6 +7292,7 @@ mod tests {
             source_id: source,
             exiled_id: exiled,
             kind: crate::types::game_state::ExileLinkKind::TrackedBySource,
+            supplier: None,
         });
 
         let mut events = Vec::new();
@@ -7299,6 +7310,7 @@ mod tests {
                 owner: PlayerId(1),
                 mana_value: 4,
                 incarnation: state.objects[&exiled].incarnation,
+                supplier: None,
             }]
         );
         assert!(
@@ -7337,6 +7349,7 @@ mod tests {
             source_id: source,
             exiled_id: exiled,
             kind: crate::types::game_state::ExileLinkKind::TrackedBySource,
+            supplier: None,
         });
 
         let mut events = Vec::new();
@@ -7385,6 +7398,7 @@ mod tests {
             source_id: source,
             exiled_id: exiled,
             kind: crate::types::game_state::ExileLinkKind::TrackedBySource,
+            supplier: None,
         });
 
         let mut events = Vec::new();
@@ -7430,6 +7444,7 @@ mod tests {
                 source_id: source,
                 exiled_id: exiled,
                 kind: crate::types::game_state::ExileLinkKind::TrackedBySource,
+                supplier: None,
             });
             let departed = state.objects[&source].incarnation;
             move_to_zone(&mut state, source, Zone::Graveyard, &mut events);
@@ -7441,12 +7456,120 @@ mod tests {
                     owner: PlayerId(1),
                     mana_value: 0,
                     incarnation: state.objects[&exiled].incarnation,
+                    supplier: None,
                 }],
             });
         }
 
         assert_ne!(departures[0].successor, departures[1].departed);
         assert_eq!(state.linked_exile_lki.get(&source), Some(&departures));
+    }
+
+    /// CR 607.5 + CR 607.2a: each exile link's `supplier` — the ability pair that
+    /// performed the exile — is carried into the departure's LKI snapshot, so a
+    /// later reader (`players::pair_compatible`) can admit only the pile the
+    /// reading ability pair built. Both `ExileLink` and `LinkedExileSnapshot`
+    /// define a manual `PartialEq` that IGNORES `supplier`, so the field is
+    /// compared explicitly here; a producer that stamped `None` fails.
+    #[test]
+    fn a_battlefield_departure_keeps_each_links_supplier_in_its_lki_snapshot() {
+        use crate::game::game_object::LinkedAbilitySource;
+        use crate::types::ability::{CharacteristicSetRef, CopyEffectInstanceRef};
+
+        let mut state = setup();
+        let source = create_object(
+            &mut state,
+            CardId(67),
+            PlayerId(0),
+            "Supplier Source".to_string(),
+            Zone::Battlefield,
+        );
+        let incarnation = state.objects[&source].incarnation;
+        let own_pair = LinkedAbilitySource {
+            creator: ObjectIncarnationRef::of(source, incarnation),
+            characteristic_set: CharacteristicSetRef::Own,
+        };
+        let copied_pair = LinkedAbilitySource {
+            creator: ObjectIncarnationRef::of(source, incarnation),
+            characteristic_set: CharacteristicSetRef::Copied(CopyEffectInstanceRef {
+                continuous_effect_id: 7,
+                modification_index: 0,
+            }),
+        };
+
+        let mut events = Vec::new();
+        let mut linked = Vec::new();
+        for (card_id, supplier) in [(68, Some(own_pair)), (69, Some(copied_pair)), (70, None)] {
+            let exiled = create_object(
+                &mut state,
+                CardId(card_id),
+                PlayerId(1),
+                "Exiled With Source".to_string(),
+                Zone::Exile,
+            );
+            state.exile_links.push(crate::types::game_state::ExileLink {
+                source_id: source,
+                exiled_id: exiled,
+                kind: crate::types::game_state::ExileLinkKind::TrackedBySource,
+                supplier,
+            });
+            linked.push((exiled, supplier));
+        }
+
+        move_to_zone(&mut state, source, Zone::Graveyard, &mut events);
+
+        let entries = state
+            .linked_exile_lki
+            .get(&source)
+            .expect("the departure records its linked-exile entry");
+        assert_eq!(
+            entries.len(),
+            1,
+            "every non-cast-cost link shares one entry"
+        );
+        let snapshot = &entries[0].snapshot;
+        assert_eq!(snapshot.len(), 3, "every link contributes its own snapshot");
+        for &(exiled, supplier) in &linked {
+            let snap = snapshot
+                .iter()
+                .find(|snap| snap.exiled_id == exiled)
+                .expect("each linked card has its own LKI snapshot");
+            assert_eq!(
+                snap.supplier, supplier,
+                "the LKI snapshot keeps the supplier captured for {exiled:?}"
+            );
+        }
+
+        // CR 603.10a + CR 607.2a: the departure's zone-change record carries the
+        // same attribution for the look-back readers that consult it.
+        let record = events
+            .iter()
+            .find_map(|event| {
+                if let GameEvent::ZoneChanged {
+                    object_id,
+                    from,
+                    record,
+                    ..
+                } = event
+                {
+                    (*object_id == source && *from == Some(Zone::Battlefield)).then_some(&**record)
+                } else {
+                    None
+                }
+            })
+            .expect("the battlefield departure was emitted");
+        assert_eq!(record.linked_exile_snapshot.len(), 3);
+        for &(exiled, supplier) in &linked {
+            let snap = record
+                .linked_exile_snapshot
+                .iter()
+                .find(|snap| snap.exiled_id == exiled)
+                .expect("the zone-change record carries each linked card");
+            assert_eq!(
+                snap.supplier, supplier,
+                "the zone-change record keeps the supplier for {exiled:?}"
+            );
+        }
     }
 
     /// CR 712.8a + CR 400.7: An MDFC permanent that entered the battlefield as

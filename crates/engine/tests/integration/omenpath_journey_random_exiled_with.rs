@@ -67,6 +67,7 @@ fn omenpath_journey_puts_one_random_exiled_with_source_card_onto_battlefield_tap
                 exiled_id: id,
                 source_id: source,
                 kind: ExileLinkKind::TrackedBySource,
+                supplier: None,
             });
             id
         })

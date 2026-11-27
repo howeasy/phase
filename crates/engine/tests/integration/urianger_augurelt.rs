@@ -102,6 +102,7 @@ fn link_exiled_with(runner: &mut GameRunner, card: ObjectId, source: ObjectId) {
         exiled_id: card,
         source_id: source,
         kind: ExileLinkKind::TrackedBySource,
+        supplier: None,
     });
 }
 
@@ -346,6 +347,7 @@ fn selected_permission_modifier_does_not_leak_from_sibling_permission() {
         enters_with_modifications: Default::default(),
         mana_spend_permission: None,
         cast_cost_modifier: Some(CastCostModifier::raise(ManaCost::generic(2))),
+        single_use_group: None,
     };
     runner
         .state_mut()

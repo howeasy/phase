@@ -67,6 +67,7 @@ fn urborg_scavengers_source_exiled_grant_is_conditional_and_per_item() {
             exiled_id: exiled,
             source_id: urborg,
             kind: ExileLinkKind::TrackedBySource,
+            supplier: None,
         });
     }
     evaluate_layers(runner.state_mut());

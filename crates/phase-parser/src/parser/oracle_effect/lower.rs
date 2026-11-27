@@ -73,6 +73,7 @@ use super::{
     parse_for_each_object_copy_parts, refine_damage_target_remainder, replace_player_anaphor,
     scan_contains_phrase, target_filter_controller_ref, ParsedEffectClause,
 };
+use crate::types::ability::filter_contains_filter_prop;
 use crate::types::ability::generic_effect_population_filter;
 
 pub(super) fn rewrite_player_anaphor_targets_in_definition(def: &mut AbilityDefinition) {
@@ -1279,7 +1280,7 @@ pub(super) fn attach_cast_cost_modifier_to_previous_play_from_exile(
 }
 
 /// Walk the previous def and its `sub_ability` chain for a
-/// `LingeringPermission`-driven `Effect::CastFromZone`'s rider slot. Mirrors
+/// lingering-driver (`LingeringPermission` or `LingeringWindow`) `Effect::CastFromZone`'s rider slot. Mirrors
 /// [`find_prev_play_from_exile_permission_mut`]: the grant lands as a sibling
 /// def in the compound "exile … then you may play it" shape and as a nested
 /// sub-ability in the self-contained one, and the rider must absorb either way.
@@ -1297,10 +1298,7 @@ fn find_prev_cast_from_zone_cost_modifier_mut(
         // report the clause as supported.
         let carries_rider = matches!(
             def.effect.as_ref(),
-            Effect::CastFromZone {
-                driver: CastFromZoneDriver::LingeringPermission,
-                ..
-            }
+            Effect::CastFromZone { driver, .. } if driver.is_lingering()
         );
         if carries_rider {
             if let Effect::CastFromZone {
@@ -1328,7 +1326,7 @@ fn find_prev_cast_from_zone_cost_modifier_mut(
 /// on the effect that states it, and the resolver decides which of the
 /// permissions it creates may carry it (CR 305.1: never the land-play half).
 ///
-/// Returns `false` for a non-`LingeringPermission` driver, so the rider falls
+/// Returns `false` for a non-lingering driver, so the rider falls
 /// through to the `PlayFromExile` host and, failing that, to the assembly
 /// seam's refusal — `cast_cost_modifier_without_host_gap`, which lowers the
 /// rider as `CAST_COST_MODIFIER_WITHOUT_HOST_GAP` rather than letting its
@@ -3286,6 +3284,55 @@ pub(super) fn rebind_zone_changed_this_way_pronoun_to_moved_object(def: &mut Abi
     }
     if let Some(els) = def.else_ability.as_deref_mut() {
         rebind_zone_changed_this_way_pronoun_to_moved_object(els);
+    }
+}
+
+/// CR 608.2c + CR 607.2a: in "[exile it]. If a creature is put into exile this
+/// way, return each other card exiled with ~" (Mysterious Limousine) and
+/// "[exile it]. If you do, return each other card exiled with this artifact"
+/// (Mimic Vat), "other" means other than the card(s) the exile instruction just
+/// moved, so the `And` of the linked pile gains an explicit
+/// `Not { LastZoneChanged }` leg (the ledger of the instruction just performed)
+/// instead of the pile reader consulting that ledger. Whatever gates the
+/// return, and whichever exile instruction precedes it (`chain_clause_is_exile_producer`:
+/// Duplicity's and Moonring Mirror's "exile all cards from your hand" included), the
+/// sub-ability that follows it directly carries it.
+pub(super) fn exclude_this_way_cards_from_other_linked_pile(def: &mut AbilityDefinition) {
+    let parent_exiles = super::chain_clause_is_exile_producer(def.effect.as_ref());
+    if parent_exiles {
+        if let Some(Effect::ChangeZoneAll {
+            target: TargetFilter::And { filters },
+            ..
+        }) = def
+            .sub_ability
+            .as_deref_mut()
+            .map(|sub| sub.effect.as_mut())
+        {
+            let pile_is_linked_exile = filters
+                .iter()
+                .any(TargetFilter::references_exiled_by_source);
+            let pile_says_other = filters
+                .iter()
+                .any(|leg| filter_contains_filter_prop(leg, &|prop| *prop == FilterProp::Another));
+            let pile_already_excludes = filters.iter().any(|leg| {
+                matches!(
+                    leg,
+                    TargetFilter::Not { filter }
+                        if matches!(filter.as_ref(), TargetFilter::LastZoneChanged)
+                )
+            });
+            if pile_is_linked_exile && pile_says_other && !pile_already_excludes {
+                filters.push(TargetFilter::Not {
+                    filter: Box::new(TargetFilter::LastZoneChanged),
+                });
+            }
+        }
+    }
+    if let Some(sub) = def.sub_ability.as_deref_mut() {
+        exclude_this_way_cards_from_other_linked_pile(sub);
+    }
+    if let Some(els) = def.else_ability.as_deref_mut() {
+        exclude_this_way_cards_from_other_linked_pile(els);
     }
 }
 
@@ -17951,6 +17998,137 @@ mod tests {
                 "{card}: a follower that reads an object beyond its slots is not a host follower"
             );
         }
+    }
+
+    fn not_last_zone_changed() -> TargetFilter {
+        TargetFilter::Not {
+            filter: Box::new(TargetFilter::LastZoneChanged),
+        }
+    }
+
+    /// The `And` legs of every `ChangeZoneAll` reachable from `def` through its
+    /// sub- and else-ability chains, paired with whether its direct parent
+    /// effect is an exile `ChangeZone`.
+    fn change_zone_all_piles(def: &AbilityDefinition, out: &mut Vec<(bool, Vec<TargetFilter>)>) {
+        if let Some(sub) = def.sub_ability.as_deref() {
+            if let Effect::ChangeZoneAll {
+                target: TargetFilter::And { filters },
+                ..
+            } = sub.effect.as_ref()
+            {
+                let parent_exiles = crate::parser::oracle_effect::chain_clause_is_exile_producer(
+                    def.effect.as_ref(),
+                );
+                out.push((parent_exiles, filters.clone()));
+            }
+            change_zone_all_piles(sub, out);
+        }
+        if let Some(els) = def.else_ability.as_deref() {
+            change_zone_all_piles(els, out);
+        }
+    }
+
+    fn piles_of(
+        text: &str,
+        name: &str,
+        types: &[&str],
+        subtypes: &[&str],
+    ) -> Vec<(bool, Vec<TargetFilter>)> {
+        let types: Vec<String> = types.iter().map(|t| t.to_string()).collect();
+        let subtypes: Vec<String> = subtypes.iter().map(|t| t.to_string()).collect();
+        let parsed = crate::parser::oracle::parse_oracle_text(text, name, &[], &types, &subtypes);
+        let mut out = Vec::new();
+        for def in parsed
+            .triggers
+            .iter()
+            .filter_map(|trigger| trigger.execute.as_deref())
+            .chain(parsed.abilities.iter())
+        {
+            change_zone_all_piles(def, &mut out);
+        }
+        out
+    }
+
+    /// CR 608.2c + CR 607.2a: "each other card exiled with ~" in the sub-ability
+    /// that follows an exile spells "other than the card just exiled" as a
+    /// `Not { LastZoneChanged }` leg on the linked pile's `And`, whatever gates
+    /// the return: Mysterious Limousine ("If a creature is put into exile this
+    /// way") and Mimic Vat ("If you do"), and after a mass exile (Duplicity, Moonring Mirror). Northampton Farm's "Return each other
+    /// card exiled with this land" follows no exile instruction, so it gains no
+    /// leg (its pile shape is the control, not a card that never parses).
+    #[test]
+    fn other_exiled_with_pile_after_an_exile_excludes_the_card_just_exiled() {
+        let other_card_pile = || {
+            vec![
+                TargetFilter::Typed(TypedFilter {
+                    type_filters: vec![TypeFilter::Card],
+                    controller: None,
+                    properties: vec![crate::types::ability::FilterProp::Another],
+                }),
+                TargetFilter::ExiledBySource,
+            ]
+        };
+        let with_leg = || {
+            let mut legs = other_card_pile();
+            legs.push(not_last_zone_changed());
+            legs
+        };
+
+        let limousine = piles_of(
+            "Whenever this Vehicle enters or attacks, exile up to one other target creature until this Vehicle leaves the battlefield. If a creature is put into exile this way, return each other card exiled with this Vehicle to the battlefield under its owner's control.",
+            "Mysterious Limousine",
+            &["Artifact"],
+            &["Vehicle"],
+        );
+        assert_eq!(limousine, vec![(true, with_leg())]);
+
+        let vat = piles_of(
+            "Imprint \u{2014} Whenever a nontoken creature dies, you may exile that card. If you do, return each other card exiled with this artifact to its owner's graveyard.\n{3}, {T}: Create a token that's a copy of a card exiled with this artifact. It gains haste. Exile it at the beginning of the next end step.",
+            "Mimic Vat",
+            &["Artifact"],
+            &[],
+        );
+        assert_eq!(vat, vec![(true, with_leg())]);
+
+        // Duplicity and Moonring Mirror: the exiling parent is a mass `ChangeZoneAll`.
+        for (name, text, types) in [
+            (
+                "Duplicity",
+                "When this enchantment enters, exile the top five cards of your library face down.\nAt the beginning of your upkeep, you may exile all cards from your hand face down. If you do, put all other cards you own exiled with this enchantment into your hand.\nAt the beginning of your end step, discard a card.\nWhen you lose control of this enchantment, put all cards exiled with this enchantment into their owner's graveyard.",
+                "Enchantment",
+            ),
+            (
+                "Moonring Mirror",
+                "Whenever you draw a card, exile the top card of your library face down.\nAt the beginning of your upkeep, you may exile all cards from your hand face down. If you do, put all other cards you own exiled with this artifact into your hand.",
+                "Artifact",
+            ),
+        ] {
+            let piles = piles_of(text, name, &[types], &[]);
+            assert!(
+                piles.len() == 1
+                    && piles[0].0
+                    && piles[0].1.last() == Some(&not_last_zone_changed())
+                    && piles[0].1.contains(&TargetFilter::ExiledBySource),
+                "{name}: the return after the hand exile excludes the cards just exiled, got {piles:?}"
+            );
+        }
+
+        let farm = piles_of(
+            "{T}: Add {C}.\n{1}, {T}: Exile target creature you own.\n{2}, {T}, Sacrifice this land: Return a creature card exiled with this land to the battlefield under your control. Return each other card exiled with this land to its owner's hand.",
+            "Northampton Farm",
+            &["Land"],
+            &[],
+        );
+        assert!(
+            farm.iter().any(|(_, legs)| *legs == other_card_pile()),
+            "reach: the Farm's other-card pile parses to the same shape, got {farm:?}"
+        );
+        assert!(
+            farm.iter()
+                .all(|(parent_exiles, legs)| !*parent_exiles
+                    && !legs.contains(&not_last_zone_changed())),
+            "no exile instruction precedes the Farm's return, so no leg: {farm:?}"
+        );
     }
 }
 #[cfg(test)]

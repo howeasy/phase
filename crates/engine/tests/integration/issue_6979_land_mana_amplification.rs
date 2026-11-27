@@ -90,6 +90,7 @@ fn extraplanar_lens_matches_the_name_of_its_imprinted_land() {
         source_id: lens,
         exiled_id: imprinted,
         kind: ExileLinkKind::TrackedBySource,
+        supplier: None,
     });
     let ability = runner.state().objects[&land].abilities[0].clone();
     let mut events = Vec::new();

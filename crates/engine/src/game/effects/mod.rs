@@ -11848,6 +11848,7 @@ fn effect_fields_read_filter_population(
                         enters_with_modifications,
                         mana_spend_permission: _,
                         cast_cost_modifier: _,
+                        single_use_group: _,
                     } => {
                         constraint.as_ref().is_some_and(has_cast_constraint)
                             || duration.as_ref().is_some_and(has_duration)
@@ -18878,6 +18879,37 @@ fn gated_run_keeps_ledger_for_this_way_head(ability: &ResolvedAbility) -> bool {
                 .as_ref()
                 .and_then(|sub| sub.condition.as_ref()),
         )
+}
+
+/// CR 608.2c: Whether this node is a characteristic-changing step applied to the
+/// object the preceding instruction just moved (a `GenericEffect` bound to
+/// `ParentTarget` — "put it onto the battlefield … It's a Borg artifact
+/// creature", the expansion of `assimilate`) and is directly followed by a
+/// "… this way" reader, including the negated "If you can't" form. The step is
+/// part of the moving instruction, not a separate instruction, so the reader's
+/// "this way" still names the move. The caller applies this only when the node
+/// moved no objects.
+fn moved_object_step_keeps_ledger_for_this_way_head(ability: &ResolvedAbility) -> bool {
+    let reads_this_way_ledger = |condition: &AbilityCondition| {
+        // "If you can't" is the negated form: unwrap one `Not` and ask the same question.
+        let unwrapped = if let AbilityCondition::Not { condition } = condition {
+            &**condition
+        } else {
+            condition
+        };
+        unwrapped.zone_changed_this_way_head().is_some()
+    };
+    matches!(
+        ability.effect,
+        Effect::GenericEffect {
+            target: Some(TargetFilter::ParentTarget),
+            ..
+        }
+    ) && ability
+        .sub_ability
+        .as_ref()
+        .and_then(|sub| sub.condition.as_ref())
+        .is_some_and(reads_this_way_ledger)
 }
 
 /// CR 603.12 + CR 701.9a: Effect kinds whose reflexive "when you do" needs an
@@ -30962,7 +30994,9 @@ fn resolve_chain_body(
     // turn") directly followed by a "this way" head is not that instruction,
     // so it leaves the moving instruction's ledger in place for the head.
     if !permission_node_keeps_ledger_for_this_way_head(ability)
-        && !(zone_changed_ids.is_empty() && gated_run_keeps_ledger_for_this_way_head(ability))
+        && !(zone_changed_ids.is_empty()
+            && (gated_run_keeps_ledger_for_this_way_head(ability)
+                || moved_object_step_keeps_ledger_for_this_way_head(ability)))
     {
         state.last_zone_changed_ids = zone_changed_ids;
     }
@@ -56063,6 +56097,7 @@ mod tests {
                         enters_with_modifications: Default::default(),
                         mana_spend_permission: None,
                         cast_cost_modifier: None,
+                        single_use_group: None,
                     },
                     target: TargetFilter::TrackedSet {
                         id: TrackedSetId(0),
@@ -56169,6 +56204,7 @@ mod tests {
                         enters_with_modifications: Default::default(),
                         mana_spend_permission: None,
                         cast_cost_modifier: None,
+                        single_use_group: None,
                     },
                     target: TargetFilter::TrackedSet {
                         id: TrackedSetId(0),
@@ -56248,6 +56284,7 @@ mod tests {
                     enters_with_modifications: Default::default(),
                     mana_spend_permission: None,
                     cast_cost_modifier: None,
+                    single_use_group: None,
                 },
                 target: TargetFilter::TrackedSet {
                     id: TrackedSetId(0),
@@ -63400,6 +63437,7 @@ mod tests {
                         enters_with_modifications: Default::default(),
                         mana_spend_permission: None,
                         cast_cost_modifier: None,
+                        single_use_group: None,
                     },
                     target: TargetFilter::Any,
                     grantee: Default::default(),
@@ -63426,6 +63464,7 @@ mod tests {
                             },
                         mana_spend_permission: None,
                         cast_cost_modifier: None,
+                        single_use_group: None,
                     },
                     target: TargetFilter::Any,
                     grantee: Default::default(),
@@ -65590,6 +65629,7 @@ mod tests {
                 source_id: source,
                 exiled_id: exiled,
                 kind: ExileLinkKind::TrackedBySource,
+                supplier: None,
             });
         }
 
@@ -65732,18 +65772,21 @@ mod tests {
                         owner: PlayerId(0),
                         mana_value: 2,
                         incarnation: state.objects[&exiled_a].incarnation,
+                        supplier: None,
                     },
                     LinkedExileSnapshot {
                         exiled_id: exiled_b,
                         owner: PlayerId(0),
                         mana_value: 3,
                         incarnation: state.objects[&exiled_b].incarnation,
+                        supplier: None,
                     },
                     LinkedExileSnapshot {
                         exiled_id: exiled_c,
                         owner: PlayerId(1),
                         mana_value: 4,
                         incarnation: state.objects[&exiled_c].incarnation,
+                        supplier: None,
                     },
                 ],
                 ..crate::types::game_state::ZoneChangeRecord::test_minimal(
@@ -67146,6 +67189,7 @@ mod tests {
             source_id: source,
             exiled_id: land_card,
             kind: ExileLinkKind::TrackedBySource,
+            supplier: None,
         });
 
         let token_rider = ResolvedAbility::new(
@@ -72120,6 +72164,7 @@ mod tests {
             exiled_id: exiled,
             source_id: source,
             kind: crate::types::game_state::ExileLinkKind::TrackedBySource,
+            supplier: None,
         });
     }
 

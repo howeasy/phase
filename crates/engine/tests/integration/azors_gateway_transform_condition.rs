@@ -96,6 +96,7 @@ fn seed_prior_exile(
         exiled_id: id,
         source_id: source,
         kind: ExileLinkKind::TrackedBySource,
+        supplier: None,
     });
 }
 
