@@ -10,10 +10,9 @@
 //! event happens as the modes are announced (CR 603.2); the per-turn history is
 //! written once the announcement reaches the stack (CR 601.2i + CR 733.1: an
 //! undone announcement records nothing). Copies (CR 707.10, CR 700.2g) face
-//! no dilemma (a copy copies the chosen modes and chooses none, CR 700.2g). No CR
-//! rule says who chooses a mode drawn at random; this reads "choose one at random"
-//! as the controller choosing one or more modes (CR 700.17), so a nonempty random
-//! draw faces one.
+//! no dilemma (a copy copies the chosen modes and chooses none, CR 700.2g). Ruling
+//! 2025-06-06 (Umaro, Raging Yeti; Summon: Magus Sisters): "you choose a mode at
+//! random", so a nonempty random draw faces one (CR 700.17).
 //!
 //! Every named card below is the printed card, added from the curated card
 //! database through `add_real_card`; its printed cost is paid with basic lands.
@@ -1610,4 +1609,177 @@ fn a_modal_spell_with_a_reflexive_trigger_faces_one_dilemma() {
         "Seven drew exactly once: the spell left the hand, one dilemma drew a card"
     );
     assert_eq!(dilemmas(&runner, P0), 1);
+}
+
+/// R24 — CR 700.17 + CR 601.2b + CR 107.3: Heliod's Intervention ("{X}{W}{W}
+/// Instant. Choose one — • Destroy X target artifacts and/or enchantments. •
+/// Target player gains twice X life.") announces X before its targets, so the
+/// chosen mode's targeting is deferred past the X announcement. The spell still
+/// faces exactly one dilemma, recorded once it is on the stack, and Seven of
+/// Nine draws once. Fails if the X-deferred route never records the dilemma.
+#[test]
+fn an_x_deferred_modal_spell_faces_one_dilemma() {
+    let Some(db) = shared_card_db() else { return };
+    let mut scenario = board();
+    add_seven(&mut scenario, P0, db);
+    // {X}{W}{W} with X = 1.
+    for _ in 0..3 {
+        scenario.add_basic_land(P0, ManaColor::White);
+    }
+    let sol_ring = scenario.add_real_card(P1, "Sol Ring", Zone::Battlefield, db);
+    let intervention = scenario.add_real_card(P0, "Heliod's Intervention", Zone::Hand, db);
+    let mut runner = scenario.build();
+    let hand = hand_len(&runner, P0);
+    cast(&mut runner, intervention);
+    runner
+        .act(GameAction::SelectModes { indices: vec![0] })
+        .expect("choose the destroy mode");
+    let mut chose_x = false;
+    for _ in 0..16 {
+        match runner.state().waiting_for.clone() {
+            WaitingFor::ChooseXValue { .. } => {
+                runner
+                    .act(GameAction::ChooseX { value: 1 })
+                    .expect("announce X = 1");
+                chose_x = true;
+            }
+            WaitingFor::TargetSelection { .. } => {
+                runner
+                    .act(GameAction::ChooseTarget {
+                        target: Some(TargetRef::Object(sol_ring)),
+                    })
+                    .expect("choose the artifact");
+            }
+            _ => break,
+        }
+    }
+    assert!(chose_x, "REACH: the spell asked for X");
+    drive(&mut runner, Plan::default());
+    assert_eq!(
+        runner.state().objects[&sol_ring].zone,
+        Zone::Graveyard,
+        "REACH: the X-deferred mode resolved"
+    );
+    assert_eq!(
+        hand_len(&runner, P0),
+        hand - 1 + 1,
+        "Seven drew exactly once"
+    );
+    assert_eq!(dilemmas(&runner, P0), 1);
+}
+
+/// R25 — CR 700.17 + CR 603.3c: Summon: Magus Sisters with no other creature
+/// on the battlefield. Whichever mode the seeded draw picks has at most one
+/// legal target (the Saga itself for the counter modes, none for "fights up to
+/// one target creature an opponent controls"), so no mode prompts for a target
+/// and the construction finishes inside the dispatch window. The chapter still
+/// faces exactly one dilemma, read from the per-turn history (no observer is
+/// needed, and every creature observer would be a second legal target). Fails
+/// if the no-prompt random route records no dilemma, or two.
+#[test]
+fn a_random_modal_trigger_without_a_target_prompt_faces_one_dilemma() {
+    let Some(db) = shared_card_db() else { return };
+    let mut scenario = board();
+    // Summon: Magus Sisters {4}{G}.
+    for _ in 0..5 {
+        scenario.add_basic_land(P0, ManaColor::Green);
+    }
+    let saga = scenario.add_real_card(P0, "Summon: Magus Sisters", Zone::Hand, db);
+    let mut runner = scenario.build();
+    cast(&mut runner, saga);
+    for _ in 0..8 {
+        if runner
+            .state()
+            .stack
+            .iter()
+            .any(|entry| entry.source_id == saga)
+            && runner.state().stack.len() > 1
+        {
+            break;
+        }
+        runner
+            .act(GameAction::PassPriority)
+            .expect("pass priority so the Saga resolves");
+    }
+    assert!(
+        !matches!(
+            runner.state().waiting_for,
+            WaitingFor::TriggerTargetSelection { .. }
+        ),
+        "REACH: the drawn mode needed no target prompt: {:?}",
+        runner.state().waiting_for
+    );
+    assert_eq!(
+        dilemmas(&runner, P0),
+        1,
+        "REACH: the chapter faced its dilemma when it was placed"
+    );
+    // Let the chapter resolve; the history still holds the one dilemma.
+    while !runner.state().stack.is_empty() {
+        runner
+            .act(GameAction::PassPriority)
+            .expect("pass priority so the chapter resolves");
+    }
+    assert_eq!(dilemmas(&runner, P0), 1);
+}
+
+/// R26 — CR 603.3b + CR 700.2a: "An ability that triggers whenever a player
+/// faces a dilemma will resolve before the spell or ability that caused it to
+/// trigger." A modal spell (Abzan Charm) and a modal activation (Cankerbloom)
+/// each leave Elim Garak, Simple Tailor's trigger above them on the stack.
+/// Fails if the observer is placed below its cause.
+#[test]
+fn a_dilemma_observer_sits_above_the_spell_and_the_activation_that_caused_it() {
+    let Some(db) = shared_card_db() else { return };
+    let mut scenario = board();
+    let garak = scenario.add_real_card(P0, "Elim Garak, Simple Tailor", Zone::Battlefield, db);
+    let cankerbloom = scenario.add_real_card(P0, "Cankerbloom", Zone::Battlefield, db);
+    let sol_ring = scenario.add_real_card(P1, "Sol Ring", Zone::Battlefield, db);
+    scenario.add_basic_land(P0, ManaColor::Green);
+    let charm = add_abzan_charm(&mut scenario, db);
+    let mut runner = scenario.build();
+    let sources = |runner: &GameRunner| -> Vec<ObjectId> {
+        runner
+            .state()
+            .stack
+            .iter()
+            .map(|entry| entry.source_id)
+            .collect()
+    };
+    cast(&mut runner, charm);
+    runner
+        .act(GameAction::SelectModes { indices: vec![1] })
+        .expect("choose the draw mode");
+    assert_eq!(
+        sources(&runner),
+        vec![charm, garak],
+        "REACH: the spell with Garak's trigger above it"
+    );
+    drive(&mut runner, Plan::default());
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: cankerbloom,
+            ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("activate Cankerbloom");
+    runner
+        .act(GameAction::SelectModes { indices: vec![0] })
+        .expect("choose the destroy mode");
+    if matches!(
+        runner.state().waiting_for,
+        WaitingFor::TargetSelection { .. }
+    ) {
+        runner
+            .act(GameAction::ChooseTarget {
+                target: Some(TargetRef::Object(sol_ring)),
+            })
+            .expect("choose the artifact");
+    }
+    assert_eq!(
+        sources(&runner),
+        vec![cankerbloom, garak],
+        "REACH: the activation with Garak's trigger above it"
+    );
+    assert_eq!(dilemmas(&runner, P0), 2);
 }

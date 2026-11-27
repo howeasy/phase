@@ -766,9 +766,9 @@ pub(crate) fn parse_modal_header_ast(text: &str) -> Option<ModalHeaderAst> {
     }
 
     // CR 701.9b (analogous): "choose one at random" — the game draws the
-    // mode(s). No CR rule says who chooses a mode drawn at random; this reads
-    // "choose one at random" as the controller choosing one or more modes
-    // (CR 700.17), so the draw faces a dilemma. The qualifier is a
+    // mode(s). Ruling 2025-06-06 (Umaro, Raging Yeti; Summon: Magus Sisters):
+    // "you choose a mode at random", so the controller is the mode chooser
+    // (CR 700.17) and the draw faces a dilemma. The qualifier is a
     // word-boundary phrase flag on the header sentence, not parsing dispatch.
     let selection = if nom_primitives::scan_contains(&header_lower, "at random") {
         TargetSelectionMode::Random

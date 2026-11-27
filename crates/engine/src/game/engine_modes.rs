@@ -590,18 +590,18 @@ struct TriggeredModeChoice {
     span_owner: triggers::ConstructionSpanOwner,
 }
 
-/// No CR rule says who chooses a mode drawn at random; this reads "choose one at
-/// random" as the controller choosing one or more modes (CR 700.17), so the draw
-/// faces a dilemma. Complete a modal *triggered* ability whose `selection` is `Random`
-/// (Cult of Skaro "choose one at random") without prompting `modal.chooser`. The game draws the mode index/indices via
-/// `random_select_modal_indices` (seeded `state.rng`), then routes through the
+/// Complete a modal *triggered* ability whose `selection` is `Random` (Cult of
+/// Skaro "choose one at random") without prompting `modal.chooser`. The game
+/// draws the mode index/indices via `random_select_modal_indices` (seeded `state.rng`), then routes through the
 /// SAME finalization path the interactive controller-choice flow uses
 /// (`handle_triggered_mode_choice`) so target legality, per-mode labels, and
 /// stack-entry mutation stay identical. The controller remains the mode chooser
 /// (CR 700.2b: the controller of a modal triggered ability chooses the mode(s)
 /// as part of putting it on the stack), so a nonempty draw faces one dilemma,
 /// which the construction step that completes the entry emits and records
-/// exactly as on the prompted path.
+/// exactly as on the prompted path. Ruling 2025-06-06 (Umaro, Raging Yeti;
+/// Summon: Magus Sisters): "you choose a mode at random", so the controller is
+/// the mode chooser (CR 700.17).
 ///
 /// Preconditions (the "push first, choose second" contract — see
 /// `dispatch_pending_trigger_context`): `state.pending_trigger` is set and its
@@ -638,7 +638,7 @@ pub(super) fn resolve_random_modal_trigger(
         &indices,
     );
     // CR 700.17 (edition effective 2026-11-06): the controller is still the mode
-    // chooser of a random draw (the reading stated above), so the nonempty draw
+    // chooser of a random draw (the ruling cited above), so the nonempty draw
     // faces one dilemma.
     let dilemma_chooser = super::ability_utils::mode_choice_dilemma_chooser(player, &indices);
     let mut resolved =

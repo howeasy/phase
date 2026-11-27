@@ -15465,9 +15465,9 @@ fn dispatch_pending_trigger_context_core(
             state.pending_trigger_firing = Some(firing);
             state.pending_trigger_entry = Some(entry_id);
 
-            // No CR rule says who chooses a mode drawn at random; this reads
-            // "choose one at random" as the controller choosing one or more
-            // modes (CR 700.17), so the draw faces a dilemma. Draw it
+            // Ruling 2025-06-06 (Umaro, Raging Yeti; Summon: Magus Sisters): "you
+            // choose a mode at random", so the controller is the mode chooser
+            // (CR 700.17) and the draw faces a dilemma. Draw it
             // immediately via `state.rng` instead of pausing on
             // `AbilityModeChoice`. Mirrors the `TargetSelectionMode::Random`
             // short-circuit used for targets below.

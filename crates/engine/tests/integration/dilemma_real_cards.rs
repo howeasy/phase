@@ -215,3 +215,15 @@ fn jett_reno_surveils_or_draws_instead_at_power_four() {
     assert!(surveils.is_empty(), "power 4: no surveil: {surveils:?}");
     assert_eq!(drawn, 1, "power 4: she draws a card instead");
 }
+
+/// Jett Reno's printed boundary ("If her power is 4 or greater"): at power 3
+/// (two +1/+1 counters) she still surveils and draws nothing. CR 701.25a +
+/// CR 608.2c.
+#[test]
+fn jett_reno_at_power_three_still_surveils() {
+    let Some((surveils, drawn)) = jett_taps(2) else {
+        return;
+    };
+    assert_eq!(surveils, vec![(P0, 1)], "power 3: P0 surveils 1");
+    assert_eq!(drawn, 0, "power 3: no draw");
+}

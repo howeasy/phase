@@ -1679,10 +1679,10 @@ fn modal_indices_have_legal_target_assignment(
 /// you choose one or more modes"; CR 603.3c removes a zero-mode trigger).
 ///
 /// The selection procedure does not change the chooser: a "choose one at
-/// random" trigger (Cult of Skaro) is still the controller's mode choice. No
-/// CR rule says who chooses a mode drawn at random; this reads "choose one at
-/// random" as the controller choosing one or more modes (CR 700.17), so a
-/// nonempty random draw faces a dilemma exactly like a prompted one.
+/// random" trigger (Cult of Skaro) is still the controller's mode choice.
+/// Ruling 2025-06-06 (Umaro, Raging Yeti; Summon: Magus Sisters): "you choose a
+/// mode at random", so a nonempty random draw faces a dilemma exactly like a
+/// prompted one (CR 700.17).
 pub(crate) fn mode_choice_dilemma_chooser(
     chooser: PlayerId,
     indices: &[usize],
@@ -2411,14 +2411,14 @@ pub fn random_select_targets_for_ability(
     Ok(chosen)
 }
 
-/// No CR rule says who chooses a mode drawn at random; this reads "choose one
-/// at random" as the controller choosing one or more modes (CR 700.17), so the
-/// draw faces a dilemma. Resolve a modal ability whose `selection` is `Random`
-/// (Cult of Skaro
+/// Resolve a modal ability whose `selection` is `Random` (Cult of Skaro
 /// "choose one at random") by uniformly drawing mode index/indices from the
 /// legal set using the engine's seeded RNG (`state.rng`), so no
 /// `WaitingFor::AbilityModeChoice` is emitted. Mirrors
-/// `random_select_targets_for_ability` for the mode-selection axis.
+/// `random_select_targets_for_ability` for the mode-selection axis. Ruling
+/// 2025-06-06 (Umaro, Raging Yeti; Summon: Magus Sisters): "you choose a mode at
+/// random", so the controller is the mode chooser and the draw faces a dilemma
+/// (CR 700.17).
 ///
 /// The legal set is `0..mode_count` minus `unavailable_modes` (modes ruled out
 /// by prior selection or unsatisfiable target legality, per CR 700.2b). A count
