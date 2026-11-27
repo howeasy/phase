@@ -297,6 +297,53 @@ fn compare_population(raw: &Map<String, Value>, populations: &[(&ConfirmedMispar
     }
 }
 
+/// Sandstalker Moloch (its dig publishes every looked-at card, ticket 359) and
+/// Sarevok, Deathbringer (a typeless permanent leaving is not counted) parse their
+/// intervening-if gates but are not claimed: the committed rows make both report an
+/// honest `Misparse:` gap, with the parse and the five claimed cards untouched.
+#[test]
+fn intervening_if_unclaimed_cards_stay_unsupported_and_claimed_cards_stay_supported() {
+    let unclaimed = [
+        ("sandstalker moloch", MisparseClass::WrongObject),
+        ("sarevok, deathbringer", MisparseClass::ConditionWrong),
+    ];
+    let claimed = [
+        "kaito shizuki",
+        "krond the dawn-clad",
+        "warchanter skald",
+        "syrix, carrier of the flame",
+        "novice knight",
+    ];
+    let pool: Map<String, Value> = unclaimed
+        .iter()
+        .map(|(key, _)| *key)
+        .chain(claimed)
+        .map(|key| (key.to_string(), fixture()[key].clone()))
+        .collect();
+    let committed = ConfirmedMisparses::committed();
+    let before = report(&database(&stamped_export(&pool, &ConfirmedMisparses::empty())));
+    let after = report(&database(&stamped_export(&pool, committed)));
+    for (key, class) in unclaimed {
+        assert_eq!(committed.class_of(key), Some(class), "committed row: {key}");
+        assert!(before[key].supported, "gate parses on its own: {key}");
+        assert!(!after[key].supported, "unclaimed card must report a gap: {key}");
+        assert!(
+            handlers(&after[key]).contains(&class.handler()),
+            "typed Misparse gap: {key}"
+        );
+        assert_eq!(
+            serde_json::to_value(&before[key].parse_details).unwrap(),
+            serde_json::to_value(&after[key].parse_details).unwrap(),
+            "the marker changes support, never the parse: {key}"
+        );
+    }
+    for key in claimed {
+        assert_eq!(committed.class_of(key), None, "claimed card has no row: {key}");
+        assert!(after[key].supported, "claimed card is supported: {key}");
+        assert!(after[key].gap_details.is_empty(), "claimed card is gap-free: {key}");
+    }
+}
+
 #[test]
 fn confirmed_misparse_fixture_population_and_unlisted_invariance() {
     compare_population(
