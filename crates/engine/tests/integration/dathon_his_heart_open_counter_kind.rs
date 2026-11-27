@@ -13,14 +13,10 @@
 
 use crate::support::shared_card_db;
 use engine::game::coverage::card_face_gaps;
-use engine::game::effects::counter;
 use engine::game::engine::EngineError;
-use engine::game::sba;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::scenario_db::GameScenarioDbExt;
-use engine::types::ability::{
-    AbilityDefinition, AbilityKind, Effect, ResolvedAbility, TargetFilter, TargetRef,
-};
+use engine::types::ability::{AbilityDefinition, AbilityKind, Effect};
 use engine::types::actions::GameAction;
 use engine::types::counter::CounterType;
 use engine::types::game_state::{CastPaymentMode, WaitingFor};
@@ -377,88 +373,126 @@ fn casting_a_saga_also_deals_two_damage_to_each_opponent() {
     ));
 }
 
-/// CR 603.2 + CR 608.2h + CR 400.7 + CR 704.5e: Dathon's "If it's a Saga spell"
-/// reads the triggering spell's last known information. The cast Saga is a copy
-/// (a Shiko-style copy of a Saga spell cast through Dathon's trigger), countered
-/// while the trigger waits above it; the copy ceases to exist, yet the rider still
-/// sees a Saga spell, so the draw AND the 2 damage happen.
-#[test]
-fn a_countered_saga_spell_still_triggers_dathons_damage() {
-    let (mut runner, saga) = dathon_cast_setup(
-        "History of Benalia",
+/// Dathon and Shiko (P0), the printed enchantment `target` in P0's graveyard, a Counterspell
+/// and `UU` for P1, and "Island" on top of P0's library. Shiko is cast, its enters trigger
+/// exiles `target` and casts a copy of it (CR 707.12) for free, which triggers Dathon
+/// (CR 603.1). Drives the prompts until the copy and Dathon's trigger wait on the stack,
+/// then P1 Counterspells the copy (CR 701.6a); the copy ceases to exist (CR 704.5e) before
+/// the trigger resolves. Returns P1's life after the stack settles; asserts Dathon drew.
+fn counter_a_shiko_copy(target: &str) -> i32 {
+    let db = shared_card_db().expect("integration card fixture must load");
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.add_real_card(P0, "Dathon, His Heart Open", Zone::Battlefield, db);
+    let shiko = scenario.add_real_card(P0, "Shiko, Paragon of the Way", Zone::Hand, db);
+    scenario.add_real_card(P0, target, Zone::Graveyard, db);
+    let counterspell = scenario.add_real_card(P1, "Counterspell", Zone::Hand, db);
+    let unit = |ty| ManaUnit::new(ty, ObjectId(0), false, vec![]);
+    scenario.with_mana_pool(
+        P0,
         vec![
-            ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]),
-            ManaUnit::new(ManaType::White, ObjectId(0), false, vec![]),
-            ManaUnit::new(ManaType::White, ObjectId(0), false, vec![]),
+            unit(ManaType::Colorless),
+            unit(ManaType::Colorless),
+            unit(ManaType::Blue),
+            unit(ManaType::Red),
+            unit(ManaType::White),
         ],
     );
-    let p1_life = counter_the_cast_copy(&mut runner, saga);
+    scenario.with_mana_pool(P1, vec![unit(ManaType::Blue), unit(ManaType::Blue)]);
+    scenario.with_library_top(P0, &["Island"]);
+    let mut runner = scenario.build();
+
+    runner.cast(shiko).resolve();
+    for _ in 0..24 {
+        match &runner.state().waiting_for {
+            WaitingFor::TriggerTargetSelection { .. } | WaitingFor::TargetSelection { .. } => {
+                runner
+                    .choose_first_legal_target()
+                    .expect("choose Shiko's target");
+            }
+            WaitingFor::ChooseFromZoneChoice { cards, .. } => {
+                let cards = cards.clone();
+                runner
+                    .act(GameAction::SelectCards { cards })
+                    .expect("cast the offered copy");
+            }
+            WaitingFor::OptionalEffectChoice { .. } => {
+                runner
+                    .act(GameAction::DecideOptionalEffect { accept: true })
+                    .expect("accept the optional cast");
+            }
+            WaitingFor::Priority { .. } if runner.state().stack.len() == 2 => break,
+            WaitingFor::Priority { .. } => {
+                runner.act(GameAction::PassPriority).expect("pass priority");
+            }
+            other => panic!("unexpected prompt while resolving Shiko: {other:?}"),
+        }
+    }
     assert_eq!(
-        p1_life, 18,
+        runner.state().stack.len(),
+        2,
+        "the copy and Dathon's trigger wait: {:?}",
+        runner.state().stack
+    );
+    let copy = runner.state().stack[0].id;
+    assert!(runner.state().objects[&copy].is_copy, "a cast copy");
+
+    runner.act(GameAction::PassPriority).expect("P0 passes");
+    let card_id = runner.state().objects[&counterspell].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: counterspell,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("P1 casts Counterspell");
+    for _ in 0..4 {
+        match runner.state().waiting_for {
+            WaitingFor::TargetSelection { .. } => {
+                runner
+                    .act(GameAction::ChooseTarget {
+                        target: Some(engine::types::ability::TargetRef::Object(copy)),
+                    })
+                    .expect("target the copy");
+            }
+            WaitingFor::ManaPayment { .. } => {
+                runner.act(GameAction::PassPriority).expect("pay");
+            }
+            _ => break,
+        }
+    }
+    settle_without_prompts(&mut runner);
+    assert!(
+        !runner.state().objects.contains_key(&copy),
+        "the countered copy ceased to exist"
+    );
+    assert_eq!(hand_cards(&runner, P0).len(), 1, "Dathon still draws");
+    runner.life(P1)
+}
+
+/// CR 603.2 + CR 608.2h + CR 400.7 + CR 704.5e: Dathon's "If it's a Saga spell" reads the
+/// triggering spell's last known information. Shiko casts a copy of History of Benalia,
+/// P1 counters it while Dathon's trigger waits, and the copy ceases to exist; the rider
+/// still sees a Saga spell, so the draw AND the 2 damage happen.
+#[test]
+fn a_countered_saga_copy_still_triggers_dathons_damage() {
+    assert_eq!(
+        counter_a_shiko_copy("History of Benalia"),
+        18,
         "the countered Saga spell still earns the 2 damage"
     );
 }
 
-/// Hostile sibling: the same countered-copy path for a non-Saga enchantment draws
-/// but deals no damage, so the last-known-information read is not vacuously true.
+/// Hostile sibling: the same path for a non-Saga enchantment draws but deals no damage,
+/// so the last-known-information read is not vacuously true.
 #[test]
 fn a_countered_non_saga_enchantment_copy_draws_without_damage() {
-    let (mut runner, moon) = dathon_cast_setup(
-        "Bad Moon",
-        vec![
-            ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]),
-            ManaUnit::new(ManaType::Black, ObjectId(0), false, vec![]),
-        ],
-    );
-    let p1_life = counter_the_cast_copy(&mut runner, moon);
-    assert_eq!(p1_life, 20, "not a Saga: no damage");
-}
-
-/// Casts `spell`, marks it a copy (the CR 704.5e state a copied spell reaches; no
-/// printed card in the fixture produces one through Dathon's own trigger), counters
-/// it through the production Counter resolver while Dathon's trigger waits above it,
-/// runs state-based actions, then settles. Returns P1's life; asserts Dathon drew.
-fn counter_the_cast_copy(runner: &mut GameRunner, spell: ObjectId) -> i32 {
-    let saga = spell;
-    drop(runner.cast(saga).commit());
     assert_eq!(
-        runner.state().stack.len(),
-        2,
-        "Saga spell below Dathon's trigger"
+        counter_a_shiko_copy("Bad Moon"),
+        20,
+        "not a Saga: no damage"
     );
-    runner
-        .state_mut()
-        .objects
-        .get_mut(&saga)
-        .expect("spell")
-        .is_copy = true;
-
-    let counter = ResolvedAbility::new(
-        Effect::Counter {
-            target: TargetFilter::Any,
-            source_rider: None,
-            countered_spell_zone: None,
-        },
-        vec![TargetRef::Object(saga)],
-        ObjectId(9999),
-        P1,
-    );
-    let mut events = Vec::new();
-    counter::resolve(runner.state_mut(), &counter, &mut events).expect("counter resolves");
-    sba::check_state_based_actions(runner.state_mut(), &mut events);
-    assert!(
-        !runner.state().objects.contains_key(&saga),
-        "the countered copy ceased to exist"
-    );
-    assert_eq!(
-        runner.state().stack.len(),
-        1,
-        "only Dathon's trigger remains"
-    );
-
-    settle_without_prompts(runner);
-    assert_eq!(hand_cards(runner, P0).len(), 1, "Dathon still draws");
-    runner.life(P1)
 }
 
 /// CR 603.2 + CR 109.5: Dathon's "Whenever YOU cast an enchantment spell" is its
