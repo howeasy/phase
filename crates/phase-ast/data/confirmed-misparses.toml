@@ -191,7 +191,7 @@ face = [
   { key = "berserk", class = "condition_wrong", clauses = ["Target creature gains trample and gets +X/+0 until end of turn, where X is its power.", "At the beginning of the next end step, destroy that creature if it attacked this turn."] },
   { key = "bicycle elemental", class = "wrong_object", clauses = ["Each card in your hand with the chosen word in its name, type line, and/or rules text has cycling {2}."] },
   { key = "bigger on the inside", class = "wrong_duration", clauses = ["The next spell they cast this turn has cascade.\""] },
-  { key = "bilbo, thief in the night", class = "missing_effect", clauses = ["Spells you cast from anywhere other than your hand cost {1} less to cast.", "If an instant or sorcery spell cast this way would be put into your graveyard, exile it instead."] },
+  { key = "bilbo, thief in the night", class = "missing_effect", clauses = ["If an instant or sorcery spell cast this way would be put into your graveyard, exile it instead."] },
   { key = "bind to life", class = "wrong_count", clauses = ["Then put a creature card from among them onto the battlefield."] },
   { key = "binding negotiation", class = "target_wrong", clauses = ["Otherwise, you may put a face-up exiled card they own into their graveyard."] },
   { key = "bioessence hydra", class = "wrong_count", clauses = ["This creature enters with a +1/+1 counter on it for each loyalty counter on planeswalkers you control.", "Whenever one or more loyalty counters are put on planeswalkers you control, put that many +1/+1 counters on this creature."] },

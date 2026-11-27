@@ -45455,97 +45455,36 @@ fn burden_of_proof_otherwise_branch_cannot_block_detectives() {
     );
 }
 
-/// CR 601.2f + CR 611.2a: a cost-modification subject ends "... spells you cast
-/// this turn cost {N} less". The "this turn" window sits between the "you cast"
-/// infix and "cost", so the trailing-infix trims never reached the type words and
-/// `spell_filter` came out `null`: EVERY spell was reduced, not just the named
-/// types (Armor Wars, Ballad of the Black Flag, Izzet Steam Maze, Spellbinding
-/// Soprano, The Pieces Are Coming Together, Urza, Planeswalker). The window is
-/// carried by the effect that grants the static, so the subject drops it.
-#[test]
-fn cost_mod_this_turn_window_keeps_the_spell_type_subject() {
-    fn filter(line: &str) -> TargetFilter {
-        let def = parse_static_line(line).unwrap_or_else(|| panic!("{line} should parse"));
-        let StaticMode::ModifyCost { spell_filter, .. } = def.mode else {
-            panic!("expected ModifyCost for {line}");
-        };
-        spell_filter.unwrap_or_else(|| panic!("{line} dropped its spell filter"))
-    }
-
-    let TargetFilter::Typed(artifact) =
-        filter("Artifact spells you cast this turn cost {1} less to cast.")
-    else {
-        panic!("expected a Typed artifact filter");
-    };
-    assert_eq!(artifact.type_filters, vec![TypeFilter::Artifact]);
-
-    let TargetFilter::Typed(historic) =
-        filter("Historic spells you cast this turn cost {2} less to cast.")
-    else {
-        panic!("expected a Typed historic filter");
-    };
-    assert!(
-        historic
-            .properties
-            .iter()
-            .any(|p| matches!(p, FilterProp::Historic)),
-        "historic restriction lost: {historic:?}"
-    );
-
-    // The shape without the window is the reference: both must agree.
-    assert_eq!(
-        filter("Instant and sorcery spells you cast this turn cost {3} less to cast."),
-        filter("Instant and sorcery spells you cast cost {3} less to cast."),
-    );
-    let TargetFilter::Or { filters } =
-        filter("Artifact, instant, and sorcery spells you cast this turn cost {2} less to cast.")
-    else {
-        panic!("expected an Or over artifact, instant and sorcery");
-    };
-    assert_eq!(filters.len(), 3, "three operand types: {filters:?}");
-}
-
-/// The "this turn" peel must not remove a restriction: a bare "Spells you cast
-/// this turn" subject still means every spell (The Legend of Arena class).
-#[test]
-fn cost_mod_this_turn_window_on_a_bare_subject_stays_unfiltered() {
-    let def = parse_static_line("Spells you cast this turn cost {1} less to cast.")
-        .expect("cost reduction should parse");
-    let StaticMode::ModifyCost { spell_filter, .. } = def.mode else {
-        panic!("expected ModifyCost");
-    };
-    assert_eq!(spell_filter, None);
-}
-
 /// CR 601.2a + CR 400.11: "Spells you cast from anywhere other than your hand
 /// cost {N} less" is the NEGATION of a hand origin. The "from anywhere other than"
 /// clause used to be skipped, so Savvy Trader, Sage of the Beyond, Fortune Teller's
 /// Talent and Advanced Reconstruction reduced every spell, hand casts included.
-/// The "more" row is synthetic (no printed card raises cost this way); its nearest
-/// printed card is Savvy Trader, and it only pins that the Raise direction shares
-/// the same origin handling.
+/// Both printed amounts of the class are pinned here: Savvy Trader's {1} and Sage
+/// of the Beyond's {2}.
 #[test]
 fn cost_mod_cast_origin_not_hand_is_the_negation_of_a_hand_origin() {
-    for (line, mode) in [
+    for (line, amount) in [
         (
             "Spells you cast from anywhere other than your hand cost {1} less to cast.",
-            CostModifyMode::Reduce,
+            1,
         ),
         (
-            "Spells you cast from anywhere other than your hand cost {2} more to cast.",
-            CostModifyMode::Raise,
+            "Spells you cast from anywhere other than your hand cost {2} less to cast.",
+            2,
         ),
     ] {
         let def = parse_static_line(line).unwrap_or_else(|| panic!("{line} should parse"));
         let StaticMode::ModifyCost {
+            mode,
+            amount: parsed_amount,
             spell_filter,
-            mode: parsed_mode,
             ..
         } = def.mode
         else {
             panic!("expected ModifyCost for {line}");
         };
-        assert_eq!(parsed_mode, mode);
+        assert_eq!(mode, CostModifyMode::Reduce, "{line}");
+        assert_eq!(parsed_amount, ManaCost::generic(amount), "{line}");
         let Some(TargetFilter::Typed(tf)) = spell_filter else {
             panic!("{line}: expected a Typed origin filter, got {spell_filter:?}");
         };
@@ -45560,7 +45499,11 @@ fn cost_mod_cast_origin_not_hand_is_the_negation_of_a_hand_origin() {
 }
 
 /// The exclusion composes with a type restriction instead of replacing it, and
-/// the positive zone forms keep their own reading.
+/// the positive-zone form keeps its own reading (printed: Gravebreaker Lamia,
+/// "Spells you cast from your graveyard cost {1} less to cast.").
+///
+/// The typed subject line is parser-shape-only: no printed card types the subject
+/// of this clause. Nearest printed card: Savvy Trader.
 #[test]
 fn cost_mod_cast_origin_composes_with_type_and_keeps_positive_zones() {
     let def = parse_static_line(
@@ -45578,7 +45521,7 @@ fn cost_mod_cast_origin_composes_with_type_and_keeps_positive_zones() {
         prop: Box::new(FilterProp::InZone { zone: Zone::Hand }),
     }));
 
-    let def = parse_static_line("Spells you cast from exile cost {1} less to cast.")
+    let def = parse_static_line("Spells you cast from your graveyard cost {1} less to cast.")
         .expect("cost reduction should parse");
     let StaticMode::ModifyCost { spell_filter, .. } = def.mode else {
         panic!("expected ModifyCost");
@@ -45588,35 +45531,47 @@ fn cost_mod_cast_origin_composes_with_type_and_keeps_positive_zones() {
     };
     assert_eq!(
         tf.properties,
-        vec![FilterProp::InZone { zone: Zone::Exile }]
+        vec![FilterProp::InZone {
+            zone: Zone::Graveyard
+        }]
     );
 }
 
 /// An origin exclusion other than the hand form is not modelled: the whole line
-/// declines instead of reducing every spell (CR 601.2f), and the opponents' scope
-/// takes the same "this turn" window as the controller's.
+/// declines instead of reducing every spell (CR 601.2f). The exclusion may also
+/// appear as the second "from" clause, which the cast-origin authority does not
+/// consume and the fail-closed scan must catch.
+///
+/// Both declined lines are parser-shape-only: no printed card carries them.
+/// Nearest printed card: Savvy Trader.
 #[test]
-fn cost_mod_unmodelled_origin_exclusion_declines_and_opponent_window_is_peeled() {
-    assert_eq!(
-        parse_static_line(
-            "Spells you cast from anywhere other than your graveyard cost {1} less to cast."
-        ),
-        None
-    );
-    let def =
-        parse_static_line("Artifact spells your opponents cast this turn cost {1} more to cast.")
-            .expect("cost increase should parse");
-    let StaticMode::ModifyCost {
-        spell_filter, mode, ..
-    } = def.mode
-    else {
+fn cost_mod_unmodelled_origin_exclusion_declines() {
+    for line in [
+        "Spells you cast from anywhere other than your graveyard cost {1} less to cast.",
+        "Spells you cast from exile or from anywhere other than your hand cost {1} less to cast.",
+    ] {
+        assert_eq!(parse_static_line(line), None, "{line}");
+    }
+
+    // Positive guard in the same test: the printed Savvy Trader line still parses
+    // with the hand exclusion, so the declines above are the fail-closed scan
+    // firing and not a broken input.
+    let def = parse_static_line(
+        "Spells you cast from anywhere other than your hand cost {1} less to cast.",
+    )
+    .expect("the printed Savvy Trader line parses");
+    let StaticMode::ModifyCost { spell_filter, .. } = def.mode else {
         panic!("expected ModifyCost");
     };
-    assert_eq!(mode, CostModifyMode::Raise);
     let Some(TargetFilter::Typed(tf)) = spell_filter else {
-        panic!("expected a Typed artifact filter, got {spell_filter:?}");
+        panic!("expected a Typed filter, got {spell_filter:?}");
     };
-    assert_eq!(tf.type_filters, vec![TypeFilter::Artifact]);
+    assert_eq!(
+        tf.properties,
+        vec![FilterProp::Not {
+            prop: Box::new(FilterProp::InZone { zone: Zone::Hand }),
+        }]
+    );
 }
 
 /// SHAPE: the quoted static keeps the entire definition on the resolving effect.

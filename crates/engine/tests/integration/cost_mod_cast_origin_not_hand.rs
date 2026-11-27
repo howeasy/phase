@@ -14,9 +14,9 @@
 //! every card has a control cast that must pay its full printed cost.
 //!
 //! The suite parses a small raw-MTGJSON fixture
-//! (`fixtures/cost_mod_cast_origin_atomic.json`: the four printed cards, the
-//! filler spells and basic lands) through `CardDatabase::from_mtgjson`, so the
-//! parser change is on the tested path.
+//! (`fixtures/cost_mod_cast_origin_atomic.json`: the printed cards of the class
+//! plus Bilbo and Dream Twist, the filler spells and basic lands) through
+//! `CardDatabase::from_mtgjson`, so the parser change is on the tested path.
 
 use std::path::Path;
 use std::sync::OnceLock;
@@ -381,7 +381,9 @@ fn savvy_trader_reduces_only_casts_from_outside_the_hand() {
 /// after the turn structure is crossed through public actions, the Bears —
 /// still exiled — is castable on a later P0 turn for {G} ({1}{G} reduced by
 /// the printed {1}, a cast whose origin is exile), really cast with exactly
-/// that mana.
+/// that mana. The later-turn hand-cast control is the revert-failing
+/// assertion: a Grizzly Bears cast from the hand on that same later turn pays
+/// its full printed {1}{G}.
 #[test]
 fn savvy_trader_play_permission_lasts_while_the_card_remains_exiled() {
     let mut scenario = GameScenario::new();
@@ -394,6 +396,9 @@ fn savvy_trader_play_permission_lasts_while_the_card_remains_exiled() {
     // A second permanent card in the graveyard keeps the target prompt open
     // (the engine auto-commits a unique legal target).
     let gy_forest = scenario.add_real_card(P0, "Forest", Zone::Graveyard, db());
+    // Later-turn hand-cast control: the same printed card from the hand pays
+    // its full price even though the exiled copy is reduced.
+    let hand_bears = scenario.add_real_card(P0, "Grizzly Bears", Zone::Hand, db());
     // Draw-step filler for the turn cycle the witness crosses.
     scenario.with_library_top(P0, &["Island"; 2]);
     scenario.with_library_top(P1, &["Forest"; 2]);
@@ -490,7 +495,7 @@ fn savvy_trader_play_permission_lasts_while_the_card_remains_exiled() {
         "the play-from-exile permission survived the turn boundary, got {:?}",
         r.state().objects[&gy_bears].casting_permissions
     );
-    for unit in units("G") {
+    for unit in units("GGC") {
         let _ = r.state_mut().add_mana_to_pool(P0, unit);
     }
     assert_eq!(
@@ -504,10 +509,25 @@ fn savvy_trader_play_permission_lasts_while_the_card_remains_exiled() {
         Zone::Battlefield,
         "the Bears is castable from exile on the later turn for exactly {{G}}"
     );
+
+    // The later-turn hand-cast control: the same printed card from the hand
+    // keeps its full printed {1}{G}, so the reduction above is the origin
+    // exclusion and not a blanket reduction.
+    assert_eq!(
+        display_spell_cost(r.state(), P0, hand_bears),
+        Some(cost(1, vec![ManaCostShard::Green])),
+        "a Grizzly Bears cast from hand on the later turn keeps its full printed {{1}}{{G}}"
+    );
+    let later_hand_cast = r.cast(hand_bears).resolve();
+    assert_eq!(
+        later_hand_cast.zone_of(hand_bears),
+        Zone::Battlefield,
+        "the later-turn hand Bears is castable at full price"
+    );
     assert_eq!(
         pool_size(&r, P0),
         0,
-        "the later-turn cast charged exactly {{G}}"
+        "the later-turn casts charged exactly {{G}} + {{1}}{{G}}"
     );
     assert_settled(&r, P0, "Savvy Trader later turn");
 }
@@ -810,6 +830,163 @@ fn sage_of_the_beyond_reduces_its_own_foretell_cast() {
     assert_settled(&r, P0, "Sage of the Beyond control");
 }
 
+// ===== Bilbo, Thief in the Night (static only) =====
+
+/// Bilbo, Thief in the Night ({1}{U} 2/2): "Spells you cast from anywhere other
+/// than your hand cost {1} less to cast." + "Whenever Bilbo attacks, you may
+/// cast an artifact, instant, or sorcery spell from your graveyard. If an
+/// instant or sorcery spell cast this way would be put into your graveyard,
+/// exile it instead."
+///
+/// STATIC-ONLY witness: this test claims only the printed STATIC. Bilbo's attack
+/// trigger and its exile-instead replacement are NOT witnessed, and his census
+/// row (class `missing_effect`, second clause only) stays.
+///
+/// CR 601.2f: the printed Flashback cost of a Faithless Looting in the
+/// graveyard ({2}{R}, a cast from the graveyard, CR 601.2a) is reduced to
+/// {1}{R}, while a Divination cast from the hand pays its full printed {2}{U}.
+/// The pre-fix parse (no origin filter) reduced the hand cast too.
+#[test]
+fn bilbo_static_reduces_graveyard_cast_not_hand_cast() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    // Exact funding: the flashback {1}{R} + the hand Divination {2}{U}.
+    scenario.with_mana_pool(P0, units("CCCRU"));
+    let _bilbo = scenario.add_real_card(P0, "Bilbo, Thief in the Night", Zone::Battlefield, db());
+    let looting = scenario.add_real_card(P0, "Faithless Looting", Zone::Graveyard, db());
+    let p1_looting = scenario.add_real_card(P1, "Faithless Looting", Zone::Graveyard, db());
+    let divination = scenario.add_real_card(P0, "Divination", Zone::Hand, db());
+    // Library, top first: Looting draws two, then Divination draws two.
+    let looting_draw_a = scenario.add_real_card(P0, "Island", Zone::Library, db());
+    let looting_draw_b = scenario.add_real_card(P0, "Forest", Zone::Library, db());
+    let _divination_draw_a = scenario.add_real_card(P0, "Mountain", Zone::Library, db());
+    let _divination_draw_b = scenario.add_real_card(P0, "Plains", Zone::Library, db());
+
+    let mut r = scenario.build();
+    engine::game::rehydrate_game_from_card_db(r.state_mut(), db());
+
+    // The graveyard cast: printed Flashback {2}{R}, reduced by {1}.
+    assert_eq!(
+        display_spell_cost(r.state(), P0, looting),
+        Some(cost(1, vec![ManaCostShard::Red])),
+        "the Faithless Looting flashback {{2}}{{R}} is reduced to {{1}}{{R}} by Bilbo's static"
+    );
+    let flashback = r
+        .cast(looting)
+        .discard(&[looting_draw_a, looting_draw_b])
+        .resolve();
+    assert_eq!(
+        flashback.zone_of(looting),
+        Zone::Exile,
+        "the flashback cast resolves and then exiles the card"
+    );
+
+    // Control: a sorcery cast from the hand pays full price.
+    assert_eq!(
+        display_spell_cost(r.state(), P0, divination),
+        Some(cost(2, vec![ManaCostShard::Blue])),
+        "a sorcery cast from hand pays its full printed {{2}}{{U}}"
+    );
+    let hand_cast = r.cast(divination).resolve();
+    assert_eq!(
+        hand_cast.zone_of(divination),
+        Zone::Graveyard,
+        "the hand Divination is castable at full price"
+    );
+
+    // The opponent's own graveyard flashback is untouched (the static says
+    // "spells you cast").
+    assert_eq!(
+        display_spell_cost(r.state(), P1, p1_looting),
+        Some(cost(2, vec![ManaCostShard::Red])),
+        "P1's Faithless Looting flashback {{2}}{{R}} is not reduced by P0's Bilbo"
+    );
+
+    assert_eq!(
+        pool_size(&r, P0),
+        0,
+        "the pool funded exactly {{1}}{{R}} + {{2}}{{U}} and is now empty"
+    );
+    assert_settled(&r, P0, "Bilbo, Thief in the Night");
+}
+
+// ===== Sage of the Beyond: the reduction cannot cut coloured mana =====
+
+/// Sage of the Beyond ({5}{U}{U} 5/5, Flying, Foretell {4}{U}): "Spells you cast
+/// from anywhere other than your hand cost {2} less to cast." Dream Twist
+/// ({U} Instant): "Target player mills three cards.\nFlashback {1}{U}".
+///
+/// CR 601.2f: the printed rulings say the reduction applies only to the generic
+/// component of the total cost. The Dream Twist flashback {1}{U} has one generic
+/// mana, so the {2} reduction is clamped at the {0} floor and the {U} shard
+/// survives. Paired reach guard on the SAME card and route: with no Sage the
+/// same graveyard flashback shows generic 1 + {U}, so the reduction is what
+/// moved generic 1 to 0. Then the reduced cast is paid with exactly {U}.
+#[test]
+fn sage_reduction_never_touches_coloured_mana_dream_twist() {
+    // With the Sage on the battlefield.
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_mana_pool(P0, units("U"));
+    let _sage = scenario.add_real_card(P0, "Sage of the Beyond", Zone::Battlefield, db());
+    let dream_twist = scenario.add_real_card(P0, "Dream Twist", Zone::Graveyard, db());
+    scenario.with_library_top(P1, &["Forest"; 3]);
+
+    let mut r = scenario.build();
+    engine::game::rehydrate_game_from_card_db(r.state_mut(), db());
+
+    assert_eq!(
+        display_spell_cost(r.state(), P0, dream_twist),
+        Some(cost(0, vec![ManaCostShard::Blue])),
+        "flashback {{1}}{{U}} floors at {{U}}: the {{2}} reduction cannot remove the blue shard"
+    );
+    let reduced = r.cast(dream_twist).target_player(P1).resolve();
+    assert_eq!(
+        reduced.zone_of(dream_twist),
+        Zone::Exile,
+        "the flashback cast resolves and then exiles the card"
+    );
+    assert_eq!(
+        pool_size(&r, P0),
+        0,
+        "the reduced flashback charged exactly {{U}}"
+    );
+    assert_eq!(
+        r.state().players[P1.0 as usize].graveyard.len(),
+        3,
+        "the resolved Dream Twist milled P1's three cards"
+    );
+    assert_settled(&r, P0, "Dream Twist with Sage of the Beyond");
+
+    // Reach guard: no Sage, same card, same graveyard route.
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_mana_pool(P0, units("CU"));
+    let dream_twist = scenario.add_real_card(P0, "Dream Twist", Zone::Graveyard, db());
+    scenario.with_library_top(P1, &["Forest"; 3]);
+
+    let mut r = scenario.build();
+    engine::game::rehydrate_game_from_card_db(r.state_mut(), db());
+
+    assert_eq!(
+        display_spell_cost(r.state(), P0, dream_twist),
+        Some(cost(1, vec![ManaCostShard::Blue])),
+        "without the Sage the same flashback shows its full generic 1 + {{U}}"
+    );
+    let unreduced = r.cast(dream_twist).target_player(P1).resolve();
+    assert_eq!(
+        unreduced.zone_of(dream_twist),
+        Zone::Exile,
+        "the control flashback cast resolves and then exiles the card"
+    );
+    assert_eq!(
+        pool_size(&r, P0),
+        0,
+        "the control flashback charged exactly {{1}}{{U}}"
+    );
+    assert_settled(&r, P0, "Dream Twist control");
+}
+
 // ===== Fortune Teller's Talent =====
 
 /// Fortune Teller's Talent ({U} Enchantment — Class), level 3 clause: "Spells
@@ -1033,12 +1210,13 @@ fn fortune_tellers_talent_level_1_look_and_level_2_spell_cast_gate() {
 /// to each opponent." Level 3: "Spells you cast from anywhere other than your
 /// hand cost {2} less to cast."
 ///
-/// CR 601.2f: leveled to 3 through the real activation actions, the turn's
-/// first main phase (CR 608.2c: the trigger exiles the milled card; CR 601.2a: the
-/// cast moves it from exile onto the stack) lets P0 cast the exiled
-/// Divination for {U} ({2}{U} minus {2}) while a Divination cast from the
-/// hand pays the full {2}{U}; the level 2 trigger deals exactly 2 damage to
-/// P1 when the milled card leaves the graveyard.
+/// CR 601.2f: leveled to 3 through the real activation actions, the next P0
+/// precombat main is reached through public turn actions
+/// (`advance_to_next_p0_main`), where the level 1 trigger (CR 608.2c: it exiles
+/// the milled card; CR 601.2a: the cast moves it from exile onto the stack) lets
+/// P0 cast the exiled Divination for {U} ({2}{U} minus {2}) while a Divination
+/// cast from the hand pays the full {2}{U}; the level 2 trigger deals exactly 2
+/// damage to P1 when the milled card leaves the graveyard.
 #[test]
 fn advanced_reconstruction_level_3_reduces_the_exiled_cast_and_level_2_deals_damage() {
     let mut scenario = GameScenario::new();
@@ -1057,6 +1235,9 @@ fn advanced_reconstruction_level_3_reduces_the_exiled_cast_and_level_2_deals_dam
     let _exiled_cast_draw_b = scenario.add_real_card(P0, "Mountain", Zone::Library, db());
     let _hand_cast_draw_a = scenario.add_real_card(P0, "Plains", Zone::Library, db());
     let _hand_cast_draw_b = scenario.add_real_card(P0, "Swamp", Zone::Library, db());
+    // Draw-step filler for the turn cycle the witness crosses (P1 must not deck
+    // out on their own draw step).
+    scenario.with_library_top(P1, &["Forest"; 2]);
 
     let mut r = scenario.build();
     engine::game::rehydrate_game_from_card_db(r.state_mut(), db());
@@ -1088,47 +1269,27 @@ fn advanced_reconstruction_level_3_reduces_the_exiled_cast_and_level_2_deals_dam
         "the two level bars charged exactly {{1}}{{R}} each"
     );
 
-    // A fresh turn: the draw step takes the top card, then the level 1
-    // trigger fires at the beginning of the first main phase.
-    r.state_mut().turn_number = 3;
-    r.state_mut().phase = Phase::Untap;
-    r.state_mut().active_player = P0;
-    r.state_mut().priority_player = P0;
-    r.state_mut().waiting_for = WaitingFor::Priority { player: P0 };
-    let waiting = r.auto_advance_to_main_phase();
+    // The next P0 precombat main, reached through public turn actions. The draw
+    // step takes the top card, then the level 1 trigger fires at the beginning
+    // of the main phase; `advance_to_next_p0_main` returns only with the stack
+    // empty, so the level 1 trigger and the level 2 damage trigger behind it
+    // have already resolved.
+    let trigger_turn = r.state().turn_number;
+    advance_to_next_p0_main(&mut r, trigger_turn, "Advanced Reconstruction level 3 turn");
+    assert!(
+        r.state().turn_number > trigger_turn,
+        "a full turn cycle was crossed through public actions"
+    );
     assert_eq!(
         r.state().phase,
         Phase::PreCombatMain,
         "the turn reached its first main phase"
-    );
-    assert!(
-        matches!(waiting, WaitingFor::Priority { player } if player == P0),
-        "P0 holds priority with the trigger queued, got {waiting:?}"
-    );
-    assert_eq!(
-        r.state().stack.len(),
-        1,
-        "the level 1 phase trigger is on the stack"
     );
     assert_eq!(
         zone_of(&r, draw_step_card),
         Zone::Hand,
         "the draw step took the top card"
     );
-    assert_eq!(
-        zone_of(&r, milled),
-        Zone::Library,
-        "the Divination is now the top card"
-    );
-    assert!(
-        r.state().players[P0.0 as usize].graveyard.is_empty(),
-        "reach guard: the graveyard is empty, so the random exile must pick the milled card"
-    );
-    assert_eq!(r.life(P1), 20, "reach guard: P1 starts the turn at 20 life");
-
-    // Resolve the level 1 trigger, then the level 2 damage trigger its
-    // graveyard exit queues behind it.
-    pass_until_stack_empty(&mut r, "Advanced Reconstruction triggers");
     assert_eq!(
         zone_of(&r, milled),
         Zone::Exile,
@@ -1229,6 +1390,8 @@ fn advanced_reconstruction_levels_1_and_2_charge_the_full_exiled_cost() {
     let milled = scenario.add_real_card(P0, "Divination", Zone::Library, db());
     let _cast_draw_a = scenario.add_real_card(P0, "Forest", Zone::Library, db());
     let _cast_draw_b = scenario.add_real_card(P0, "Mountain", Zone::Library, db());
+    // Draw-step filler for the turn cycle the witness crosses.
+    scenario.with_library_top(P1, &["Forest"; 2]);
 
     let mut r = scenario.build();
     engine::game::rehydrate_game_from_card_db(r.state_mut(), db());
@@ -1238,39 +1401,24 @@ fn advanced_reconstruction_levels_1_and_2_charge_the_full_exiled_cost() {
         "the printed Class enters the battlefield at level 1"
     );
 
-    // A fresh turn, exactly as in the level 3 witness above.
-    r.state_mut().turn_number = 3;
-    r.state_mut().phase = Phase::Untap;
-    r.state_mut().active_player = P0;
-    r.state_mut().priority_player = P0;
-    r.state_mut().waiting_for = WaitingFor::Priority { player: P0 };
-    let waiting = r.auto_advance_to_main_phase();
+    // The next P0 precombat main, reached through public turn actions; the
+    // stack is empty on return, so the level 1 trigger has already resolved.
+    let trigger_turn = r.state().turn_number;
+    advance_to_next_p0_main(&mut r, trigger_turn, "Advanced Reconstruction level 1 turn");
+    assert!(
+        r.state().turn_number > trigger_turn,
+        "a full turn cycle was crossed through public actions"
+    );
     assert_eq!(
         r.state().phase,
         Phase::PreCombatMain,
         "the turn reached its first main phase"
-    );
-    assert!(
-        matches!(waiting, WaitingFor::Priority { player } if player == P0),
-        "P0 holds priority with the trigger queued, got {waiting:?}"
-    );
-    assert_eq!(
-        r.state().stack.len(),
-        1,
-        "the level 1 phase trigger is on the stack"
     );
     assert_eq!(
         zone_of(&r, draw_step_card),
         Zone::Hand,
         "the draw step took the top card"
     );
-    assert!(
-        r.state().players[P0.0 as usize].graveyard.is_empty(),
-        "reach guard: the graveyard is empty, so the random exile must pick the milled card"
-    );
-    assert_eq!(r.life(P1), 20, "reach guard: P1 starts the turn at 20 life");
-
-    pass_until_stack_empty(&mut r, "Advanced Reconstruction level 1 trigger");
     assert_eq!(
         zone_of(&r, milled),
         Zone::Exile,
@@ -1329,6 +1477,8 @@ fn advanced_reconstruction_levels_1_and_2_charge_the_full_exiled_cost() {
     let milled = scenario.add_real_card(P0, "Divination", Zone::Library, db());
     let _cast_draw_a = scenario.add_real_card(P0, "Forest", Zone::Library, db());
     let _cast_draw_b = scenario.add_real_card(P0, "Mountain", Zone::Library, db());
+    // Draw-step filler for the turn cycle the witness crosses.
+    scenario.with_library_top(P1, &["Forest"; 2]);
 
     let mut r = scenario.build();
     engine::game::rehydrate_game_from_card_db(r.state_mut(), db());
@@ -1345,31 +1495,29 @@ fn advanced_reconstruction_levels_1_and_2_charge_the_full_exiled_cost() {
         "the level bar charged exactly {{1}}{{R}}"
     );
 
-    r.state_mut().turn_number = 3;
-    r.state_mut().phase = Phase::Untap;
-    r.state_mut().active_player = P0;
-    r.state_mut().priority_player = P0;
-    r.state_mut().waiting_for = WaitingFor::Priority { player: P0 };
-    let waiting = r.auto_advance_to_main_phase();
+    // The next P0 precombat main, reached through public turn actions; the
+    // stack is empty on return, so both level 1 and level 2 triggers have
+    // already resolved.
+    let trigger_turn = r.state().turn_number;
+    advance_to_next_p0_main(&mut r, trigger_turn, "Advanced Reconstruction level 2 turn");
+    assert!(
+        r.state().turn_number > trigger_turn,
+        "a full turn cycle was crossed through public actions"
+    );
     assert_eq!(
         r.state().phase,
         Phase::PreCombatMain,
         "the turn reached its first main phase"
     );
-    assert!(
-        matches!(waiting, WaitingFor::Priority { player } if player == P0),
-        "P0 holds priority with the trigger queued, got {waiting:?}"
-    );
-    pass_until_stack_empty(&mut r, "Advanced Reconstruction level 2 triggers");
-    assert_eq!(
-        zone_of(&r, milled),
-        Zone::Exile,
-        "the trigger milled the Divination and exiled it from the graveyard"
-    );
     assert_eq!(
         zone_of(&r, draw_step_card),
         Zone::Hand,
         "the draw step took the top card"
+    );
+    assert_eq!(
+        zone_of(&r, milled),
+        Zone::Exile,
+        "the trigger milled the Divination and exiled it from the graveyard"
     );
     assert_eq!(
         r.life(P1),

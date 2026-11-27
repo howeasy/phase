@@ -368,20 +368,10 @@ fn strip_cost_mod_cast_scope_suffix(input: &str) -> &str {
     let (_, stripped) = all_consuming(alt((
         terminated(
             take_until(" your opponents cast"),
-            (
-                tag::<_, _, OracleError<'_>>(" your opponents cast"),
-                opt(tag(" this turn")),
-                eof,
-            ),
+            (tag::<_, _, OracleError<'_>>(" your opponents cast"), eof),
         ),
-        terminated(
-            take_until(" opponents cast"),
-            (tag(" opponents cast"), opt(tag(" this turn")), eof),
-        ),
-        terminated(
-            take_until(" you cast"),
-            (tag(" you cast"), opt(tag(" this turn")), eof),
-        ),
+        terminated(take_until(" opponents cast"), (tag(" opponents cast"), eof)),
+        terminated(take_until(" you cast"), (tag(" you cast"), eof)),
         rest,
     )))
     .parse(input)

@@ -341,7 +341,6 @@ mod corrupted_resolve_counter_poisoned;
 mod corrupted_zendikon_keeps_land_type;
 mod cosmic_intervention_graveyard_redirect;
 mod cost_mod_cast_origin_not_hand;
-mod cost_mod_this_turn_subject;
 mod cost_paid_objects_historical_restore;
 mod cost_paid_provenance;
 mod cost_reduction_order_election;

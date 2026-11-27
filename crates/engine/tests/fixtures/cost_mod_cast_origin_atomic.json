@@ -41,6 +41,59 @@
         ]
       }
     ],
+    "Bilbo, Thief in the Night": [
+      {
+        "colorIdentity": [
+          "U"
+        ],
+        "colors": [
+          "U"
+        ],
+        "convertedManaCost": 2.0,
+        "firstPrinting": "HOB",
+        "identifiers": {
+          "scryfallOracleId": "72a9a85d-7cfc-4b3c-82db-9d35be6c0982"
+        },
+        "layout": "normal",
+        "legalities": {
+          "brawl": "Legal",
+          "commander": "Legal",
+          "competitivebrawl": "Legal",
+          "duel": "Legal",
+          "future": "Legal",
+          "gladiator": "Legal",
+          "historic": "Legal",
+          "legacy": "Legal",
+          "modern": "Legal",
+          "oathbreaker": "Legal",
+          "pioneer": "Legal",
+          "standard": "Legal",
+          "standardbrawl": "Legal",
+          "timeless": "Legal",
+          "vintage": "Legal"
+        },
+        "manaCost": "{1}{U}",
+        "manaValue": 2.0,
+        "name": "Bilbo, Thief in the Night",
+        "power": "2",
+        "printings": [
+          "HOB"
+        ],
+        "subtypes": [
+          "Halfling",
+          "Rogue"
+        ],
+        "supertypes": [
+          "Legendary"
+        ],
+        "text": "Spells you cast from anywhere other than your hand cost {1} less to cast.\nWhenever Bilbo attacks, you may cast an artifact, instant, or sorcery spell from your graveyard. If an instant or sorcery spell cast this way would be put into your graveyard, exile it instead.",
+        "toughness": "2",
+        "type": "Legendary Creature — Halfling Rogue",
+        "types": [
+          "Creature"
+        ]
+      }
+    ],
     "Divination": [
       {
         "colorIdentity": [
@@ -97,6 +150,52 @@
         "type": "Sorcery",
         "types": [
           "Sorcery"
+        ]
+      }
+    ],
+    "Dream Twist": [
+      {
+        "colorIdentity": [
+          "U"
+        ],
+        "colors": [
+          "U"
+        ],
+        "convertedManaCost": 1.0,
+        "firstPrinting": "ISD",
+        "identifiers": {
+          "scryfallOracleId": "d569d969-ce39-4314-b5f0-76b45f5c4c7f"
+        },
+        "keywords": [
+          "Flashback",
+          "Mill"
+        ],
+        "layout": "normal",
+        "legalities": {
+          "commander": "Legal",
+          "duel": "Legal",
+          "legacy": "Legal",
+          "modern": "Legal",
+          "oathbreaker": "Legal",
+          "pauper": "Legal",
+          "paupercommander": "Legal",
+          "penny": "Legal",
+          "vintage": "Legal"
+        },
+        "manaCost": "{U}",
+        "manaValue": 1.0,
+        "name": "Dream Twist",
+        "printings": [
+          "EMA",
+          "ISD",
+          "PLST"
+        ],
+        "subtypes": [],
+        "supertypes": [],
+        "text": "Target player mills three cards.\nFlashback {1}{U} (You may cast this card from your graveyard for its flashback cost. Then exile it.)",
+        "type": "Instant",
+        "types": [
+          "Instant"
         ]
       }
     ],
