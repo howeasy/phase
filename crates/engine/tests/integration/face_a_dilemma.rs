@@ -1864,7 +1864,10 @@ fn a_dilemma_observer_sits_above_the_spell_and_the_activation_that_caused_it() {
 // is not narrated. Each row reads `ActionResult::log_entries` of every action
 // it submits through `GameRunner::act`. Reverting the placement-time event
 // (narrating the choice-time event instead) flips the cancel rows to 1 and the
-// recast to 2.
+// recast to 2. Known limit: a modal trigger placed through the `OrderTriggers`
+// resume (`triggers::dispatch_collected_triggers`) is not narrated, because
+// that path drops its event buffer (it dropped the choice-time event the same
+// way before this change), and `drain_order_triggers_with_identity` bypasses it.
 // ---------------------------------------------------------------------------
 
 /// N1 — CR 601.2b + CR 700.2a: a completed modal cast narrates one line, for
