@@ -19398,6 +19398,7 @@ mod tests {
                 supertypes: vec![],
                 static_abilities: vec![],
                 enter_with_counters: vec![],
+                additional_members: Vec::new(),
             },
         );
         let mode_damageall = AbilityDefinition::new(
@@ -20174,6 +20175,7 @@ mod tests {
                 supertypes: vec![],
                 static_abilities: vec![],
                 enter_with_counters: vec![],
+                additional_members: Vec::new(),
             },
             vec![],
             ObjectId(1),
@@ -25854,6 +25856,7 @@ mod tests {
             supertypes: vec![],
             static_abilities: vec![],
             enter_with_counters: vec![],
+            additional_members: Vec::new(),
         };
         assert!(
             effect_needs_target_creature_quantity_slot(&token_with_count(QuantityExpr::Ref {
