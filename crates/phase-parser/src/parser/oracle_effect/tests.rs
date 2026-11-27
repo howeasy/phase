@@ -42051,7 +42051,9 @@ fn scoped_decline_body_gated_continuation_is_idempotent_under_rewrites() {
         AbilityKind::Spell,
         Effect::Sacrifice {
             target: TargetFilter::Any,
-            count: QuantityExpr::Fixed { value: 1 },
+            count: crate::types::ability::SacrificeSelection::Count(QuantityExpr::Fixed {
+                value: 1,
+            }),
             min_count: 0,
         },
     )

@@ -69510,13 +69510,8 @@ mod tests {
     const BRAIDS_FRIGHTFUL_RETURN: &str = "Read ahead (Choose a chapter and start with that many lore counters. Add one after your draw step. Skipped chapters don't trigger. Sacrifice after III.)\nI — You may sacrifice a creature. If you do, each opponent discards a card.\nII — Return target creature card from your graveyard to your hand.\nIII — Target opponent may sacrifice a nonland, nontoken permanent of their choice. If they don't, they lose 2 life and you draw a card.";
 
     /// The resolved chain of the first trigger whose `execute` carries a
-    /// `player_scope`, parsed from verbatim Oracle text.
-    fn scoped_trigger_resolved(text: &str, name: &str, types: &[&str]) -> ResolvedAbility {
-        scoped_trigger_resolved_with(text, name, &[], types, &[])
-    }
-
-    /// `scoped_trigger_resolved` for a face with printed keywords and subtypes
-    /// (a Saga's "Read ahead").
+    /// `player_scope`, parsed from verbatim Oracle text, for a face with its
+    /// printed keywords and subtypes (a Saga's "Read ahead").
     fn scoped_trigger_resolved_with(
         text: &str,
         name: &str,
