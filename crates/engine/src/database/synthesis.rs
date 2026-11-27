@@ -890,6 +890,7 @@ fn build_mobilize_trigger(qty: &QuantityExpr) -> TriggerDefinition {
         supertypes: vec![],
         static_abilities: vec![],
         enter_with_counters: vec![],
+        additional_members: Vec::new(),
     };
 
     let sacrifice_at_end_step = AbilityDefinition::new(
@@ -1051,6 +1052,7 @@ fn synthesize_etb_token_attach_keyword(
         supertypes: vec![],
         static_abilities: vec![],
         enter_with_counters: vec![],
+        additional_members: Vec::new(),
     };
 
     let attach_effect = AbilityDefinition::new(
@@ -3899,6 +3901,7 @@ fn build_fabricate_trigger(n: u32) -> TriggerDefinition {
             supertypes: vec![],
             static_abilities: vec![],
             enter_with_counters: vec![],
+            additional_members: Vec::new(),
         },
     )
     .description(format!(
@@ -4540,6 +4543,7 @@ fn build_afterlife_trigger(count: u32) -> TriggerDefinition {
         supertypes: vec![],
         static_abilities: vec![],
         enter_with_counters: vec![],
+        additional_members: Vec::new(),
     };
 
     let execute = AbilityDefinition::new(AbilityKind::Spell, token_effect).description(format!(
@@ -9223,16 +9227,13 @@ fn is_amplify_etb_replacement(replacement: &ReplacementDefinition, expected_n: u
 /// CR 702.62a: Each face carrying `Keyword::Suspend { count, cost }` gets two exile triggers.
 /// A fixed count also gets a hand ability.
 ///
-///   1. **Hand-activated alt-cost** (not for Suspend X)
+///   1. **Hand special action** (fixed counts only, CR 116.2f)
 ///      ("Rather than cast this card from your hand,
 ///      you may pay [cost] and exile it with N time counters on it. This action
 ///      doesn't use the stack."). Modeled as an activated ability with
 ///      `activation_zone = Hand` and `ActivationRestriction::MatchesCardCastTiming`
 ///      (CR 702.62a "if you could begin to cast this card by putting it onto the
-///      stack from your hand"). Cost is composite (mana + exile self from hand);
-///      effect is a Time-counter `PutCounter` on the now-exiled SelfRef. Stifle
-///      can counter the synthesized activation on the stack. Under CR 116.2f and
-///      CR 702.62a, suspending is a special action that skips the stack.
+///      stack from your hand"). Cost is composite (mana + exile self from hand).
 ///
 ///   2. **Upkeep counter-removal trigger** ("At the beginning of your upkeep,
 ///      if this card is suspended, remove a time counter from it.") fires from
@@ -9269,8 +9270,6 @@ pub fn synthesize_suspend(face: &mut CardFace) {
         return;
     };
 
-    // CR 702.62a: Activated ability — pay [cost], exile self from hand, then
-    // place N time counters on it. Composite cost mirrors `synthesize_cycling`.
     let already_has_activation = face.abilities.iter().any(|a| {
         a.activation_zone == Some(Zone::Hand)
             && a.activation_restrictions
