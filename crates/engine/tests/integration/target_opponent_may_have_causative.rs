@@ -9,7 +9,9 @@
 //! Cards (printed, added through `add_real_card` on the curated card
 //! database): Bane, Lord of Darkness; Combustible Gearhulk; Palantír of
 //! Orthanc; Terrapact Intimidator; Risk Factor. Tell Me What You See, the
-//! sixth member, lives in `tell_me_what_you_see_etb.rs`. Printed costs are
+//! sixth member, lives in `tell_me_what_you_see_etb.rs`; it is marked
+//! `condition_wrong` (the optional draw is offered to a drawer who cannot
+//! draw, CR 121.3a) and is not claimed as supported. Printed costs are
 //! made payable by adding basic lands; the other hand and library cards are
 //! textless builder fillers.
 //!
@@ -1097,6 +1099,11 @@ fn the_census_rows_of_the_class_agree_with_the_regenerated_fixture() {
             "Palantír of Orthanc",
             MisparseClass::WrongObject,
         ),
+        (
+            "tell me what you see",
+            "Tell Me What You See",
+            MisparseClass::ConditionWrong,
+        ),
     ] {
         assert_eq!(registry.class_of(key), Some(class), "registry row {key}");
         let face = db
@@ -1118,7 +1125,6 @@ fn the_census_rows_of_the_class_agree_with_the_regenerated_fixture() {
         "Combustible Gearhulk",
         "Terrapact Intimidator",
         "Risk Factor",
-        "Tell Me What You See",
     ] {
         let face = db
             .get_face_by_name(name)

@@ -773,7 +773,9 @@ fn random_modes_face_a_dilemma() {
 }
 
 /// R21 — Tell Me What You See: "Whenever you face a dilemma, you may return
-/// this enchantment to its owner's hand."
+/// this enchantment to its owner's hand." Only the dilemma observer is
+/// witnessed here; the card itself is not claimed as supported (its enters
+/// trigger carries a `condition_wrong` confirmed-misparse row).
 #[test]
 fn tell_me_what_you_see_may_return_to_hand() {
     let Some(db) = shared_card_db() else { return };

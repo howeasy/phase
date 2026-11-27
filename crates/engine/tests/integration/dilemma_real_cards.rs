@@ -3,7 +3,9 @@
 //! (`add_real_card`): a random modal trigger's dilemma observers are placed above the
 //! whole original trigger batch (CR 603.3b).
 
+use engine::database::card_db::CardDatabase;
 use engine::game::combat::AttackTarget;
+use engine::game::coverage::card_face_gaps;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::scenario_db::GameScenarioDbExt;
 use engine::types::actions::GameAction;
@@ -226,4 +228,49 @@ fn jett_reno_at_power_three_still_surveils() {
     };
     assert_eq!(surveils, vec![(P0, 1)], "power 3: P0 surveils 1");
     assert_eq!(drawn, 0, "power 3: no draw");
+}
+
+/// The printed "face a dilemma" class: nine cards. Tell Me What You See is the
+/// only one reported unsupported, through its typed confirmed-misparse row
+/// (`condition_wrong`: its optional draw is offered to a drawer who cannot
+/// draw, CR 121.3a, which the engine does not yet check). The other eight
+/// printed cards have no coverage gap. Paired reach-guard: Palantir of
+/// Orthanc, a separate marked card in the same database, still reports its own
+/// `wrong_object` gap, so the gap query reaches marked faces.
+#[test]
+fn only_tell_me_what_you_see_of_the_dilemma_class_reports_a_gap() {
+    let db = CardDatabase::from_integration_fixture().expect("integration fixture loads");
+    let gaps_of = |name: &str| {
+        card_face_gaps(
+            db.get_face_by_name(name)
+                .unwrap_or_else(|| panic!("{name} is in the integration fixture")),
+        )
+    };
+
+    assert_eq!(
+        gaps_of("Palantír of Orthanc"),
+        vec!["Misparse:wrong_object".to_string()],
+        "reach-guard: a marked face reports its typed gap"
+    );
+    assert_eq!(
+        gaps_of("Tell Me What You See"),
+        vec!["Misparse:condition_wrong".to_string()],
+        "Tell Me What You See is unsupported through the typed gap"
+    );
+    for name in [
+        "Captain Benjamin Sisko",
+        "Elim Garak, Simple Tailor",
+        "Gabriel Lorca, Mirror Menace",
+        "Jett Reno, Problem Solver",
+        "Melkotian Adjudicator",
+        "Obsidian Order Operative",
+        "Seven of Nine",
+        "The Caretaker",
+    ] {
+        assert!(
+            gaps_of(name).is_empty(),
+            "{name} stays supported: {:?}",
+            gaps_of(name)
+        );
+    }
 }

@@ -109686,7 +109686,10 @@ mod targeted_opponent_causative_tests {
     }
 
     /// Q1 — Tell Me What You See: the head declares G, the controller draws,
-    /// and on decline "they" (G) lose 4, then the controller surveils.
+    /// and on decline "they" (G) lose 4, then the controller surveils. The
+    /// chain parses as printed but resolves wrongly when the draw is
+    /// unfeasible (CR 121.3a), so the card keeps a `condition_wrong`
+    /// confirmed-misparse row and is not claimed as supported.
     #[test]
     fn tell_me_what_you_see_declares_the_target_opponent() {
         let parsed = parse(

@@ -14,7 +14,13 @@
 //! The ETB targets one opponent as it is put on the stack (CR 115.1d); only that
 //! opponent decides. The dilemma bounce is covered in `face_a_dilemma.rs`.
 //!
-//! Every named card below (Tell Me What You See, Leyline of Sanctity) is the
+//! Tell Me What You See is NOT claimed as supported: it carries a typed
+//! `condition_wrong` confirmed-misparse row (see `shakedown_heavy.rs` for the
+//! same wording), because its optional draw is offered even when the drawing
+//! player cannot draw (CR 121.3a). The Narset rows below witness that defect.
+//!
+//! Every named card below (Tell Me What You See, Leyline of Sanctity, Narset,
+//! Parter of Veils) is the
 //! printed card, added from the curated card database through `add_real_card`;
 //! the enchantment's printed {1}{B} is paid with basic lands.
 
@@ -56,6 +62,17 @@ fn scenario_with_leylines(
     leylines: &[PlayerId],
     db: &CardDatabase,
 ) -> (GameRunner, ObjectId) {
+    scenario_with_battlefield(player_count, leylines, &[], db)
+}
+
+/// `scenario_with_leylines`, with each printed card in `extra` also on the
+/// battlefield under its named player before the game is built.
+fn scenario_with_battlefield(
+    player_count: u8,
+    leylines: &[PlayerId],
+    extra: &[(PlayerId, &str)],
+    db: &CardDatabase,
+) -> (GameRunner, ObjectId) {
     let mut scenario = if player_count == 2 {
         GameScenario::new()
     } else {
@@ -70,6 +87,9 @@ fn scenario_with_leylines(
     }
     for &player in leylines {
         scenario.add_real_card(player, "Leyline of Sanctity", Zone::Battlefield, db);
+    }
+    for &(player, name) in extra {
+        scenario.add_real_card(player, name, Zone::Battlefield, db);
     }
     // Tell Me What You See's printed cost is {1}{B}: one land per shard and
     // per generic.
@@ -332,4 +352,87 @@ fn no_legal_target_removes_the_enters_trigger() {
         [lives[0], lives[1], lives[2] - 4]
     );
     assert_eq!(record.surveil_actors, vec![P0]);
+}
+
+/// Narset, Parter of Veils on P1's side; P0 (Narset's opponent) is marked as
+/// having already drawn `drawn` cards this turn.
+fn narset_scenario(narset: bool, drawn: u32, db: &CardDatabase) -> (GameRunner, ObjectId) {
+    let extra: &[(PlayerId, &str)] = if narset {
+        &[(P1, "Narset, Parter of Veils")]
+    } else {
+        &[]
+    };
+    let (mut runner, card) = scenario_with_battlefield(2, &[], extra, db);
+    runner.state_mut().players[P0.0 as usize].cards_drawn_this_turn = drawn;
+    (runner, card)
+}
+
+/// Row W — witnessed misparse (the reason for the `condition_wrong`
+/// confirmed-misparse row). Narset: "Each opponent can't draw more than one
+/// card each turn." P0 has already drawn a card this turn, so P0 can't draw
+/// another. CR 121.3a + Narset's 2019-05-03 ruling ("if the draws are optional,
+/// the player can't choose to draw"): the choice "may have you draw a card"
+/// cannot be taken, so P1 is not asked; P1 "doesn't", and the "If they don't"
+/// rider runs (P1 loses 4 life, P0 surveils 1, P0's hand is unchanged). This
+/// derivation rests on CR 121.3a and the Narset ruling, not a Tell Me What You
+/// See ruling.
+///
+/// This row pins the OBSERVED (wrong) behavior; the measured values are
+/// asserted below. When `optional_instruction_is_infeasible` gains an
+/// `Effect::Draw` arm, assert optional_actors empty, P1 life - 4,
+/// surveil_actors [P0], P0 hand unchanged, and delete the confirmed-misparse
+/// row.
+#[test]
+fn narset_with_the_draw_spent_still_offers_the_draw_choice() {
+    let Some(db) = shared_card_db() else {
+        return;
+    };
+    let (mut runner, card) = narset_scenario(true, 1, db);
+    let p1_life = runner.life(P1);
+    let p0_hand_after_cast = hand_len(&runner, P0) - 1;
+
+    let record = cast_and_resolve(&mut runner, card, P1, true);
+
+    assert_eq!(record.optional_actors, vec![P1], "OBSERVED: offer is made");
+    assert_eq!(hand_len(&runner, P0), p0_hand_after_cast);
+    assert_eq!(runner.life(P1), p1_life);
+    assert!(record.surveil_actors.is_empty());
+    assert_eq!(surveil_ledger(&runner, P0), 0);
+}
+
+/// Guard (a) — no Narset, P0 has already drawn one card: the offer is made and
+/// accepting delivers exactly one card, no surveil. The drawn counter alone is
+/// not the cause of Row W.
+#[test]
+fn without_narset_a_spent_draw_counter_still_draws_on_accept() {
+    let Some(db) = shared_card_db() else {
+        return;
+    };
+    let (mut runner, card) = narset_scenario(false, 1, db);
+    let p0_hand_after_cast = hand_len(&runner, P0) - 1;
+
+    let record = cast_and_resolve(&mut runner, card, P1, true);
+
+    assert_eq!(record.optional_actors, vec![P1]);
+    assert_eq!(hand_len(&runner, P0), p0_hand_after_cast + 1);
+    assert!(record.surveil_actors.is_empty());
+}
+
+/// Guard (b) — Narset present, P0 has drawn no card this turn: the limit
+/// (one) still has room, so the draw is legal and the offer correct; accepting
+/// delivers exactly one card. Narset alone is not the cause of Row W; the
+/// exhausted limit is.
+#[test]
+fn narset_with_the_draw_unspent_draws_on_accept() {
+    let Some(db) = shared_card_db() else {
+        return;
+    };
+    let (mut runner, card) = narset_scenario(true, 0, db);
+    let p0_hand_after_cast = hand_len(&runner, P0) - 1;
+
+    let record = cast_and_resolve(&mut runner, card, P1, true);
+
+    assert_eq!(record.optional_actors, vec![P1]);
+    assert_eq!(hand_len(&runner, P0), p0_hand_after_cast + 1);
+    assert!(record.surveil_actors.is_empty());
 }
