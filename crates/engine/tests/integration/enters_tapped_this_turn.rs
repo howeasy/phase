@@ -21,7 +21,8 @@ use engine::game::replacement::{replace_event, ReplacementResult};
 use engine::game::scenario::{GameRunner, GameScenario, P0};
 use engine::parser::parse_oracle_text;
 use engine::types::ability::{
-    ControllerRef, Effect, RestrictionExpiry, TapStateChange, TargetFilter, TypeFilter,
+    ControllerRef, Effect, ReplacementRecipient, RestrictionExpiry, TapStateChange, TargetFilter,
+    TypeFilter,
 };
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
@@ -70,7 +71,7 @@ fn lifted_replacement(
         {
             assert_eq!(
                 *target,
-                TargetFilter::None,
+                ReplacementRecipient::Filter(TargetFilter::None),
                 "the lift must use the no-per-target-binding mode (CR 611.2a)"
             );
             return (**replacement).clone();

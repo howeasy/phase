@@ -36,7 +36,7 @@ use engine::game::zone_pipeline::{move_object_for_test, ZoneMoveRequest};
 use engine::parser::oracle::parse_oracle_text;
 use engine::types::ability::{
     AbilityDefinition, AbilityKind, AttachmentReferent, Effect, FilterProp, QuantityExpr,
-    QuantityRef, TapStateChange, TargetFilter, TargetRef, TypedFilter,
+    QuantityRef, ReplacementRecipient, TapStateChange, TargetFilter, TargetRef, TypedFilter,
 };
 use engine::types::actions::GameAction;
 use engine::types::events::GameEvent;
@@ -304,7 +304,10 @@ fn fiery_annihilation_narrows_equipment_slot_and_binds_rider_to_creature_slot() 
     let Effect::AddTargetReplacement { target, .. } = effects[2] else {
         panic!("expected the death-exile rider, got {effects:?}");
     };
-    assert_eq!(*target, TargetFilter::ParentTargetSlot { index: 0 });
+    assert_eq!(
+        *target,
+        ReplacementRecipient::Filter(TargetFilter::ParentTargetSlot { index: 0 })
+    );
 }
 
 /// In class, no declared slot: "that creature" in a trigger body names the
@@ -2089,7 +2092,7 @@ fn single_declarer_compound_subject_rider_keeps_its_route_and_exiles() {
         matches!(
             effects[1],
             Effect::AddTargetReplacement {
-                target: TargetFilter::Any,
+                target: ReplacementRecipient::Filter(TargetFilter::Any),
                 ..
             }
         ),

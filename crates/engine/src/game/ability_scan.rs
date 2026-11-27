@@ -2085,7 +2085,10 @@ fn scan_effect(x: &Effect, mode: ScanMode) -> Axes<'_> {
             replacement,
             target,
         } => Axes::CONSERVATIVE
-            .or(scan_target_filter(target, target_ctx, mode))
+            // `PriorDamageRecipients` holds no filter and contributes no axes.
+            .or(target.filter().map_or(Axes::NONE, |filter| {
+                scan_target_filter(filter, target_ctx, mode)
+            }))
             .or(replacement_definition_axes(
                 replacement,
                 None,
@@ -7669,11 +7672,10 @@ fn ability_definition_axes(def: &AbilityDefinition, mode: ScanMode) -> Axes<'_> 
         cost: _,
         description: _,
         target_prompt: _,
-        declares_chosen_group: _,         // definition-local target identity
-        reads_chosen_group: _,            // effect and target metadata are scanned above
-        declares_return_result: _,        // producer effect carries its own writes
-        reads_return_result,              // instruction-local result is a dynamic read
-        exact_damage_recipient_reader: _, // input from the preceding instruction only
+        declares_chosen_group: _,  // definition-local target identity
+        reads_chosen_group: _,     // effect and target metadata are scanned above
+        declares_return_result: _, // producer effect carries its own writes
+        reads_return_result,       // instruction-local result is a dynamic read
         activation_restrictions: _,
         // Payment-time only; it cannot create a resolution-time dependency.
         activation_mana_payment_restriction: _,

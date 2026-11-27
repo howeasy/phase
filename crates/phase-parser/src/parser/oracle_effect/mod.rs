@@ -136,15 +136,15 @@ use crate::types::ability::{
     ControlWindow, ControllerRef, CopyChooseScope, CopyRetargetPermission, CopyScale,
     DamageModification, DamageSource, DelayedTriggerCondition, DelayedTriggerLifetime,
     DelayedTriggerPlayerBinding, DieResultBranch, DigRestOrder, Duration, EachDamageRecipient,
-    Effect, EffectOutcomeSignal, EffectScope, ExactDamageRecipientReader, ExtraPhaseRecipient,
-    FilterProp, GameRestriction, GuardReading, GuessSubject, InstructionJoin, IntensityScope,
-    IterationKindBinding, KeeperConstraint, KeeperCounterMark, LibraryPosition, LibraryShuffleMode,
-    ManaProduction, ManaSpendPermission, ManaTargetRole, MultiTargetSpec, NameStickerSet,
-    NumberDistinctness, ObjectProperty, ObjectScope, ObjectSelectionCardinality, OriginConstraint,
-    PerPlayerScope, PerpetualModification, PlayPermissionInvalidation, PlayerChoiceDistinctness,
-    PlayerFilter, PlayerRelation, PlayerScope, PreventionAmount, PreventionScope,
-    ProhibitedActivity, PropertyAggregate, PtValue, QuantityExpr, QuantityRef,
-    ReciprocalZoneChoiceRole, RepeatForTiming, ReplacementCondition, ReplacementDefinition,
+    Effect, EffectOutcomeSignal, EffectScope, ExtraPhaseRecipient, FilterProp, GameRestriction,
+    GuardReading, GuessSubject, InstructionJoin, IntensityScope, IterationKindBinding,
+    KeeperConstraint, KeeperCounterMark, LibraryPosition, LibraryShuffleMode, ManaProduction,
+    ManaSpendPermission, ManaTargetRole, MultiTargetSpec, NameStickerSet, NumberDistinctness,
+    ObjectProperty, ObjectScope, ObjectSelectionCardinality, OriginConstraint, PerPlayerScope,
+    PerpetualModification, PlayPermissionInvalidation, PlayerChoiceDistinctness, PlayerFilter,
+    PlayerRelation, PlayerScope, PreventionAmount, PreventionScope, ProhibitedActivity,
+    PropertyAggregate, PtValue, QuantityExpr, QuantityRef, ReciprocalZoneChoiceRole,
+    RepeatForTiming, ReplacementCondition, ReplacementDefinition, ReplacementRecipient,
     ResolutionCastWindow, RestrictionExpiry, RestrictionPlayerScope, RevealUntilDisposition,
     RoundingMode, SharedQuality, SharedQualityRelation, SiblingCondition, SkipScope,
     SpellStackToGraveyardReplacement, SpellbookSelection, StaticCondition, StaticDefinition,
@@ -4939,7 +4939,7 @@ fn try_parse_die_exile_rider(lower: &str, kind: AbilityKind) -> Option<AbilityDe
         kind,
         Effect::AddTargetReplacement {
             replacement: Box::new(repl),
-            target: TargetFilter::Any,
+            target: TargetFilter::Any.into(),
         },
     ))
 }
@@ -5109,7 +5109,7 @@ pub(crate) fn try_parse_leave_battlefield_exile_replacement(lower: &str) -> Opti
         replacement: Box::new(
             leave_battlefield_exile_replacement().expiry(RestrictionExpiry::UntilHostLeavesPlay),
         ),
-        target,
+        target: target.into(),
     })
 }
 
@@ -5147,7 +5147,7 @@ fn parse_token_creation_replacement_effect(lower: &str) -> Option<Effect> {
 
     Some(Effect::AddTargetReplacement {
         replacement: Box::new(def),
-        target: TargetFilter::None,
+        target: TargetFilter::None.into(),
     })
 }
 
@@ -5218,7 +5218,7 @@ fn try_parse_cant_become_untapped_target_rider(lower: &str) -> Option<Effect> {
 
     Some(Effect::AddTargetReplacement {
         replacement: Box::new(replacement),
-        target: TargetFilter::Any,
+        target: TargetFilter::Any.into(),
     })
 }
 
@@ -5278,7 +5278,7 @@ fn try_parse_triggered_damage_replacement(lower: &str) -> Option<Effect> {
 
     Some(Effect::AddTargetReplacement {
         replacement: Box::new(replacement),
-        target: TargetFilter::TriggeringPlayer,
+        target: TargetFilter::TriggeringPlayer.into(),
     })
 }
 
@@ -5407,7 +5407,7 @@ fn try_parse_global_damage_modification_replacement(text: &str) -> Option<Effect
     }
     Some(Effect::AddTargetReplacement {
         replacement: Box::new(replacement),
-        target: TargetFilter::None,
+        target: TargetFilter::None.into(),
     })
 }
 
@@ -5454,7 +5454,7 @@ fn try_parse_global_life_floor_replacement(text: &str, lower: &str) -> Option<Ef
     }
     Some(Effect::AddTargetReplacement {
         replacement: Box::new(replacement),
-        target: TargetFilter::None,
+        target: TargetFilter::None.into(),
     })
 }
 
@@ -5584,7 +5584,7 @@ fn parse_enter_from_zone_redirect_replacement(norm_lower: &str) -> Option<Effect
 
     Some(Effect::AddTargetReplacement {
         replacement: Box::new(replacement),
-        target: TargetFilter::None,
+        target: TargetFilter::None.into(),
     })
 }
 
@@ -5803,7 +5803,7 @@ fn try_parse_token_controller_redirect(lower: &str) -> Option<Effect> {
 
     Some(Effect::AddTargetReplacement {
         replacement: Box::new(replacement),
-        target: TargetFilter::None,
+        target: TargetFilter::None.into(),
     })
 }
 
@@ -5841,7 +5841,7 @@ fn try_parse_next_time_source_damage_replacement(lower: &str) -> Option<Effect> 
 
     Some(Effect::AddTargetReplacement {
         replacement: Box::new(replacement),
-        target: TargetFilter::TriggeringSource,
+        target: TargetFilter::TriggeringSource.into(),
     })
 }
 
@@ -20397,7 +20397,7 @@ fn try_parse_enter_tapped_set_this_turn(tp: TextPair<'_>, card_name: &str) -> Op
     def.expiry = Some(RestrictionExpiry::EndOfTurn);
     Some(Effect::AddTargetReplacement {
         replacement: Box::new(def),
-        target: TargetFilter::None,
+        target: TargetFilter::None.into(),
     })
 }
 
@@ -33748,7 +33748,8 @@ fn effect_slot_filters(effect: &Effect) -> impl Iterator<Item = &TargetFilter> {
         Effect::ChooseObjectsIntoTrackedSet { filter, .. } => Some(filter),
         // The die-exile rider ("If that creature would die this turn, exile it
         // instead") binds the creature through `ParentTargetSlot`.
-        Effect::AddTargetReplacement { target, .. } => Some(target),
+        // A `PriorDamageRecipients` operand reads no declared slot.
+        Effect::AddTargetReplacement { target, .. } => target.filter(),
         _ => None,
     };
     effect
@@ -34122,8 +34123,8 @@ fn preceding_damage_effect(clauses: &[ClauseIr]) -> Option<&Effect> {
 /// registry ([`resolve_declared_slot_anaphor`]); the rider then targets
 /// `TargetFilter::ParentTargetSlot { index }`.
 ///
-/// CR 608.2c + CR 614.9: “dealt damage this way” instead reads the actual
-/// deliveries of one preceding damage instruction, independent of its slots.
+/// CR 608.2c + CR 614.9 (redirection): ‘dealt damage this way’ reads the actual
+/// deliveries of one preceding damage instruction, independent of declared slots.
 ///
 /// Unchanged (`Any`) when the preceding clause announces no target, its last
 /// declared slot is the antecedent, or it holds the chain's only declared slot
@@ -34145,11 +34146,8 @@ fn bind_die_exile_rider_antecedent(
         if let Some(producer) = exact_die_exile_damage_producer(clauses) {
             if producer.parsed.sub_ability.is_none() {
                 if let Effect::AddTargetReplacement { target, .. } = &mut *rider.effect {
-                    *target = TargetFilter::TrackedSet {
-                        id: TrackedSetId(0),
-                    };
+                    *target = ReplacementRecipient::PriorDamageRecipients;
                 }
-                rider.exact_damage_recipient_reader = Some(ExactDamageRecipientReader {});
                 return rider;
             }
             if preserves_compound_die_exile_route(producer, ctx) {
@@ -34180,7 +34178,9 @@ fn bind_die_exile_rider_antecedent(
         Some((slot, _)) => {
             if previous_clause_slots.last().and_then(|entry| entry.index) != Some(slot) {
                 if let Effect::AddTargetReplacement { target, .. } = &mut *rider.effect {
-                    *target = TargetFilter::ParentTargetSlot { index: slot };
+                    *target = ReplacementRecipient::Filter(TargetFilter::ParentTargetSlot {
+                        index: slot,
+                    });
                 }
             }
             rider

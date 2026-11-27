@@ -47,7 +47,7 @@ fn install(state: &mut GameState, controller: PlayerId) {
     let mut ability = ResolvedAbility::new(
         Effect::AddTargetReplacement {
             replacement: Box::new(torbran_replacement()),
-            target: TargetFilter::None,
+            target: TargetFilter::None.into(),
         },
         Vec::new(),
         ObjectId(7),

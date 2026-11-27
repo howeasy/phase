@@ -14657,7 +14657,7 @@ mod tests {
             AbilityKind::Activated,
             Effect::AddTargetReplacement {
                 replacement: Box::new(nested),
-                target: TargetFilter::Any,
+                target: TargetFilter::Any.into(),
             },
         )
         .sub_ability(AbilityDefinition::new(

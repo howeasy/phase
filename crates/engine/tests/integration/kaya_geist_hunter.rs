@@ -24,7 +24,8 @@ use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::parser::oracle::parse_oracle_text;
 use engine::parser::oracle_effect::parse_effect_chain;
 use engine::types::ability::{
-    AbilityCost, AbilityKind, ControllerRef, Effect, QuantityModification, TargetFilter,
+    AbilityCost, AbilityKind, ControllerRef, Effect, QuantityModification, ReplacementRecipient,
+    TargetFilter,
 };
 use engine::types::card_type::CoreType;
 use engine::types::counter::CounterType;
@@ -236,7 +237,7 @@ fn kaya_minus2_parses_to_floating_token_replacement() {
     };
     assert_eq!(
         *target,
-        TargetFilter::None,
+        ReplacementRecipient::Filter(TargetFilter::None),
         "floating (non-object-hosted) install uses target: None"
     );
     assert_eq!(replacement.event, ReplacementEvent::CreateToken);

@@ -2249,7 +2249,7 @@ mod tests {
         let other_install = ResolvedAbility::new(
             Effect::AddTargetReplacement {
                 replacement: Box::new(eot_rider),
-                target: TargetFilter::Any,
+                target: TargetFilter::Any.into(),
             },
             vec![TargetRef::Object(other)],
             ObjectId(0),
@@ -2723,7 +2723,7 @@ mod tests {
             let mut install = ResolvedAbility::new(
                 Effect::AddTargetReplacement {
                     replacement: Box::new(rider),
-                    target: TargetFilter::Any,
+                    target: TargetFilter::Any.into(),
                 },
                 vec![TargetRef::Object(bear)],
                 ObjectId(0),
@@ -2759,7 +2759,7 @@ mod tests {
             let mut float_install = ResolvedAbility::new(
                 Effect::AddTargetReplacement {
                     replacement: Box::new(floating),
-                    target: TargetFilter::None,
+                    target: TargetFilter::None.into(),
                 },
                 vec![],
                 ObjectId(0),
@@ -2785,7 +2785,7 @@ mod tests {
             let mut player_install = ResolvedAbility::new(
                 Effect::AddTargetReplacement {
                     replacement: Box::new(player_rider),
-                    target: TargetFilter::Any,
+                    target: TargetFilter::Any.into(),
                 },
                 vec![TargetRef::Player(PlayerId(1))],
                 ObjectId(0),
@@ -2827,7 +2827,7 @@ mod tests {
             let mut install = ResolvedAbility::new(
                 Effect::AddTargetReplacement {
                     replacement: Box::new(untap_rider),
-                    target: TargetFilter::Any,
+                    target: TargetFilter::Any.into(),
                 },
                 vec![TargetRef::Object(bear)],
                 ObjectId(0),
@@ -2867,7 +2867,7 @@ mod tests {
         let mut install = ResolvedAbility::new(
             Effect::AddTargetReplacement {
                 replacement: Box::new(untap_rider),
-                target: TargetFilter::Any,
+                target: TargetFilter::Any.into(),
             },
             vec![TargetRef::Object(bear)],
             ObjectId(0),

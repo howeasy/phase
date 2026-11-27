@@ -6523,7 +6523,10 @@ fn trigger_combat_damage_installs_until_next_turn_damage_doubler() {
     else {
         panic!("expected AddTargetReplacement, got {:?}", exec.effect);
     };
-    assert_eq!(*target, TargetFilter::TriggeringPlayer);
+    assert_eq!(
+        *target,
+        crate::types::ability::ReplacementRecipient::Filter(TargetFilter::TriggeringPlayer)
+    );
     assert_eq!(replacement.event, ReplacementEvent::DamageDone);
     assert_eq!(
         replacement.damage_modification,

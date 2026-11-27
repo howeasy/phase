@@ -33,16 +33,15 @@ use crate::types::ability::{
     ContinuousEffectOnset, ContinuousModification, ControllerRef, CopyRetargetPermission,
     CostPaidObjectSnapshot, CounterKindDomain, DamageInstructionResult, DetachedRemainder,
     Duration, EachDamageRecipient, Effect, EffectError, EffectKind, EffectOutcomeSignal,
-    EffectResolutionResult, EffectScope, ExactDamageRecipientReader, ExtraPhaseRecipient,
-    FilterProp, ForEachCategoryAction, ForwardedResultContext, LibraryShuffleMode, ManaProduction,
-    NameStickerSet, ObjectProperty, ObjectScope, ObjectSelectionCardinality, OpponentMayScope,
-    PlayerFilter, PlayerRelation, PlayerScope, PossessionAxis, PropertyAggregate, PtValue,
-    QuantityExpr, QuantityRef, ReciprocalZoneChoiceRole, RepeatContinuation, ResolvedAbility,
-    RevealUntilDisposition, SacrificeCost, SacrificeRequirement, SharedQuality,
-    SharedQualityRelation, SiblingCondition, SpellContext, StaticDefinition, SubAbilityLink,
-    TapStateChange, TargetChoiceTiming, TargetDamageSourceBinding, TargetFilter, TargetReadOrigin,
-    TargetRef, ThisWayCause, TrackedAnaphorSource, TypedFilter, ZoneChoiceCandidateSource,
-    ZoneChoiceChooser, ZoneRef,
+    EffectResolutionResult, EffectScope, ExtraPhaseRecipient, FilterProp, ForEachCategoryAction,
+    ForwardedResultContext, LibraryShuffleMode, ManaProduction, NameStickerSet, ObjectProperty,
+    ObjectScope, ObjectSelectionCardinality, OpponentMayScope, PlayerFilter, PlayerRelation,
+    PlayerScope, PossessionAxis, PropertyAggregate, PtValue, QuantityExpr, QuantityRef,
+    ReciprocalZoneChoiceRole, RepeatContinuation, ResolvedAbility, RevealUntilDisposition,
+    SacrificeCost, SacrificeRequirement, SharedQuality, SharedQualityRelation, SiblingCondition,
+    SpellContext, StaticDefinition, SubAbilityLink, TapStateChange, TargetChoiceTiming,
+    TargetDamageSourceBinding, TargetFilter, TargetReadOrigin, TargetRef, ThisWayCause,
+    TrackedAnaphorSource, TypedFilter, ZoneChoiceCandidateSource, ZoneChoiceChooser, ZoneRef,
 };
 #[cfg(test)]
 use crate::types::ability::{AttackSubject, CombatHistoryScope};
@@ -4425,29 +4424,43 @@ fn single_damage_recipient(records: &[RecordedDamageDealt]) -> Option<ObjectInca
 
 /// CR 120.8 + CR 400.7: only positive deliveries to object occurrences count.
 fn fold_exact_damage_recipients(
-    pins: &mut Option<Arc<Vec<ObjectIncarnationRef>>>,
+    pins: &mut Arc<Vec<ObjectIncarnationRef>>,
     records: &[RecordedDamageDealt],
 ) {
-    let mut seen = pins
-        .iter()
-        .flat_map(|pins| pins.iter().copied())
-        .collect::<HashSet<_>>();
-    for pin in records
+    let mut fresh = records
         .iter()
         .filter(|record| record.amount > 0)
-        .filter_map(|record| record.object_pin)
-    {
-        if seen.insert(pin) {
-            Arc::make_mut(pins.get_or_insert_with(|| Arc::new(vec![]))).push(pin);
+        .filter_map(|record| record.object_pin);
+    // An empty fold neither allocates nor takes `Arc::make_mut`'s copy path.
+    let Some(first) = fresh.next() else {
+        return;
+    };
+    let pins = Arc::make_mut(pins);
+    for pin in std::iter::once(first).chain(fresh) {
+        if !pins.contains(&pin) {
+            pins.push(pin);
         }
     }
+}
+
+/// CR 608.2c: the seed for a damage result whose consumer reads the exact
+/// recipients of the preceding instruction. The accumulator's own presence is
+/// the reader gate: `Some` (even empty) records deliveries, `None` records
+/// nothing.
+pub(crate) fn exact_recipient_accumulator(
+    consumer: &ResolvedAbility,
+) -> Option<Arc<Vec<ObjectIncarnationRef>>> {
+    consumer
+        .effect
+        .reads_prior_damage_recipients()
+        .then(Arc::default)
 }
 
 pub(crate) fn new_awaiting_damage_result_from_snapshots(
     state: &GameState,
     ability: &ResolvedAbility,
     snapshots: &[RecordedDamageDealt],
-    exact_reader: Option<ExactDamageRecipientReader>,
+    exact_recipients: Option<Arc<Vec<ObjectIncarnationRef>>>,
 ) -> DamageInstructionResult {
     let fight_fought_creature = if matches!(ability.effect, Effect::Fight { .. }) {
         fight::resolve_fight_fighters(state, ability)
@@ -4461,10 +4474,10 @@ pub(crate) fn new_awaiting_damage_result_from_snapshots(
         amount: 0,
         excess: None,
         recipient: AwaitedDamageRecipient::None,
-        exact_recipients: None,
+        exact_recipients,
         fight_fought_creature,
     };
-    fold_snapshots_into_damage_result(&mut result, snapshots, exact_reader);
+    fold_snapshots_into_damage_result(&mut result, snapshots);
     result
 }
 
@@ -4499,7 +4512,6 @@ pub(crate) fn chain_awaits_damage_delivery(
 fn fold_snapshots_into_damage_result(
     result: &mut DamageInstructionResult,
     snapshots: &[RecordedDamageDealt],
-    exact_reader: Option<ExactDamageRecipientReader>,
 ) {
     use crate::game::arithmetic::u32_to_i32_saturating;
     let DamageInstructionResult::AwaitingDelivery {
@@ -4530,8 +4542,9 @@ fn fold_snapshots_into_damage_result(
             recipient.record_object(pin);
         }
     }
-    if exact_reader.is_some() {
-        fold_exact_damage_recipients(exact_recipients, snapshots);
+    // Whoever seeded the accumulator is the reader; a `None` stays unrecorded.
+    if let Some(pins) = exact_recipients.as_mut() {
+        fold_exact_damage_recipients(pins, snapshots);
     }
 }
 
@@ -4546,11 +4559,7 @@ pub(crate) fn fold_snapshots_into_chain_awaiting_delivery(
         if let Some(result @ DamageInstructionResult::AwaitingDelivery { .. }) =
             chain.context.direct_damage_result.as_mut()
         {
-            fold_snapshots_into_damage_result(
-                result,
-                snapshots,
-                chain.context.exact_damage_recipient_reader,
-            );
+            fold_snapshots_into_damage_result(result, snapshots);
             let result = chain.context.direct_damage_result.take();
             chain.set_direct_damage_result(result, Some(owner));
             return true;
@@ -6057,13 +6066,15 @@ pub(crate) fn apply_parent_chain_context(
     // CR 616.1 + CR 608.2c: and a node's wait for its paused damage instruction's
     // delivery (`DamageInstructionResult::AwaitingDelivery` / `ContinuationPortion`).
     let child_damage_delivery_owner = child.context.damage_delivery_owner;
-    let child_exact_reader = child.context.exact_damage_recipient_reader;
+    // CR 608.2c: the operand lives on the effect, which the wholesale context
+    // hand-off below never touches.
+    let child_reads_prior = child.effect.reads_prior_damage_recipients();
     let child_awaited_damage = child.context.direct_damage_result.take().filter(|result| {
         matches!(
             result,
             DamageInstructionResult::AwaitingDelivery { .. }
                 | DamageInstructionResult::ContinuationPortion
-        ) || (child_exact_reader.is_some()
+        ) || (child_reads_prior
             && matches!(result, DamageInstructionResult::Dealt { .. })
             && is_damage_continuation_node(parent))
     });
@@ -6078,7 +6089,6 @@ pub(crate) fn apply_parent_chain_context(
         ..SpellContext::default()
     };
     child.context = parent.context.clone();
-    child.context.exact_damage_recipient_reader = child_exact_reader;
     child.context.settled_damage_guards = child_settled_guards;
     child.context.parked_damage_batch = child_parked_batch;
     child.context.face_down_in_exile |= child_face_down_in_exile;
@@ -6339,7 +6349,7 @@ pub(crate) fn should_propagate_parent_targets(
     sub: &ResolvedAbility,
 ) -> bool {
     !ability.targets.is_empty()
-        && sub.context.exact_damage_recipient_reader.is_none()
+        && !sub.effect.reads_prior_damage_recipients()
         && can_inherit_parent_targets(sub)
         // CR 608.2d: each-player damage resolves its own per-player work. A
         // Resolution-timed continuation following that work must choose its
@@ -12164,7 +12174,8 @@ fn effect_fields_read_filter_population(
             target, duration, ..
         } => has_filter(target) || has_duration(duration),
         Effect::BecomeSaddled { target } => has_filter(target),
-        Effect::AddTargetReplacement { target, .. } => has_filter(target),
+        // `PriorDamageRecipients` holds no filter.
+        Effect::AddTargetReplacement { target, .. } => target.filter().is_some_and(has_filter),
         Effect::ReduceNextSpellCost { spell_filter, .. } => {
             spell_filter.as_ref().is_some_and(has_filter)
         }
@@ -17249,17 +17260,11 @@ pub(crate) fn chain_references_tracked_set(ability: &ResolvedAbility) -> bool {
 /// computes its own population (with its own pick-exclusion) and must keep
 /// its inherited pick targets, never the offered-pool complement.
 pub(crate) fn ability_node_references_tracked_set(ability: &ResolvedAbility) -> bool {
-    node_effect_references_tracked_set(ability)
+    effect_references_tracked_set(&ability.effect)
         || ability.condition.as_ref().is_some_and(|condition| {
             condition.any_quantity_expr(&quantity_expr_references_tracked_set)
                 || condition.any_filter_grammar(&filter_grammar_node_consumes_tracked_set)
         })
-}
-
-fn node_effect_references_tracked_set(ability: &ResolvedAbility) -> bool {
-    !(ability.context.exact_damage_recipient_reader.is_some()
-        && matches!(ability.effect, Effect::AddTargetReplacement { .. }))
-        && effect_references_tracked_set(&ability.effect)
 }
 
 /// CR 608.2c: does this parked continuation take the interactive pick by
@@ -17479,7 +17484,7 @@ fn node_or_branch_references_tracked_set(
             uses_tracked_set: true,
             ..
         } | Effect::ChooseFromZone { .. }
-    ) || node_effect_references_tracked_set(ability)
+    ) || effect_references_tracked_set(&ability.effect)
         // CR 608.2c: `repeat_for` is a loop-count quantity on the
         // ResolvedAbility, not inside Effect — e.g. "for each nonland card
         // discarded this way, create a token" uses `repeat_for: TrackedSetSize`.
@@ -17720,10 +17725,12 @@ fn effect_references_tracked_set(effect: &Effect) -> bool {
     }
     // CR 608.2c: `AddTargetReplacement` carries its recipient in `target`, which
     // `Effect::target_filter()` deliberately hides (exposing it would announce a
-    // phantom target slot). Legacy population riders consume the producer's
-    // published set. The node-aware caller excludes exact receipt readers.
+    // phantom target slot). A `TrackedSet`-bound rider ("a creature dealt damage
+    // this way would die this turn, exile it instead"; Anger of the Gods, and the
+    // plural "those Auras would leave the battlefield, exile them instead") still
+    // consumes the producer's published set, so the producer must publish it.
     if let Effect::AddTargetReplacement { target, .. } = effect {
-        if filter_references_tracked_set(target) {
+        if target.filter().is_some_and(filter_references_tracked_set) {
             return true;
         }
     }
@@ -19816,7 +19823,7 @@ fn first_tracked_set_consumer(ability: Option<&ResolvedAbility>) -> Option<&Reso
             uses_tracked_set: true,
             ..
         } | Effect::ChooseFromZone { .. }
-    ) || node_effect_references_tracked_set(ability)
+    ) || effect_references_tracked_set(&ability.effect)
         || node_counts_tracked_set(ability)
         || ability
             .player_scope
@@ -31283,14 +31290,18 @@ fn resolve_chain_body(
         .as_deref()
         .filter(|_| !is_damage_continuation_node(ability))
         .map(|records| {
-            let mut exact_recipients = None;
-            if !progress.is_pending()
-                && ability
-                    .sub_ability
-                    .as_deref()
-                    .is_some_and(|sub| sub.context.exact_damage_recipient_reader.is_some())
-            {
-                fold_exact_damage_recipients(&mut exact_recipients, records);
+            // A pending instruction hands off through `AwaitingDelivery`, whose
+            // seed is built where the next sibling is held.
+            let mut exact_recipients = (!progress.is_pending())
+                .then(|| {
+                    ability
+                        .sub_ability
+                        .as_deref()
+                        .and_then(exact_recipient_accumulator)
+                })
+                .flatten();
+            if let Some(pins) = exact_recipients.as_mut() {
+                fold_exact_damage_recipients(pins, records);
             }
             DamageInstructionResult::Dealt {
                 recipient: single_damage_recipient(records),
@@ -31587,7 +31598,7 @@ fn resolve_chain_body(
                     if sub.context.damage_delivery_owner == Some(owner)
                         && finalize_awaiting_damage_result(state, sub)
                     {
-                        if sub.context.exact_damage_recipient_reader.is_none() {
+                        if !sub.effect.reads_prior_damage_recipients() {
                             owned.context.direct_damage_result =
                                 sub.context.direct_damage_result.clone();
                         }
@@ -32136,7 +32147,7 @@ fn resolve_chain_body(
                                 state,
                                 ability,
                                 snapshots,
-                                resolved.context.exact_damage_recipient_reader,
+                                exact_recipient_accumulator(&resolved),
                             );
                             resolved
                                 .set_direct_damage_result(Some(awaiting), damage_delivery_owner);
@@ -32220,7 +32231,7 @@ fn resolve_chain_body(
                                 state,
                                 ability,
                                 snapshots,
-                                resolved.context.exact_damage_recipient_reader,
+                                exact_recipient_accumulator(&resolved),
                             );
                             resolved
                                 .set_direct_damage_result(Some(awaiting), damage_delivery_owner);
@@ -32390,7 +32401,7 @@ fn resolve_chain_body(
                     state,
                     ability,
                     snapshots,
-                    sub_clone.context.exact_damage_recipient_reader,
+                    exact_recipient_accumulator(&sub_clone),
                 );
                 sub_clone.set_direct_damage_result(Some(awaiting), damage_delivery_owner);
             }
@@ -32766,7 +32777,7 @@ fn resolve_chain_body(
                 AbilityCondition::EffectOutcome {
                     signal: EffectOutcomeSignal::OptionalEffectPerformed,
                 }
-            ) && !node_effect_references_tracked_set(sub)
+            ) && !effect_references_tracked_set(&sub.effect)
             {
                 state.chain_tracked_set_id = None;
             }
@@ -51728,7 +51739,7 @@ mod tests {
                     .valid_card(TargetFilter::SelfRef)
                     .destination_zone(Zone::Exile),
                 ),
-                target: TargetFilter::Any,
+                target: TargetFilter::Any.into(),
             },
             vec![TargetRef::Object(declared_target)],
             source,
@@ -61673,7 +61684,7 @@ mod tests {
                 "AddTargetReplacement execute",
                 Effect::AddTargetReplacement {
                     replacement: Box::new(replacement(true, ReplacementMode::Mandatory)),
-                    target: TargetFilter::Any,
+                    target: TargetFilter::Any.into(),
                 },
             ),
             (
@@ -61685,7 +61696,7 @@ mod tests {
                             decline: Some(payload()),
                         },
                     )),
-                    target: TargetFilter::Any,
+                    target: TargetFilter::Any.into(),
                 },
             ),
             (
@@ -61698,7 +61709,7 @@ mod tests {
                             decline: Some(payload()),
                         },
                     )),
-                    target: TargetFilter::Any,
+                    target: TargetFilter::Any.into(),
                 },
             ),
             (
@@ -62979,7 +62990,7 @@ mod tests {
         let with_mode = move |mode: StaticMode| generic(StaticDefinition::new(mode));
         let replacement_row = |replacement: ReplacementDefinition| Effect::AddTargetReplacement {
             replacement: Box::new(replacement),
-            target: TargetFilter::Any,
+            target: TargetFilter::Any.into(),
         };
         let sacrifice = |filter: TargetFilter| {
             AbilityCost::Sacrifice(SacrificeCost::new(
@@ -63410,7 +63421,7 @@ mod tests {
                     });
                     Effect::AddTargetReplacement {
                         replacement: Box::new(replacement),
-                        target: TargetFilter::Any,
+                        target: TargetFilter::Any.into(),
                     }
                 })),
             ),
@@ -75262,7 +75273,7 @@ mod tests {
                         ReplacementDefinition::new(ReplacementEvent::Moved)
                             .valid_card(TargetFilter::SelfRef),
                     ),
-                    target,
+                    target: target.into(),
                 },
                 vec![],
                 ObjectId(1),
@@ -75277,6 +75288,56 @@ mod tests {
         assert!(!next_sub_needs_tracked_set(
             &damage_all().sub_ability(rider(TargetFilter::Any))
         ));
+    }
+
+    /// CR 608.2c: the prior-damage operand holds no filter, so it references no
+    /// ambient tracked set and the producer need not publish one; the
+    /// `Filter(TrackedSet)` rider in the same loop is the positive control that
+    /// each walker's `.filter()` route is reached.
+    #[test]
+    fn prior_damage_recipients_references_no_ambient_tracked_set() {
+        use crate::types::ability::ReplacementRecipient;
+        let chain = |target: ReplacementRecipient| {
+            ResolvedAbility::new(
+                Effect::DamageAll {
+                    amount: QuantityExpr::Fixed { value: 3 },
+                    target: TargetFilter::Typed(TypedFilter::creature()),
+                    player_filter: None,
+                    damage_source: None,
+                },
+                vec![],
+                ObjectId(1),
+                PlayerId(0),
+            )
+            .sub_ability(ResolvedAbility::new(
+                Effect::AddTargetReplacement {
+                    replacement: Box::new(
+                        ReplacementDefinition::new(ReplacementEvent::Moved)
+                            .valid_card(TargetFilter::SelfRef),
+                    ),
+                    target,
+                },
+                vec![],
+                ObjectId(1),
+                PlayerId(0),
+            ))
+        };
+        for (target, expected) in [
+            (
+                ReplacementRecipient::Filter(TargetFilter::TrackedSet {
+                    id: TrackedSetId(0),
+                }),
+                true,
+            ),
+            (ReplacementRecipient::PriorDamageRecipients, false),
+        ] {
+            let ability = chain(target);
+            let rider = ability.sub_ability.as_deref().expect("rider");
+            assert_eq!(effect_references_tracked_set(&rider.effect), expected);
+            assert_eq!(ability_node_references_tracked_set(rider), expected);
+            assert_eq!(chain_references_tracked_set(&ability), expected);
+            assert_eq!(next_sub_needs_tracked_set(&ability), expected);
+        }
     }
 }
 

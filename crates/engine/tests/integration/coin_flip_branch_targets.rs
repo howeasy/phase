@@ -1664,7 +1664,7 @@ fn empty_coin_binding_scenario(
                     .prevention_shield(PreventionAmount::All)
                     .valid_card(TargetFilter::SelfRef),
             ),
-            target: TargetFilter::ParentTarget,
+            target: TargetFilter::ParentTarget.into(),
         },
         EmptyCoinRider::Saddle => Effect::BecomeSaddled {
             target: TargetFilter::ParentTarget,

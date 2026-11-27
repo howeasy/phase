@@ -26060,10 +26060,15 @@ pub enum Effect {
     /// already constrains its own source/target/scope filters, so the
     /// resolver pushes it directly to `pending_damage_replacements` with
     /// no per-target inference of `damage_target_filter`.
+    ///
+    /// `target: ReplacementRecipient::PriorDamageRecipients` binds the
+    /// replacement to the object recipients that the immediately preceding
+    /// damage instruction actually delivered damage to ("If a creature dealt
+    /// damage this way would die this turn, exile it instead.").
     AddTargetReplacement {
         replacement: Box<ReplacementDefinition>,
-        #[serde(default = "default_target_filter_any")]
-        target: TargetFilter,
+        #[serde(default = "default_replacement_recipient_any")]
+        target: ReplacementRecipient,
     },
     /// CR 614.16: Apply a game-level restriction (e.g., disable damage prevention).
     AddRestriction {
@@ -30586,6 +30591,216 @@ pub enum GrantedAbilityScope {
 
 pub fn default_target_filter_any() -> TargetFilter {
     TargetFilter::Any
+}
+
+pub fn default_replacement_recipient_any() -> ReplacementRecipient {
+    ReplacementRecipient::Filter(TargetFilter::Any)
+}
+
+/// CR 614.1a + CR 608.2c: whom an installed replacement binds to.
+///
+/// The operand of [`Effect::AddTargetReplacement`]. `Filter` is the ordinary
+/// target binding (a `TargetFilter` resolved at installation); the other
+/// variant reads an instruction result rather than a filter, so it cannot live
+/// on `TargetFilter` without forcing every filter consumer to answer an operand
+/// that is meaningless outside the replacement seam.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(from = "ReplacementRecipientWire", into = "ReplacementRecipientWire")]
+pub enum ReplacementRecipient {
+    Filter(TargetFilter),
+    /// CR 608.2c + CR 614.9 (redirection) + CR 615.6 (prevented damage is never
+    /// dealt) + CR 120.8: the object recipients that the immediately preceding
+    /// damage instruction actually delivered positive damage to.
+    PriorDamageRecipients,
+}
+
+/// Wire form of [`ReplacementRecipient`]. A `Filter` serializes as exactly the
+/// bare `TargetFilter`, so every pre-existing `target` value is byte-identical.
+/// `Prior` is tried first; no `TargetFilter` variant carries its tag.
+#[derive(Serialize, Deserialize)]
+#[serde(untagged)]
+enum ReplacementRecipientWire {
+    Prior(PriorDamageRecipientsWire),
+    Filter(TargetFilter),
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "type")]
+enum PriorDamageRecipientsWire {
+    PriorDamageRecipients,
+}
+
+impl From<ReplacementRecipientWire> for ReplacementRecipient {
+    fn from(wire: ReplacementRecipientWire) -> Self {
+        match wire {
+            ReplacementRecipientWire::Prior(PriorDamageRecipientsWire::PriorDamageRecipients) => {
+                ReplacementRecipient::PriorDamageRecipients
+            }
+            ReplacementRecipientWire::Filter(filter) => ReplacementRecipient::Filter(filter),
+        }
+    }
+}
+
+impl From<ReplacementRecipient> for ReplacementRecipientWire {
+    fn from(recipient: ReplacementRecipient) -> Self {
+        match recipient {
+            ReplacementRecipient::PriorDamageRecipients => {
+                ReplacementRecipientWire::Prior(PriorDamageRecipientsWire::PriorDamageRecipients)
+            }
+            ReplacementRecipient::Filter(filter) => ReplacementRecipientWire::Filter(filter),
+        }
+    }
+}
+
+impl From<TargetFilter> for ReplacementRecipient {
+    fn from(filter: TargetFilter) -> Self {
+        ReplacementRecipient::Filter(filter)
+    }
+}
+
+impl ReplacementRecipient {
+    /// The carried filter. Use only where "the prior-damage operand holds no
+    /// filter" is the correct answer; every other reader matches exhaustively.
+    pub fn filter(&self) -> Option<&TargetFilter> {
+        match self {
+            ReplacementRecipient::Filter(filter) => Some(filter),
+            ReplacementRecipient::PriorDamageRecipients => None,
+        }
+    }
+
+    /// CR 608.2c: whether this operand reads the preceding damage instruction's
+    /// actual deliveries.
+    pub fn reads_prior_damage_recipients(&self) -> bool {
+        match self {
+            ReplacementRecipient::PriorDamageRecipients => true,
+            ReplacementRecipient::Filter(_) => false,
+        }
+    }
+}
+
+impl Effect {
+    /// CR 608.2c: the single authority for "this instruction reads the exact
+    /// recipients of the preceding damage instruction". The exhaustiveness lives
+    /// in [`ReplacementRecipient::reads_prior_damage_recipients`].
+    pub fn reads_prior_damage_recipients(&self) -> bool {
+        matches!(self, Effect::AddTargetReplacement { target, .. }
+            if target.reads_prior_damage_recipients())
+    }
+}
+
+#[cfg(test)]
+mod replacement_recipient_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn accessors_pin_both_variants() {
+        let prior = ReplacementRecipient::PriorDamageRecipients;
+        let filter = ReplacementRecipient::Filter(TargetFilter::Any);
+        assert!(prior.reads_prior_damage_recipients());
+        assert!(prior.filter().is_none());
+        assert!(!filter.reads_prior_damage_recipients());
+        assert_eq!(filter.filter(), Some(&TargetFilter::Any));
+        assert_eq!(
+            ReplacementRecipient::from(TargetFilter::None),
+            ReplacementRecipient::Filter(TargetFilter::None)
+        );
+    }
+
+    #[test]
+    fn both_variants_round_trip_through_value_and_string() {
+        for recipient in [
+            ReplacementRecipient::PriorDamageRecipients,
+            ReplacementRecipient::Filter(TargetFilter::Any),
+            ReplacementRecipient::Filter(TargetFilter::TrackedSet {
+                id: TrackedSetId(7),
+            }),
+        ] {
+            let value = serde_json::to_value(&recipient).unwrap();
+            assert_eq!(
+                serde_json::from_value::<ReplacementRecipient>(value).unwrap(),
+                recipient
+            );
+            let text = serde_json::to_string(&recipient).unwrap();
+            assert_eq!(
+                serde_json::from_str::<ReplacementRecipient>(&text).unwrap(),
+                recipient
+            );
+        }
+    }
+
+    #[test]
+    fn existing_filter_shapes_stay_byte_identical_filters() {
+        for raw in [
+            json!({"type": "Any"}),
+            json!({"type": "None"}),
+            json!({"type": "ParentTargetSlot", "index": 0}),
+        ] {
+            let parsed: ReplacementRecipient = serde_json::from_value(raw.clone()).unwrap();
+            let filter: TargetFilter = serde_json::from_value(raw.clone()).unwrap();
+            assert_eq!(parsed, ReplacementRecipient::Filter(filter));
+            assert_eq!(serde_json::to_value(&parsed).unwrap(), raw);
+        }
+        assert_eq!(
+            serde_json::to_string(&ReplacementRecipient::Filter(TargetFilter::Any)).unwrap(),
+            serde_json::to_string(&TargetFilter::Any).unwrap()
+        );
+    }
+
+    /// Every `target` deserializes through serde `Content` buffering, so a rich
+    /// filter (controller plus properties) must survive it.
+    #[test]
+    fn rich_filters_survive_untagged_buffering() {
+        let rich = ReplacementRecipient::Filter(TargetFilter::Typed(
+            TypedFilter::creature().controller(ControllerRef::Opponent),
+        ));
+        let value = serde_json::to_value(&rich).unwrap();
+        assert_eq!(
+            serde_json::from_value::<ReplacementRecipient>(value).unwrap(),
+            rich
+        );
+        let text = serde_json::to_string(&rich).unwrap();
+        assert_eq!(
+            serde_json::from_str::<ReplacementRecipient>(&text).unwrap(),
+            rich
+        );
+    }
+
+    #[test]
+    fn missing_target_key_defaults_to_any_and_prior_tag_parses() {
+        let effect: Effect = serde_json::from_value(json!({
+            "type": "AddTargetReplacement",
+            "replacement": serde_json::to_value(Box::new(ReplacementDefinition::new(
+                ReplacementEvent::Destroy
+            ))).unwrap(),
+        }))
+        .unwrap();
+        let Effect::AddTargetReplacement { target, .. } = effect else {
+            panic!("expected AddTargetReplacement");
+        };
+        assert_eq!(target, default_replacement_recipient_any());
+        assert_eq!(
+            serde_json::from_value::<ReplacementRecipient>(
+                json!({"type": "PriorDamageRecipients"})
+            )
+            .unwrap(),
+            ReplacementRecipient::PriorDamageRecipients
+        );
+    }
+
+    #[test]
+    fn unknown_type_is_an_error_and_no_filter_claims_the_prior_tag() {
+        assert!(
+            serde_json::from_value::<ReplacementRecipient>(json!({"type": "NoSuchOperand"}))
+                .is_err()
+        );
+        // The untagged wire tries `Prior` first; that is only sound while no
+        // `TargetFilter` variant owns the tag.
+        assert!(
+            serde_json::from_value::<TargetFilter>(json!({"type": "PriorDamageRecipients"}))
+                .is_err()
+        );
+    }
 }
 
 /// Default number of random nonland cards a Heist looks at (Arena reminder: 3).
@@ -37998,10 +38213,6 @@ pub struct ReturnResultReadSpec {
     pub recipient: ControllerRef,
 }
 
-/// Reads only object recipients of the immediately preceding damage instruction.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ExactDamageRecipientReader {}
-
 /// Parsed ability definition with typed effect. Zero remaining_params.
 ///
 /// `Serialize` is hand-written (see `impl Serialize for AbilityDefinition`) so
@@ -38022,7 +38233,6 @@ pub struct AbilityDefinition {
     pub reads_chosen_group: Option<ChosenGroupId>,
     pub declares_return_result: Option<ReturnResultId>,
     pub reads_return_result: Option<(ReturnResultId, ReturnResultReadSpec)>,
-    pub exact_damage_recipient_reader: Option<ExactDamageRecipientReader>,
     pub cost: Option<AbilityCost>,
     pub sub_ability: Option<Box<AbilityDefinition>>,
     /// CR 608.2c: Alternative branch executed when the condition on this ability is NOT met.
@@ -38509,8 +38719,6 @@ struct AbilityDefinitionRepr<'a> {
     declares_return_result: &'a Option<ReturnResultId>,
     #[serde(skip_serializing_if = "Option::is_none")]
     reads_return_result: &'a Option<(ReturnResultId, ReturnResultReadSpec)>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    exact_damage_recipient_reader: &'a Option<ExactDamageRecipientReader>,
     cost: &'a Option<AbilityCost>,
     sub_ability: &'a Option<Box<AbilityDefinition>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -38610,7 +38818,6 @@ impl Serialize for AbilityDefinition {
             reads_chosen_group,
             declares_return_result,
             reads_return_result,
-            exact_damage_recipient_reader,
             cost,
             sub_ability,
             else_ability,
@@ -38667,7 +38874,6 @@ impl Serialize for AbilityDefinition {
             reads_chosen_group,
             declares_return_result,
             reads_return_result,
-            exact_damage_recipient_reader,
             cost,
             sub_ability,
             else_ability,
@@ -38759,8 +38965,6 @@ struct AbilityDefinitionDe {
     declares_return_result: Option<ReturnResultId>,
     #[serde(default)]
     reads_return_result: Option<(ReturnResultId, ReturnResultReadSpec)>,
-    #[serde(default)]
-    exact_damage_recipient_reader: Option<ExactDamageRecipientReader>,
     #[serde(default)]
     cost: Option<AbilityCost>,
     #[serde(default)]
@@ -38878,7 +39082,6 @@ impl<'de> Deserialize<'de> for AbilityDefinition {
             reads_chosen_group: de.reads_chosen_group,
             declares_return_result: de.declares_return_result,
             reads_return_result: de.reads_return_result,
-            exact_damage_recipient_reader: de.exact_damage_recipient_reader,
             cost: de.cost,
             sub_ability: de.sub_ability,
             else_ability: de.else_ability,
@@ -39315,7 +39518,6 @@ impl AbilityDefinition {
             reads_chosen_group: None,
             declares_return_result: None,
             reads_return_result: None,
-            exact_damage_recipient_reader: None,
             cost: None,
             sub_ability: None,
             else_ability: None,

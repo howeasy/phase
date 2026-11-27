@@ -2206,9 +2206,6 @@ pub struct SpellContext {
     /// incidental object (a land tapped for a mana payment) never reaches it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub direct_damage_result: Option<DamageInstructionResult>,
-    /// The authored input mode of this node, not inherited from its parent.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub exact_damage_recipient_reader: Option<ExactDamageRecipientReader>,
     /// The damage instruction that owns this suspended result or delivery node.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub damage_delivery_owner: Option<DamageDeliveryOwnerId>,

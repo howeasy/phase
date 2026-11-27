@@ -2387,7 +2387,7 @@ fn crafty_cutpurse_oracle_text_parses_to_token_controller_redirect() {
         panic!("expected AddTargetReplacement, got {e:?}");
     };
     // CR 113.7a: the redirect is installed floating, not on the source.
-    assert_eq!(target, TargetFilter::None);
+    assert_eq!(target, ReplacementRecipient::Filter(TargetFilter::None));
     assert_eq!(replacement.event, ReplacementEvent::CreateToken);
     assert_eq!(replacement.token_owner_scope, Some(ControllerRef::Opponent));
     assert_eq!(replacement.token_owner_redirect, Some(ControllerRef::You));

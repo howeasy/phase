@@ -27,7 +27,7 @@
 
 use engine::game::scenario::{CastOutcome, GameRunner, GameScenario, P0, P1};
 use engine::parser::parse_oracle_text;
-use engine::types::ability::{Effect, FilterProp, TargetFilter, TypeFilter};
+use engine::types::ability::{Effect, FilterProp, ReplacementRecipient, TargetFilter, TypeFilter};
 use engine::types::actions::GameAction;
 use engine::types::events::GameEvent;
 use engine::types::game_state::WaitingFor;
@@ -338,7 +338,7 @@ fn cosmic_intervention_parses_as_a_windowed_resolution_install() {
         .find_map(|ability| match &*ability.effect {
             Effect::AddTargetReplacement {
                 replacement,
-                target: TargetFilter::None,
+                target: ReplacementRecipient::Filter(TargetFilter::None),
             } => Some(replacement),
             _ => None,
         })

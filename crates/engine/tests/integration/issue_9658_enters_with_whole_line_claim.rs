@@ -21,7 +21,7 @@
 
 use engine::game::scenario::{GameScenario, P0, P1};
 use engine::parser::parse_oracle_text;
-use engine::types::ability::{AbilityDefinition, Effect, TargetFilter};
+use engine::types::ability::{AbilityDefinition, Effect, ReplacementRecipient, TargetFilter};
 use engine::types::counter::CounterType;
 use engine::types::game_state::WaitingFor;
 use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
@@ -294,7 +294,7 @@ fn dark_intimations_self_exiles_and_adds_loyalty_after_its_spell_resolves() {
     assert!(matches!(
         exile.sub_ability.as_deref().unwrap().effect.as_ref(),
         Effect::AddTargetReplacement {
-            target: TargetFilter::None,
+            target: ReplacementRecipient::Filter(TargetFilter::None),
             ..
         }
     ));

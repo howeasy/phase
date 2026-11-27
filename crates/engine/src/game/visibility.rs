@@ -9580,8 +9580,11 @@ mod tests {
     #[test]
     fn unless_payment_hides_exact_damage_receipts_on_both_view_boundaries() {
         use crate::game::derived_views::ClientGameStateRef;
-        use crate::types::ability::{AwaitedDamageRecipient, ExactDamageRecipientReader};
+        use crate::types::ability::{
+            AwaitedDamageRecipient, ReplacementDefinition, ReplacementRecipient,
+        };
         use crate::types::identifiers::DamageDeliveryOwnerId;
+        use crate::types::replacements::ReplacementEvent;
 
         // A real damage pause stores its reader in the hidden resolution stack.
         // Use a visible carrier here to exercise the shared recursive redactor.
@@ -9592,12 +9595,14 @@ mod tests {
         };
         let pins = Arc::new(vec![pin]);
         let mut pending = ResolvedAbility::new(
-            Effect::unimplemented("private receipt probe", "private receipt probe"),
+            Effect::AddTargetReplacement {
+                replacement: Box::new(ReplacementDefinition::new(ReplacementEvent::Moved)),
+                target: ReplacementRecipient::PriorDamageRecipients,
+            },
             vec![],
             ObjectId(10),
             PlayerId(0),
         );
-        pending.context.exact_damage_recipient_reader = Some(ExactDamageRecipientReader {});
         pending.context.damage_delivery_owner = Some(DamageDeliveryOwnerId(12));
         let mut child = pending.clone();
         child.context.direct_damage_result = Some(DamageInstructionResult::Dealt {
@@ -9647,7 +9652,6 @@ mod tests {
                 assert_eq!(source["context"]["damage_delivery_owner"], 12);
                 assert!(source["context"]["direct_damage_result"]["exact_recipients"].is_array());
                 let context = &output["context"];
-                assert!(context["exact_damage_recipient_reader"].is_object());
                 assert!(context.get("damage_delivery_owner").is_none());
                 assert_eq!(context["direct_damage_result"]["type"], tag);
                 assert!(context["direct_damage_result"]

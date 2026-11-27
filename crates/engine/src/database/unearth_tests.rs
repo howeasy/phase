@@ -161,7 +161,7 @@ fn synthesize_unearth_builds_graveyard_activated_sorcery_chain() {
         } => {
             assert_eq!(
                 *target,
-                TargetFilter::SelfRef,
+                crate::types::ability::ReplacementRecipient::Filter(TargetFilter::SelfRef),
                 "install on the returned card"
             );
             assert_eq!(replacement.event, ReplacementEvent::Moved);

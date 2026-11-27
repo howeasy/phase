@@ -292,7 +292,7 @@ mod a2_runtime {
         let mut ability = ResolvedAbility::new(
             Effect::AddTargetReplacement {
                 replacement: Box::new(a2_replacement()),
-                target: TargetFilter::None,
+                target: TargetFilter::None.into(),
             },
             Vec::new(),
             ObjectId(7),

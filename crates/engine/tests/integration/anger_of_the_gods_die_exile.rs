@@ -56,6 +56,7 @@ const MENDING_HANDS: &str =
     "Prevent the next 4 damage that would be dealt to any target this turn.";
 const DOOM_BLADE: &str = "Destroy target nonblack creature.";
 const HARMS_WAY: &str = "The next 2 damage that a source of your choice would deal to you and/or permanents you control this turn is dealt to any target instead.";
+const TORBRAN: &str = "If a red source you control would deal damage to an opponent or a permanent an opponent controls, it deals that much damage plus 2 instead.";
 const FURNACE: &str = "If a source would deal damage to a permanent or player, it deals double that damage to that permanent or player instead.";
 const RED_SUN: &str = "Red Sun's Zenith deals X damage to any target. If a creature dealt damage this way would die this turn, exile it instead. Shuffle Red Sun's Zenith into its owner's library.";
 const UNSUMMON: &str = "Return target creature to its owner's hand.";
@@ -370,7 +371,6 @@ fn pillar_of_flame_ordered_prevention_and_old_save_compatibility() {
             let obj = runner.state_mut().objects.get_mut(&spell).unwrap();
             let mut abilities = serde_json::to_value(&obj.abilities).unwrap();
             let rider = abilities[0]["sub_ability"].as_object_mut().unwrap();
-            assert!(rider.remove("exact_damage_recipient_reader").is_some());
             rider["effect"]["target"] = serde_json::json!({"type": "Any"});
             obj.abilities = serde_json::from_value(abilities).unwrap();
             obj.base_abilities = obj.abilities.clone();
@@ -383,7 +383,7 @@ fn pillar_of_flame_ordered_prevention_and_old_save_compatibility() {
         let captured = save(runner.state());
         if legacy {
             let json = captured.to_string();
-            assert!(!json.contains("exact_damage_recipient_reader"));
+            assert!(!json.contains("PriorDamageRecipients"));
             assert!(!json.contains("exact_recipients"));
         }
         let mut runner = restore(captured);
@@ -715,11 +715,100 @@ fn lake_silencio_chaos_exiles_only_after_positive_damage() {
 }
 
 fn parked_exact_reader(node: &ResolvedAbility) -> Option<&ResolvedAbility> {
-    if node.context.exact_damage_recipient_reader.is_some() {
+    if node.effect.reads_prior_damage_recipients() {
         return Some(node);
     }
     node.child_links()
         .find_map(|(_, child)| parked_exact_reader(child))
+}
+
+fn strip_key(value: &mut serde_json::Value, key: &str) -> usize {
+    match value {
+        serde_json::Value::Object(map) => {
+            usize::from(map.remove(key).is_some())
+                + map.values_mut().map(|v| strip_key(v, key)).sum::<usize>()
+        }
+        serde_json::Value::Array(items) => items.iter_mut().map(|v| strip_key(v, key)).sum(),
+        _ => 0,
+    }
+}
+
+/// CR 616.1 + CR 608.2c + CR 614.9: Pillar of Flame parks on a replacement
+/// ordering BEFORE any delivery, so its reader accumulator is `Some([])`. That
+/// empty accumulator must survive save/restore (it is the only reader gate), and
+/// an old save that lacks the field restores as a non-reader and installs nothing.
+#[test]
+fn pillar_parked_before_any_delivery_keeps_its_empty_reader_across_save_restore() {
+    for old_save in [false, true] {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let victim = scenario.add_creature(P1, "Victim", 0, 20).id();
+        scenario.add_enchantment_from_oracle(P0, "Furnace of Rath", FURNACE);
+        scenario.add_enchantment_from_oracle(P0, "Torbran, Thane of Red Fell", TORBRAN);
+        let removal = blade(&mut scenario);
+        let spell = scenario
+            .add_spell_to_hand_from_oracle(P0, "Pillar of Flame", false, PILLAR)
+            .with_color(vec![ManaColor::Red])
+            .id();
+        let mut runner = scenario.build();
+        runner.cast(spell).target_object(victim).resolve();
+        assert!(
+            matches!(
+                runner.state().waiting_for,
+                WaitingFor::ReplacementChoice {
+                    candidate_count: 2,
+                    ..
+                }
+            ),
+            "Furnace and Torbran do not commute, so they park an ordering choice before any delivery"
+        );
+        let mut captured = save(runner.state());
+        assert!(captured.to_string().contains("\"exact_recipients\":[]"));
+        if old_save {
+            assert!(strip_key(&mut captured, "exact_recipients") > 0);
+        }
+        let mut resumed = restore(captured);
+        let reader = parked_exact_reader(
+            &resumed
+                .state()
+                .active_ability_continuation()
+                .expect("the parked rider chain")
+                .chain,
+        )
+        .expect("the parked reader survives the round trip");
+        let Some(DamageInstructionResult::AwaitingDelivery {
+            exact_recipients, ..
+        }) = &reader.context.direct_damage_result
+        else {
+            panic!("the reader is parked awaiting delivery");
+        };
+        if old_save {
+            assert!(exact_recipients.is_none(), "an old save is a non-reader");
+        } else {
+            assert_eq!(exact_recipients.as_deref().map(Vec::len), Some(0));
+        }
+        resumed
+            .act(GameAction::ChooseReplacement { index: 0 })
+            .unwrap();
+        rest(&resumed);
+        // Positive reach-guard: the damage was delivered through the resumed pause.
+        // Furnace then Torbran deals 6; Torbran then Furnace deals 8.
+        assert!(matches!(
+            resumed.state().objects[&victim].damage_marked,
+            6 | 8
+        ));
+        assert_eq!(installed(&resumed, victim), usize::from(!old_save));
+        destroy(
+            &mut resumed,
+            removal,
+            victim,
+            if old_save {
+                Zone::Graveyard
+            } else {
+                Zone::Exile
+            },
+        );
+    }
 }
 
 /// CR 616.1 + CR 614.1a: the parked rider retains prior recipients and only

@@ -10290,7 +10290,6 @@ fn stays_on_resolution_line(def: &AbilityDefinition) -> bool {
         reads_chosen_group: _,
         declares_return_result: _,
         reads_return_result: _,
-        exact_damage_recipient_reader: _,
         cost: _,
         duration: _,
         description: _,

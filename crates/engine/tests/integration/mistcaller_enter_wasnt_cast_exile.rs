@@ -29,8 +29,8 @@ use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::{create_debug_cards, debug_card_entry_source, DebugCardCreateRequest};
 use engine::parser::oracle::{parse_oracle_text, ParsedAbilities};
 use engine::types::ability::{
-    AbilityCost, AbilityKind, ContinuousModification, Duration, Effect, FilterProp, TargetFilter,
-    TargetRef,
+    AbilityCost, AbilityKind, ContinuousModification, Duration, Effect, FilterProp,
+    ReplacementRecipient, TargetFilter, TargetRef,
 };
 use engine::types::ability_visit::visit_ability_def;
 use engine::types::actions::{DebugCardCreationKind, GameAction};
@@ -298,7 +298,7 @@ fn mistcaller_parses_to_floating_enter_exile_install() {
     assert_eq!(ability.duration, Some(Duration::UntilEndOfTurn));
     let Effect::AddTargetReplacement {
         replacement,
-        target: TargetFilter::None,
+        target: ReplacementRecipient::Filter(TargetFilter::None),
     } = ability.effect.as_ref()
     else {
         panic!(
@@ -354,7 +354,7 @@ fn hallowed_moonlight_parses_to_floating_enter_exile_install_and_draw() {
     assert_eq!(ability.duration, Some(Duration::UntilEndOfTurn));
     let Effect::AddTargetReplacement {
         replacement,
-        target: TargetFilter::None,
+        target: ReplacementRecipient::Filter(TargetFilter::None),
     } = ability.effect.as_ref()
     else {
         panic!(

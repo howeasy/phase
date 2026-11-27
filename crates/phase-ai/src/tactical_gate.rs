@@ -6083,7 +6083,7 @@ mod tests {
             .with_mana_cost(ManaCost::zero())
             .with_ability(Effect::AddTargetReplacement {
                 replacement: Box::new(moved_exile_then_draw_replacement(floating_spell)),
-                target: TargetFilter::None,
+                target: TargetFilter::None.into(),
             })
             .id();
         floating_scenario.with_library_top(P0, &["Floating replacement draw"]);

@@ -1823,7 +1823,7 @@ mod tests {
                 AbilityKind::Spell,
                 Effect::AddTargetReplacement {
                     replacement: Box::new(repl_execute),
-                    target: TargetFilter::Any,
+                    target: TargetFilter::Any.into(),
                 },
             ),
         ));
@@ -1839,7 +1839,7 @@ mod tests {
                 AbilityKind::Spell,
                 Effect::AddTargetReplacement {
                     replacement: Box::new(repl_maycost_cost),
-                    target: TargetFilter::Any,
+                    target: TargetFilter::Any.into(),
                 },
             ),
         ));
@@ -1855,7 +1855,7 @@ mod tests {
                 AbilityKind::Spell,
                 Effect::AddTargetReplacement {
                     replacement: Box::new(repl_maycost_decline),
-                    target: TargetFilter::Any,
+                    target: TargetFilter::Any.into(),
                 },
             ),
         ));
@@ -1870,7 +1870,7 @@ mod tests {
                 AbilityKind::Spell,
                 Effect::AddTargetReplacement {
                     replacement: Box::new(repl_optional),
-                    target: TargetFilter::Any,
+                    target: TargetFilter::Any.into(),
                 },
             ),
         ));
