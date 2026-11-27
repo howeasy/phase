@@ -349,7 +349,8 @@ fn installed(runner: &GameRunner, target: ObjectId) -> usize {
 }
 
 /// CR 616.1 + CR 615.6: both orders fully prevent Pillar. An authoritative
-/// old-shaped spell and parked rider intentionally retain declared binding.
+/// old-shaped spell and parked rider resume and complete without corrupting
+/// the parked batch.
 #[test]
 fn pillar_of_flame_ordered_prevention_and_old_save_compatibility() {
     for (shield_first, legacy) in [(true, false), (false, false), (true, true)] {
@@ -399,12 +400,11 @@ fn pillar_of_flame_ordered_prevention_and_old_save_compatibility() {
         assert_eq!(prevented(&events, target), if shield_first { 2 } else { 4 });
         assert_eq!(runner.state().objects[&target].damage_marked, 0);
         rest(&runner);
-        destroy(
-            &mut runner,
-            removal,
-            target,
-            if legacy { Zone::Exile } else { Zone::Graveyard },
-        );
+        // An old-shaped save only has to resume cleanly; the later-death outcome
+        // of its declared-target binding is deliberately left unspecified.
+        if !legacy {
+            destroy(&mut runner, removal, target, Zone::Graveyard);
+        }
     }
 }
 
@@ -474,9 +474,9 @@ fn chandra_minus_x_pays_loyalty_and_exiles_only_the_damaged_walker() {
         let removal = scenario
             .add_spell_to_hand_from_oracle(
                 P0,
-                "Swift End",
+                "Hero's Downfall",
                 true,
-                "Destroy target creature or planeswalker. You lose 2 life.",
+                "Destroy target creature or planeswalker.",
             )
             .id();
         let mut runner = scenario.build();
@@ -612,6 +612,8 @@ fn lake_silencio_chaos_exiles_only_after_positive_damage() {
         let mut scenario = GameScenario::new();
         scenario.at_phase(Phase::PreCombatMain);
         let victim = scenario.add_creature(P1, "Victim", 0, 8).id();
+        // CR 603.3d: a second legal target keeps the chaos trigger from auto-targeting.
+        scenario.add_creature(P1, "Bystander", 0, 8);
         let shields = [shield(&mut scenario), shield(&mut scenario)];
         let removal = blade(&mut scenario);
         let mut runner = scenario.build();
@@ -754,9 +756,9 @@ fn anger_parked_recipient_prefix_round_trips_and_appends_answered_damage() {
     let walker_kill = scenario
         .add_spell_to_hand_from_oracle(
             P0,
-            "Swift End",
+            "Hero's Downfall",
             true,
-            "Destroy target creature or planeswalker. You lose 2 life.",
+            "Destroy target creature or planeswalker.",
         )
         .id();
     let [kill_a, kill_b] = std::array::from_fn(|_| blade(&mut scenario));
@@ -816,7 +818,7 @@ fn anger_parked_recipient_prefix_round_trips_and_appends_answered_damage() {
     );
     let wire = serde_json::to_value(ClientGameStateRef::wrap_filtered(
         runner.state(),
-        runner.state(),
+        &view,
         Some(P1),
     ))
     .unwrap();

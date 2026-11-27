@@ -5969,7 +5969,7 @@ mod tests {
         ));
         assert!(matches!(&reader.context.direct_damage_result,
             Some(DamageInstructionResult::AwaitingDelivery { exact_recipients: Some(pins), .. })
-                if pins.as_slice() == &[first, later]));
+                if pins.as_slice() == [first, later]));
     }
 
     /// CR 120.1 + CR 616.1: distinct owned deliveries by the same source
