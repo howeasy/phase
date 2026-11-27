@@ -859,6 +859,7 @@ fn tyvar_animated_lens_echo_choice_leaves_no_undo_for_the_land() {
         source_id: lens,
         exiled_id: imprinted,
         kind: ExileLinkKind::TrackedBySource,
+        supplier: None,
     });
     state.layers_dirty.mark_full();
     let ability_index =

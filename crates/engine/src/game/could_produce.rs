@@ -2216,6 +2216,7 @@ mod tests {
             exiled_id: exiled,
             source_id: land,
             kind: ExileLinkKind::TrackedBySource,
+            supplier: None,
         });
         assert_eq!(
             crate::game::players::linked_exile_cards_for_source(&state, land).len(),

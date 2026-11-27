@@ -454,6 +454,7 @@ fn hypothetical_reading_matches_the_real_activation() {
                 exiled_id: card,
                 source_id: labyrinth,
                 kind: ExileLinkKind::TrackedBySource,
+                supplier: None,
             });
         }
         cases.push((
