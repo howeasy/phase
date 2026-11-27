@@ -11,11 +11,9 @@
 //!    Station (...)
 //!    12+ | Artifact creatures you control have flying."
 //!
-//! CR 701.72b (Assimilate; the Comprehensive Rules edition effective November 6,
-//! 2026 — the repository pins September 25, 2026, which lacks it): to assimilate a
-//! permanent card in a zone other than the battlefield, put it onto the
-//! battlefield under your control with a +1/+1 counter; it's a Borg artifact
-//! creature. The card it moves is chosen from the cards exiled with Borg Cube
+//! The printed reminder text puts the chosen card onto the battlefield under
+//! your control with a +1/+1 counter as a Borg artifact creature. The card is
+//! chosen from the cards exiled with Borg Cube
 //! (CR 607.2a); when there is none, the fallback exile runs and that card
 //! becomes linked to Borg Cube (CR 406.6).
 

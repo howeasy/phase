@@ -15278,11 +15278,9 @@ fn anaphoric_trigger_body_note_value(rest: &str) -> Option<QuantityExpr> {
     Some(QuantityExpr::Ref { qty })
 }
 
-/// CR 701.72a + CR 701.72b + CR 205.1a + CR 205.1b + CR 110.2a + CR 122.1 + CR 115.2:
-/// recognize the `assimilate <target phrase>` keyword action and return the
-/// phrase's target filter. CR 701.72 (Assimilate) exists only in the Comprehensive
-/// Rules edition effective November 6, 2026; the repository's pinned September 25,
-/// 2026 edition does not have it yet.
+/// Recognize the `assimilate <target phrase>` keyword action and return the
+/// phrase's target filter. The keyword action is described by printed reminder
+/// text; the pinned Comprehensive Rules edition predates it.
 ///
 /// Anchored on `tag("assimilate ")` — the trailing space IS the word boundary,
 /// so `assimilates`/`assimilation`/`Assimilation Aegis` cannot match. The
@@ -15291,15 +15289,9 @@ fn anaphoric_trigger_body_note_value(rest: &str) -> Option<QuantityExpr> {
 /// `parse_zone_suffix` to `Owned{Opponent}` + `InZone{Graveyard}` exactly as it
 /// does for Ashen Powder and Puppeteer Clique.
 ///
-/// Fails closed (returns `None`, so the caller falls through to the imperative
-/// `Effect::Unimplemented` fallback and coverage stays red) when either:
-///   * the target phrase leaves an unconsumed remainder, or
-///   * CR 115.2: the phrase does not name a graveyard zone. This second guard
-///     exists for COVERAGE HONESTY, not to license an `origin` value: the
-///     lowering emits `ChangeZone { origin: None }` (the zone constraint travels
-///     on the target filter), and a non-graveyard `assimilate` phrasing is a
-///     shape this production does not model, so it must keep reporting as
-///     unsupported rather than be silently lowered into a reanimation.
+/// Reject an unconsumed target phrase or a zone other than graveyard or linked
+/// exile. For the graveyard form, the zone constraint travels on the declared
+/// target filter (CR 115.2), and lowering leaves `ChangeZone::origin` unset.
 ///
 /// CR 607.2a + CR 406.6: the exile form ("assimilate a creature card exiled
 /// with it" — Borg Cube, Assimilation Assessor) names a card from the source's
