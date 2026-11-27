@@ -2042,8 +2042,7 @@ mod tests {
 
     /// CR 106.6 + CR 115.1: Jetfire's produced {C} carries the negative spend
     /// restriction "this mana can't be spent to cast nonartifact spells"
-    /// (`SpellTypeOrAbilityActivation{ Artifact, Any }`), and it is deposited on
-    /// the targeted player's mana units.
+    /// and deposits it on the targeted player's mana units.
     #[test]
     fn target_player_recipient_mana_carries_spend_restriction() {
         use crate::types::mana::{AbilityActivationScope, ManaRestriction};
@@ -2063,7 +2062,7 @@ mod tests {
                 },
                 restrictions: vec![ManaSpendRestriction::SpellTypeOrAbilityActivation {
                     spell_type: "Artifact".to_string(),
-                    ability: AbilityActivationScope::Any,
+                    ability: AbilityActivationScope::AnyNonSpellPayment,
                 }],
                 grants: vec![],
                 expiry: None,
@@ -2085,7 +2084,7 @@ mod tests {
                 unit.restrictions
                     .contains(&ManaRestriction::OnlyForTypeSpellsOrAbilities {
                         spell_type: "Artifact".to_string(),
-                        ability: AbilityActivationScope::Any,
+                        ability: AbilityActivationScope::AnyNonSpellPayment,
                     })
             }),
             "each produced {{C}} must carry the artifact-spell spend restriction"

@@ -32114,6 +32114,7 @@ mod attached_set_host_filter_tests {
             declaration_records: vec![crate::types::game_state::AttackDeclarationRecord {
                 object_id: host,
                 incarnation: Some(departed.incarnation),
+                ordinal_this_turn: None,
                 lki: empty_lki(),
                 is_token: false,
                 is_commander: false,
@@ -32183,6 +32184,7 @@ mod attached_set_host_filter_tests {
             declaration_records: vec![crate::types::game_state::AttackDeclarationRecord {
                 object_id: host,
                 incarnation: Some(current.incarnation),
+                ordinal_this_turn: None,
                 lki: empty_lki(),
                 is_token: false,
                 is_commander: false,
