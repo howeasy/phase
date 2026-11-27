@@ -1108,7 +1108,7 @@ fn prince_exile_mode_at_target_prompt(
 #[test]
 fn a_modal_trigger_waiting_for_its_target_has_no_observer_above_it() {
     let Some(db) = shared_card_db() else { return };
-    let (runner, prince, _seven, _bear, hand) = prince_exile_mode_at_target_prompt(db);
+    let (runner, prince, seven, _bear, hand) = prince_exile_mode_at_target_prompt(db);
     let sources: Vec<ObjectId> = runner
         .state()
         .stack
@@ -1121,6 +1121,169 @@ fn a_modal_trigger_waiting_for_its_target_has_no_observer_above_it() {
         "only the Prince's trigger under construction is on the stack"
     );
     assert_eq!(hand_len(&runner, P0), hand - 1, "Seven has not drawn yet");
+    // CR 700.17 (edition effective 2026-11-06) + CR 603.2: the dilemma was faced
+    // at the mode choice, so Seven's observer has already triggered; it waits in
+    // the deferred queue, not on the stack, until the construction completes.
+    let queued: Vec<ObjectId> = runner
+        .state()
+        .deferred_triggers
+        .iter()
+        .map(|context| context.pending.source_id)
+        .collect();
+    assert_eq!(
+        queued,
+        vec![seven],
+        "Seven's observer triggered at the mode choice and waits unplaced"
+    );
+}
+
+const P2: PlayerId = PlayerId(2);
+
+/// T1 — CR 700.17 (edition effective 2026-11-06) + CR 603.2 + CR 800.4a: P0
+/// controls P2's Seven of Nine through Control Magic. P0's Charming Prince
+/// trigger chooses its exile mode, which is the dilemma and triggers Seven
+/// right then; the mode's target prompt is still open when P2 concedes and Seven
+/// leaves the game with its owner. The already-triggered observer (CR 113.7a)
+/// still goes on the stack above the Prince's trigger and P0 draws exactly once.
+/// Fails if the observer were matched only at the target answer, after Seven is gone.
+#[test]
+fn a_conceding_owner_of_a_dilemma_observer_cannot_miss_a_targeted_modal_trigger() {
+    let Some(db) = shared_card_db() else { return };
+    let mut scenario = GameScenario::new_n_player(3, 7);
+    scenario.at_phase(Phase::PreCombatMain);
+    for player in [P0, P1, P2] {
+        for index in 0..5 {
+            scenario.add_spell_to_library_top(
+                player,
+                &format!("Library {}-{index}", player.0),
+                false,
+            );
+        }
+    }
+    let seven = scenario.add_real_card(P2, "Seven of Nine", Zone::Battlefield, db);
+    let magic = scenario.add_real_card(P0, "Control Magic", Zone::Battlefield, db);
+    let bear = scenario.add_creature(P0, "Owned Bear A", 2, 2).id();
+    scenario.add_creature(P0, "Owned Bear B", 2, 2);
+    // Charming Prince {1}{W}.
+    for _ in 0..2 {
+        scenario.add_basic_land(P0, ManaColor::White);
+    }
+    let prince = scenario.add_real_card(P0, "Charming Prince", Zone::Hand, db);
+    let mut runner = scenario.build();
+    {
+        let state = runner.state_mut();
+        state.objects.get_mut(&magic).unwrap().attached_to = Some(seven.into());
+        state
+            .objects
+            .get_mut(&seven)
+            .unwrap()
+            .attachments
+            .push(magic);
+        state.layers_dirty.mark_full();
+    }
+    engine::game::layers::flush_layers(runner.state_mut());
+    assert_eq!(
+        runner.state().objects[&seven].controller,
+        P0,
+        "REACH: P0 controls P2's Seven of Nine"
+    );
+    let hand = hand_len(&runner, P0);
+    cast(&mut runner, prince);
+    for _ in 0..8 {
+        if matches!(
+            runner.state().waiting_for,
+            WaitingFor::AbilityModeChoice { .. }
+        ) {
+            break;
+        }
+        runner
+            .act(GameAction::PassPriority)
+            .expect("pass priority so the Prince resolves");
+    }
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::AbilityModeChoice { player: P0, .. }
+        ),
+        "REACH: the enters trigger asks P0 for its modes: {:?}",
+        runner.state().waiting_for
+    );
+    runner
+        .act(GameAction::SelectModes { indices: vec![2] })
+        .expect("choose the exile mode");
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::TriggerTargetSelection { player: P0, .. }
+        ),
+        "REACH: the exile mode asks P0 for its target: {:?}",
+        runner.state().waiting_for
+    );
+    let stack_sources = |runner: &GameRunner| -> Vec<ObjectId> {
+        runner
+            .state()
+            .stack
+            .iter()
+            .map(|entry| entry.source_id)
+            .collect()
+    };
+    let queued_contexts = |runner: &GameRunner| -> Vec<(ObjectId, PlayerId)> {
+        runner
+            .state()
+            .deferred_triggers
+            .iter()
+            .map(|context| (context.pending.source_id, context.pending.controller))
+            .collect()
+    };
+    assert_eq!(stack_sources(&runner), vec![prince]);
+    assert_eq!(
+        queued_contexts(&runner),
+        vec![(seven, P0)],
+        "Seven's observer was matched at the mode choice"
+    );
+
+    runner
+        .act(GameAction::Concede { player_id: P2 })
+        .expect("P2 concedes");
+    assert!(runner.state().players[2].is_eliminated);
+    assert!(!runner.state().players[0].is_eliminated);
+    assert!(!runner.state().players[1].is_eliminated);
+    assert_ne!(
+        runner.state().objects[&seven].zone,
+        Zone::Battlefield,
+        "CR 800.4a: Seven left the game with its owner"
+    );
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::TriggerTargetSelection { player: P0, .. }
+        ),
+        "the prompt survives the concession: {:?}",
+        runner.state().waiting_for
+    );
+    assert_eq!(stack_sources(&runner), vec![prince]);
+    assert_eq!(queued_contexts(&runner), vec![(seven, P0)]);
+
+    runner
+        .act(GameAction::ChooseTarget {
+            target: Some(TargetRef::Object(bear)),
+        })
+        .expect("choose the first Bear");
+    assert_eq!(
+        stack_sources(&runner),
+        vec![prince, seven],
+        "Seven's trigger, exactly once, above the Prince's"
+    );
+    assert_eq!(hand_len(&runner, P0), hand - 1, "nothing drawn yet");
+    drive(&mut runner, Plan::default());
+    assert_eq!(
+        runner.state().objects[&bear].zone,
+        Zone::Exile,
+        "REACH: the exile mode resolved"
+    );
+    assert_eq!(hand_len(&runner, P0), hand, "Seven drew exactly once");
+    assert_eq!(dilemmas(&runner, P0), 1);
+    assert!(runner.state().stack.is_empty());
 }
 
 /// R5d — CR 603.3c + CR 700.17 + ruling "An ability that triggers whenever a

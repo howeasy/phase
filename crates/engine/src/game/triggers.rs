@@ -10465,6 +10465,9 @@ fn collect_target_lock_side_effects(state: &mut GameState, events_out: &[GameEve
 /// CR 601.2c + CR 603.3d + CR 700.13: which collector owns the target-lock span
 /// (`BecomesTarget`, `CrimeCommitted`) a triggered ability's construction finisher
 /// emits. Each caller of the finisher passes it statically; it is never stored.
+/// The mode-choice park of a targeted modal trigger (`queue_mode_choice_span`)
+/// takes the same owner: it always joins the placement process under way, but
+/// only a `Finisher` collects the dilemma event there (CR 603.2 + CR 603.3b).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ConstructionSpanOwner {
     /// The finisher runs at an action seam (`SelectTargets`, `ChooseTarget`,
@@ -10611,11 +10614,39 @@ pub(crate) fn queue_construction_span(
         ConstructionSpanOwner::Finisher => {
             // CR 603.3b + CR 603.12: the abilities that triggered earlier in the resolution this finisher's ability was put on the stack in are queued by now; they belong to its process, not to what its own targeting triggers. Only the first ability a resolution puts on the stack does this.
             join_mid_resolution_triggers_to_process(state);
-            let contexts = collect_pending_triggers(state, &events[start.min(events.len())..]);
-            claim_events_for_ordinary_collection(state, events, start);
-            queue_parked_trigger_contexts(state, contexts, DeferredTriggerBatchOrigin::Ordinary);
+            collect_claim_and_queue_span(state, events, start);
         }
     }
+}
+
+/// CR 603.2 + CR 603.2c: match `events[start..]`, claim the range for the ordinary collectors so no later collection takes it again, and queue what it triggered as Ordinary contexts.
+fn collect_claim_and_queue_span(state: &mut GameState, events: &[GameEvent], start: usize) {
+    let contexts = collect_pending_triggers(state, &events[start.min(events.len())..]);
+    claim_events_for_ordinary_collection(state, events, start);
+    queue_parked_trigger_contexts(state, contexts, DeferredTriggerBatchOrigin::Ordinary);
+}
+
+/// CR 700.17 (edition effective 2026-11-06) + CR 603.2 + CR 603.3b: the mode choice of a modal triggered ability whose target prompt is still open is the dilemma. The placement process under way is joined here for both owners (the join was the late finisher's at the target answer; it moves with the matching, so the observer queued here stays Fresh and waits for the next repetition of the process). Only a `Finisher` collects and queues the event; for an `EnclosingWindow` the dispatch window collects it from the buffer, as it does for the no-target random path.
+pub(crate) fn queue_mode_choice_span(
+    state: &mut GameState,
+    events: &[GameEvent],
+    start: usize,
+    owner: ConstructionSpanOwner,
+) {
+    join_mid_resolution_triggers_to_process(state);
+    match owner {
+        ConstructionSpanOwner::EnclosingWindow => {}
+        ConstructionSpanOwner::Finisher => collect_claim_and_queue_span(state, events, start),
+    }
+}
+
+/// CR 603.2 + CR 603.2c + CR 603.3b: the finisher span of a trigger whose dilemma observers were already matched, and the placement process already joined, at its mode choice (`queue_mode_choice_span`). It collects and queues the finisher's own events and does not join again: a second join would mark the observer queued at the mode choice as a member of the process under way.
+pub(crate) fn queue_resumed_construction_span(
+    state: &mut GameState,
+    events: &[GameEvent],
+    start: usize,
+) {
+    collect_claim_and_queue_span(state, events, start);
 }
 
 /// CR 603.2 + CR 603.2c: the one collection that admits
@@ -66225,6 +66256,102 @@ pub mod tests {
             !placement_may_be_under_way(&state),
             "the triggered-mana resume carrier"
         );
+    }
+
+    /// A resolving ability carrier with one newer ability on the stack (the
+    /// half-built entry of a modal trigger), so the join predicate holds, and two
+    /// Fresh queued contexts: `earlier` (triggered earlier in the resolution) and
+    /// `observer` (what the mode-choice park queued).
+    fn carrier_with_first_ability() -> (GameState, PendingTriggerContext, PendingTriggerContext) {
+        let mut state = setup();
+        let carrier = activated_ability_entry(&mut state);
+        state.resolving_stack_entry = Some(carrier);
+        let half_built = activated_ability_entry(&mut state);
+        state.stack.push_back(half_built);
+        assert!(
+            ability_resolution_is_placing_its_first_ability(&state),
+            "reach: an ability's resolution is placing its first ability"
+        );
+        let earlier = auto_inert_gate_context(&state, false);
+        let observer = auto_inert_gate_context(&state, false);
+        assert_eq!(earlier.placement_process, TriggerPlacementProcess::Fresh);
+        assert_eq!(observer.placement_process, TriggerPlacementProcess::Fresh);
+        (state, earlier, observer)
+    }
+
+    fn queued_processes(state: &GameState) -> Vec<TriggerPlacementProcess> {
+        state
+            .deferred_triggers
+            .iter()
+            .map(|context| context.placement_process)
+            .collect()
+    }
+
+    /// CR 603.3b: the finisher span joins what is queued to the process under
+    /// way; the resumed span (observers already matched at the mode choice) must
+    /// not, or it would mark the observer queued at the mode choice as a member.
+    #[test]
+    fn finisher_span_join_marks_the_observer_underway_and_resumed_span_does_not() {
+        use TriggerPlacementProcess::{Fresh, UnderWay};
+        let (mut state, earlier, observer) = carrier_with_first_ability();
+        state.deferred_triggers = vec![earlier, observer];
+        queue_construction_span(&mut state, &[], 0, ConstructionSpanOwner::Finisher);
+        assert_eq!(queued_processes(&state), vec![UnderWay, UnderWay]);
+
+        let (mut state, earlier, observer) = carrier_with_first_ability();
+        state.deferred_triggers = vec![earlier, observer];
+        queue_resumed_construction_span(&mut state, &[], 0);
+        assert_eq!(queued_processes(&state), vec![Fresh, Fresh]);
+    }
+
+    /// CR 603.3b + CR 700.17 (edition effective 2026-11-06): the mode-choice park
+    /// joins the contexts queued earlier in the resolution for both span owners;
+    /// the observer queued afterwards stays Fresh through the join-free resumed
+    /// finisher span.
+    #[test]
+    fn mode_choice_park_joins_earlier_contexts_for_both_owners_and_leaves_the_observer_fresh() {
+        use TriggerPlacementProcess::{Fresh, UnderWay};
+        for owner in [
+            ConstructionSpanOwner::Finisher,
+            ConstructionSpanOwner::EnclosingWindow,
+        ] {
+            let (mut state, earlier, observer) = carrier_with_first_ability();
+            state.deferred_triggers = vec![earlier];
+            queue_mode_choice_span(&mut state, &[], 0, owner);
+            assert_eq!(queued_processes(&state), vec![UnderWay], "{owner:?}");
+            state.deferred_triggers.push(observer);
+            queue_resumed_construction_span(&mut state, &[], 0);
+            assert_eq!(queued_processes(&state), vec![UnderWay, Fresh], "{owner:?}");
+        }
+    }
+
+    /// CR 603.3b + CR 608.2n: while a spell is resolving, no span function joins;
+    /// the join is scoped to an ability's resolution.
+    #[test]
+    fn mode_choice_park_does_not_join_when_a_spell_is_resolving() {
+        use TriggerPlacementProcess::Fresh;
+        let mut state = setup();
+        install_resolving_sorcery_carrier(&mut state);
+        let above = activated_ability_entry(&mut state);
+        state.stack.push_back(above);
+        assert!(
+            !ability_resolution_is_placing_its_first_ability(&state),
+            "reach: a spell carrier is not an ability's resolution"
+        );
+        let context = auto_inert_gate_context(&state, false);
+        assert_eq!(context.placement_process, Fresh);
+        for owner in [
+            ConstructionSpanOwner::Finisher,
+            ConstructionSpanOwner::EnclosingWindow,
+        ] {
+            state.deferred_triggers = vec![context.clone()];
+            queue_mode_choice_span(&mut state, &[], 0, owner);
+            assert_eq!(queued_processes(&state), vec![Fresh], "park {owner:?}");
+            queue_construction_span(&mut state, &[], 0, owner);
+            assert_eq!(queued_processes(&state), vec![Fresh], "span {owner:?}");
+        }
+        queue_resumed_construction_span(&mut state, &[], 0);
+        assert_eq!(queued_processes(&state), vec![Fresh], "resumed");
     }
 
     /// CR 603.3b: the restore step reads the predicate only for a save flagged

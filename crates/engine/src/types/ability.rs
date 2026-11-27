@@ -2302,9 +2302,11 @@ pub struct SpellContext {
     /// log-only `GameEvent::FaceDilemmaPlaced` narration (CR 733.1: an
     /// announcement that is undone records and narrates nothing). A copy of a spell is created
     /// after placement, so it carries none (CR 700.2g: it faces no dilemma).
-    /// A modal triggered ability whose chosen mode still needs a target latches it
-    /// the same way; the trigger finisher reads it once (`Option::take`) as it
-    /// puts the entry on the stack.
+    /// A modal triggered ability latches it the same way. When its chosen mode
+    /// still needs a target, the dilemma observers are matched at the mode choice
+    /// (CR 700.17, edition effective 2026-11-06) and the latch carries only the
+    /// history and log bookkeeping to the trigger finisher, which reads it once
+    /// (`Option::take`) as it puts the entry on the stack.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mode_chooser: Option<PlayerId>,
     /// Whether an optional "you may" effect was performed during resolution.

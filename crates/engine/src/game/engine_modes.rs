@@ -2,6 +2,7 @@ use crate::types::events::GameEvent;
 use crate::types::game_state::{ActivationResidual, GameState, PendingCast, WaitingFor};
 use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
 use crate::types::mana::ManaCost;
+use crate::types::player::PlayerId;
 
 use super::ability_utils::{
     assign_selected_slots_in_chain, auto_select_targets_for_ability,
@@ -108,12 +109,14 @@ pub(super) fn handle_ability_mode_choice(
         // CR 603.3c + CR 700.17 (edition effective 2026-11-06): the controller
         // chooses a modal triggered ability's modes as it is put on the stack, and
         // the choice cannot be undone (no CancelCast for a triggered mode prompt).
-        // The chooser is latched on the chosen modes; whichever construction step
-        // completes the entry faces the dilemma, inside the finisher's own span
-        // (`engine_stack::place_trigger_targets`, or the no-target branch of
-        // `handle_triggered_mode_choice`). A chosen mode's target may still be
-        // outstanding, in which case the entry on the stack is half-built (CR 603.3d)
-        // and an observer must not land above it before then.
+        // The chooser is latched on the chosen modes. When no chosen mode needs a
+        // target, the no-target (or auto-target) step is the mode choice and the
+        // finisher in one reducer step, so the dilemma is faced inside the
+        // finisher's own span. When a target prompt separates them, the dilemma is
+        // faced at the mode choice (`face_dilemma_at_parked_mode_choice`) while the
+        // half-built entry (CR 603.3d) stays alone on the stack until the target
+        // answer; the latch then carries only the history and log bookkeeping to
+        // `engine_stack::place_trigger_targets`.
         resolved.context.mode_chooser = dilemma_chooser;
         // Round-20 seam 2: the finisher wraps the result HERE, at the public
         // `SelectModes` entry, and never inside `handle_triggered_mode_choice`.
@@ -737,6 +740,24 @@ fn carry_trigger_provenance(
     }));
 }
 
+/// CR 700.17 (edition effective 2026-11-06) + CR 603.2 + CR 603.3b: a modal
+/// trigger whose chosen mode needs a target faces its dilemma at the mode choice,
+/// not at the target answer. The observers are matched here, while the event is
+/// current, so a player leaving the game before the target answer cannot make
+/// them miss it; they stay queued (not on the stack) until the construction
+/// completes, so none lands above the half-built entry.
+fn face_dilemma_at_parked_mode_choice(
+    state: &mut GameState,
+    chooser: Option<PlayerId>,
+    events: &mut Vec<GameEvent>,
+    span_owner: triggers::ConstructionSpanOwner,
+) {
+    let Some(chooser) = chooser else { return };
+    let span_start = events.len();
+    super::ability_utils::emit_face_dilemma_event(chooser, events);
+    triggers::queue_mode_choice_span(state, events, span_start, span_owner);
+}
+
 fn handle_triggered_mode_choice(
     state: &mut GameState,
     choice: TriggeredModeChoice,
@@ -866,7 +887,12 @@ fn handle_triggered_mode_choice(
             // `EnclosingWindow` it does not drain (the enclosing dispatcher's end-of-batch
             // drain places the queue). Use its result instead of falling through to Priority below.
             return Ok(engine_stack::finalize_trigger_target_selection(
-                state, trigger, resolved, events, span_owner,
+                state,
+                trigger,
+                resolved,
+                events,
+                span_owner,
+                engine_stack::ModeDilemmaMatching::AtFinisher,
             ));
         } else {
             // CR 601.2c + CR 603.3d: Mode chosen but target choice still
@@ -926,6 +952,14 @@ fn handle_triggered_mode_choice(
             // Slot legality computed; the pending `TriggerTargetSelection` carries
             // `trigger_event` so the per-slot prompt re-establishes the context.
             triggers::restore_trigger_event_context(state, mode_context_snapshot);
+            // CR 700.17 (edition effective 2026-11-06) + CR 603.2: the target
+            // prompt separates the mode choice from the finisher, and the mode
+            // choice is the dilemma, so its observers are matched now.
+            let dilemma_chooser = state
+                .pending_trigger
+                .as_ref()
+                .and_then(|pending| pending.ability.context.mode_chooser);
+            face_dilemma_at_parked_mode_choice(state, dilemma_chooser, events, span_owner);
             return Ok(WaitingFor::TriggerTargetSelection {
                 player,
                 trigger_controller: Some(trigger_controller),
