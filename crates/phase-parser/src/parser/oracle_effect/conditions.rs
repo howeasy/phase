@@ -19596,38 +19596,60 @@ fn named_cycling_split_commits_at_the_first_structural_suffix() {
 /// "spell" noun keeps the target binding.
 #[test]
 fn its_a_subtype_spell_in_a_cast_trigger_binds_the_event_spell() {
-    fn rider_subject(oracle: &str) -> ObjectScope {
-        let parsed = crate::parser::oracle::parse_oracle_text(
-            oracle,
-            "Test Card",
+    // Dathon, His Heart Open's complete printed Oracle text; only the rider's noun varies.
+    fn dathon(rider_phrase: &str) -> crate::parser::oracle::ParsedAbilities {
+        let oracle = format!(
+            "Whenever you cast an enchantment spell, draw a card. If it's a {rider_phrase}, Dathon deals 2 damage to each opponent.\n{{2}}: Choose a counter on target enchantment you control. Put another counter of that kind on it. Activate only as a sorcery."
+        );
+        crate::parser::oracle::parse_oracle_text(
+            &oracle,
+            "Dathon, His Heart Open",
             &[],
             &["Creature".to_string()],
-            &[],
-        );
-        let rider = parsed.triggers[0]
+            &["Tamarian".to_string(), "Officer".to_string()],
+        )
+    }
+    fn rider(parsed: &crate::parser::oracle::ParsedAbilities) -> &AbilityDefinition {
+        parsed.triggers[0]
             .execute
             .as_deref()
             .and_then(|def| def.sub_ability.as_deref())
-            .expect("the trigger body has a rider");
+            .expect("the trigger body has a rider")
+    }
+    fn rider_subject(rider: &AbilityDefinition) -> ObjectScope {
         match rider.condition.as_ref() {
             Some(AbilityCondition::TargetMatchesFilter { subject, .. }) => *subject,
             other => panic!("expected a referent condition, got {other:?}"),
         }
     }
-    // Dathon, His Heart Open is the sole printed consumer; the phrase is the class.
+    let printed = dathon("Saga spell");
+    let printed_rider = rider(&printed);
+    assert_eq!(rider_subject(printed_rider), ObjectScope::EventSource);
+    // The rider is the printed 2 damage to each opponent.
+    let Effect::DamageEachPlayer {
+        amount,
+        player_filter,
+    } = &*printed_rider.effect
+    else {
+        panic!("expected DamageEachPlayer, got {:?}", printed_rider.effect);
+    };
+    assert_eq!(*amount, QuantityExpr::Fixed { value: 2 });
     assert_eq!(
-        rider_subject(
-            "Whenever you cast an enchantment spell, draw a card. If it's a Saga spell, ~ deals 2 damage to each opponent."
-        ),
-        ObjectScope::EventSource
+        *player_filter,
+        phase_ast::types::ability::PlayerFilter::Opponent
     );
-    // Without the "spell" noun the referent stays the live target/object.
-    assert_ne!(
-        rider_subject(
-            "Whenever you cast an enchantment spell, draw a card. If it's a Saga, ~ deals 2 damage to each opponent."
-        ),
-        ObjectScope::EventSource
+    // The activated ability still parses alongside the cast trigger.
+    assert_eq!(
+        printed
+            .abilities
+            .iter()
+            .filter(|def| def.kind == AbilityKind::Activated)
+            .count(),
+        1
     );
+    // Without the "spell" noun the referent stays the target (mutated control).
+    let control = dathon("Saga");
+    assert_eq!(rider_subject(rider(&control)), ObjectScope::Target);
     assert!(names_spell_phrase("saga spell"));
     assert!(!names_spell_phrase("saga"));
     assert!(!names_spell_phrase("spellshaper"));
