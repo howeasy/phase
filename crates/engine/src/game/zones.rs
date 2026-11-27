@@ -1355,6 +1355,20 @@ pub(crate) fn prune_object_bound_effects_on_exit(
     if to == Zone::Stack || (from == Zone::Stack && to == Zone::Battlefield) {
         return;
     }
+    // CR 400.7 + CR 614.1c: a pending "that creature enters with an additional
+    // counter" rider (Kumano Faces Kakkazan, Summon: Fenrir, Yuna, Grand
+    // Summoner) belongs to the creature spell it was registered for. When that
+    // spell leaves the stack for anywhere but the battlefield (countered,
+    // Remanded, bounced), the card that is cast again is a new object the rider
+    // was not made for. `ObjectId` is storage identity here, so drop the rows at
+    // the zone-change boundary. The battlefield entry consumes its own rows.
+    // Rows exist only while the spell is on the stack, so a debug-staged move
+    // from another zone leaves them alone.
+    if from == Zone::Stack {
+        state
+            .pending_etb_counters
+            .retain(|(pending_id, _, _)| *pending_id != object_id);
+    }
     super::layers::prune_affected_object_left_effects(state, object_id);
 }
 
