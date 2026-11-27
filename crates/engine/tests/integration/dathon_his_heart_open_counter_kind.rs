@@ -13,10 +13,14 @@
 
 use crate::support::shared_card_db;
 use engine::game::coverage::card_face_gaps;
+use engine::game::effects::counter;
 use engine::game::engine::EngineError;
+use engine::game::sba;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::scenario_db::GameScenarioDbExt;
-use engine::types::ability::{AbilityDefinition, AbilityKind, Effect};
+use engine::types::ability::{
+    AbilityDefinition, AbilityKind, Effect, ResolvedAbility, TargetFilter, TargetRef,
+};
 use engine::types::actions::GameAction;
 use engine::types::counter::CounterType;
 use engine::types::game_state::{CastPaymentMode, WaitingFor};
@@ -371,6 +375,66 @@ fn casting_a_saga_also_deals_two_damage_to_each_opponent() {
         runner.state().waiting_for,
         WaitingFor::Priority { .. }
     ));
+}
+
+/// CR 603.2 + CR 608.2h + CR 400.7 + CR 704.5e: Dathon's "If it's a Saga spell"
+/// reads the triggering spell's last known information. The cast Saga is a copy
+/// (a Shiko-style copy of a Saga spell cast through Dathon's trigger), countered
+/// while the trigger waits above it; the copy ceases to exist, yet the rider still
+/// sees a Saga spell, so the draw AND the 2 damage happen.
+#[test]
+fn a_countered_saga_spell_still_triggers_dathons_damage() {
+    let (mut runner, saga) = dathon_cast_setup(
+        "History of Benalia",
+        vec![
+            ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]),
+            ManaUnit::new(ManaType::White, ObjectId(0), false, vec![]),
+            ManaUnit::new(ManaType::White, ObjectId(0), false, vec![]),
+        ],
+    );
+    drop(runner.cast(saga).commit());
+    assert_eq!(
+        runner.state().stack.len(),
+        2,
+        "Saga spell below Dathon's trigger"
+    );
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&saga)
+        .expect("spell")
+        .is_copy = true;
+
+    let counter = ResolvedAbility::new(
+        Effect::Counter {
+            target: TargetFilter::Any,
+            source_rider: None,
+            countered_spell_zone: None,
+        },
+        vec![TargetRef::Object(saga)],
+        ObjectId(9999),
+        P1,
+    );
+    let mut events = Vec::new();
+    counter::resolve(runner.state_mut(), &counter, &mut events).expect("counter resolves");
+    sba::check_state_based_actions(runner.state_mut(), &mut events);
+    assert!(
+        !runner.state().objects.contains_key(&saga),
+        "the countered copy ceased to exist"
+    );
+    assert_eq!(
+        runner.state().stack.len(),
+        1,
+        "only Dathon's trigger remains"
+    );
+
+    settle_without_prompts(&mut runner);
+    assert_eq!(hand_cards(&runner, P0).len(), 1, "Dathon still draws");
+    assert_eq!(
+        runner.life(P1),
+        18,
+        "the countered Saga spell still earns the 2 damage"
+    );
 }
 
 /// CR 603.2 + CR 109.5: Dathon's "Whenever YOU cast an enchantment spell" is its

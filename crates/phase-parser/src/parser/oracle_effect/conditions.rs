@@ -3563,6 +3563,16 @@ fn spell_referent_scope(ctx: &ParseContext) -> ObjectScope {
     }
 }
 
+/// Whether a type phrase names a spell ("saga spell", "creature or enchantment spell").
+fn names_spell_phrase(phrase: &str) -> bool {
+    all_consuming(terminated(
+        take_until::<_, _, OracleError<'_>>(" spell"),
+        tag(" spell"),
+    ))
+    .parse(phrase)
+    .is_ok()
+}
+
 /// CR 202.3 + CR 608.2c: "that spell's mana value was N or less" / "that permanent's mana
 /// value was N or less" / "that spell has mana value N or greater" / "that card has mana
 /// value N or less" — the owner's noun surface. `that permanent` reads the earlier
@@ -9392,13 +9402,17 @@ fn try_unrouted_nom_condition_tail(text: &str, ctx: &mut ParseContext) -> Option
                     .iter()
                     .any(type_filter_references_subtype)
             {
+                // CR 608.2h + CR 400.7 + CR 603.2: "it's a Saga spell" in a cast trigger
+                // names the spell the event names, so it binds the event object (read
+                // through the spell's last known information once it has left the stack,
+                // Dathon: a countered copy ceases to exist) rather than the live target.
+                let subject = if names_spell_phrase(rest) {
+                    spell_referent_scope(ctx)
+                } else {
+                    ObjectScope::Target
+                };
                 return Some(maybe_negate(
-                    referent_condition(
-                        filter.clone(),
-                        ReferentTense::Present,
-                        ObjectScope::Target,
-                        None,
-                    ),
+                    referent_condition(filter.clone(), ReferentTense::Present, subject, None),
                     negated,
                 ));
             }
@@ -19573,4 +19587,40 @@ fn named_cycling_split_commits_at_the_first_structural_suffix() {
             format!("If you've cycled a card named Yidaro, Wandering Monster {suffix}, {body}");
         assert_eq!(split_leading_conditional(&text), None, "{text}");
     }
+}
+
+/// CR 608.2h + CR 400.7 + CR 603.2: "If it's a <subtype> spell" in a cast trigger names the
+/// event's spell (`ObjectScope::EventSource`), so a spell that has left the stack is still
+/// read through its last known information (Dathon, His Heart Open: a countered Saga copy).
+/// The class is the spell-phrase form, not one subtype: a bare "it's a <subtype>" with no
+/// "spell" noun keeps the target binding.
+#[test]
+fn its_a_subtype_spell_in_a_cast_trigger_binds_the_event_spell() {
+    fn rider_subject(oracle: &str) -> ObjectScope {
+        let parsed = crate::parser::oracle::parse_oracle_text(
+            oracle,
+            "Test Card",
+            &[],
+            &["Creature".to_string()],
+            &[],
+        );
+        let rider = parsed.triggers[0]
+            .execute
+            .as_deref()
+            .and_then(|def| def.sub_ability.as_deref())
+            .expect("the trigger body has a rider");
+        match rider.condition.as_ref() {
+            Some(AbilityCondition::TargetMatchesFilter { subject, .. }) => subject.clone(),
+            other => panic!("expected a referent condition, got {other:?}"),
+        }
+    }
+    for oracle in [
+        "Whenever you cast an enchantment spell, draw a card. If it's a Saga spell, ~ deals 2 damage to each opponent.",
+        "Whenever you cast a creature spell, draw a card. If it's a Dragon spell, ~ deals 2 damage to each opponent.",
+    ] {
+        assert_eq!(rider_subject(oracle), ObjectScope::EventSource, "{oracle}");
+    }
+    assert!(names_spell_phrase("saga spell"));
+    assert!(!names_spell_phrase("saga"));
+    assert!(!names_spell_phrase("spellshaper"));
 }
