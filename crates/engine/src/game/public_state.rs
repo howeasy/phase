@@ -612,6 +612,7 @@ pub fn mark_public_state_from_events(state: &mut GameState, events: &[GameEvent]
             | GameEvent::PowerToughnessChanged { .. }
             | GameEvent::CascadeMissed { .. }
             | GameEvent::CardPredicateGuessMade { .. }
+            | GameEvent::FaceDilemmaPlaced { .. }
             | GameEvent::DebugActionUsed { .. }
             | GameEvent::DebugPermissionGranted { .. }
             | GameEvent::DebugPermissionRevoked { .. }

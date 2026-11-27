@@ -785,6 +785,7 @@ pub(crate) fn keys_from_event(event: &GameEvent, state: &GameState) -> Keys {
         GameEvent::CascadeMissed { .. }
         | GameEvent::CardNamed { .. }
         | GameEvent::CardPredicateGuessMade { .. }
+        | GameEvent::FaceDilemmaPlaced { .. }
         | GameEvent::DebugActionUsed { .. }
         | GameEvent::DebugPermissionGranted { .. }
         | GameEvent::DebugPermissionRevoked { .. } => {}

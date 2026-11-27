@@ -969,7 +969,11 @@ fn handle_triggered_mode_choice(
         let span_start = events.len();
         if let Some(chooser) = dilemma_chooser {
             super::ability_utils::emit_face_dilemma_event(chooser, events);
-            super::ability_utils::record_face_dilemma_after_stack_placement(state, Some(chooser));
+            super::ability_utils::record_face_dilemma_after_stack_placement(
+                state,
+                Some(chooser),
+                events,
+            );
         }
         triggers::queue_construction_span(state, events, span_start, span_owner);
         debug_assert!(

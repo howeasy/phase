@@ -12260,6 +12260,7 @@ fn as_enters_roller(roll: &GameEvent) -> Option<ObjectId> {
         | GameEvent::Cycled { .. }
         | GameEvent::PlayerPerformedAction { .. }
         | GameEvent::CardPredicateGuessMade { .. }
+        | GameEvent::FaceDilemmaPlaced { .. }
         | GameEvent::CardNamed { .. }
         | GameEvent::Regenerated { .. }
         | GameEvent::CreatureSuspected { .. }

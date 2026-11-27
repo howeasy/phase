@@ -2005,6 +2005,17 @@ pub enum GameEvent {
         source_id: Option<ObjectId>,
         choice: String,
     },
+    /// Log-only narration that `player_id` faced a dilemma, published once the
+    /// announcement that faced it has reached the stack (CR 601.2i / CR 602.2b /
+    /// CR 603.3b + CR 733.1: an announcement that is undone is not a completed
+    /// choice). It is not rules input and never matches a trigger: the
+    /// trigger-visible event is `PlayerPerformedAction { FaceDilemma }`, emitted
+    /// at the mode choice and excluded from the game log so this placement-time
+    /// event is the only narration of the dilemma (CR 700.17, edition effective
+    /// 2026-11-06).
+    FaceDilemmaPlaced {
+        player_id: PlayerId,
+    },
     /// CR 608.2d: A player chose a card name as an instruction resolved
     /// ("Choose a nonland card name" — Brain Pry). Chosen names are public, so
     /// this carries the name for the game log and the frontend rather than

@@ -1709,9 +1709,14 @@ pub(crate) fn emit_face_dilemma_event(
 /// CR 700.17 (edition effective 2026-11-06) + CR 601.2i + CR 602.2b + CR 733.1:
 /// record the dilemma in the per-turn history once the announcement that faced
 /// it has reached the stack, so an undone announcement records nothing.
+///
+/// The same placement publishes `GameEvent::FaceDilemmaPlaced`, the log-only
+/// narration: the choice-time `PlayerPerformedAction { FaceDilemma }` is excluded
+/// from the game log, so a cancelled announcement narrates nothing.
 pub(crate) fn record_face_dilemma_after_stack_placement(
     state: &mut GameState,
     chooser: Option<PlayerId>,
+    events: &mut Vec<crate::types::events::GameEvent>,
 ) {
     if let Some(player) = chooser {
         super::effects::record_player_action_this_turn(
@@ -1719,6 +1724,7 @@ pub(crate) fn record_face_dilemma_after_stack_placement(
             player,
             crate::types::events::PlayerActionKind::FaceDilemma,
         );
+        events.push(crate::types::events::GameEvent::FaceDilemmaPlaced { player_id: player });
     }
 }
 

@@ -1,0 +1,7 @@
+{
+  "surfaces": [
+    "full",
+    "wire"
+  ],
+  "reason": "GameEvent gains FaceDilemmaPlaced, a log-only narration of a faced dilemma at stack placement; an older peer cannot decode the tag"
+}

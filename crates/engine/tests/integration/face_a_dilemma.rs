@@ -20,6 +20,7 @@
 //! scenario builders.
 
 use engine::database::card_db::CardDatabase;
+use engine::game::engine::EngineError;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::scenario_db::GameScenarioDbExt;
 use engine::game::triggers::drain_order_triggers_with_identity;
@@ -27,8 +28,9 @@ use engine::types::ability::TargetRef;
 use engine::types::actions::GameAction;
 use engine::types::counter::CounterType;
 use engine::types::events::PlayerActionKind;
-use engine::types::game_state::{CastPaymentMode, StackEntryKind, WaitingFor};
+use engine::types::game_state::{ActionResult, CastPaymentMode, StackEntryKind, WaitingFor};
 use engine::types::identifiers::ObjectId;
+use engine::types::log::{GameLogEntry, LogSegment};
 use engine::types::mana::ManaColor;
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
@@ -106,8 +108,65 @@ struct Record {
     cost_choices: Vec<(PlayerId, Vec<ObjectId>)>,
 }
 
+/// The game-log entries published by the actions a row drives, read from each
+/// `ActionResult` the production boundary returns.
+#[derive(Default)]
+struct Narration {
+    entries: Vec<GameLogEntry>,
+}
+
+impl Narration {
+    /// Submit `action` through the runner and keep the entries it published.
+    fn act(
+        &mut self,
+        runner: &mut GameRunner,
+        action: GameAction,
+    ) -> Result<ActionResult, EngineError> {
+        let result = runner.act(action)?;
+        self.entries.extend(result.log_entries.iter().cloned());
+        Ok(result)
+    }
+
+    /// `cast`, collecting its entries.
+    fn cast(&mut self, runner: &mut GameRunner, spell: ObjectId) {
+        let card_id = runner.state().objects[&spell].card_id;
+        self.act(
+            runner,
+            GameAction::CastSpell {
+                object_id: spell,
+                card_id,
+                targets: vec![],
+                payment_mode: CastPaymentMode::Auto,
+            },
+        )
+        .expect("cast the spell");
+    }
+
+    /// Lines "<player> faces a dilemma" narrated so far.
+    fn faces_a_dilemma(&self, player: PlayerId) -> usize {
+        self.entries
+            .iter()
+            .filter(|entry| {
+                matches!(
+                    entry.segments.as_slice(),
+                    [
+                        LogSegment::PlayerName { player_id, .. },
+                        LogSegment::Text(space),
+                        LogSegment::Text(label),
+                    ] if *player_id == player && space == " " && label == "faces a dilemma"
+                )
+            })
+            .count()
+    }
+}
+
 /// Answer every prompt from `plan` until the stack is empty at priority.
 fn drive(runner: &mut GameRunner, plan: Plan) -> Record {
+    drive_logged(runner, plan, &mut Narration::default())
+}
+
+/// `drive`, collecting the game-log entries of every action it submits.
+fn drive_logged(runner: &mut GameRunner, plan: Plan, log: &mut Narration) -> Record {
     let Plan {
         modes,
         targets,
@@ -124,8 +183,7 @@ fn drive(runner: &mut GameRunner, plan: Plan) -> Record {
             | WaitingFor::AbilityModeChoice { player, .. } => {
                 record.mode_choosers.push(player);
                 let indices = modes.next().expect("unplanned mode prompt");
-                runner
-                    .act(GameAction::SelectModes { indices })
+                log.act(runner, GameAction::SelectModes { indices })
                     .expect("choose the planned modes");
             }
             WaitingFor::TargetSelection { .. } | WaitingFor::TriggerTargetSelection { .. } => {
@@ -134,28 +192,24 @@ fn drive(runner: &mut GameRunner, plan: Plan) -> Record {
                     None if stop_choosing_targets => None,
                     None => panic!("unplanned target prompt"),
                 };
-                runner
-                    .act(GameAction::ChooseTarget { target })
+                log.act(runner, GameAction::ChooseTarget { target })
                     .expect("choose the planned target");
             }
             WaitingFor::OptionalEffectChoice { player, .. } => {
                 record.optional_actors.push(player);
                 let accept = optional.next().expect("unplanned optional prompt");
-                runner
-                    .act(GameAction::DecideOptionalEffect { accept })
+                log.act(runner, GameAction::DecideOptionalEffect { accept })
                     .expect("answer the optional prompt");
             }
             WaitingFor::ScryChoice { cards, .. } | WaitingFor::SurveilChoice { cards, .. } => {
-                runner
-                    .act(GameAction::SelectCards { cards })
+                log.act(runner, GameAction::SelectCards { cards })
                     .expect("keep the cards on top");
             }
             WaitingFor::PayCost {
                 player, choices, ..
             } => {
                 record.cost_choices.push((player, choices.clone()));
-                runner
-                    .act(GameAction::SelectCards { cards: choices })
+                log.act(runner, GameAction::SelectCards { cards: choices })
                     .expect("pay the cost with its only choice");
             }
             WaitingFor::OrderTriggers { .. } => {
@@ -165,8 +219,7 @@ fn drive(runner: &mut GameRunner, plan: Plan) -> Record {
                 if runner.state().stack.is_empty() {
                     return record;
                 }
-                runner
-                    .act(GameAction::PassPriority)
+                log.act(runner, GameAction::PassPriority)
                     .expect("pass priority while the stack resolves");
             }
             other => panic!("unexpected prompt {other:?}; record {record:?}"),
@@ -1801,4 +1854,510 @@ fn a_dilemma_observer_sits_above_the_spell_and_the_activation_that_caused_it() {
         "REACH: the activation with Garak's trigger above it"
     );
     assert_eq!(dilemmas(&runner, P0), 2);
+}
+
+// ---------------------------------------------------------------------------
+// Narration (the "<player> faces a dilemma" log line). The line is published
+// once per completed mode choice, at stack placement (CR 601.2i / CR 602.2b /
+// CR 603.3b + CR 733.1), through the log-only `GameEvent::FaceDilemmaPlaced`;
+// the choice-time `PlayerPerformedAction { FaceDilemma }` that drives triggers
+// is not narrated. Each row reads `ActionResult::log_entries` of every action
+// it submits through `GameRunner::act`. Reverting the placement-time event
+// (narrating the choice-time event instead) flips the cancel rows to 1 and the
+// recast to 2.
+// ---------------------------------------------------------------------------
+
+/// N1 — CR 601.2b + CR 700.2a: a completed modal cast narrates one line, for
+/// the caster only.
+#[test]
+fn a_modal_cast_narrates_one_dilemma() {
+    let Some(db) = shared_card_db() else { return };
+    let mut scenario = board();
+    add_seven(&mut scenario, P0, db);
+    let charm = add_abzan_charm(&mut scenario, db);
+    let mut runner = scenario.build();
+    let mut log = Narration::default();
+    log.cast(&mut runner, charm);
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::ModeChoice { .. }),
+        "REACH: the mode prompt is open: {:?}",
+        runner.state().waiting_for
+    );
+    assert_eq!(
+        log.faces_a_dilemma(P0),
+        0,
+        "nothing is narrated before the choice completes"
+    );
+    drive_logged(
+        &mut runner,
+        Plan {
+            modes: vec![vec![1]],
+            ..Plan::default()
+        },
+        &mut log,
+    );
+    assert_eq!(dilemmas(&runner, P0), 1, "REACH: the dilemma was faced");
+    assert_eq!(log.faces_a_dilemma(P0), 1);
+    assert_eq!(log.faces_a_dilemma(P1), 0);
+}
+
+/// N2 — CR 700.2a + CR 700.2d: two modes chosen are one dilemma and one line.
+#[test]
+fn two_modes_narrate_one_dilemma() {
+    let Some(db) = shared_card_db() else { return };
+    let mut scenario = board();
+    // Atarka's Command {R}{G}.
+    scenario.add_basic_land(P0, ManaColor::Red);
+    scenario.add_basic_land(P0, ManaColor::Green);
+    let command = scenario.add_real_card(P0, "Atarka's Command", Zone::Hand, db);
+    let mut runner = scenario.build();
+    let mut log = Narration::default();
+    log.cast(&mut runner, command);
+    drive_logged(
+        &mut runner,
+        Plan {
+            modes: vec![vec![1, 3]],
+            ..Plan::default()
+        },
+        &mut log,
+    );
+    assert_eq!(dilemmas(&runner, P0), 1, "REACH: one dilemma was faced");
+    assert_eq!(log.faces_a_dilemma(P0), 1);
+}
+
+/// N3 — CR 733.1 + ruling 2026-10-07 ("As long as you choose one or more modes
+/// for a spell or ability, you've faced a dilemma"): a cast cancelled at its
+/// target prompt narrates nothing, and the recast narrates exactly one line for
+/// the one completed choice. Fails on the choice-time event: 1 at the prompt,
+/// 1 after the cancel, 2 after the recast.
+#[test]
+fn a_cancelled_cast_narrates_nothing_and_the_recast_narrates_one() {
+    let Some(db) = shared_card_db() else { return };
+    let mut scenario = board();
+    add_seven(&mut scenario, P0, db);
+    // Two legal exile targets, so the target prompt is raised.
+    scenario.add_creature(P1, "P1 Giant", 4, 4);
+    scenario.add_creature(P1, "P1 Second Giant", 4, 4);
+    let charm = add_abzan_charm(&mut scenario, db);
+    let mut runner = scenario.build();
+    let mut log = Narration::default();
+    log.cast(&mut runner, charm);
+    log.act(&mut runner, GameAction::SelectModes { indices: vec![0] })
+        .expect("choose the exile mode");
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::TargetSelection { .. }
+        ),
+        "REACH: the exile mode asks for its target: {:?}",
+        runner.state().waiting_for
+    );
+    assert_eq!(log.faces_a_dilemma(P0), 0, "at the target prompt");
+    log.act(&mut runner, GameAction::CancelCast)
+        .expect("cancel the cast");
+    assert_eq!(runner.state().objects[&charm].zone, Zone::Hand);
+    assert_eq!(log.faces_a_dilemma(P0), 0, "after the cancel");
+
+    log.cast(&mut runner, charm);
+    drive_logged(
+        &mut runner,
+        Plan {
+            modes: vec![vec![1]],
+            ..Plan::default()
+        },
+        &mut log,
+    );
+    assert_eq!(
+        dilemmas(&runner, P0),
+        1,
+        "REACH: the recast faced its dilemma"
+    );
+    assert_eq!(
+        log.faces_a_dilemma(P0),
+        1,
+        "one line for one completed choice"
+    );
+}
+
+/// N4 — CR 602.2b + CR 733.1: an activation cancelled at its target prompt
+/// narrates nothing; the reactivation narrates one line.
+#[test]
+fn a_cancelled_activation_narrates_nothing_and_the_reactivation_narrates_one() {
+    let Some(db) = shared_card_db() else { return };
+    let mut scenario = board();
+    add_seven(&mut scenario, P0, db);
+    let cankerbloom = scenario.add_real_card(P0, "Cankerbloom", Zone::Battlefield, db);
+    scenario.add_real_card(P1, "Sol Ring", Zone::Battlefield, db);
+    scenario.add_basic_land(P0, ManaColor::Green);
+    let mut runner = scenario.build();
+    let mut log = Narration::default();
+    let activate = GameAction::ActivateAbility {
+        source_id: cankerbloom,
+        ability_index: 0,
+        payment_mode: CastPaymentMode::Auto,
+    };
+    log.act(&mut runner, activate.clone())
+        .expect("activate Cankerbloom");
+    log.act(&mut runner, GameAction::SelectModes { indices: vec![0] })
+        .expect("choose the destroy-artifact mode");
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::TargetSelection { .. }
+        ),
+        "REACH: the destroy-artifact mode asks for its target: {:?}",
+        runner.state().waiting_for
+    );
+    assert_eq!(log.faces_a_dilemma(P0), 0, "at the target prompt");
+    log.act(&mut runner, GameAction::CancelCast)
+        .expect("cancel the activation");
+    assert_eq!(log.faces_a_dilemma(P0), 0, "after the cancel");
+
+    log.act(&mut runner, activate).expect("reactivate");
+    drive_logged(
+        &mut runner,
+        Plan {
+            modes: vec![vec![2]],
+            ..Plan::default()
+        },
+        &mut log,
+    );
+    assert_eq!(
+        dilemmas(&runner, P0),
+        1,
+        "REACH: the reactivation faced its dilemma"
+    );
+    assert_eq!(log.faces_a_dilemma(P0), 1);
+}
+
+/// N5 — CR 602.2b: a targeted modal activation narrates one line.
+#[test]
+fn a_targeted_modal_activation_narrates_one_dilemma() {
+    let Some(db) = shared_card_db() else { return };
+    let mut scenario = board();
+    // Two legal artifacts (Seven of Nine and Sol Ring) so the target prompt is raised.
+    add_seven(&mut scenario, P0, db);
+    let cankerbloom = scenario.add_real_card(P0, "Cankerbloom", Zone::Battlefield, db);
+    let sol_ring = scenario.add_real_card(P1, "Sol Ring", Zone::Battlefield, db);
+    scenario.add_basic_land(P0, ManaColor::Green);
+    let mut runner = scenario.build();
+    let mut log = Narration::default();
+    log.act(
+        &mut runner,
+        GameAction::ActivateAbility {
+            source_id: cankerbloom,
+            ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
+        },
+    )
+    .expect("activate Cankerbloom");
+    drive_logged(
+        &mut runner,
+        Plan {
+            modes: vec![vec![0]],
+            targets: vec![TargetRef::Object(sol_ring)],
+            ..Plan::default()
+        },
+        &mut log,
+    );
+    assert_eq!(
+        runner.state().objects[&sol_ring].zone,
+        Zone::Graveyard,
+        "REACH: the targeted mode resolved"
+    );
+    assert_eq!(log.faces_a_dilemma(P0), 1);
+}
+
+/// N6 — CR 603.3c + CR 700.2b: a modal trigger with no target prompt (Charming
+/// Prince's life mode) narrates one line.
+#[test]
+fn a_modal_trigger_without_a_target_narrates_one_dilemma() {
+    let Some(db) = shared_card_db() else { return };
+    let mut scenario = board();
+    for _ in 0..2 {
+        scenario.add_basic_land(P0, ManaColor::White);
+    }
+    let prince = scenario.add_real_card(P0, "Charming Prince", Zone::Hand, db);
+    let mut runner = scenario.build();
+    let mut log = Narration::default();
+    log.cast(&mut runner, prince);
+    let record = drive_logged(
+        &mut runner,
+        Plan {
+            modes: vec![vec![1]],
+            ..Plan::default()
+        },
+        &mut log,
+    );
+    assert_eq!(
+        record.mode_choosers,
+        vec![P0],
+        "REACH: the trigger asked for its modes"
+    );
+    assert_eq!(log.faces_a_dilemma(P0), 1);
+}
+
+/// N7 — CR 603.3c: a modal trigger whose chosen mode still needs a target
+/// narrates nothing while it waits for the target, and one line once the
+/// construction finishes.
+#[test]
+fn a_target_needing_modal_trigger_narrates_when_it_is_placed() {
+    let Some(db) = shared_card_db() else { return };
+    let mut scenario = board();
+    let bear = scenario.add_creature(P0, "Owned Bear A", 2, 2).id();
+    scenario.add_creature(P0, "Owned Bear B", 2, 2);
+    for _ in 0..2 {
+        scenario.add_basic_land(P0, ManaColor::White);
+    }
+    let prince = scenario.add_real_card(P0, "Charming Prince", Zone::Hand, db);
+    let mut runner = scenario.build();
+    let mut log = Narration::default();
+    log.cast(&mut runner, prince);
+    for _ in 0..8 {
+        if matches!(
+            runner.state().waiting_for,
+            WaitingFor::AbilityModeChoice { .. }
+        ) {
+            break;
+        }
+        log.act(&mut runner, GameAction::PassPriority)
+            .expect("pass priority so the Prince resolves");
+    }
+    log.act(&mut runner, GameAction::SelectModes { indices: vec![2] })
+        .expect("choose the exile mode");
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::TriggerTargetSelection { .. }
+        ),
+        "REACH: the exile mode asks for its target: {:?}",
+        runner.state().waiting_for
+    );
+    assert_eq!(log.faces_a_dilemma(P0), 0, "while waiting for the target");
+    log.act(
+        &mut runner,
+        GameAction::ChooseTarget {
+            target: Some(TargetRef::Object(bear)),
+        },
+    )
+    .expect("choose the first Bear");
+    assert_eq!(
+        log.faces_a_dilemma(P0),
+        1,
+        "once the trigger is on the stack"
+    );
+}
+
+/// N8 — CR 700.2b + CR 603.3c: a random-mode trigger (Summon: Magus Sisters,
+/// chapter I with no creature to fight) narrates one line, at placement.
+#[test]
+fn a_random_modal_trigger_narrates_one_dilemma() {
+    let Some(db) = shared_card_db() else { return };
+    let mut scenario = board();
+    for _ in 0..5 {
+        scenario.add_basic_land(P0, ManaColor::Green);
+    }
+    let saga = scenario.add_real_card(P0, "Summon: Magus Sisters", Zone::Hand, db);
+    let mut runner = scenario.build();
+    let mut log = Narration::default();
+    log.cast(&mut runner, saga);
+    for _ in 0..8 {
+        if runner.state().stack.iter().any(|entry| {
+            entry.source_id == saga && matches!(entry.kind, StackEntryKind::TriggeredAbility { .. })
+        }) {
+            break;
+        }
+        log.act(&mut runner, GameAction::PassPriority)
+            .expect("pass priority so the Saga resolves");
+    }
+    assert_eq!(
+        dilemmas(&runner, P0),
+        1,
+        "REACH: the chapter faced its dilemma"
+    );
+    assert_eq!(log.faces_a_dilemma(P0), 1);
+    while !runner.state().stack.is_empty() {
+        log.act(&mut runner, GameAction::PassPriority)
+            .expect("pass priority so the chapter resolves");
+    }
+    assert_eq!(log.faces_a_dilemma(P0), 1, "resolving adds no second line");
+}
+
+/// N9 — CR 601.2b + CR 107.3: an X-deferred modal spell narrates nothing at the
+/// X prompt (the entry is not placed yet) and one line at the end.
+#[test]
+fn an_x_deferred_modal_spell_narrates_when_it_is_placed() {
+    let Some(db) = shared_card_db() else { return };
+    let mut scenario = board();
+    for _ in 0..3 {
+        scenario.add_basic_land(P0, ManaColor::White);
+    }
+    let sol_ring = scenario.add_real_card(P1, "Sol Ring", Zone::Battlefield, db);
+    let intervention = scenario.add_real_card(P0, "Heliod's Intervention", Zone::Hand, db);
+    let mut runner = scenario.build();
+    let mut log = Narration::default();
+    log.cast(&mut runner, intervention);
+    log.act(&mut runner, GameAction::SelectModes { indices: vec![0] })
+        .expect("choose the destroy mode");
+    let mut chose_x = false;
+    for _ in 0..16 {
+        match runner.state().waiting_for.clone() {
+            WaitingFor::ChooseXValue { .. } => {
+                assert_eq!(log.faces_a_dilemma(P0), 0, "at the X prompt");
+                log.act(&mut runner, GameAction::ChooseX { value: 1 })
+                    .expect("announce X = 1");
+                chose_x = true;
+            }
+            WaitingFor::TargetSelection { .. } => {
+                log.act(
+                    &mut runner,
+                    GameAction::ChooseTarget {
+                        target: Some(TargetRef::Object(sol_ring)),
+                    },
+                )
+                .expect("choose the artifact");
+            }
+            _ => break,
+        }
+    }
+    assert!(chose_x, "REACH: the spell asked for X");
+    drive_logged(&mut runner, Plan::default(), &mut log);
+    assert_eq!(dilemmas(&runner, P0), 1, "REACH: the dilemma was faced");
+    assert_eq!(log.faces_a_dilemma(P0), 1);
+}
+
+/// N10 — CR 700.2b + CR 603.3c: Panharmonicon doubles Charming Prince's trigger
+/// into two triggered abilities; each faces its own dilemma and is narrated.
+#[test]
+fn two_triggers_in_one_batch_narrate_two_dilemmas() {
+    let Some(db) = shared_card_db() else { return };
+    let mut scenario = board();
+    scenario.add_real_card(P0, "Panharmonicon", Zone::Battlefield, db);
+    for _ in 0..2 {
+        scenario.add_basic_land(P0, ManaColor::White);
+    }
+    let prince = scenario.add_real_card(P0, "Charming Prince", Zone::Hand, db);
+    let mut runner = scenario.build();
+    let mut log = Narration::default();
+    log.cast(&mut runner, prince);
+    let record = drive_logged(
+        &mut runner,
+        Plan {
+            modes: vec![vec![1], vec![1]],
+            ..Plan::default()
+        },
+        &mut log,
+    );
+    assert_eq!(
+        record.mode_choosers,
+        vec![P0, P0],
+        "REACH: both triggers asked"
+    );
+    assert_eq!(dilemmas(&runner, P0), 2);
+    assert_eq!(log.faces_a_dilemma(P0), 2);
+}
+
+/// N11 — CR 700.2e: "An opponent chooses one": the line names the player who
+/// chose the mode, not the caster.
+#[test]
+fn the_narrated_dilemma_names_the_mode_chooser() {
+    let Some(db) = shared_card_db() else { return };
+    let mut scenario = board();
+    for _ in 0..4 {
+        scenario.add_basic_land(P0, ManaColor::Black);
+    }
+    let lore = scenario.add_real_card(P0, "Fatal Lore", Zone::Hand, db);
+    let mut runner = scenario.build();
+    let mut log = Narration::default();
+    log.cast(&mut runner, lore);
+    let record = drive_logged(
+        &mut runner,
+        Plan {
+            modes: vec![vec![0]],
+            ..Plan::default()
+        },
+        &mut log,
+    );
+    assert_eq!(record.mode_choosers, vec![P1], "REACH: the opponent chose");
+    assert_eq!(log.faces_a_dilemma(P1), 1);
+    assert_eq!(log.faces_a_dilemma(P0), 0);
+}
+
+/// N12 — CR 707.10 + CR 700.2g: a copy copies the modes and faces no dilemma,
+/// so the copy adds no line.
+#[test]
+fn a_copy_narrates_no_dilemma() {
+    let Some(db) = shared_card_db() else { return };
+    let mut scenario = board();
+    scenario.add_basic_land(P0, ManaColor::Red);
+    scenario.add_basic_land(P0, ManaColor::Green);
+    let command = scenario.add_real_card(P0, "Atarka's Command", Zone::Hand, db);
+    for _ in 0..2 {
+        scenario.add_basic_land(P0, ManaColor::Blue);
+    }
+    let twincast = scenario.add_real_card(P0, "Twincast", Zone::Hand, db);
+    let mut runner = scenario.build();
+    let p1 = runner.life(P1);
+    let mut log = Narration::default();
+    log.cast(&mut runner, command);
+    log.act(
+        &mut runner,
+        GameAction::SelectModes {
+            indices: vec![1, 3],
+        },
+    )
+    .expect("choose the command's modes");
+    log.cast(&mut runner, twincast);
+    drive_logged(
+        &mut runner,
+        Plan {
+            targets: vec![TargetRef::Object(command)],
+            optional: vec![false],
+            ..Plan::default()
+        },
+        &mut log,
+    );
+    assert_eq!(runner.life(P1), p1 - 6, "REACH: the copy resolved");
+    assert_eq!(log.faces_a_dilemma(P0), 1, "the original's one line only");
+}
+
+/// N13 — "as you choose one or more modes": choosing zero modes narrates
+/// nothing; the same turn's Abzan Charm narrates one line.
+#[test]
+fn zero_modes_narrate_no_dilemma() {
+    let Some(db) = shared_card_db() else { return };
+    let mut scenario = board();
+    for _ in 0..2 {
+        scenario.add_basic_land(P0, ManaColor::Green);
+    }
+    let call = scenario.add_real_card(P0, "Call Damage Control", Zone::Hand, db);
+    let charm = add_abzan_charm(&mut scenario, db);
+    let mut runner = scenario.build();
+    let mut log = Narration::default();
+    log.cast(&mut runner, call);
+    let record = drive_logged(
+        &mut runner,
+        Plan {
+            modes: vec![vec![]],
+            ..Plan::default()
+        },
+        &mut log,
+    );
+    assert_eq!(
+        record.mode_choosers,
+        vec![P0],
+        "REACH: the mode prompt was raised"
+    );
+    assert_eq!(log.faces_a_dilemma(P0), 0);
+
+    log.cast(&mut runner, charm);
+    drive_logged(
+        &mut runner,
+        Plan {
+            modes: vec![vec![1]],
+            ..Plan::default()
+        },
+        &mut log,
+    );
+    assert_eq!(log.faces_a_dilemma(P0), 1);
 }

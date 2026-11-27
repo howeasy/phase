@@ -97,7 +97,11 @@ fn place_trigger_targets(
     // finisher's span so the observer is held with the target-lock events.
     if let Some(chooser) = ability.context.mode_chooser.take() {
         super::ability_utils::emit_face_dilemma_event(chooser, events);
-        super::ability_utils::record_face_dilemma_after_stack_placement(state, Some(chooser));
+        super::ability_utils::record_face_dilemma_after_stack_placement(
+            state,
+            Some(chooser),
+            events,
+        );
     }
     let assigned_targets = declared_targets_in_chain(&ability);
     let crime_candidate =
