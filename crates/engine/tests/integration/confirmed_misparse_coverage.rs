@@ -321,12 +321,18 @@ fn intervening_if_unclaimed_cards_stay_unsupported_and_claimed_cards_stay_suppor
         .map(|key| (key.to_string(), fixture()[key].clone()))
         .collect();
     let committed = ConfirmedMisparses::committed();
-    let before = report(&database(&stamped_export(&pool, &ConfirmedMisparses::empty())));
+    let before = report(&database(&stamped_export(
+        &pool,
+        &ConfirmedMisparses::empty(),
+    )));
     let after = report(&database(&stamped_export(&pool, committed)));
     for (key, class) in unclaimed {
         assert_eq!(committed.class_of(key), Some(class), "committed row: {key}");
         assert!(before[key].supported, "gate parses on its own: {key}");
-        assert!(!after[key].supported, "unclaimed card must report a gap: {key}");
+        assert!(
+            !after[key].supported,
+            "unclaimed card must report a gap: {key}"
+        );
         assert!(
             handlers(&after[key]).contains(&class.handler()),
             "typed Misparse gap: {key}"
@@ -338,9 +344,16 @@ fn intervening_if_unclaimed_cards_stay_unsupported_and_claimed_cards_stay_suppor
         );
     }
     for key in claimed {
-        assert_eq!(committed.class_of(key), None, "claimed card has no row: {key}");
+        assert_eq!(
+            committed.class_of(key),
+            None,
+            "claimed card has no row: {key}"
+        );
         assert!(after[key].supported, "claimed card is supported: {key}");
-        assert!(after[key].gap_details.is_empty(), "claimed card is gap-free: {key}");
+        assert!(
+            after[key].gap_details.is_empty(),
+            "claimed card is gap-free: {key}"
+        );
     }
 }
 
