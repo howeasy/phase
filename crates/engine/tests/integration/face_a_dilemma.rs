@@ -1707,18 +1707,17 @@ fn a_random_modal_trigger_without_a_target_prompt_faces_one_dilemma() {
             entry.source_id == saga && matches!(entry.kind, StackEntryKind::TriggeredAbility { .. })
         })
         .expect("REACH: the chapter is still on the stack at the first count");
-    // Whichever mode the seed drew, its declared targets are at most the Saga
-    // itself (the counter modes) or none ("up to one" fight with no legal creature).
-    if let StackEntryKind::TriggeredAbility { ability, .. } = &chapter.kind {
-        assert!(
-            ability
-                .targets
-                .iter()
-                .all(|target| matches!(target, TargetRef::Object(id) if *id == saga)),
-            "REACH: the chapter's only possible target is the Saga: {:?}",
-            ability.targets
-        );
-    }
+    // The "up to one target creature an opponent controls" fight mode has no legal
+    // target on this board and is not drawn; every remaining mode is a counter mode
+    // whose sole declared target is the Saga itself, preserved at placement.
+    let StackEntryKind::TriggeredAbility { ability, .. } = &chapter.kind else {
+        unreachable!("the chapter was found as a triggered ability above");
+    };
+    assert_eq!(
+        ability.targets,
+        vec![TargetRef::Object(saga)],
+        "REACH: the chosen counter mode declares the Saga as its sole target"
+    );
     assert!(
         !matches!(
             runner.state().waiting_for,
