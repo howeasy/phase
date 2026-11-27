@@ -11816,6 +11816,11 @@ fn static_mode_needs_source_controller_anchor(mode: &crate::types::statics::Stat
         | StaticMode::CantBeTargeted { .. }
         | StaticMode::CantBeCast { .. }
         | StaticMode::CantBeActivated { .. }
+        // CR 109.5: a sacrifice prohibition's "you" is resolved by
+        // `player_cant_sacrifice` from the carrier's controller, and no
+        // producer grafts `CantSacrifice` onto another player's permanent, so
+        // no installing-player anchor is snapshotted.
+        | StaticMode::CantSacrifice { .. }
         | StaticMode::CantSearchLibrary { .. }
         | StaticMode::RestrictLibrarySearchToTop { .. }
         | StaticMode::ControlPlayersDuringOwnLibrarySearch { .. }

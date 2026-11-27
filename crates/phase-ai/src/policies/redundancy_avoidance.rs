@@ -1424,6 +1424,9 @@ fn quoted_static_mode_supports_redundancy(mode: &StaticMode) -> bool {
         | StaticMode::CantBeTargeted { .. }
         | StaticMode::CantBeCast { .. }
         | StaticMode::CantBeActivated { .. }
+        // A sacrifice prohibition is not decided as attackers or blockers are
+        // declared (CR 508.1), so a quoted grant of it has no combat redundancy.
+        | StaticMode::CantSacrifice { .. }
         | StaticMode::CantSearchLibrary { .. }
         | StaticMode::RestrictLibrarySearchToTop { .. }
         | StaticMode::ControlPlayersDuringOwnLibrarySearch { .. }
