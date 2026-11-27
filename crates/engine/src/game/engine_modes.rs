@@ -963,14 +963,14 @@ fn handle_triggered_mode_choice(
         // CR 700.17 (edition effective 2026-11-06) + CR 603.3c: no mode needs a
         // target, so the entry is complete and the dilemma is faced now, inside
         // the finisher's own span: an observer that triggers on it is matched
-        // here and held until the drain below has run, so a sibling's mode prompt
+        // here and queued before the drain below runs, so a sibling's mode prompt
         // that surfaces from the drain cannot swallow it (CR 603.2e).
         let span_start = events.len();
         if let Some(chooser) = dilemma_chooser {
             super::ability_utils::emit_face_dilemma_event(chooser, events);
             super::ability_utils::record_face_dilemma_after_stack_placement(state, Some(chooser));
         }
-        let held = triggers::hold_construction_span(state, events, span_start, span_owner);
+        triggers::queue_construction_span(state, events, span_start, span_owner);
         debug_assert!(
             !triggers::is_pending_trigger_construction_active(state),
             "deferred-trigger drain entered with construction still active",
@@ -990,8 +990,6 @@ fn handle_triggered_mode_choice(
             // siblings; no nested window runs inside this one.
             triggers::ConstructionSpanOwner::EnclosingWindow => None,
         };
-        // CR 603.3b: what triggered during this process waits until the drain returned.
-        triggers::release_construction_span(state, held);
         if let Some(waiting_for) = drained {
             return Ok(waiting_for);
         }

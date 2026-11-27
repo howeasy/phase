@@ -93,6 +93,9 @@ struct Plan {
     modes: Vec<Vec<usize>>,
     targets: Vec<TargetRef>,
     optional: Vec<bool>,
+    /// Answer a target prompt after the planned targets ran out by declining to
+    /// choose another ("up to X target creatures", CR 601.2c).
+    stop_choosing_targets: bool,
 }
 
 /// The actor of each mode and optional prompt `drive` answered.
@@ -110,6 +113,7 @@ fn drive(runner: &mut GameRunner, plan: Plan) -> Record {
         modes,
         targets,
         optional,
+        stop_choosing_targets,
     } = plan;
     let mut modes = modes.into_iter();
     let mut targets = targets.into_iter();
@@ -126,11 +130,13 @@ fn drive(runner: &mut GameRunner, plan: Plan) -> Record {
                     .expect("choose the planned modes");
             }
             WaitingFor::TargetSelection { .. } | WaitingFor::TriggerTargetSelection { .. } => {
-                let target = targets.next().expect("unplanned target prompt");
+                let target = match targets.next() {
+                    Some(target) => Some(target),
+                    None if stop_choosing_targets => None,
+                    None => panic!("unplanned target prompt"),
+                };
                 runner
-                    .act(GameAction::ChooseTarget {
-                        target: Some(target),
-                    })
+                    .act(GameAction::ChooseTarget { target })
                     .expect("choose the planned target");
             }
             WaitingFor::OptionalEffectChoice { player, .. } => {
@@ -1554,6 +1560,54 @@ fn a_random_modal_trigger_with_a_targeted_mode_faces_one_dilemma() {
     assert!(
         runner.state().stack.is_empty(),
         "REACH: the chapter resolved to an empty stack"
+    );
+    assert_eq!(dilemmas(&runner, P0), 1);
+}
+
+/// R23 — CR 700.17 + CR 603.12 + CR 700.2a: Slight Malfunction ("Choose one —
+/// • Destroy target artifact. • Roll a six-sided die. When you do, Slight
+/// Malfunction deals 1 damage to each of up to X target creatures, where X is
+/// the result.") faces exactly one dilemma, when its mode is chosen at cast.
+/// The reflexive "When you do" trigger is created during resolution from the
+/// spell's context, which no longer carries the chooser latch, so it chooses no
+/// modes and Seven of Nine does not draw a second time. Fails if the spell's
+/// placement leaves the latch on the chain and the reflexive trigger faces a
+/// second dilemma (Seven draws twice and the history holds two).
+#[test]
+fn a_modal_spell_with_a_reflexive_trigger_faces_one_dilemma() {
+    let Some(db) = shared_card_db() else { return };
+    let mut scenario = board();
+    add_seven(&mut scenario, P0, db);
+    scenario.add_basic_land(P0, ManaColor::Red);
+    scenario.add_basic_land(P0, ManaColor::Red);
+    let bear = scenario.add_creature(P1, "P1 Bear", 2, 2).id();
+    let malfunction = scenario.add_real_card(P0, "Slight Malfunction", Zone::Hand, db);
+    let mut runner = scenario.build();
+    let hand = hand_len(&runner, P0);
+    cast(&mut runner, malfunction);
+    let record = drive(
+        &mut runner,
+        Plan {
+            modes: vec![vec![1]],
+            targets: vec![TargetRef::Object(bear)],
+            stop_choosing_targets: true,
+            ..Plan::default()
+        },
+    );
+    assert_eq!(
+        record.mode_choosers,
+        vec![P0],
+        "REACH: the spell's mode prompt was answered once, by its controller"
+    );
+    assert_eq!(
+        runner.state().objects[&bear].damage_marked,
+        1,
+        "REACH: the reflexive trigger resolved and dealt its 1 damage"
+    );
+    assert_eq!(
+        hand_len(&runner, P0),
+        hand - 1 + 1,
+        "Seven drew exactly once: the spell left the hand, one dilemma drew a card"
     );
     assert_eq!(dilemmas(&runner, P0), 1);
 }
