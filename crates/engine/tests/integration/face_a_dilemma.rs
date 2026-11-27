@@ -27,7 +27,7 @@ use engine::types::ability::TargetRef;
 use engine::types::actions::GameAction;
 use engine::types::counter::CounterType;
 use engine::types::events::PlayerActionKind;
-use engine::types::game_state::{CastPaymentMode, WaitingFor};
+use engine::types::game_state::{CastPaymentMode, StackEntryKind, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::ManaColor;
 use engine::types::phase::Phase;
@@ -1688,18 +1688,36 @@ fn a_random_modal_trigger_without_a_target_prompt_faces_one_dilemma() {
     let mut runner = scenario.build();
     cast(&mut runner, saga);
     for _ in 0..8 {
-        if runner
-            .state()
-            .stack
-            .iter()
-            .any(|entry| entry.source_id == saga)
-            && runner.state().stack.len() > 1
-        {
+        // The chapter I trigger is a triggered ability of the Saga: stop the
+        // moment it sits on the stack, before it can resolve.
+        if runner.state().stack.iter().any(|entry| {
+            entry.source_id == saga && matches!(entry.kind, StackEntryKind::TriggeredAbility { .. })
+        }) {
             break;
         }
         runner
             .act(GameAction::PassPriority)
             .expect("pass priority so the Saga resolves");
+    }
+    let chapter = runner
+        .state()
+        .stack
+        .iter()
+        .find(|entry| {
+            entry.source_id == saga && matches!(entry.kind, StackEntryKind::TriggeredAbility { .. })
+        })
+        .expect("REACH: the chapter is still on the stack at the first count");
+    // Whichever mode the seed drew, its declared targets are at most the Saga
+    // itself (the counter modes) or none ("up to one" fight with no legal creature).
+    if let StackEntryKind::TriggeredAbility { ability, .. } = &chapter.kind {
+        assert!(
+            ability
+                .targets
+                .iter()
+                .all(|target| matches!(target, TargetRef::Object(id) if *id == saga)),
+            "REACH: the chapter's only possible target is the Saga: {:?}",
+            ability.targets
+        );
     }
     assert!(
         !matches!(
@@ -1712,7 +1730,7 @@ fn a_random_modal_trigger_without_a_target_prompt_faces_one_dilemma() {
     assert_eq!(
         dilemmas(&runner, P0),
         1,
-        "REACH: the chapter faced its dilemma when it was placed"
+        "REACH: the chapter faced its dilemma when it was placed, not when it resolved"
     );
     // Let the chapter resolve; the history still holds the one dilemma.
     while !runner.state().stack.is_empty() {

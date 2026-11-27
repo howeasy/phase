@@ -964,7 +964,8 @@ fn handle_triggered_mode_choice(
         // target, so the entry is complete and the dilemma is faced now, inside
         // the finisher's own span: an observer that triggers on it is matched
         // here and queued before the drain below runs, so a sibling's mode prompt
-        // that surfaces from the drain cannot swallow it (CR 603.2e).
+        // that surfaces from the drain cannot swallow it (CR 603.2 + CR 603.3b
+        // govern the matching and stacking; the span ownership is engine plumbing).
         let span_start = events.len();
         if let Some(chooser) = dilemma_chooser {
             super::ability_utils::emit_face_dilemma_event(chooser, events);
