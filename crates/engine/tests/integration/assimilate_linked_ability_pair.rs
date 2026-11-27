@@ -11,6 +11,10 @@
 //! ability that is not linked to the Assessor trigger, so the trigger's
 //! "assimilate a creature card exiled with it" finds nothing and does nothing.
 //!
+//! Agatha's Soul Cauldron can grant the Paleontologist's exile ability to
+//! Assimilation Assessor. That grant is likewise foreign to the Assessor's
+//! printed pair, whether the exile happened before or after the attack latch.
+//!
 //! Oracle (verbatim, MTGJSON 5.3.0+20261115):
 //!   Volrath, the Shapestealer {2}{B}{G}{U}, Legendary Creature — Phyrexian
 //!   Shapeshifter 7/5: "At the beginning of combat on your turn, put a -1/-1
@@ -30,13 +34,16 @@
 //!   die, exile it instead.)"
 
 use engine::game::combat::AttackTarget;
+use engine::game::game_object::ExileSupplier;
 use engine::game::layers::evaluate_layers;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
-use engine::types::ability::{Effect, TargetRef};
+use engine::game::zones::create_object;
+use engine::types::ability::{AbilityProvenance, Effect, TargetRef};
 use engine::types::actions::GameAction;
+use engine::types::card_type::CoreType;
 use engine::types::counter::CounterType;
 use engine::types::game_state::WaitingFor;
-use engine::types::identifiers::ObjectId;
+use engine::types::identifiers::{CardId, ObjectId};
 use engine::types::mana::{ManaColor, ManaCost, ManaCostShard};
 use engine::types::phase::Phase;
 use engine::types::zones::Zone;
@@ -56,6 +63,14 @@ const PALEONTOLOGIST: &str = "{T}: Add one mana of any color.\n\
      You may cast Dinosaur creature spells from among cards you own exiled with this creature. \
      If you cast a spell this way, that creature enters with a finality counter on it. (If a \
      creature with a finality counter on it would die, exile it instead.)";
+
+const CAULDRON: &str =
+    "You may spend mana as though it were mana of any color to activate abilities of creatures \
+     you control.\n\
+     Creatures you control with +1/+1 counters on them have all activated abilities of all \
+     creature cards exiled with Agatha's Soul Cauldron.\n\
+     {T}: Exile target card from a graveyard. When a creature card is exiled this way, put a \
+     +1/+1 counter on target creature you control.";
 
 fn cost(shards: &[ManaCostShard], generic: u32) -> ManaCost {
     ManaCost::Cost {
@@ -90,11 +105,12 @@ fn activate_on_stack(runner: &mut GameRunner, source: ObjectId, index: usize, ta
     panic!("activation did not reach priority");
 }
 
-/// Both players pass until the stack is one shorter.
+/// Both players pass until the original top entry leaves the stack. Resolution
+/// may put a new entry there without reducing the stack's length.
 fn resolve_one(runner: &mut GameRunner) {
-    let before = runner.state().stack.len();
+    let top_id = runner.state().stack.back().expect("a stack entry").id;
     for _ in 0..6 {
-        if runner.state().stack.len() < before {
+        if !runner.state().stack.iter().any(|entry| entry.id == top_id) {
             return;
         }
         runner.act(GameAction::PassPriority).expect("pass priority");
@@ -109,6 +125,218 @@ fn ability_index(runner: &GameRunner, source: ObjectId, pick: impl Fn(&Effect) -
         .iter()
         .position(|def| pick(&def.effect))
         .expect("the object has the activated ability")
+}
+
+/// CR 607.1 + CR 607.2a + CR 607.5: the Assessor's attack reads the pile of
+/// its printed ETB ability, not another exile ability it gained in layer 6
+/// (CR 613.1f). Before the fix, the granted exile entered the latch as
+/// unattributed and opened an EffectZoneChoice alongside the real ETB exile.
+#[test]
+fn a_granted_exile_latched_before_attack_is_not_assimilated() {
+    granted_exile_is_not_assimilated(true);
+}
+
+#[test]
+fn a_granted_exile_made_while_attack_trigger_waits_is_not_assimilated() {
+    granted_exile_is_not_assimilated(false);
+}
+
+fn granted_exile_is_not_assimilated(exile_before_attack: bool) {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let assessor = scenario
+        .add_creature_to_hand_from_oracle(P0, "Assimilation Assessor", 5, 5, ASSESSOR)
+        .as_artifact_creature()
+        .with_subtypes(vec!["Borg"])
+        .with_mana_cost(cost(&[ManaCostShard::Black], 4))
+        .id();
+    let cauldron = scenario
+        .add_artifact_from_oracle(P0, "Agatha's Soul Cauldron", CAULDRON)
+        .as_legendary()
+        .with_mana_cost(cost(&[], 2))
+        .id();
+    let paleontologist = scenario
+        .add_creature_to_graveyard(P0, "Intrepid Paleontologist", 2, 2)
+        .with_subtypes(vec!["Human", "Druid"])
+        .with_mana_cost(cost(&[ManaCostShard::Green], 1))
+        .from_oracle_text(PALEONTOLOGIST)
+        .id();
+    let etb_exile = scenario
+        .add_creature_to_graveyard(P1, "Grizzly Bears", 2, 2)
+        .with_subtypes(vec!["Bear"])
+        .with_mana_cost(cost(&[ManaCostShard::Green], 1))
+        .id();
+    // Give the reflexive trigger two legal counter recipients.
+    let other_recipient = scenario
+        .add_creature(P0, "Grizzly Bears", 2, 2)
+        .with_subtypes(vec!["Bear"])
+        .with_mana_cost(cost(&[ManaCostShard::Green], 1))
+        .id();
+    scenario.add_basic_land(P0, ManaColor::Black);
+    for _ in 0..6 {
+        scenario.add_basic_land(P0, ManaColor::White);
+    }
+    let mut runner = scenario.build();
+    runner.state_mut().all_creature_types = vec!["Bear".into(), "Borg".into()];
+    runner.cast(assessor).target_player(P1).resolve();
+    assert_eq!(runner.state().objects[&etb_exile].zone, Zone::Exile);
+    assert!(runner
+        .state()
+        .exile_links
+        .iter()
+        .any(|link| link.exiled_id == etb_exile && link.source_id == assessor));
+    assert!(runner.state().stack.is_empty());
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { player: P0 }
+    ));
+
+    let card_id = CardId(runner.state().next_object_id);
+    let granted_exile = create_object(
+        runner.state_mut(),
+        card_id,
+        P1,
+        "Runeclaw Bear".into(),
+        Zone::Graveyard,
+    );
+    {
+        let bear = runner.state_mut().objects.get_mut(&granted_exile).unwrap();
+        bear.card_types.core_types.push(CoreType::Creature);
+        bear.card_types.subtypes.push("Bear".into());
+        bear.base_card_types = bear.card_types.clone();
+        bear.mana_cost = cost(&[ManaCostShard::Green], 1);
+        bear.base_mana_cost = bear.mana_cost.clone();
+        bear.power = Some(2);
+        bear.toughness = Some(2);
+        bear.base_power = Some(2);
+        bear.base_toughness = Some(2);
+    }
+
+    // CR 603.12: the Cauldron exiles the donor first, then the reflexive
+    // trigger targets the creature that will receive the counter.
+    let cauldron_exile = ability_index(&runner, cauldron, is_exile);
+    activate_on_stack(&mut runner, cauldron, cauldron_exile, paleontologist);
+    resolve_one(&mut runner);
+    assert_eq!(runner.state().objects[&paleontologist].zone, Zone::Exile);
+    let WaitingFor::TriggerTargetSelection {
+        source_id,
+        player,
+        target_slots,
+        selection,
+        ..
+    } = &runner.state().waiting_for
+    else {
+        panic!(
+            "Cauldron's reflexive trigger must ask for a creature: {:?}",
+            runner.state().waiting_for
+        );
+    };
+    assert_eq!(*player, P0);
+    assert_eq!(*source_id, Some(cauldron));
+    let offered = &target_slots[selection.current_slot].legal_targets;
+    assert!(offered.contains(&TargetRef::Object(assessor)));
+    assert!(offered.contains(&TargetRef::Object(other_recipient)));
+    runner
+        .act(GameAction::ChooseTarget {
+            target: Some(TargetRef::Object(assessor)),
+        })
+        .expect("target the Assessor with the Cauldron's reflexive trigger");
+    resolve_one(&mut runner);
+    assert!(runner.state().stack.is_empty());
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { player: P0 }
+    ));
+    assert_eq!(
+        runner.state().objects[&assessor]
+            .counters
+            .get(&CounterType::Plus1Plus1),
+        Some(&1)
+    );
+    let granted_index = ability_index(&runner, assessor, is_exile);
+    assert_eq!(
+        runner.state().objects[&assessor].activated_ability_provenance(granted_index),
+        AbilityProvenance::Granted
+    );
+
+    let exile_with_grant = |runner: &mut GameRunner| {
+        activate_on_stack(runner, assessor, granted_index, granted_exile);
+        resolve_one(runner);
+        assert_eq!(runner.state().objects[&granted_exile].zone, Zone::Exile);
+        runner
+            .state()
+            .exile_links
+            .iter()
+            .find(|link| link.exiled_id == granted_exile && link.source_id == assessor)
+            .expect("the granted activation made a link under the same source")
+            .supplier
+    };
+
+    // Same-turn combat fixture, as in borg_cube_assimilate.rs. No intervening
+    // turn is needed to test the timing of the attack's linked-exile latch.
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&assessor)
+        .unwrap()
+        .summoning_sick = false;
+    let before_attack = exile_before_attack.then(|| exile_with_grant(&mut runner));
+    runner.advance_to_combat();
+    runner
+        .declare_attackers(&[(assessor, AttackTarget::Player(P1))])
+        .expect("declare the Assessor as attacker");
+    assert_eq!(runner.state().stack.len(), 1, "the attack trigger waits");
+    let attack = runner.state().stack.back().unwrap();
+    assert_eq!(attack.source_id, assessor);
+    let latched = &attack
+        .ability()
+        .and_then(|ability| ability.trigger_source.as_ref())
+        .expect("the attack trigger latched its source")
+        .linked_exile_snapshot;
+    assert!(latched.iter().any(|snap| snap.exiled_id == etb_exile));
+    assert_eq!(
+        latched.iter().any(|snap| snap.exiled_id == granted_exile),
+        exile_before_attack,
+        "the test must place the granted exile on the intended side of the latch"
+    );
+    let supplier = before_attack.unwrap_or_else(|| exile_with_grant(&mut runner));
+    assert_eq!(
+        runner.state().stack.len(),
+        1,
+        "only the attack trigger waits"
+    );
+
+    // CR 608.2d: two eligible creatures would require a choice. Instead the
+    // only linked creature is assimilated and resolution returns to priority.
+    resolve_one(&mut runner);
+    assert!(
+        !matches!(
+            runner.state().waiting_for,
+            WaitingFor::EffectZoneChoice { .. }
+        ),
+        "a granted exile must not make the printed pile a two-card choice"
+    );
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+    assert!(runner.state().stack.is_empty());
+    let assimilated = &runner.state().objects[&etb_exile];
+    assert_eq!(assimilated.zone, Zone::Battlefield);
+    assert_eq!(assimilated.controller, P0);
+    assert_eq!(assimilated.counters.get(&CounterType::Plus1Plus1), Some(&1));
+    assert_eq!(runner.state().objects[&granted_exile].zone, Zone::Exile);
+    assert!(matches!(supplier, Some(ExileSupplier::Granted)));
+}
+
+fn is_exile(effect: &Effect) -> bool {
+    matches!(
+        effect,
+        Effect::ChangeZone {
+            destination: Zone::Exile,
+            ..
+        }
+    )
 }
 
 #[test]

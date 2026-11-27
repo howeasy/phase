@@ -3094,13 +3094,12 @@ pub struct LinkedExileSnapshot {
     /// no live object has (fail-closed, mirroring `CostPaidObjectSnapshot`).
     #[serde(default = "crate::types::ability::legacy_incarnation")]
     pub incarnation: u64,
-    /// CR 607.5 + CR 607.2a: the ability pair that exiled this card (the exiling
-    /// object's incarnation and the copiable set of the ability), copied from the
-    /// link it was captured from. `None` when the exile was not made by an
-    /// attributable activated or triggered ability (a cost, a replacement effect,
-    /// a granted ability) or predates the field.
+    /// CR 607.5 + CR 607.2a: the exile's ability provenance, copied from
+    /// the link. `None` is unattributed (e.g. costs, replacement effects,
+    /// or saves predating the field), not a known granted supplier.
+    /// See [`crate::game::game_object::ExileSupplier`] for attributed exiles.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub supplier: Option<crate::game::game_object::LinkedAbilitySource>,
+    pub supplier: Option<crate::game::game_object::ExileSupplier>,
 }
 
 /// CR 607.5: the `supplier` is attribution metadata read by a pile reader, not part of
@@ -4121,14 +4120,11 @@ pub struct ExileLink {
     pub exiled_id: ObjectId,
     pub source_id: ObjectId,
     pub kind: ExileLinkKind,
-    /// CR 607.5 + CR 607.2a: the ability pair that made this link — the exiling
-    /// object's incarnation and the copiable set of the resolving ability
-    /// (`exile_links::resolving_exile_supplier`). An ability that reads the pile
-    /// is linked only to abilities of its own set (CR 607.5), so a reader of a
-    /// later link compares this against its own pair. `None` when the exile was
-    /// not made by an attributable activated or triggered ability.
+    /// CR 607.5 + CR 607.2a: the resolving ability's provenance, for readers
+    /// that scope the linked pile to their own pair. `None` means no
+    /// attributable activated or triggered ability made the exile.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub supplier: Option<crate::game::game_object::LinkedAbilitySource>,
+    pub supplier: Option<crate::game::game_object::ExileSupplier>,
 }
 
 /// CR 702.xxx: Paradigm (Strixhaven) first-resolution record.

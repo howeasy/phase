@@ -447,6 +447,34 @@ pub struct LinkedAbilitySource {
     pub characteristic_set: CharacteristicSetRef,
 }
 
+/// CR 607.1 + CR 607.5 + CR 613.1f: known provenance of a linked exile.
+/// `Granted` is foreign to every characteristic pair and is never mirrored
+/// to an emblem. This does not model same-effect granted pairs (CR 607.5) or
+/// self-grants treated as printed (CR 607.1a). A tracked exile from a runtime
+/// slot classified as granted (such as equip or cycling) also records `Granted`.
+///
+/// `PartialEq`/`Eq` exist only because the containing link types derive `Eq`;
+/// two `Granted` suppliers are equal here yet pair with nothing. Pairing must go
+/// through [`ExileSupplier::pairs_with`], never `==`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "data")]
+pub enum ExileSupplier {
+    Paired(LinkedAbilitySource),
+    Granted,
+}
+
+impl ExileSupplier {
+    /// CR 607.1 + CR 607.5: strict pairing requires the same characteristic pair.
+    pub(crate) fn pairs_with(self, reader: Self) -> bool {
+        use ExileSupplier::{Granted, Paired};
+
+        match (self, reader) {
+            (Paired(supplier), Paired(reader)) => supplier == reader,
+            (Granted, Paired(_) | Granted) | (Paired(_), Granted) => false,
+        }
+    }
+}
+
 /// CR 702.16p: Start-time attachment exemption captured for one continuous
 /// protection modification and host (see [`ProtectionStartKey`]).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

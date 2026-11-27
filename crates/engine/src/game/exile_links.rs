@@ -1,6 +1,6 @@
 use serde::Serialize;
 
-use crate::game::game_object::LinkedAbilitySource;
+use crate::game::game_object::{ExileSupplier, LinkedAbilitySource};
 use crate::types::ability::{AbilityProvenance, Duration, ResolvedAbility};
 use crate::types::game_state::{
     ExileLink, ExileLinkKind, ExiledStopInput, GameState, LibrarySearchDeliveryResume,
@@ -284,7 +284,7 @@ pub(crate) fn tracked_exile_of_acting_incarnation(
 pub(crate) fn exiled_card_snapshot(
     state: &GameState,
     exiled_id: ObjectId,
-    supplier: Option<LinkedAbilitySource>,
+    supplier: Option<ExileSupplier>,
 ) -> Option<LinkedExileSnapshot> {
     state
         .objects
@@ -406,9 +406,9 @@ pub(crate) fn push_with_kind_as(
 ) {
     let live = state.objects.get(&source_id).map(|obj| obj.incarnation);
     let departed_creator = creator.filter(|creator| live != Some(*creator));
-    // CR 607.5 + CR 607.2a: the ability pair doing this exile, kept on the link
-    // (and on its LKI snapshot) so a later reader of the pile can tell whether
-    // the card was exiled by an ability linked to its own.
+    // CR 607.5 + CR 607.2a: preserve the exile's provenance on the link and
+    // its snapshots so a reader can distinguish its own pair from foreign
+    // abilities, including known grants.
     let supplier = resolving_exile_supplier(state, source_id);
     let recorded = match (&kind, departed_creator) {
         // CR 610.3 + CR 400.7: the incarnation that made an "until it leaves"
@@ -455,7 +455,7 @@ fn record_departed_linked_exile(
     exiled_id: ObjectId,
     source_id: ObjectId,
     creator: u64,
-    supplier: Option<LinkedAbilitySource>,
+    supplier: Option<ExileSupplier>,
 ) -> bool {
     // The exile was replaced: nothing was exiled with any incarnation.
     let Some(snapshot) = exiled_card_snapshot(state, exiled_id, supplier) else {
@@ -496,7 +496,7 @@ fn record_link(
     exiled_id: ObjectId,
     source_id: ObjectId,
     kind: ExileLinkKind,
-    supplier: Option<LinkedAbilitySource>,
+    supplier: Option<ExileSupplier>,
 ) -> bool {
     if let Some(existing) = state
         .exile_links
@@ -535,17 +535,15 @@ pub(crate) fn linked_exile_incarnation(state: &GameState, source_id: ObjectId) -
         .or_else(|| state.objects.get(&source_id).map(|obj| obj.incarnation))
 }
 
-/// CR 607.1 + CR 607.2a + CR 607.5 + CR 113.7a: the pairing identity of the
-/// ability of `source_id` whose instruction is performing the exile being
-/// linked now — the incarnation that put it on the stack and the copiable
-/// set it is characteristic of. `None` when no activated or triggered ability
-/// of `source_id` is resolving (a replacement redirect, a state-based action,
-/// another object's effect, a spell), or when that ability is granted or its
-/// provenance is not attributable: such an exile pairs with no emblem.
+/// CR 607.1 + CR 607.2a + CR 607.5 + CR 113.7a: attribution of a resolving
+/// ability of `source_id`. A characteristic ability carries the incarnation
+/// that put it on the stack and its copiable set; a granted ability is known
+/// but foreign to that pair. `None` when no activated or triggered ability
+/// of `source_id` is resolving or its provenance cannot be determined.
 pub(crate) fn resolving_exile_supplier(
     state: &GameState,
     source_id: ObjectId,
-) -> Option<LinkedAbilitySource> {
+) -> Option<ExileSupplier> {
     let entry = state
         .resolving_stack_entry
         .as_ref()
@@ -557,17 +555,17 @@ pub(crate) fn resolving_exile_supplier(
         | StackEntryKind::KeywordAction { .. }
         | StackEntryKind::CombatDamage { .. } => return None,
     };
-    let AbilityProvenance::Characteristic(characteristic_set) =
-        ability.source_ability_provenance()?
-    else {
-        return None;
-    };
-    // CR 400.7 + CR 113.7a: the push-time capture names the object that put
-    // the ability on the stack even after it changed zones.
-    Some(LinkedAbilitySource {
-        creator: ability.source_ref(state)?,
-        characteristic_set,
-    })
+    match ability.source_ability_provenance()? {
+        // CR 400.7 + CR 113.7a: the push-time capture names the object that
+        // put the ability on the stack even after it changed zones.
+        AbilityProvenance::Characteristic(characteristic_set) => {
+            Some(ExileSupplier::Paired(LinkedAbilitySource {
+                creator: ability.source_ref(state)?,
+                characteristic_set,
+            }))
+        }
+        AbilityProvenance::Granted => Some(ExileSupplier::Granted),
+    }
 }
 
 /// CR 607.1d + CR 607.2a + CR 114.4: a card exiled by an object is also
@@ -581,7 +579,7 @@ pub(crate) fn resolving_exile_supplier(
 /// 607.5; CR 607.2a); a replacement-effect supplier (CR 607.2b) is not
 /// attributed and fails closed — no card pairs one with an emblem.
 fn mirror_link_to_linked_emblems(state: &mut GameState, exiled_id: ObjectId, source_id: ObjectId) {
-    let Some(supplier) = resolving_exile_supplier(state, source_id) else {
+    let Some(ExileSupplier::Paired(supplier)) = resolving_exile_supplier(state, source_id) else {
         return;
     };
     let emblems: Vec<ObjectId> = state
@@ -2063,7 +2061,10 @@ mod tests {
         });
         let card = exile_card(&mut state);
         push_tracked_by_source(&mut state, card, source);
-        assert!(has_link(&state, card, source), "reach: the source link");
+        assert!(matches!(
+            link_of(&state, card, source).supplier,
+            Some(ExileSupplier::Granted)
+        ));
         assert!(!has_link(&state, card, emblem), "granted supplier");
     }
 
@@ -2248,28 +2249,98 @@ mod tests {
         let (mut state, source, _) = mirror_fixture(true, 0, CharacteristicSetRef::Own);
         resolving_characteristic(&mut state, source, CharacteristicSetRef::Own);
         state.objects.get_mut(&source).unwrap().incarnation = 5;
-        assert_eq!(
+        assert!(matches!(
             resolving_exile_supplier(&state, source),
-            Some(LinkedAbilitySource {
-                creator: ObjectIncarnationRef::of(source, 4),
+            Some(ExileSupplier::Paired(LinkedAbilitySource {
+                creator,
                 characteristic_set: CharacteristicSetRef::Own,
-            })
-        );
+            })) if creator == ObjectIncarnationRef::of(source, 4)
+        ));
         resolving_as(&mut state, source, ResolvingKind::Activated, |ability| {
             ability.source_incarnation = None;
             ability.set_source_ability_provenance_recursive(Some(
                 AbilityProvenance::Characteristic(CharacteristicSetRef::Own),
             ));
         });
-        assert_eq!(
+        assert!(matches!(
             resolving_exile_supplier(&state, source),
-            Some(LinkedAbilitySource {
-                creator: ObjectIncarnationRef::of(source, 5),
+            Some(ExileSupplier::Paired(LinkedAbilitySource {
+                creator,
                 characteristic_set: CharacteristicSetRef::Own,
-            })
-        );
+            })) if creator == ObjectIncarnationRef::of(source, 5)
+        ));
         state.resolving_stack_entry = None;
-        assert_eq!(resolving_exile_supplier(&state, source), None);
+        assert!(resolving_exile_supplier(&state, source).is_none());
+    }
+
+    #[test]
+    fn resolving_exile_supplier_distinguishes_granted_ability_from_unattributed_exile() {
+        let (mut state, source, _) = mirror_fixture(true, 0, CharacteristicSetRef::Own);
+        resolving_as(&mut state, source, ResolvingKind::Activated, |ability| {
+            ability.set_source_ability_provenance_recursive(Some(AbilityProvenance::Granted));
+        });
+        assert!(matches!(
+            resolving_exile_supplier(&state, source),
+            Some(ExileSupplier::Granted)
+        ));
+
+        resolving_as(&mut state, source, ResolvingKind::Activated, |_| {});
+        assert!(resolving_exile_supplier(&state, source).is_none());
+
+        resolving_as(&mut state, source, ResolvingKind::Spell, |ability| {
+            ability.set_source_ability_provenance_recursive(Some(AbilityProvenance::Granted));
+        });
+        assert!(resolving_exile_supplier(&state, source).is_none());
+    }
+
+    #[test]
+    fn exile_link_and_snapshot_round_trip_supplier_provenance() {
+        let (mut state, source, _) = mirror_fixture(true, 0, CharacteristicSetRef::Own);
+        let card = exile_card(&mut state);
+        let pair = LinkedAbilitySource {
+            creator: ObjectIncarnationRef::of(source, 4),
+            characteristic_set: CharacteristicSetRef::Own,
+        };
+        for (supplier, wire) in [
+            (None, None),
+            (
+                Some(ExileSupplier::Granted),
+                Some(serde_json::json!({ "type": "Granted" })),
+            ),
+            (
+                Some(ExileSupplier::Paired(pair)),
+                Some(serde_json::json!({ "type": "Paired", "data": pair })),
+            ),
+        ] {
+            let link = ExileLink {
+                exiled_id: card,
+                source_id: source,
+                kind: ExileLinkKind::TrackedBySource,
+                supplier,
+            };
+            let snapshot = exiled_card_snapshot(&state, card, supplier).unwrap();
+            let link_json = serde_json::to_value(&link).unwrap();
+            let snapshot_json = serde_json::to_value(&snapshot).unwrap();
+            assert_eq!(link_json.get("supplier"), wire.as_ref());
+            assert_eq!(snapshot_json.get("supplier"), wire.as_ref());
+
+            // Compare the decoded field explicitly: state equality ignores it.
+            // The None row has no field in its input, like a legacy save.
+            let link: ExileLink = serde_json::from_value(link_json).unwrap();
+            let snapshot: LinkedExileSnapshot = serde_json::from_value(snapshot_json).unwrap();
+            for decoded in [link.supplier, snapshot.supplier] {
+                match supplier {
+                    None => assert!(decoded.is_none()),
+                    Some(ExileSupplier::Granted) => {
+                        assert!(matches!(decoded, Some(ExileSupplier::Granted)));
+                    }
+                    Some(ExileSupplier::Paired(pair)) => assert!(matches!(
+                        decoded,
+                        Some(ExileSupplier::Paired(decoded_pair)) if decoded_pair == pair
+                    )),
+                }
+            }
+        }
     }
 
     // ── CR 113.7a write attribution ─────────────────────────────────────
@@ -2395,8 +2466,10 @@ mod tests {
         // incarnation's snapshot carries the resolving pair.
         let (mut state, source) = departed_creator_fixture();
         resolving_characteristic(&mut state, source, CharacteristicSetRef::Own);
-        let expected = resolving_exile_supplier(&state, source);
-        assert!(expected.is_some(), "the resolving ability is attributable");
+        let Some(expected @ ExileSupplier::Paired(_)) = resolving_exile_supplier(&state, source)
+        else {
+            panic!("the resolving ability has a characteristic pair");
+        };
         let card = exile_card(&mut state);
         push_tracked_by_source(&mut state, card, source);
         assert!(
@@ -2406,11 +2479,9 @@ mod tests {
         let entries = &state.linked_exile_lki[&source];
         assert_eq!(entries.len(), 1, "one LKI entry");
         assert_eq!(entries[0].snapshot.len(), 1, "the card once");
-        assert_eq!(entries[0].snapshot[0].supplier, expected);
-        assert!(
-            entries[0].snapshot[0].supplier.is_some(),
-            "the snapshot names the exiling pair, not nothing"
-        );
+        assert!(entries[0].snapshot[0]
+            .supplier
+            .is_some_and(|supplier| supplier.pairs_with(expected)));
 
         // Stamped 6 (the live object), same provenance: the live link carries
         // the live object's pair.
@@ -2427,13 +2498,13 @@ mod tests {
             has_link(&state, card, source),
             "the live object's own exile"
         );
-        assert_eq!(
+        assert!(matches!(
             link_of(&state, card, source).supplier,
-            Some(LinkedAbilitySource {
-                creator: ObjectIncarnationRef::of(source, 6),
+            Some(ExileSupplier::Paired(LinkedAbilitySource {
+                creator,
                 characteristic_set: CharacteristicSetRef::Own,
-            })
-        );
+            })) if creator == ObjectIncarnationRef::of(source, 6)
+        ));
 
         // No resolving ability: an unattributed exile still links, with no pair.
         let (mut state, source) = departed_creator_fixture();
@@ -2444,7 +2515,7 @@ mod tests {
             has_link(&state, card, source),
             "an exile with no resolving ability still links"
         );
-        assert_eq!(link_of(&state, card, source).supplier, None);
+        assert!(link_of(&state, card, source).supplier.is_none());
     }
 
     /// CR 400.7 + CR 607.2a: a card the departed incarnation exiles, which then

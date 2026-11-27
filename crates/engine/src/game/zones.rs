@@ -7473,7 +7473,7 @@ mod tests {
     /// compared explicitly here; a producer that stamped `None` fails.
     #[test]
     fn a_battlefield_departure_keeps_each_links_supplier_in_its_lki_snapshot() {
-        use crate::game::game_object::LinkedAbilitySource;
+        use crate::game::game_object::{ExileSupplier, LinkedAbilitySource};
         use crate::types::ability::{CharacteristicSetRef, CopyEffectInstanceRef};
 
         let mut state = setup();
@@ -7485,21 +7485,33 @@ mod tests {
             Zone::Battlefield,
         );
         let incarnation = state.objects[&source].incarnation;
-        let own_pair = LinkedAbilitySource {
+        let own_pair = ExileSupplier::Paired(LinkedAbilitySource {
             creator: ObjectIncarnationRef::of(source, incarnation),
             characteristic_set: CharacteristicSetRef::Own,
-        };
-        let copied_pair = LinkedAbilitySource {
+        });
+        let copied_pair = ExileSupplier::Paired(LinkedAbilitySource {
             creator: ObjectIncarnationRef::of(source, incarnation),
             characteristic_set: CharacteristicSetRef::Copied(CopyEffectInstanceRef {
                 continuous_effect_id: 7,
                 modification_index: 0,
             }),
+        });
+        let supplier_preserved = |actual, expected| match (actual, expected) {
+            (None, None) | (Some(ExileSupplier::Granted), Some(ExileSupplier::Granted)) => true,
+            (Some(ExileSupplier::Paired(actual)), Some(ExileSupplier::Paired(expected))) => {
+                actual == expected
+            }
+            _ => false,
         };
 
         let mut events = Vec::new();
         let mut linked = Vec::new();
-        for (card_id, supplier) in [(68, Some(own_pair)), (69, Some(copied_pair)), (70, None)] {
+        for (card_id, supplier) in [
+            (68, Some(own_pair)),
+            (69, Some(copied_pair)),
+            (70, None),
+            (71, Some(ExileSupplier::Granted)),
+        ] {
             let exiled = create_object(
                 &mut state,
                 CardId(card_id),
@@ -7528,14 +7540,14 @@ mod tests {
             "every non-cast-cost link shares one entry"
         );
         let snapshot = &entries[0].snapshot;
-        assert_eq!(snapshot.len(), 3, "every link contributes its own snapshot");
+        assert_eq!(snapshot.len(), 4, "every link contributes its own snapshot");
         for &(exiled, supplier) in &linked {
             let snap = snapshot
                 .iter()
                 .find(|snap| snap.exiled_id == exiled)
                 .expect("each linked card has its own LKI snapshot");
-            assert_eq!(
-                snap.supplier, supplier,
+            assert!(
+                supplier_preserved(snap.supplier, supplier),
                 "the LKI snapshot keeps the supplier captured for {exiled:?}"
             );
         }
@@ -7558,15 +7570,15 @@ mod tests {
                 }
             })
             .expect("the battlefield departure was emitted");
-        assert_eq!(record.linked_exile_snapshot.len(), 3);
+        assert_eq!(record.linked_exile_snapshot.len(), 4);
         for &(exiled, supplier) in &linked {
             let snap = record
                 .linked_exile_snapshot
                 .iter()
                 .find(|snap| snap.exiled_id == exiled)
                 .expect("the zone-change record carries each linked card");
-            assert_eq!(
-                snap.supplier, supplier,
+            assert!(
+                supplier_preserved(snap.supplier, supplier),
                 "the zone-change record keeps the supplier for {exiled:?}"
             );
         }

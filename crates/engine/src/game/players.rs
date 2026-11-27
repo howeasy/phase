@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::game::game_object::{LinkedAbilitySource, ObjectIdentityBindingExt};
+use crate::game::game_object::{ExileSupplier, ObjectIdentityBindingExt};
 use crate::types::ability::{AggregateFunction, ControllerRef, PlayerRelation, SeatDirection};
 use crate::types::events::{GameEvent, PlayerActionKind};
 use crate::types::game_state::GameState;
@@ -419,6 +419,10 @@ pub fn apnap_order_from(
 /// links of the incarnation this read is made for. The final linked-exile LKI
 /// fallback is incarnation-bounded the same way (CR 400.7). A record with a
 /// trigger source context reads `linked_exile_pile`.
+///
+/// Pair filtering is limited to bound reads through `linked_exile_pile`;
+/// a raw zone-change snapshot and `links_for_reader` (e.g. cast permissions)
+/// retain their source-scoped reads.
 pub fn linked_exile_cards_for_source(
     state: &GameState,
     source_id: ObjectId,
@@ -463,29 +467,27 @@ pub fn linked_exile_cards_for_source(
         .collect()
 }
 
-/// CR 607.5 + CR 607.2a: the ability pair a pile read is made for — the exiling
-/// object's incarnation and the copiable set of the ability that is resolving
-/// from the bound source (`exile_links::resolving_exile_supplier`). `None` when no
-/// activated or triggered ability of the bound source is resolving, or when its
-/// provenance is not attributable (a granted ability).
-fn pile_reader_pair(
-    state: &GameState,
-    source: &TriggerSourceContext,
-) -> Option<LinkedAbilitySource> {
+/// CR 607.5 + CR 607.2a: the resolving ability's provenance for the bound
+/// source. `None` is unknown; a known grant is not a characteristic pair.
+fn pile_reader_pair(state: &GameState, source: &TriggerSourceContext) -> Option<ExileSupplier> {
     crate::game::exile_links::resolving_exile_supplier(state, source.identity.reference.object_id)
 }
 
-/// CR 607.5: an entry captured at the latch or kept in LKI is dropped only when
-/// both its exiling ability and the reading ability are known and are not the
-/// same pair; an unattributed entry (a cost, a replacement effect, a link that
-/// predates the field) keeps the reading it had before pairs were recorded.
-fn pair_compatible(
-    supplier: Option<LinkedAbilitySource>,
-    reader: Option<LinkedAbilitySource>,
-) -> bool {
-    match (supplier, reader) {
-        (Some(supplier), Some(reader)) => supplier == reader,
-        (None, _) | (_, None) => true,
+/// CR 607.1 + CR 607.5: a known grant cannot pair with a characteristic
+/// ability. Of the latched and LKI entries, a granted reader keeps only
+/// unattributed ones. A pair granted by the same effect used to be admitted
+/// as unattributed; without grant identity it now fails closed even though
+/// CR 607.5 would link it. Other unattributed reads keep their prior behavior.
+fn pair_compatible(supplier: Option<ExileSupplier>, reader: Option<ExileSupplier>) -> bool {
+    use ExileSupplier::{Granted, Paired};
+
+    match supplier {
+        None => true,
+        Some(Granted) => false,
+        Some(supplier @ Paired(_)) => match reader {
+            None => true,
+            Some(reader) => supplier.pairs_with(reader),
+        },
     }
 }
 
@@ -528,7 +530,11 @@ fn pile_entries<'a>(
         })
         .into_iter()
         .flatten()
-        .filter(move |snap| snap.supplier.is_some() && snap.supplier == reader);
+        .filter(move |snap| {
+            snap.supplier
+                .zip(reader)
+                .is_some_and(|(supplier, reader)| supplier.pairs_with(reader))
+        });
     // `departed`, not `admits`: an entry whose successor is this incarnation
     // belongs to an earlier departure, a different object.
     let later = state
@@ -1895,9 +1901,43 @@ mod tests {
         assert_eq!(pile_ids(&state, &context), vec![first]);
     }
 
-    /// CR 607.5: the linked-exile LKI of the bound incarnation is pair-scoped like
-    /// the live links: an entry whose exiling ability is another pair is dropped,
-    /// an entry of the reading pair and an unattributed one are kept.
+    /// CR 607.1 + CR 607.5: false for known foreign suppliers, including
+    /// grants, but keep the compatibility fallback for unattributed exiles.
+    #[test]
+    fn linked_exile_pile_supplier_admission_matrix() {
+        use crate::game::game_object::LinkedAbilitySource;
+        use crate::types::ability::CharacteristicSetRef::Own;
+        use crate::types::identifiers::ObjectIncarnationRef;
+        use ExileSupplier::{Granted, Paired};
+
+        let creator = ObjectIncarnationRef::of(ObjectId(1), 1);
+        let own = Paired(LinkedAbilitySource {
+            creator,
+            characteristic_set: Own,
+        });
+        let other = Paired(LinkedAbilitySource {
+            creator,
+            characteristic_set: copied_set(7),
+        });
+        let readers = [None, Some(Granted), Some(own)];
+        for (supplier, expected) in [
+            (None, [true, true, true]),
+            (Some(Granted), [false, false, false]),
+            (Some(own), [true, false, true]),
+            (Some(other), [true, false, false]),
+        ] {
+            for (reader, admitted) in readers.into_iter().zip(expected) {
+                assert_eq!(
+                    pair_compatible(supplier, reader),
+                    admitted,
+                    "supplier {supplier:?}, reader {reader:?}"
+                );
+            }
+        }
+    }
+
+    /// CR 607.1 + CR 607.5: LKI entries made by a foreign pair or a grant
+    /// are dropped; entries of the reading pair and unattributed ones are kept.
     #[test]
     fn linked_exile_pile_scopes_lki_entries_to_the_reading_pair() {
         use crate::game::game_object::LinkedAbilitySource;
@@ -1911,12 +1951,19 @@ mod tests {
             "Unattributed".into(),
             Zone::Exile,
         );
+        let granted = create_object(
+            &mut state,
+            CardId(5),
+            PlayerId(1),
+            "Granted".into(),
+            Zone::Exile,
+        );
         let incarnation = state.objects[&source].incarnation;
         let pair = |set| {
-            Some(LinkedAbilitySource {
+            Some(ExileSupplier::Paired(LinkedAbilitySource {
                 creator: ObjectIncarnationRef::of(source, incarnation),
                 characteristic_set: set,
-            })
+            }))
         };
         let snap = |id, supplier| LinkedExileSnapshot {
             exiled_id: id,
@@ -1931,6 +1978,7 @@ mod tests {
             snapshot: vec![
                 snap(own, pair(Own)),
                 snap(other, pair(copied_set(7))),
+                snap(granted, Some(ExileSupplier::Granted)),
                 snap(unattributed, None),
             ],
         };
@@ -1942,6 +1990,7 @@ mod tests {
         resolving_characteristic(&mut state, source, Own);
         assert_eq!(pile_ids(&state, &context), vec![own, unattributed]);
         assert!(!linked_exile_pile_holds(&state, &context, other));
+        assert!(!linked_exile_pile_holds(&state, &context, granted));
     }
 
     /// The membership form answers exactly what the vector form does.
@@ -2080,10 +2129,10 @@ mod tests {
             // A link of this kind, recorded by an ability of the STALE
             // incarnation's own pair, on the card the stale reader could read.
             let pair = |incarnation| {
-                Some(LinkedAbilitySource {
+                Some(ExileSupplier::Paired(LinkedAbilitySource {
                     creator: ObjectIncarnationRef::of(source, incarnation),
                     characteristic_set: Own,
-                })
+                }))
             };
             state.exile_links.push(ExileLink {
                 exiled_id: stale_card,
