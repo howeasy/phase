@@ -63652,3 +63652,51 @@ fn grant_digest_covers_the_enters_tapped_rider() {
         grant_digest(&grant(EtbTapState::Unspecified))
     );
 }
+
+/// CR 608.2c + CR 611.2a: a cast carrying no elected object-permission index
+/// (a static `CastingVariant::ExilePermission` cast, which deliberately elects
+/// none) spends no shared `ExileWithAltCost` budget (Idol of Endurance, Court of
+/// Locthwain, Serpent's Soul-Jar), because the legacy first-compatible scan
+/// could otherwise charge an unrelated grant the cast did not use.
+#[test]
+fn shared_exile_alt_cost_budget_is_spent_only_by_the_elected_permission() {
+    let mut state = setup_game_at_main_phase();
+    let exiled = add_exiled_card(&mut state, PlayerId(0), "Grizzly Bears");
+    state
+        .objects
+        .get_mut(&exiled)
+        .unwrap()
+        .casting_permissions
+        .push(CastingPermission::ExileWithAltCost {
+            source_id: None,
+            cost_provenance: crate::types::ability::ExileGrantCostProvenance::Alternative,
+            cost: ManaCost::zero(),
+            cast_transformed: false,
+            constraint: None,
+            granted_to: Some(PlayerId(0)),
+            resolution_cleanup: None,
+            duration: None,
+            graveyard_replacement: None,
+            mana_spend_permission: None,
+            enters_with_counter: None,
+            enters_with_modifications: Default::default(),
+            cast_cost_modifier: None,
+            single_use_group: Some(TrackedSetId(7)),
+        });
+
+    assert_eq!(
+        selected_exile_alt_cost_permission_single_use_group(&state, exiled, PlayerId(0), None),
+        None,
+        "a cast that elected no object permission must not spend the grant's budget"
+    );
+    assert_eq!(
+        selected_exile_alt_cost_permission_single_use_group(
+            &state,
+            exiled,
+            PlayerId(0),
+            Some(CastingPermissionIndex(0)),
+        ),
+        Some(TrackedSetId(7)),
+        "the elected permission spends its own budget"
+    );
+}

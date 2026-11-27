@@ -5087,18 +5087,18 @@ pub(super) fn selected_exile_alt_cost_permission_graveyard_replacement(
 
 /// CR 608.2c + CR 611.2a: the shared cast budget the cast of `object_id` spends:
 /// the `single_use_group` of the `ExileWithAltCost` permission elected for THIS
-/// cast, read before the stack move drops the object's permissions. Mirrors
-/// `selected_exile_alt_cost_permission_graveyard_replacement`, so a sibling
-/// permission's group cannot be spent by a cast made under another.
+/// cast, read before the stack move drops the object's permissions. An absent
+/// index elects no object grant here (e.g. a static `ExilePermission` cast);
+/// the legacy first-compatible lookup cannot authorize spending a group.
 pub(super) fn selected_exile_alt_cost_permission_single_use_group(
     state: &GameState,
     object_id: ObjectId,
     player: PlayerId,
     casting_permission_index: Option<CastingPermissionIndex>,
 ) -> Option<TrackedSetId> {
+    let index = casting_permission_index?;
     let obj = state.objects.get(&object_id)?;
-    let permission =
-        selected_exile_alt_cost_permission(state, obj, player, casting_permission_index)?;
+    let permission = selected_exile_alt_cost_permission(state, obj, player, Some(index))?;
     match permission {
         crate::types::ability::CastingPermission::ExileWithAltCost {
             single_use_group, ..

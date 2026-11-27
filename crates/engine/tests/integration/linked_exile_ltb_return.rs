@@ -36,16 +36,16 @@
 //! nothing. Then its first ability will resolve and exile the target creature
 //! indefinitely."
 
-use engine::game::game_object::ObjectIncarnationRefExt;
+use engine::game::game_object::{ExileSupplier, ObjectIncarnationRefExt};
 use engine::game::merge::{merge_object_onto, MergeSide};
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::scenario_db::GameScenarioDbExt;
-use engine::types::ability::{Effect, EffectKind, TargetRef};
+use engine::types::ability::{ChosenAttribute, Effect, EffectKind, TargetRef};
 use engine::types::actions::GameAction;
 use engine::types::events::GameEvent;
 use engine::types::game_state::{GameState, LoopDetectionMode, StackEntryKind, WaitingFor};
 use engine::types::identifiers::{ObjectId, ObjectIncarnationRef};
-use engine::types::mana::{ManaType, ManaUnit};
+use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::zones::Zone;
 
@@ -94,9 +94,11 @@ fn answer(
                 target.expect("a trigger target prompt needs a declared target"),
             )),
         },
-        WaitingFor::EffectZoneChoice { .. } => GameAction::SelectCards {
-            cards: vec![target.expect("a resolution card choice needs a declared target")],
-        },
+        WaitingFor::EffectZoneChoice { .. } | WaitingFor::ChooseFromZoneChoice { .. } => {
+            GameAction::SelectCards {
+                cards: vec![target.expect("a resolution card choice needs a declared target")],
+            }
+        }
         other => panic!("unhandled prompt: {other:?}"),
     };
     runner.act(action).expect("action accepted").events
@@ -471,6 +473,76 @@ fn admonition_angel_return_brings_back_every_merged_component() {
     let state = runner.state();
     assert_eq!(state.objects[&angel].zone, Zone::Hand);
     assert_returned_unmerged(state, &[host, rider], "Admonition Angel's pile");
+}
+
+/// CR 607.5: Koh gains both of Admonition Angel's linked triggers from the
+/// same effect. On departure, the granted return trigger can read the exile
+/// made by the granted landfall trigger.
+#[test]
+fn koh_returns_the_permanent_exiled_by_its_granted_landfall_trigger() {
+    const KOH: &str = "When Koh enters, exile up to one other target creature.\nWhenever another nontoken creature dies, you may exile it.\nPay 1 life: Choose a creature card exiled with Koh.\nKoh has all activated and triggered abilities of the last chosen card.";
+    let db = shared_card_db().expect("integration card fixture must load");
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let koh = scenario
+        .add_creature_to_hand(P0, "Koh, the Face Stealer", 6, 6)
+        .as_legendary()
+        .with_subtypes(vec!["Shapeshifter", "Spirit"])
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Black; 2],
+            generic: 4,
+        })
+        .from_oracle_text(KOH)
+        .id();
+    let angel = scenario.add_real_card(P1, "Admonition Angel", Zone::Battlefield, db);
+    let bears = scenario.add_real_card(P1, "Grizzly Bears", Zone::Battlefield, db);
+    let plains = scenario.add_real_card(P0, "Plains", Zone::Hand, db);
+    let unsummon = scenario.add_real_card(P0, "Unsummon", Zone::Hand, db);
+    let mut mana = pool(4, ManaType::Colorless);
+    mana.extend(pool(2, ManaType::Black));
+    mana.extend(pool(1, ManaType::Blue));
+    scenario.with_mana_pool(P0, mana);
+    let mut runner = scenario.build();
+
+    drop(runner.cast(koh).commit());
+    drive_to_empty_stack(&mut runner, true, Some(angel), |_| {});
+    assert_eq!(runner.state().objects[&angel].zone, Zone::Exile);
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: koh,
+            ability_index: 0,
+            payment_mode: Default::default(),
+        })
+        .expect("activate Koh's life-payment ability");
+    drive_to_empty_stack(&mut runner, true, Some(angel), |_| {});
+    assert!(runner.state().objects[&koh]
+        .chosen_attributes
+        .iter()
+        .any(|choice| matches!(choice, ChosenAttribute::Card(pin) if pin.object_id == angel)));
+
+    let card_id = runner.state().objects[&plains].card_id;
+    runner
+        .act(GameAction::PlayLand {
+            object_id: plains,
+            card_id,
+        })
+        .expect("play a land to trigger the granted landfall ability");
+    drive_to_empty_stack(&mut runner, true, Some(bears), |_| {});
+    assert_eq!(runner.state().objects[&bears].zone, Zone::Exile);
+    assert!(runner.state().exile_links.iter().any(|link| {
+        link.source_id == koh
+            && link.exiled_id == bears
+            && link.supplier == Some(ExileSupplier::Granted)
+    }));
+
+    drop(runner.cast(unsummon).target_object(koh).commit());
+    drive_to_empty_stack(&mut runner, true, None, |_| {});
+    assert_eq!(runner.state().objects[&koh].zone, Zone::Hand);
+    assert_returned_unmerged(
+        runner.state(),
+        &[bears],
+        "Koh's granted departure trigger must return its granted landfall exile",
+    );
 }
 
 /// CR 400.7 + CR 607.2a + CR 730.3c: a component split from a merged

@@ -537,9 +537,9 @@ pub(crate) fn linked_exile_incarnation(state: &GameState, source_id: ObjectId) -
 
 /// CR 607.1 + CR 607.2a + CR 607.5 + CR 113.7a: attribution of a resolving
 /// ability of `source_id`. A characteristic ability carries the incarnation
-/// that put it on the stack and its copiable set; a granted ability is known
-/// but foreign to that pair. `None` when no activated or triggered ability
-/// of `source_id` is resolving or its provenance cannot be determined.
+/// that put it on the stack and its copiable set; a granted ability is foreign
+/// to that pair, but its granting effect is unknown. `None` when no activated
+/// or triggered ability of `source_id` is resolving or its provenance is unknown.
 pub(crate) fn resolving_exile_supplier(
     state: &GameState,
     source_id: ObjectId,

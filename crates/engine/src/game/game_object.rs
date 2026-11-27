@@ -449,13 +449,14 @@ pub struct LinkedAbilitySource {
 
 /// CR 607.1 + CR 607.5 + CR 613.1f: known provenance of a linked exile.
 /// `Granted` is foreign to every characteristic pair and is never mirrored
-/// to an emblem. This does not model same-effect granted pairs (CR 607.5) or
-/// self-grants treated as printed (CR 607.1a). A tracked exile from a runtime
+/// to an emblem. The grant's effect identity is not tracked (CR 607.5), nor
+/// are self-grants treated as printed (CR 607.1a). A tracked exile from a runtime
 /// slot classified as granted (such as equip or cycling) also records `Granted`.
 ///
 /// `PartialEq`/`Eq` exist only because the containing link types derive `Eq`;
-/// two `Granted` suppliers are equal here yet pair with nothing. Pairing must go
-/// through [`ExileSupplier::pairs_with`], never `==`.
+/// two `Granted` suppliers are equal but don't establish a strict pair.
+/// Use [`ExileSupplier::pairs_with`] for strict pairing. Latched and LKI
+/// trigger reads apply a separate compatibility fallback.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
 pub enum ExileSupplier {
