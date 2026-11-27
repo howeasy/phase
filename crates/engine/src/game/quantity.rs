@@ -6789,8 +6789,11 @@ fn resolve_ref(
                     .sum();
                 usize_to_i32_saturating(total)
             } else {
+                // CR 800.4i: a spell-cast history read can find casts made by a
+                // player who has since left the game, so the departed player's
+                // record still counts (same reading as the last-turn arm above).
                 usize_to_i32_saturating(
-                    scoped_players(state, scope, ctx, controller)
+                    history_scoped_players(state, scope, ctx, controller)
                         .filter_map(|player| state.spells_cast_this_turn_by_player.get(&player.id))
                         .map(|list| match filter {
                             None => list.len(),
@@ -7012,6 +7015,12 @@ fn resolve_ref(
                 .filter(|record| {
                     from.is_none_or(|zone| record.from_zone == Some(zone))
                         && to.is_none_or(|zone| record.to_zone == zone)
+                        // CR 603.6c + CR 702.26k: a phased-out permanent that
+                        // leaves the game with its owner did not leave the
+                        // battlefield; the same departure rule the leaves-the-
+                        // battlefield triggers use.
+                        && (*from != Some(crate::types::zones::Zone::Battlefield)
+                            || record.departure.observed_leaving_battlefield(to.is_some()))
                         && matches_target_filter_on_zone_change_record(
                             state,
                             record,

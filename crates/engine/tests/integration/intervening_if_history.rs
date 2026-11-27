@@ -16,7 +16,7 @@
 //! The negative siblings pair the same observable with a positive control run
 //! so a missing trigger cannot pass for the wrong reason.
 //!
-//! CR references (verified against docs/MagicCompRules.txt):
+//! CR references (verified against the Comprehensive Rules):
 //!   - CR 603.4: an intervening "if" is checked when the trigger event occurs
 //!     and again as the ability resolves.
 //!   - CR 404.1: a player's graveyard is their discard pile; cards move there
@@ -24,19 +24,25 @@
 //!   - CR 105.1: the five colors; "blue and/or black" is the either-color
 //!     disjunction.
 //!   - CR 702.8a: flash means the card may be cast any time an instant could.
+//!   - CR 603.6c + CR 702.26k: a phased-in permanent leaving with its owner
+//!     counts as leaving the battlefield; a phased-out one does not.
+//!   - CR 800.4i: game history can find actions taken by a player who left.
 
 use engine::database::card_db::CardDatabase;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::scenario_db::GameScenarioDbExt;
 use engine::types::ability::TargetRef;
 use engine::types::actions::GameAction;
-use engine::types::game_state::WaitingFor;
+use engine::types::game_state::{StackEntryKind, WaitingFor, ZoneDeparture};
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaColor, ManaType, ManaUnit};
 use engine::types::phase::Phase;
+use engine::types::player::PlayerId;
 use engine::types::zones::Zone;
 
 use crate::support::shared_card_db;
+
+const P2: PlayerId = PlayerId(2);
 
 fn card_db() -> &'static CardDatabase {
     shared_card_db().expect(
@@ -218,6 +224,73 @@ fn sarevok_deathbringer_permanent_leaving_battlefield_suppresses_end_step_trigge
     );
     assert_eq!(runner.life(P1), 20, "P1 must not lose life either");
     assert_settled(&runner, P0, "Sarevok after a permanent left");
+}
+
+/// Only the phased-in Grizzly Bears counts as leaving the battlefield when
+/// P1 concedes (CR 603.6c + CR 702.26k).
+#[test]
+fn sarevok_deathbringer_ignores_phased_out_permanent_leaving_with_its_owner() {
+    let db = card_db();
+    for phase_out in [true, false] {
+        let mut scenario = GameScenario::new_n_player(3, 42);
+        scenario.at_phase(Phase::PostCombatMain);
+        let sarevok = scenario.add_real_card(P2, "Sarevok, Deathbringer", Zone::Battlefield, db);
+        let bear = scenario.add_real_card(P1, "Grizzly Bears", Zone::Battlefield, db);
+        let ripple = scenario.add_real_card(P0, "Reality Ripple", Zone::Hand, db);
+        scenario.with_mana_pool(P0, pool(ManaType::Blue, 2));
+        let mut runner = scenario.build();
+        engine::game::rehydrate_game_from_card_db(runner.state_mut(), db);
+        assert_settled(&runner, P0, "Sarevok before Reality Ripple");
+        assert_eq!(runner.state().objects[&sarevok].power, Some(3));
+
+        if phase_out {
+            runner.cast(ripple).target_object(bear).resolve();
+            assert_settled(&runner, P0, "Sarevok after Reality Ripple");
+        }
+        assert_eq!(runner.state().objects[&bear].zone, Zone::Battlefield);
+        assert_eq!(runner.state().objects[&bear].is_phased_out(), phase_out);
+        assert!(zone_departures_from(&runner, Zone::Battlefield).is_empty());
+
+        runner
+            .act(GameAction::Concede { player_id: P1 })
+            .expect("P1 can concede on P0's turn");
+        assert!(runner
+            .state()
+            .players
+            .iter()
+            .any(|p| p.id == P1 && p.is_eliminated));
+        let departure = runner
+            .state()
+            .zone_changes_this_turn
+            .iter()
+            .find(|record| record.object_id == bear && record.from_zone == Some(Zone::Battlefield))
+            .expect("concession must record the Bears leaving the game in both cases");
+        let expected_departure = if phase_out {
+            ZoneDeparture::LeftGamePhasedOut
+        } else {
+            ZoneDeparture::LeftGame
+        };
+        assert_eq!(departure.departure, expected_departure);
+        assert_eq!(runner.life(P0), 20, "P0 has not reached the end step yet");
+
+        runner.advance_to_end_step();
+        assert_eq!(runner.state().phase, Phase::End);
+        assert_eq!(runner.state().active_player, P0);
+        if phase_out {
+            assert_eq!(runner.stack_names(), ["Sarevok, Deathbringer"]);
+        } else {
+            assert!(
+                runner.state().stack.is_empty(),
+                "a phased-in permanent left, so Sarevok must not trigger"
+            );
+        }
+        settle(&mut runner);
+
+        let expected_life = if phase_out { 17 } else { 20 };
+        assert_eq!(runner.life(P0), expected_life, "phased out: {phase_out}");
+        assert_eq!(runner.life(P2), 20, "only the active player can lose life");
+        assert_settled(&runner, P0, "Sarevok after P1 conceded");
+    }
 }
 
 /// Build the quiet-turn board and drive to the end step of `active`'s turn.
@@ -624,12 +697,27 @@ struct SandstalkerRun {
     p1_grizzly: ObjectId,
 }
 
-/// Build the board, have the designated player cast a printed spell of the
-/// designated color, then have P0 cast Sandstalker Moloch with flash (CR
-/// 702.8a) so it enters this turn. Returns with whatever prompt the entry
-/// raised; callers assert it.
+/// Resolve the preceding spell and Sandstalker as well as any resulting
+/// trigger, stopping at the dig prompt if one appears.
 fn run_sandstalker(db: &CardDatabase, spell: SandstalkerPrecedingSpell) -> SandstalkerRun {
-    let mut scenario = GameScenario::new();
+    let mut run = prepare_sandstalker(db, spell, GameScenario::new(), spell.caster());
+    run.runner.cast(run.sandstalker).resolve();
+    assert_eq!(
+        run.runner.state().objects[&run.sandstalker].zone,
+        Zone::Battlefield,
+        "reach guard: Sandstalker Moloch must enter the battlefield this turn"
+    );
+    run
+}
+
+/// Cast and resolve a printed preceding spell, then hand priority to P0 to
+/// flash in Sandstalker Moloch (CR 702.8a).
+fn prepare_sandstalker(
+    db: &CardDatabase,
+    spell: SandstalkerPrecedingSpell,
+    mut scenario: GameScenario,
+    active: PlayerId,
+) -> SandstalkerRun {
     scenario.at_phase(Phase::PreCombatMain);
 
     let sandstalker = scenario.add_real_card(P0, "Sandstalker Moloch", Zone::Hand, db);
@@ -665,11 +753,10 @@ fn run_sandstalker(db: &CardDatabase, spell: SandstalkerPrecedingSpell) -> Sands
 
     // Resolve the preceding spell from the designated player.
     runner.state_mut().phase = Phase::PreCombatMain;
-    runner.state_mut().active_player = spell.caster();
-    runner.state_mut().priority_player = spell.caster();
-    runner.state_mut().waiting_for = WaitingFor::Priority {
-        player: spell.caster(),
-    };
+    runner.state_mut().active_player = active;
+    runner.state_mut().priority_player = active;
+    runner.state_mut().waiting_for = WaitingFor::Priority { player: active };
+    pass_priority_to(&mut runner, spell.caster());
 
     match spell {
         SandstalkerPrecedingSpell::OpponentBlue => {
@@ -721,15 +808,7 @@ fn run_sandstalker(db: &CardDatabase, spell: SandstalkerPrecedingSpell) -> Sands
         "reach guard: the preceding spell must have been cast and resolved"
     );
 
-    // P0 flash-casts Sandstalker Moloch (CR 702.8a) now, on the same turn.
     pass_priority_to(&mut runner, P0);
-    runner.cast(sandstalker).resolve();
-
-    assert_eq!(
-        runner.state().objects[&sandstalker].zone,
-        Zone::Battlefield,
-        "reach guard: Sandstalker Moloch must enter the battlefield this turn"
-    );
 
     SandstalkerRun {
         runner,
@@ -876,6 +955,63 @@ fn sandstalker_moloch_opponent_blue_spell_enables_enters_dig() {
     let chosen = run.top_four[0]; // Grizzly Bears
     assert_dig_prompt_and_keep(&mut run, chosen);
     assert_settled(&run.runner, P1, "Sandstalker after the blue-triggered dig");
+}
+
+/// CR 800.4i + CR 603.4: when the intervening-if is checked again on
+/// resolution, P1's Opt still counts even though P1 has conceded.
+#[test]
+fn sandstalker_moloch_opponent_blue_spell_counts_after_caster_concedes() {
+    let mut run = prepare_sandstalker(
+        card_db(),
+        SandstalkerPrecedingSpell::OpponentBlue,
+        GameScenario::new_n_player(3, 42),
+        P0,
+    );
+    assert_eq!(colors_of_cast_spells(&run.runner, P1), [ManaColor::Blue]);
+    run.runner.cast(run.sandstalker).commit();
+    // Stop when the spell leaves the stack, before passing on its trigger.
+    for _ in 0..3 {
+        if !run
+            .runner
+            .state()
+            .stack
+            .iter()
+            .any(|entry| entry.id == run.sandstalker)
+        {
+            break;
+        }
+        run.runner
+            .act(GameAction::PassPriority)
+            .expect("priority pass on Sandstalker Moloch must succeed");
+    }
+    assert_eq!(
+        run.runner.state().objects[&run.sandstalker].zone,
+        Zone::Battlefield
+    );
+    let stack = &run.runner.state().stack;
+    assert!(
+        stack.len() == 1
+            && matches!(
+                &stack[0].kind,
+                StackEntryKind::TriggeredAbility { source_id, .. } if *source_id == run.sandstalker
+            ),
+        "Sandstalker's enters trigger must be pending before P1 concedes"
+    );
+
+    run.runner
+        .act(GameAction::Concede { player_id: P1 })
+        .expect("P1 can concede with Sandstalker's trigger pending");
+    assert!(run
+        .runner
+        .state()
+        .players
+        .iter()
+        .any(|p| p.id == P1 && p.is_eliminated));
+    settle(&mut run.runner);
+
+    let chosen = run.top_four[0]; // Grizzly Bears
+    assert_dig_prompt_and_keep(&mut run, chosen);
+    assert_settled(&run.runner, P0, "Sandstalker after P1 conceded");
 }
 
 /// Sandstalker Moloch positive (black): the "and/or" color disjunction also
