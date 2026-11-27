@@ -650,28 +650,29 @@ pub(crate) fn try_parse_cost_modification(
             if let Some(from_idx) = prefix.find(" from ") {
                 // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
                 let from_text = &prefix[from_idx..];
-                // "from anywhere other than your hand" is the NEGATION of a zone
-                // match, so it becomes a `Not(InZone)` origin predicate rather than
-                // a zone list (Savvy Trader, Fortune Teller's Talent).
+                // CR 109.5 + CR 400.3: "your hand" is the static source's
+                // controller's hand. A card cast from a different player's
+                // hand also qualifies, since a card in a hand is in its owner's hand.
                 let origin = from_text.trim();
-                if let Some(prop) = crate::parser::oracle_nom::condition::
-                    parse_cast_origin_anywhere_other_than_suffix(origin)
-                    .filter(|(_, consumed)| *consumed == origin.len())
-                    .and_then(|(props, _)| match props.as_slice() {
-                        [prop @ FilterProp::Not { prop: inner }]
-                            if matches!(**inner, FilterProp::InZone { zone: Zone::Hand }) =>
-                        {
-                            Some(prop.clone())
-                        }
-                        _ => None,
-                    })
+                if crate::parser::oracle_nom::condition::parse_cast_origin_exclusion_of_your_zone(
+                    origin,
+                )
+                .is_some_and(|(zone, consumed)| zone == Zone::Hand && consumed == origin.len())
                 {
-                    origin_exclusion = Some(prop);
+                    origin_exclusion = Some(FilterProp::AnyOf {
+                        props: vec![
+                            FilterProp::Not {
+                                prop: Box::new(FilterProp::InZone { zone: Zone::Hand }),
+                            },
+                            FilterProp::Owned {
+                                controller: ControllerRef::Opponent,
+                            },
+                        ],
+                    });
                 } else if nom_primitives::scan_contains(from_text, "anywhere other than") {
                     // CR 601.2f: an exclusion the typed surface does not model (any
-                    // origin but the hand form above) fails closed: skipping it would
-                    // reduce every spell the controller casts, the silent misparse
-                    // this clause used to produce.
+                    // origin but the "your hand" form above) fails closed:
+                    // skipping it would reduce every spell the controller casts.
                     return None;
                 } else {
                     if nom_primitives::scan_contains(from_text, "graveyard") {

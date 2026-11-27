@@ -1644,6 +1644,118 @@
         ]
       }
     ],
+    "Silent-Blade Oni": [
+      {
+        "colorIdentity": [
+          "B",
+          "U"
+        ],
+        "colors": [
+          "B",
+          "U"
+        ],
+        "convertedManaCost": 7.0,
+        "firstPrinting": "PC2",
+        "identifiers": {
+          "scryfallOracleId": "4f515250-0f1f-4fb7-aa75-b703b81ccd4a"
+        },
+        "keywords": [
+          "Ninjutsu"
+        ],
+        "layout": "normal",
+        "legalities": {
+          "commander": "Legal",
+          "duel": "Legal",
+          "legacy": "Legal",
+          "oathbreaker": "Legal",
+          "vintage": "Legal"
+        },
+        "manaCost": "{3}{U}{U}{B}{B}",
+        "manaValue": 7.0,
+        "name": "Silent-Blade Oni",
+        "power": "6",
+        "printings": [
+          "C18",
+          "NCC",
+          "OTC",
+          "PC2",
+          "PCA"
+        ],
+        "subtypes": [
+          "Demon",
+          "Ninja"
+        ],
+        "supertypes": [],
+        "text": "Ninjutsu {4}{U}{B} ({4}{U}{B}, Return an unblocked attacker you control to hand: Put this card onto the battlefield from your hand tapped and attacking.)\nWhenever this creature deals combat damage to a player, look at that player's hand. You may cast a spell from among those cards without paying its mana cost.",
+        "toughness": "5",
+        "type": "Creature — Demon Ninja",
+        "types": [
+          "Creature"
+        ]
+      }
+    ],
+    "Thalia, Guardian of Thraben": [
+      {
+        "colorIdentity": [
+          "W"
+        ],
+        "colors": [
+          "W"
+        ],
+        "convertedManaCost": 2.0,
+        "firstPrinting": "DKA",
+        "identifiers": {
+          "scryfallOracleId": "9b7f1d05-707c-4ed3-9f0e-8ced1232c2ee"
+        },
+        "keywords": [
+          "First strike"
+        ],
+        "layout": "normal",
+        "legalities": {
+          "commander": "Legal",
+          "duel": "Legal",
+          "gladiator": "Legal",
+          "historic": "Legal",
+          "legacy": "Legal",
+          "modern": "Legal",
+          "oathbreaker": "Legal",
+          "paupercommander": "Legal",
+          "penny": "Legal",
+          "pioneer": "Legal",
+          "predh": "Legal",
+          "vintage": "Legal"
+        },
+        "manaCost": "{1}{W}",
+        "manaValue": 2.0,
+        "name": "Thalia, Guardian of Thraben",
+        "power": "2",
+        "printings": [
+          "A25",
+          "DBL",
+          "DKA",
+          "HA2",
+          "MUL",
+          "PRM",
+          "PVOW",
+          "SLD",
+          "VOW",
+          "WMC"
+        ],
+        "subtypes": [
+          "Human",
+          "Soldier"
+        ],
+        "supertypes": [
+          "Legendary"
+        ],
+        "text": "First strike\nNoncreature spells cost {1} more to cast.",
+        "toughness": "1",
+        "type": "Legendary Creature — Human Soldier",
+        "types": [
+          "Creature"
+        ]
+      }
+    ],
     "Swamp": [
       {
         "colorIdentity": [

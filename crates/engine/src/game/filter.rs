@@ -9978,11 +9978,8 @@ fn spell_object_matches_property(
         // zone, so no zone constraint holds — and its negation does.
         FilterProp::InZone { zone: required } => !record.from_outside_game && zone == *required,
         FilterProp::InAnyZone { zones } => !record.from_outside_game && zones.contains(&zone),
-        // CR 608.2c + CR 601.2a + CR 400.11: logical negation must recurse through THIS
-        // zone-aware evaluator, not the history arm below, which reads the record's
-        // `from_zone` (the spell's current zone, the stack) instead of the cast origin
-        // `zone`. "Cast from anywhere other than your hand" lowers to
-        // `Not(InZone(Hand))`, so a cast from outside the game (no zone) satisfies it.
+        // CR 601.2a + CR 400.11: Recurse through this cast-origin evaluator so
+        // `Not(InZone(Hand))` also admits casts from outside the game.
         FilterProp::Not { prop: inner } => {
             !spell_object_matches_property(record, zone, inner, all_creature_types, context)
         }
@@ -10113,6 +10110,16 @@ fn spell_object_matches_property(
                 .objects
                 .get(&spell_id)
                 .is_some_and(|obj| !obj.kickers_paid.is_empty())
+        }),
+        // CR 109.5 + CR 400.3: The spell's owner identifies whose hand it
+        // came from, relative to the controller of the static ability's source.
+        FilterProp::Owned { controller } => context.is_some_and(|ctx| {
+            ctx.spell_object_id
+                .and_then(|id| ctx.state.objects.get(&id))
+                .is_some_and(|spell| {
+                    let source = source_context_from_spell_filter(ctx);
+                    owned_axis_admits(ctx.state, &source, controller, spell.owner)
+                })
         }),
         _ => spell_record_matches_property(record, prop),
     }
@@ -25134,6 +25141,125 @@ mod tests {
             source_id,
             &[],
         ));
+    }
+
+    // Shape-only: nearest printed card is Savvy Trader. Keep the same caster
+    // for both hands so using the caster instead of the owner fails the test.
+    #[test]
+    fn spell_object_filter_excludes_only_the_source_controllers_hand() {
+        let mut state = setup();
+        let you = PlayerId(0);
+        let opponent = PlayerId(1);
+        let source = add_creature(&mut state, you, "Savvy Trader");
+        let opponent_owned = FilterProp::Owned {
+            controller: ControllerRef::Opponent,
+        };
+        let origin_filter =
+            TargetFilter::Typed(TypedFilter::card().properties(vec![FilterProp::AnyOf {
+                props: vec![
+                    FilterProp::Not {
+                        prop: Box::new(FilterProp::InZone { zone: Zone::Hand }),
+                    },
+                    opponent_owned.clone(),
+                ],
+            }]));
+        let opponent_filter =
+            TargetFilter::Typed(TypedFilter::card().properties(vec![opponent_owned]));
+
+        for (origin, owner, expected) in [
+            (Zone::Hand, you, false),
+            (Zone::Hand, opponent, true),
+            (Zone::Exile, you, true),
+            (Zone::Graveyard, opponent, true),
+        ] {
+            let id = create_object(
+                &mut state,
+                CardId(304),
+                owner,
+                "Divination".to_owned(),
+                origin,
+            );
+            let spell = state.objects.get_mut(&id).unwrap();
+            spell.card_types.core_types.push(CoreType::Sorcery);
+            let spell = &state.objects[&id];
+            assert_eq!(
+                spell_object_matches_filter_from_state(
+                    &state,
+                    spell,
+                    origin,
+                    you,
+                    &origin_filter,
+                    source,
+                    &[],
+                ),
+                expected,
+                "{origin:?}, owner {owner:?}"
+            );
+            if origin == Zone::Hand && owner == opponent {
+                for filter in [&opponent_filter, &origin_filter] {
+                    assert!(!spell_object_matches_filter_from(
+                        spell,
+                        origin,
+                        you,
+                        filter,
+                        you,
+                        &[],
+                    ));
+                }
+            }
+        }
+    }
+
+    // Shape-only, nearest printed card: Savvy Trader. Exercise the ownership
+    // leg of "your commander"; the separate IsCommander leg is unchanged.
+    #[test]
+    fn spell_object_filter_reads_the_commander_ownership_leg_only_with_context() {
+        let mut state = setup();
+        let you = PlayerId(0);
+        let opponent = PlayerId(1);
+        let source = add_creature(&mut state, you, "Savvy Trader");
+        for owner in [you, opponent] {
+            let id = create_object(
+                &mut state,
+                CardId(305),
+                owner,
+                "Isamaru, Hound of Konda".to_owned(),
+                Zone::Command,
+            );
+            let spell = state.objects.get_mut(&id).unwrap();
+            spell.card_types.core_types.push(CoreType::Creature);
+            spell.is_commander = true;
+            let spell = &state.objects[&id];
+            for (controller, expected) in [
+                (ControllerRef::You, owner == you),
+                (ControllerRef::Opponent, owner == opponent),
+            ] {
+                let filter = TargetFilter::Typed(
+                    TypedFilter::creature().properties(vec![FilterProp::Owned { controller }]),
+                );
+                assert_eq!(
+                    spell_object_matches_filter_from_state(
+                        &state,
+                        spell,
+                        Zone::Command,
+                        you,
+                        &filter,
+                        source,
+                        &[],
+                    ),
+                    expected,
+                    "commander owned by {owner:?}: {filter:?}"
+                );
+                assert!(!spell_object_matches_filter_from(
+                    spell,
+                    Zone::Command,
+                    you,
+                    &filter,
+                    you,
+                    &[],
+                ));
+            }
+        }
     }
 
     fn add_battlefield_creature_with_cmc(

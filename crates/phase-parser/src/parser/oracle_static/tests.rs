@@ -45455,14 +45455,24 @@ fn burden_of_proof_otherwise_branch_cannot_block_detectives() {
     );
 }
 
-/// CR 601.2a + CR 400.11: "Spells you cast from anywhere other than your hand
-/// cost {N} less" is the NEGATION of a hand origin. The "from anywhere other than"
-/// clause used to be skipped, so Savvy Trader, Sage of the Beyond, Fortune Teller's
-/// Talent and Advanced Reconstruction reduced every spell, hand casts included.
-/// Both printed amounts of the class are pinned here: Savvy Trader's {1} and Sage
-/// of the Beyond's {2}.
+fn outside_your_hand() -> FilterProp {
+    FilterProp::AnyOf {
+        props: vec![
+            FilterProp::Not {
+                prop: Box::new(FilterProp::InZone { zone: Zone::Hand }),
+            },
+            FilterProp::Owned {
+                controller: ControllerRef::Opponent,
+            },
+        ],
+    }
+}
+
+/// CR 109.5 + CR 400.3: "other than your hand" excludes only the static
+/// controller's hand, not every hand. Pin Savvy Trader's {1} and Sage of the
+/// Beyond's {2}.
 #[test]
-fn cost_mod_cast_origin_not_hand_is_the_negation_of_a_hand_origin() {
+fn cost_mod_cast_origin_not_hand_is_the_negation_of_your_hand_origin() {
     for (line, amount) in [
         (
             "Spells you cast from anywhere other than your hand cost {1} less to cast.",
@@ -45488,13 +45498,7 @@ fn cost_mod_cast_origin_not_hand_is_the_negation_of_a_hand_origin() {
         let Some(TargetFilter::Typed(tf)) = spell_filter else {
             panic!("{line}: expected a Typed origin filter, got {spell_filter:?}");
         };
-        assert_eq!(
-            tf.properties,
-            vec![FilterProp::Not {
-                prop: Box::new(FilterProp::InZone { zone: Zone::Hand }),
-            }],
-            "{line}"
-        );
+        assert_eq!(tf.properties, vec![outside_your_hand()], "{line}");
     }
 }
 
@@ -45517,9 +45521,7 @@ fn cost_mod_cast_origin_composes_with_type_and_keeps_positive_zones() {
         panic!("expected a Typed filter, got {spell_filter:?}");
     };
     assert_eq!(tf.type_filters, vec![TypeFilter::Creature]);
-    assert!(tf.properties.contains(&FilterProp::Not {
-        prop: Box::new(FilterProp::InZone { zone: Zone::Hand }),
-    }));
+    assert!(tf.properties.contains(&outside_your_hand()));
 
     let def = parse_static_line("Spells you cast from your graveyard cost {1} less to cast.")
         .expect("cost reduction should parse");
@@ -45537,20 +45539,40 @@ fn cost_mod_cast_origin_composes_with_type_and_keeps_positive_zones() {
     );
 }
 
-/// An origin exclusion other than the hand form is not modelled: the whole line
-/// declines instead of reducing every spell (CR 601.2f). The exclusion may also
+/// An origin exclusion other than the "your hand" form is not modelled: the
+/// whole line declines instead of reducing every spell (CR 601.2f). It can also
 /// appear as the second "from" clause, which the cast-origin authority does not
 /// consume and the fail-closed scan must catch.
 ///
-/// Both declined lines are parser-shape-only: no printed card carries them.
+/// Declined lines are parser-shape-only: no printed card carries them.
 /// Nearest printed card: Savvy Trader.
 #[test]
 fn cost_mod_unmodelled_origin_exclusion_declines() {
     for line in [
         "Spells you cast from anywhere other than your graveyard cost {1} less to cast.",
         "Spells you cast from exile or from anywhere other than your hand cost {1} less to cast.",
+        "Spells you cast from anywhere other than their hand cost {1} less to cast.",
+        "Spells you cast from anywhere other than a hand cost {1} less to cast.",
+        "Spells you cast from anywhere other than the hand cost {1} less to cast.",
+        "Spells you cast from anywhere other than hand cost {1} less to cast.",
     ] {
         assert_eq!(parse_static_line(line), None, "{line}");
+        let parsed = crate::parser::oracle::parse_oracle_text(
+            line,
+            "Savvy Trader",
+            &[],
+            &["Creature".to_owned()],
+            &[],
+        );
+        assert!(parsed.statics.is_empty(), "{line}: {:?}", parsed.statics);
+        assert!(
+            parsed
+                .abilities
+                .iter()
+                .any(|ability| matches!(*ability.effect, Effect::Unimplemented { .. })),
+            "{line}: expected an unimplemented line, got {:?}",
+            parsed.abilities
+        );
     }
 
     // Positive guard in the same test: the printed Savvy Trader line still parses
@@ -45566,12 +45588,7 @@ fn cost_mod_unmodelled_origin_exclusion_declines() {
     let Some(TargetFilter::Typed(tf)) = spell_filter else {
         panic!("expected a Typed filter, got {spell_filter:?}");
     };
-    assert_eq!(
-        tf.properties,
-        vec![FilterProp::Not {
-            prop: Box::new(FilterProp::InZone { zone: Zone::Hand }),
-        }]
-    );
+    assert_eq!(tf.properties, vec![outside_your_hand()]);
 }
 
 /// SHAPE: the quoted static keeps the entire definition on the resolving effect.

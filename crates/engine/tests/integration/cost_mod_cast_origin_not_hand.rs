@@ -3,19 +3,17 @@
 //!
 //! The parser used to drop the origin qualifier, so the static reduced every
 //! spell its controller cast, hand casts included (`spell_filter: null`); the
-//! static now carries the `Not(InZone(Hand))` spell filter. Each witness loads
+//! static now excludes only the static controller's own hand. Each witness loads
 //! the printed card through `add_real_card` and drives it through the public
 //! `GameRunner` actions. CR 601.2f: the reduction enters the total cost of a
-//! cast announced from a zone other than the hand; CR 601.2a: a cast moves the
-//! card from the zone it is in onto the stack, so the origin of a cast is the
-//! zone the card is cast from. Every reduced cast is displayed with
-//! `display_spell_cost` AND really cast with exactly the reduced mana in the
-//! pool (any mis-charge leaves the pool non-empty and fails the test), and
-//! every card has a control cast that must pay its full printed cost.
+//! cast announced from anywhere other than that hand; CR 601.2a: a cast moves
+//! the card from the zone it is in onto the stack, so its origin is the
+//! zone the card is cast from. The witnesses check displayed costs and actual
+//! payment, including a free cast that owes a tax before reductions.
 //!
 //! The suite parses a small raw-MTGJSON fixture
 //! (`fixtures/cost_mod_cast_origin_atomic.json`: the printed cards of the class
-//! plus Bilbo and Dream Twist, the filler spells and basic lands) through
+//! plus the witness cards and basic lands) through
 //! `CardDatabase::from_mtgjson`, so the parser change is on the tested path.
 
 use std::path::Path;
@@ -25,6 +23,7 @@ use engine::database::card_db::CardDatabase;
 use engine::game::casting::display_spell_cost;
 use engine::game::combat::AttackTarget;
 use engine::game::derived::derive_display_state;
+use engine::game::mana_sources::activatable_mana_actions_for_player;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::scenario_db::GameScenarioDbExt;
 use engine::game::triggers::drain_order_triggers_with_identity;
@@ -530,6 +529,170 @@ fn savvy_trader_play_permission_lasts_while_the_card_remains_exiled() {
         "the later-turn casts charged exactly {{G}} + {{1}}{{G}}"
     );
     assert_settled(&r, P0, "Savvy Trader later turn");
+}
+
+// ===== Savvy Trader: casting from an opponent's hand =====
+
+fn oni_thalia_scenario() -> (GameScenario, ObjectId, ObjectId, ObjectId, ObjectId) {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_mana_pool(P0, units("CCCU"));
+    let oni = scenario.add_real_card(P0, "Silent-Blade Oni", Zone::Battlefield, db());
+    scenario.add_real_card(P0, "Thalia, Guardian of Thraben", Zone::Battlefield, db());
+    let island = scenario.add_real_card(P0, "Island", Zone::Battlefield, db());
+    let own_divination = scenario.add_real_card(P0, "Divination", Zone::Hand, db());
+    let opponent_divination = scenario.add_real_card(P1, "Divination", Zone::Hand, db());
+    for land in ["Island", "Forest", "Mountain", "Plains"] {
+        scenario.add_real_card(P0, land, Zone::Library, db());
+    }
+    scenario.add_real_card(P1, "Swamp", Zone::Library, db());
+    (scenario, oni, island, own_divination, opponent_divination)
+}
+
+fn cast_thalias_taxed_hand_divination(r: &mut GameRunner, divination: ObjectId) {
+    assert_eq!(
+        display_spell_cost(r.state(), P0, divination),
+        Some(cost(3, vec![ManaCostShard::Blue])),
+        "P0's own-hand Divination costs its printed {{2}}{{U}} plus Thalia's {{1}}"
+    );
+    let card_id = r.state().objects[&divination].card_id;
+    r.act(GameAction::CastSpell {
+        object_id: divination,
+        card_id,
+        targets: vec![],
+        payment_mode: CastPaymentMode::Auto,
+    })
+    .expect("cast P0's own-hand Divination");
+    pass_until_stack_empty(r, "P0's hand Divination");
+    assert_eq!(zone_of(r, divination), Zone::Graveyard);
+    assert_eq!(
+        pool_size(r, P0),
+        0,
+        "the hand cast spent exactly {{3}}{{U}}"
+    );
+    assert_settled(r, P0, "P0's hand Divination");
+}
+
+fn select_opponents_divination_with_oni(r: &mut GameRunner, oni: ObjectId, divination: ObjectId) {
+    let life_before = r.life(P1);
+    r.advance_to_combat();
+    r.declare_attackers(&[(oni, AttackTarget::Player(P1))])
+        .expect("declare Oni attacking P1");
+    for _ in 0..40 {
+        match r.state().waiting_for {
+            WaitingFor::OptionalEffectChoice { player: P0, .. } => break,
+            WaitingFor::DeclareBlockers { player: P1, .. } => {
+                r.declare_blockers(&[]).expect("declare no blockers");
+            }
+            WaitingFor::Priority { .. } => {
+                r.act(GameAction::PassPriority)
+                    .expect("pass through combat to Oni's trigger");
+            }
+            ref other => panic!("unexpected prompt before Oni's choice: {other:?}"),
+        }
+    }
+    assert_eq!(r.life(P1), life_before - 6, "the unblocked Oni hit P1");
+    assert!(
+        matches!(
+            r.state().waiting_for,
+            WaitingFor::OptionalEffectChoice { player: P0, .. }
+        ),
+        "P0 must receive Oni's optional cast prompt"
+    );
+    r.act(GameAction::DecideOptionalEffect { accept: true })
+        .expect("accept Oni's cast offer");
+    assert!(
+        matches!(
+            &r.state().waiting_for,
+            WaitingFor::EffectZoneChoice { player: P0, zone: Zone::Hand, cards, .. }
+                if cards.contains(&divination)
+        ),
+        "Oni must offer P1's Divination from hand, got {:?}",
+        r.state().waiting_for
+    );
+    r.act(GameAction::SelectCards {
+        cards: vec![divination],
+    })
+    .expect("select P1's Divination through Oni");
+}
+
+fn assert_oni_divination_on_stack(r: &GameRunner, divination: ObjectId) {
+    assert_eq!(zone_of(r, divination), Zone::Stack);
+    assert_eq!(r.state().objects[&divination].owner, P1);
+    assert!(
+        r.state()
+            .stack
+            .iter()
+            .any(|entry| entry.source_id == divination && entry.controller == P0),
+        "P0 casts the spell that P1 owns"
+    );
+    assert!(
+        matches!(r.state().waiting_for, WaitingFor::Priority { .. }),
+        "the cast must be complete before passing priority: {:?}",
+        r.state().waiting_for
+    );
+}
+
+/// CR 118.9d + CR 601.2f: Thalia adds {1} to Oni's alternative {0} cost,
+/// then Savvy removes {1} because P0 is casting from P1's hand.
+#[test]
+fn savvy_trader_reduces_a_spell_cast_from_the_opponents_hand() {
+    let (mut scenario, oni, island, own_divination, opponent_divination) = oni_thalia_scenario();
+    scenario.add_real_card(P0, "Savvy Trader", Zone::Battlefield, db());
+    let mut r = scenario.build();
+    engine::game::rehydrate_game_from_card_db(r.state_mut(), db());
+    cast_thalias_taxed_hand_divination(&mut r, own_divination);
+    assert!(!r.state().objects[&island].tapped);
+
+    let hand_before = r.state().players[0].hand.len();
+    select_opponents_divination_with_oni(&mut r, oni, opponent_divination);
+    assert!(
+        !r.state().objects[&island].tapped,
+        "Savvy must cancel Thalia's tax on the cast from P1's hand"
+    );
+    assert_oni_divination_on_stack(&r, opponent_divination);
+    assert_eq!(pool_size(&r, P0), 0);
+    pass_until_stack_empty(&mut r, "Oni's Divination");
+    assert_eq!(zone_of(&r, opponent_divination), Zone::Graveyard);
+    assert_eq!(r.state().players[0].hand.len(), hand_before + 2);
+    assert_settled(&r, P0, "Oni's Divination");
+}
+
+#[test]
+fn silent_blade_oni_free_cast_from_the_opponents_hand_pays_thalias_tax_without_savvy() {
+    let (scenario, oni, island, own_divination, opponent_divination) = oni_thalia_scenario();
+    let mut r = scenario.build();
+    engine::game::rehydrate_game_from_card_db(r.state_mut(), db());
+    cast_thalias_taxed_hand_divination(&mut r, own_divination);
+    assert!(!r.state().objects[&island].tapped);
+
+    select_opponents_divination_with_oni(&mut r, oni, opponent_divination);
+    if matches!(
+        r.state().waiting_for,
+        WaitingFor::ManaPayment { player: P0, .. }
+    ) {
+        let tap = activatable_mana_actions_for_player(r.state(), P0)
+            .into_iter()
+            .find(|action| {
+                matches!(action, GameAction::TapLandForMana { selection }
+                    if selection.source.object_id == island)
+            })
+            .expect("the Island must be available to pay Thalia's tax");
+        r.act(tap).expect("tap the Island to pay Thalia's tax");
+        if matches!(
+            r.state().waiting_for,
+            WaitingFor::ManaPayment { player: P0, .. }
+        ) {
+            r.act(GameAction::PassPriority)
+                .expect("pay Thalia's tax from the mana pool");
+        }
+    }
+    assert_oni_divination_on_stack(&r, opponent_divination);
+    assert!(
+        r.state().objects[&island].tapped,
+        "without Savvy the only available mana must pay Thalia's {{1}}"
+    );
+    assert_eq!(pool_size(&r, P0), 0);
 }
 
 // ===== Sage of the Beyond =====
@@ -1095,10 +1258,22 @@ fn fortune_tellers_talent_level_3_reduces_the_top_of_library_cast_only() {
         "P1's Divination pays its full printed {{2}}{{U}}"
     );
 
+    // Fund the Bears only after the earlier costs have consumed their pool,
+    // so an earlier generic cost cannot spend the green mana.
     assert_eq!(
         pool_size(&r, P0),
         0,
-        "the pool funded exactly {{3}}{{U}} + {{2}}{{U}} + {{2}}{{U}} + {{U}} and is now empty"
+        "the earlier pool funded exactly {{3}}{{U}} + {{2}}{{U}} + {{2}}{{U}} + {{U}}"
+    );
+    for unit in units("CG") {
+        let _ = r.state_mut().add_mana_to_pool(P0, unit);
+    }
+    r.cast(drawn_bears_a).resolve();
+    assert_eq!(zone_of(&r, drawn_bears_a), Zone::Battlefield);
+    assert_eq!(
+        pool_size(&r, P0),
+        0,
+        "the hand cast charged exactly {{1}}{{G}} with level 3 active"
     );
     assert_settled(&r, P0, "Fortune Teller's Talent");
 }
