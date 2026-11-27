@@ -11335,7 +11335,6 @@ fn source_state_contraction_tail(input: &str, source_is_self: bool) -> Option<&s
         tag(" in the command zone"),
         tag(" in exile"),
         tag(" exiled"),
-        tag(" equipped"),
         tag(" enchanted"),
     ))
     .parse(tail)

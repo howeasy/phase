@@ -3155,8 +3155,10 @@ fn evaluate_condition_inner(
         // Mirrors the attacher-is-equipment subtype check from `effects/attach.rs:64-67`.
         // CR 301.5: Equipment can only attach to objects, so any non-Object host
         // is rejected by `as_object`.
+        // CR 702.26b: a phased-out attachment is treated as though it does not exist.
         StaticCondition::SourceIsEquipped => state.objects.values().any(|obj| {
             obj.attached_to.and_then(|t| t.as_object()) == Some(source_id)
+                && !obj.is_phased_out()
                 && obj.card_types.subtypes.iter().any(|s| s == "Equipment")
         }),
         // CR 303.4: True when at least one Aura is attached to the source object.
@@ -3166,6 +3168,7 @@ fn evaluate_condition_inner(
         // non-Object hosts are rejected by `as_object`.
         StaticCondition::SourceIsEnchanted => state.objects.values().any(|obj| {
             obj.attached_to.and_then(|t| t.as_object()) == Some(source_id)
+                && !obj.is_phased_out()
                 && obj.card_types.subtypes.iter().any(|s| s == "Aura")
         }),
         // CR 701.37: True when the source permanent is monstrous.

@@ -708,6 +708,55 @@ fn novice_knight_equipped_can_attack_despite_defender() {
     settle_at_declare_attackers_priority(&runner);
 }
 
+/// CR 702.26b: a phased-out Equipment is treated as though it does not exist, so an
+/// equipped Novice Knight whose only attachment has phased out is not "equipped" and
+/// keeps Defender. Paired with the equipped positive above (same board, same equip).
+#[test]
+fn novice_knight_with_only_a_phased_out_equipment_cannot_attack() {
+    let db = load_db();
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let knight = scenario.add_real_card(P0, "Novice Knight", Zone::Battlefield, db);
+    let shuko = scenario.add_real_card(P0, "Shuko", Zone::Battlefield, db);
+    let mut runner = scenario.build();
+    engine::game::rehydrate_game_from_card_db(runner.state_mut(), db);
+
+    let equip_index = equip_ability_index(&runner, shuko);
+    runner
+        .activate(shuko, equip_index)
+        .target_object(knight)
+        .resolve();
+    assert_eq!(
+        runner.state().objects[&shuko].attached_to,
+        Some(AttachTarget::Object(knight)),
+        "reach: Shuko must be attached to the Knight (CR 301.5a)"
+    );
+
+    let mut events = Vec::new();
+    engine::game::phasing::phase_out_object(
+        runner.state_mut(),
+        shuko,
+        engine::game::game_object::PhaseOutCause::Directly,
+        &mut events,
+    );
+    assert!(
+        runner.state().objects[&shuko].is_phased_out(),
+        "reach: Shuko is phased out and keeps its attachment link (CR 702.26b)"
+    );
+    assert!(
+        runner.state().objects[&knight].is_phased_in(),
+        "reach: the Knight stays phased in"
+    );
+
+    runner.advance_to_combat();
+    assert!(
+        runner
+            .declare_attackers(&[(knight, AttackTarget::Player(P1))])
+            .is_err(),
+        "a Knight whose only Equipment is phased out still has Defender"
+    );
+}
+
 /// Negative sibling: the bare Novice Knight keeps Defender (CR 702.3b). The
 /// declare-attackers step is entered with a vanilla Grizzly Bears beside it, so
 /// the prompt exists and the differential is observable: the Bears are valid

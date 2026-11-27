@@ -3542,9 +3542,12 @@ fn source_zone_contraction_is_context_gated() {
     );
     assert_eq!(source_state_contraction_tail("it's a Goblin", true), None);
     // CR 301.5a + CR 303.4: the attachment-state tails bind only on a self trigger.
+    // A bare "it's equipped" tail is not accepted: its only printed user (Tetsuo,
+    // Imperial Champion) carries a modal whose Equipment aggregate is not yet scoped
+    // to the attached Equipment, so the trigger stays unparsed rather than live.
     assert_eq!(
         source_state_contraction_tail("it's equipped, choose one", true),
-        Some(" equipped, choose one")
+        None
     );
     assert_eq!(
         source_state_contraction_tail("it's enchanted or equipped, create a token", true),

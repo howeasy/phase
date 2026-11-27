@@ -8032,7 +8032,6 @@ fn parse_zone_history_condition(input: &str) -> OracleResult<'_, StaticCondition
                 tag("a creature left the battlefield under your control this turn"),
             )),
         ),
-        parse_no_permanents_left_battlefield_this_turn,
         value(
             make_quantity_ge(QuantityRef::DescendedThisTurn, 1),
             tag("you descended this turn"),
@@ -8041,37 +8040,6 @@ fn parse_zone_history_condition(input: &str) -> OracleResult<'_, StaticCondition
         parse_you_sacrificed_this_turn,
     ))
     .parse(input)
-}
-
-/// CR 603.4: "no <permanent type phrase> left the battlefield this
-/// turn" — the negated leave-the-battlefield history gate (Sarevok, Deathbringer:
-/// "no permanents left the battlefield this turn"). The affirmative twins above
-/// compare the same `ZoneChangeCountThisTurn` count `>= 1`; this arm compares it
-/// `== 0`, with the noun folded by the shared type-phrase parser.
-fn parse_no_permanents_left_battlefield_this_turn(
-    input: &str,
-) -> OracleResult<'_, StaticCondition> {
-    let (rest, _) = tag("no ").parse(input)?;
-    let (rest, type_text) = take_until(" left the battlefield this turn").parse(rest)?;
-    let (rest, _) = tag(" left the battlefield this turn").parse(rest)?;
-    let (filter, leftover) = parse_type_phrase_folding(type_text);
-    if !leftover.trim().is_empty()
-        || !crate::parser::oracle_target::target_filter_has_meaningful_content(&filter)
-    {
-        return Err(oracle_err(input));
-    }
-    Ok((
-        rest,
-        make_quantity_comparison(
-            QuantityRef::ZoneChangeCountThisTurn {
-                from: Some(Zone::Battlefield),
-                to: None,
-                filter,
-            },
-            Comparator::EQ,
-            0,
-        ),
-    ))
 }
 
 /// CR 404.1: "[a | N or more] card(s) left your graveyard this turn" — the
@@ -10513,14 +10481,7 @@ pub(crate) fn parse_spell_history_filter(type_text: &str) -> Option<TargetFilter
     if leftover.trim().is_empty() && filter != TargetFilter::Any {
         return Some(filter);
     }
-    // CR 105.1: "blue and/or black" names a spell of either colour or both, so it
-    // is the same disjunction as "blue or black".
-    if let Ok((rest, (first, _, second))) = (
-        parse_color,
-        alt((tag(" and/or "), tag(" or "))),
-        parse_color,
-    )
-        .parse(type_text)
+    if let Ok((rest, (first, _, second))) = (parse_color, tag(" or "), parse_color).parse(type_text)
     {
         if rest.trim().is_empty() {
             return Some(TargetFilter::Or {
@@ -29411,8 +29372,8 @@ mod intervening_if_state_condition_tests {
         parse_target_controller_count_condition, referent_noun_matches_slot, ObjectReferentNoun,
     };
     use crate::types::ability::{
-        AggregateFunction, Comparator, ControllerRef, CountScope, FilterProp, PlayerScope,
-        QuantityExpr, QuantityRef, StaticCondition, TargetFilter, TypeFilter, TypedFilter,
+        AggregateFunction, Comparator, ControllerRef, FilterProp, PlayerScope, QuantityExpr,
+        QuantityRef, StaticCondition, TargetFilter, TypeFilter, TypedFilter,
     };
     use crate::types::mana::ManaColor;
     use crate::types::zones::Zone;
@@ -29634,43 +29595,6 @@ mod intervening_if_state_condition_tests {
         ));
     }
 
-    /// CR 603.4: "no <type> left the battlefield this turn" compares the
-    /// zone-change count `== 0`; the noun is folded by the shared type parser, an
-    /// unrecognized noun declines, and the affirmative Revolt arm is unchanged.
-    #[test]
-    fn no_permanents_left_the_battlefield_compares_count_to_zero() {
-        let (rest, c) =
-            parse_inner_condition("no permanents left the battlefield this turn").unwrap();
-        assert_eq!(rest, "");
-        assert_eq!(
-            c,
-            StaticCondition::QuantityComparison {
-                lhs: QuantityExpr::Ref {
-                    qty: QuantityRef::ZoneChangeCountThisTurn {
-                        from: Some(Zone::Battlefield),
-                        to: None,
-                        filter: TargetFilter::Typed(TypedFilter::permanent()),
-                    },
-                },
-                comparator: Comparator::EQ,
-                rhs: QuantityExpr::Fixed { value: 0 },
-            }
-        );
-        assert!(
-            parse_inner_condition("no flibbertigibbets left the battlefield this turn").is_err()
-        );
-        let (_, revolt) =
-            parse_inner_condition("a permanent you controlled left the battlefield this turn")
-                .unwrap();
-        assert!(matches!(
-            revolt,
-            StaticCondition::QuantityComparison {
-                comparator: Comparator::GE,
-                ..
-            }
-        ));
-    }
-
     /// CR 404.1 + CR 205.2: "a creature card left your graveyard this turn" keeps the
     /// owner and non-token axes of the bare "a card left your graveyard" arm and adds
     /// the folded type; an unrecognized noun declines.
@@ -29716,27 +29640,21 @@ mod intervening_if_state_condition_tests {
         );
     }
 
-    /// CR 105.1: "blue and/or black" is the same either-colour disjunction as "blue
-    /// or black" (Sandstalker Moloch).
+    /// Sandstalker Moloch ("a blue and/or black spell") and Sarevok, Deathbringer
+    /// ("no permanents left the battlefield this turn") are deliberately not parsed
+    /// here: their resolution is not yet correct (the shared dig path, ticket 359;
+    /// a typeless permanent leaving), so both gates stay unparsed and the trigger
+    /// fails closed rather than resolving wrongly.
     #[test]
-    fn spell_history_color_and_or_equals_color_or() {
-        let and_or =
-            parse_inner_condition("an opponent cast a blue and/or black spell this turn").unwrap();
-        let or = parse_inner_condition("an opponent cast a blue or black spell this turn").unwrap();
-        assert_eq!(and_or, or);
-        assert!(matches!(
-            and_or.1,
-            StaticCondition::QuantityComparison {
-                lhs: QuantityExpr::Ref {
-                    qty: QuantityRef::SpellsCast {
-                        scope: CountScope::Opponents,
-                        filter: Some(TargetFilter::Or { .. }),
-                        ..
-                    },
-                },
-                ..
-            }
-        ));
+    fn unclaimed_history_gates_stay_unparsed() {
+        assert!(
+            parse_inner_condition("an opponent cast a blue and/or black spell this turn")
+                .map_or(true, |(rest, _)| !rest.is_empty())
+        );
+        assert!(
+            parse_inner_condition("no permanents left the battlefield this turn")
+                .map_or(true, |(rest, _)| !rest.is_empty())
+        );
     }
 }
 
