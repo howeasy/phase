@@ -4,8 +4,8 @@ use crate::analysis::resource::ResourceAxis;
 use crate::game::filter::{matches_target_filter_including_phased_out, FilterContext};
 use crate::game::replacement::{self, ReplacementResult};
 use crate::types::ability::{
-    ControlWindow, DelayedTriggerCondition, EffectKind, GameRestriction, ReplacementDefinition,
-    RestrictionExpiry, TargetFilter, TurnGate, WheneverEventExpiry,
+    ControlWindow, DelayedTriggerCondition, Duration, EffectKind, GameRestriction,
+    ReplacementDefinition, RestrictionExpiry, TargetFilter, TurnGate, WheneverEventExpiry,
 };
 use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
@@ -515,14 +515,17 @@ pub(super) fn resume_abandoned_phase_transition(
     }
 }
 
-/// CR 104.1: a finished game owes no transition a parked choice held.
-pub(super) fn abandon_phase_begin_choice(state: &mut GameState) {
+/// CR 800.4a/j + CR 104.1: retire a genuinely cancelled phase-begin event,
+/// or its terminal-game obligation. A surviving reconsult does not call this:
+/// its transition remains parked until the ordinary replacement result arrives.
+pub(super) fn abandon_phase_begin_choice(state: &mut GameState, phase: Phase) {
     let parked = state
         .pending_phase_transition_progress
         .as_ref()
         .is_some_and(|progress| {
-            progress.drain_state
-                == crate::types::game_state::PhaseTransitionDrainState::AwaitingBeginChoice
+            progress.next_phase == phase
+                && progress.drain_state
+                    == crate::types::game_state::PhaseTransitionDrainState::AwaitingBeginChoice
         });
     if parked {
         state.pending_phase_transition_progress = None;
@@ -1692,6 +1695,30 @@ fn retire_granted_turn_triggers(state: &mut GameState, turn: ExtraTurnId) {
     }
 }
 
+/// CR 614.10a + CR 611.2a: drop every transient continuous effect bound to the
+/// granted extra turn `turn` (`UntilEndOfGrantedTurn`). Called at the same 3
+/// sites as `retire_granted_turn_triggers`: when that turn ends or is
+/// skipped (a skipped turn never activates its bound window — Final Fortune
+/// ruling #8). A default id names no minted turn and retires nothing. Marks
+/// `layers_dirty` when anything dropped (TCE removal is layer-visible —
+/// unlike trigger retirement). The variant is never armed/pruned by
+/// untap/cleanup passes.
+fn retire_granted_turn_transients(state: &mut GameState, turn: ExtraTurnId) {
+    if turn == ExtraTurnId::default() {
+        return;
+    }
+    let before = state.transient_continuous_effects.len();
+    state.transient_continuous_effects.retain(|tce| {
+        !matches!(
+            tce.duration,
+            Duration::UntilEndOfGrantedTurn { turn: Some(bound) } if bound == turn
+        )
+    });
+    if state.transient_continuous_effects.len() != before {
+        state.layers_dirty.mark_full();
+    }
+}
+
 /// CR 500.7: Select the next active player after `completed_player`'s turn ends.
 ///
 /// Returns `(next_active, extra_turn)`, where `extra_turn` names the popped
@@ -1946,6 +1973,7 @@ fn begin_next_turn(state: &mut GameState, events: &mut Vec<GameEvent>) {
     // fire. Retired before the skip recursion below re-enters this function.
     if let Some(ended) = state.current_extra_turn.take() {
         retire_granted_turn_triggers(state, ended);
+        retire_granted_turn_transients(state, ended);
     }
 
     state.turn_number += 1;
@@ -1972,6 +2000,7 @@ fn begin_next_turn(state: &mut GameState, events: &mut Vec<GameEvent>) {
         // trigger bound to it can never fire.
         if let Some(skipped) = extra_turn {
             retire_granted_turn_triggers(state, skipped);
+            retire_granted_turn_transients(state, skipped);
         }
         // Recursively start the next turn (skipping this one entirely).
         return begin_next_turn(state, events);
@@ -1989,6 +2018,7 @@ fn begin_next_turn(state: &mut GameState, events: &mut Vec<GameEvent>) {
             // bound to the skipped granted turn can never fire.
             if let Some(skipped) = extra_turn {
                 retire_granted_turn_triggers(state, skipped);
+                retire_granted_turn_transients(state, skipped);
             }
             return begin_next_turn(state, events);
         }
@@ -2088,14 +2118,6 @@ fn begin_next_turn(state: &mut GameState, events: &mut Vec<GameEvent>) {
     state.crew_history_this_turn.clear();
     // CR 701.14a: "fought this turn" is per-turn history.
     state.creatures_fought_this_turn.clear();
-    // Belt-and-suspenders: these transient replacement-continuation seeds are
-    // normally nulled by the full-drain clear (effects/mod.rs) on the next
-    // action, but EventContextAmount reads
-    // post_replacement_token_substitution_count at highest priority
-    // (quantity.rs) — guarantee a clean slate each turn so no stale copy-count
-    // can shadow a later EventContextAmount read.
-    state.post_replacement_token_substitution_count = None;
-    state.post_replacement_token_choice_applied = None;
     reset_loyalty_activation_counts(state);
     // CR 606.1 + CR 603.4: Per-player loyalty-activation history is a CR 603.4
     // "this turn" record. The cap-raising grant from
@@ -2336,16 +2358,33 @@ fn begin_next_turn(state: &mut GameState, events: &mut Vec<GameEvent>) {
     // CR 102.1 + CR 500.1: resolve each auto-pass boundary against the turn now
     // beginning. EndOfCurrentTurn clears at every turn start (its turn has
     // ended); MyNextTurnStart persists through opponents' turns and clears only
-    // when the session owner's own next turn begins (active == owner).
+    // when the session owner's own next turn begins. CR 805.4 + CR 805.4a: a
+    // shared team takes one turn, so that comparison is representative to
+    // representative — a teammate's boundary clears when the TEAM's next turn
+    // begins. (An individual seat is its own representative, preserving the
+    // single-player behavior exactly.)
     // UntilStackEmpty is turn-agnostic and untouched. If the owner's next turn
     // is skipped (the `turns_to_skip` fast-path returns before this point),
     // MyNextTurnStart clears at the next non-skipped turn start — matching how
     // EndOfCurrentTurn already interacts with skips.
+    let active_rep = super::topology::priority_pass_representative(state, active);
+    let representatives: std::collections::BTreeMap<PlayerId, PlayerId> = state
+        .auto_pass
+        .keys()
+        .map(|&pid| {
+            (
+                pid,
+                super::topology::priority_pass_representative(state, pid),
+            )
+        })
+        .collect();
     state.auto_pass.retain(|&pid, mode| match mode {
         AutoPassMode::UntilStackEmpty { .. } => true,
         AutoPassMode::UntilTurnBoundary { until } => match *until {
             TurnBoundary::EndOfCurrentTurn => false,
-            TurnBoundary::MyNextTurnStart => pid != active,
+            TurnBoundary::MyNextTurnStart => representatives
+                .get(&pid)
+                .is_none_or(|&rep| rep != active_rep),
         },
     });
 
@@ -4434,18 +4473,23 @@ fn auto_advance_once(state: &mut GameState, events: &mut Vec<GameEvent>) -> Auto
                 None,
                 events,
             ) {
-                // `Priority` is the resume's "nothing further is owed" sentinel and
-                // is always addressed to `state.active_player` — the seat that just
-                // left. Fall through to the turn's step rather than surfacing it.
+                // `Priority` is the resume's "nothing further is owed" sentinel,
+                // addressed to `living_priority_seat` (CR 800.4j), never to the seat
+                // that just left. Fall through to the turn's step rather than
+                // surfacing it.
                 //
-                // CR 800.4a: everything else is a real prompt, but this is the one
-                // call site of `resume_pending_combat_lifelink` reached while the
-                // active player is NOT in the game (the other two run with a living
-                // active player by construction), so a wait it produces can name a
+                // CR 800.4a: everything else is a real prompt, but this call site of
+                // `resume_pending_combat_lifelink` is reached while the
+                // active player is NOT in the game (`handle_replacement_choice`
+                // remaps its own `Priority` with `living_priority_seat`;
+                // `resolve_combat_damage`'s re-entry guard can also be reached after
+                // a departure, from priority.rs's completeness gate; the
+                // action-boundary convergence applies this same test to the wait it
+                // surfaces), so a wait it produces can name a
                 // seat that cannot answer. `elimination` already enforces exactly
                 // this invariant once, at elimination time, with the same accessor
-                // and the same aliveness test; re-apply it here because this is the
-                // only place a NEW wait can be installed after that reconcile has
+                // and the same aliveness test; re-apply it here because a NEW wait
+                // can be installed here after that reconcile has
                 // run. `acting_player()` is `None` for `GameOver`, which is terminal
                 // and must still be surfaced — hence `is_some_and`, not a check that
                 // an acting player exists and is alive.
@@ -4845,8 +4889,8 @@ mod tests {
     use crate::types::card_type::{CardType, CoreType, Supertype};
     use crate::types::game_state::{
         CastOccurrence, DelayedTrigger, PendingContinuation, PendingResolutionCompletion,
-        PersistentAxisMaterialization, SpellCastRecord, StackEntry, StackEntryKind,
-        StackResolutionPolicy, StepTally,
+        PersistentAxisMaterialization, PhaseTransitionDrainState, PhaseTransitionProgress,
+        SpellCastRecord, StackEntry, StackEntryKind, StackResolutionPolicy, StepTally,
     };
     use crate::types::identifiers::{CardId, ExtraPhaseId, ObjectId};
     use crate::types::phase::{PhaseStop, PhaseStopScope, TurnSegment};
@@ -14681,6 +14725,44 @@ card into your hand at the beginning of your next end step.";
         assert_eq!(
             state.current_combat_attacker_restriction_source,
             Some(ObjectId(99))
+        );
+    }
+
+    #[test]
+    fn phase_begin_abandonment_retires_only_its_unanswered_transition() {
+        let mut state = setup();
+        state.phase = Phase::EndCombat;
+        state.pending_phase_transition_progress = Some(PhaseTransitionProgress {
+            remaining_players: std::collections::VecDeque::new(),
+            next_phase: Phase::BeginCombat,
+            previous_phase: Some(Phase::EndCombat),
+            owed_life_loss: std::collections::VecDeque::new(),
+            in_flight_life_loss: None,
+            entering_cleanup: false,
+            drain_state: PhaseTransitionDrainState::AwaitingBeginChoice,
+            scheduled_begin: None,
+        });
+
+        abandon_phase_begin_choice(&mut state, Phase::Upkeep);
+        assert!(state.pending_phase_transition_progress.is_some());
+        state
+            .pending_phase_transition_progress
+            .as_mut()
+            .unwrap()
+            .drain_state = PhaseTransitionDrainState::Ready;
+        abandon_phase_begin_choice(&mut state, Phase::BeginCombat);
+        assert!(state.pending_phase_transition_progress.is_some());
+        state
+            .pending_phase_transition_progress
+            .as_mut()
+            .unwrap()
+            .drain_state = PhaseTransitionDrainState::AwaitingBeginChoice;
+        abandon_phase_begin_choice(&mut state, Phase::BeginCombat);
+        assert!(state.pending_phase_transition_progress.is_none());
+        assert_eq!(
+            state.phase,
+            Phase::EndCombat,
+            "cancellation must not begin the step"
         );
     }
 

@@ -552,7 +552,13 @@ pub(crate) fn parse_compound_subject_keyword_static(
 
     // Object-half: delegate the predicate to the shared keyword-grant builder
     // (also peels trailing " as long as <cond>" onto `object_def.condition`).
-    let mut object_def = parse_continuous_gets_has(predicate.original, affected, text)?;
+    // The printed subject is "you and/, <object>", never the source alone.
+    let mut object_def = parse_continuous_gets_has(
+        predicate.original,
+        affected,
+        text,
+        super::anthem::PrintedSubject::Other,
+    )?;
 
     // Derive the player-half mode from the granted keyword. Only player-
     // applicable keyword modes claim this pattern.
@@ -3907,7 +3913,10 @@ mod structural_marker_tests {
                 filter: TargetFilter::Typed(
                     TypedFilter::creature()
                         .controller(controller)
-                        .properties(vec![FilterProp::Attacking { defender: None }]),
+                        .properties(vec![FilterProp::Attacking {
+                            scope: Default::default(),
+                            defender: None,
+                        }]),
                 ),
             },
         };

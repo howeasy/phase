@@ -2106,7 +2106,7 @@ fn optional_effect_choice_accept_preserves_nested_effect_zone_choice_continuatio
     let mut ability = ResolvedAbility::new(
         Effect::Sacrifice {
             target: TargetFilter::Any,
-            count: QuantityExpr::Fixed { value: 1 },
+            count: QuantityExpr::Fixed { value: 1 }.into(),
             min_count: 0,
         },
         vec![],
@@ -2301,7 +2301,7 @@ fn static_prison_unless_pay_sacrifice_returns_exiled_permanent() {
     let sacrifice = ResolvedAbility::new(
         Effect::Sacrifice {
             target: TargetFilter::SelfRef,
-            count: QuantityExpr::Fixed { value: 1 },
+            count: QuantityExpr::Fixed { value: 1 }.into(),
             min_count: 0,
         },
         vec![],
@@ -2460,7 +2460,7 @@ fn unless_pay_success_sub_ability_fires_triggers_from_events() {
     let mut alternative = ResolvedAbility::new(
         Effect::Sacrifice {
             target: TargetFilter::Any,
-            count: QuantityExpr::Fixed { value: 1 },
+            count: QuantityExpr::Fixed { value: 1 }.into(),
             min_count: 0,
         },
         vec![TargetRef::Object(doomed)],
@@ -2951,7 +2951,7 @@ fn multi_target_selection_preserves_nested_effect_zone_choice_continuation() {
     let mut sacrifice_ability = ResolvedAbility::new(
         Effect::Sacrifice {
             target: TargetFilter::Any,
-            count: QuantityExpr::Fixed { value: 1 },
+            count: QuantityExpr::Fixed { value: 1 }.into(),
             min_count: 0,
         },
         vec![TargetRef::Player(PlayerId(0))],
@@ -3354,7 +3354,7 @@ fn choose_one_of_scoped_player_sacrifice_prompts_faced_opponent() {
             target: TargetFilter::Typed(
                 TypedFilter::creature().controller(ControllerRef::ScopedPlayer),
             ),
-            count: QuantityExpr::Fixed { value: 1 },
+            count: QuantityExpr::Fixed { value: 1 }.into(),
             min_count: 0,
         },
     );
@@ -3400,13 +3400,14 @@ fn choose_one_of_controller_token_branch_ignores_faced_opponent() {
             target: TargetFilter::Typed(
                 TypedFilter::creature().controller(ControllerRef::ScopedPlayer),
             ),
-            count: QuantityExpr::Fixed { value: 1 },
+            count: QuantityExpr::Fixed { value: 1 }.into(),
             min_count: 0,
         },
     );
     let token_branch = AbilityDefinition::new(
         AbilityKind::Spell,
         Effect::Token {
+            enters_blocking: None,
             name: "b_3_3_a_dalek_menace".to_string(),
             power: crate::types::ability::PtValue::Fixed(0),
             toughness: crate::types::ability::PtValue::Fixed(0),
@@ -3500,7 +3501,7 @@ fn player_scope_all_uses_apnap_order_and_resumes_remaining_players() {
     let mut ability = ResolvedAbility::new(
         Effect::Sacrifice {
             target: TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
-            count: QuantityExpr::Fixed { value: 1 },
+            count: QuantityExpr::Fixed { value: 1 }.into(),
             min_count: 0,
         },
         vec![],
@@ -3820,7 +3821,7 @@ fn copy_target_choice_resolves_become_copy() {
     assert_eq!(clone.name, "Grizzly Bears");
     assert_eq!(clone.power, Some(2));
     assert_eq!(clone.toughness, Some(2));
-    assert!(clone.card_types.subtypes.contains(&"Bird".to_string()));
+    assert!(clone.card_types.subtypes.iter().any(|i| i == "Bird"));
     assert!(clone
         .keywords
         .contains(&crate::types::keywords::Keyword::Flying));
@@ -6391,7 +6392,7 @@ fn jotun_owl_keeper_one_of_x_n_pays_combined_mana() {
                         if shards.as_slice() == [crate::types::mana::ManaCostShard::White]
                 ),
                 "first pick is Mana({{W}}) as selected by index 0; got {:?}",
-                &chosen[0]
+                chosen[0]
             );
         }
         other => panic!("expected second UnlessPaymentChooseCost, got {other:?}"),

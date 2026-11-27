@@ -220,6 +220,10 @@ const DOCUMENTED_OVER_PROMPT: &[&str] = &[
     // re-check, and each returns only itself (disjoint graveyard referents).
     // The death-count read × zone-change write conflict is conservative.
     "darklight phoenix",
+    // Spellpyre Phoenix: the hand write conservatively overlaps JournalCards.
+    // Each trigger returns its own card and leaves both players' cycle counts
+    // intact, so the intervening-if rechecks give the same result in either order.
+    "spellpyre phoenix",
     // Control(another nonland) read × self-Sacrifice — self-limiting.
     "reclusive wight",
     // Not(SourceIsTapped) read × untap-ALL write — idempotent.
@@ -476,11 +480,13 @@ const DOCUMENTED_OVER_PROMPT: &[&str] = &[
 /// an intended prompt the legacy engine wrongly auto-ordered — not an over-prompt.
 const BATCH_GENUINE_ROWS: &[&str] = &[
     // LTB: Sacrifice{Dragons-you-control, count: ObjectCount{same}} → sub
-    // ChangeZone{TrackedSet(0) → Battlefield, enters_under: You} (AST measured).
-    // Each co-departing member returns ITS OWN tracked exile set, and returned
+    // ChangeZoneAll{origin: Exile, ExiledBySource → Battlefield,
+    // enters_under: You} (AST measured).
+    // Each co-departing member returns ITS OWN linked exile (the cards its ETB exiled), and returned
     // creatures can be Dragons the OTHER member's re-sacrifice then consumes —
     // final state differs by order (CR 603.3b intended prompt). Runtime pin:
-    // b2_dotd_member_bound_pin (reads_member_bound refuses batch-T1).
+    // b2_dotd_member_bound_pin on the pre-change ChangeZone{TrackedSet} twin; this
+    // shape sets the same flag via member_bound_target_filter's ExiledBySource arm.
     "day of the dragons",
     // LTB (self_ref): Discard{count: HandSize{Controller}} → sub Draw{count:
     // Intensity{Source}} gated on EffectOutcome(OptionalEffectPerformed) (AST
@@ -1305,6 +1311,7 @@ fn put_counter_all(count: QuantityExpr) -> Effect {
 }
 fn token_power_src() -> Effect {
     Effect::Token {
+        enters_blocking: None,
         name: "Elemental".into(),
         power: crate::types::ability::PtValue::Fixed(1),
         toughness: crate::types::ability::PtValue::Fixed(1),
@@ -1851,7 +1858,7 @@ fn creatures_of(cr: ControllerRef) -> TargetFilter {
 fn sacrifice_self() -> Effect {
     Effect::Sacrifice {
         target: TargetFilter::SelfRef,
-        count: qfix(1),
+        count: qfix(1).into(),
         min_count: 0,
     }
 }
@@ -2283,7 +2290,8 @@ fn sacrifice_all_own_creatures() -> ResolvedAbility {
         target: creatures_of(ControllerRef::You),
         count: qref(QuantityRef::ObjectCount {
             filter: creatures_of(ControllerRef::You),
-        }),
+        })
+        .into(),
         min_count: 0,
     })
 }

@@ -133,13 +133,12 @@ fn strip_cost_mod_mana_value_qualifier(prefix: &str) -> (&str, Option<FilterProp
     }
 }
 
-/// Compose an optional mana-value `FilterProp::Cmc` (from
-/// `strip_cost_mod_mana_value_qualifier`) into the cost-modifier spell filter.
+/// Compose an optional qualifier into the cost-modifier spell filter.
 /// A typed filter absorbs the prop directly; an `Or` (or any non-`Typed`)
 /// filter is `And`-wrapped with a card+prop leaf; a bare mana-value gate with no
 /// type restriction ("spells you cast with mana value 4 or greater") becomes a
 /// card filter carrying the prop.
-fn compose_cost_mod_mana_value(
+fn compose_cost_mod_property(
     filter: Option<TargetFilter>,
     prop: Option<FilterProp>,
 ) -> Option<TargetFilter> {
@@ -392,8 +391,9 @@ fn strip_cost_mod_cast_scope_suffix(input: &str) -> &str {
 /// rather than re-deriving it: `oracle_classifier::is_static_pattern` (routing —
 /// does this line reach the static parser at all) and
 /// `oracle_static::dispatch::parse_static_line_inner` (composition — attach the
-/// matching `StaticCondition` to any enforceable continuous static the
-/// dispatcher would otherwise refuse). CR 604.1 + CR 611.3a + CR 102.1.
+/// matching `StaticCondition` to any static accepted by
+/// `can_compose_leading_turn_scope` that the dispatcher would otherwise
+/// refuse). CR 604.1 + CR 611.3a + CR 102.1.
 pub(crate) fn parse_leading_turn_scope(text: &str) -> OracleResult<'_, StaticCondition> {
     alt((
         value(
@@ -740,6 +740,8 @@ pub(crate) fn try_parse_cost_modification(
         // the type words and the whole type+MV restriction is dropped (The Scarlet
         // Witch reduced EVERY spell, not just instants/sorceries — #5606).
         let (without_chosen, mana_value_prop) = strip_cost_mod_mana_value_qualifier(without_chosen);
+        let (without_chosen, pt_prop) =
+            crate::parser::oracle_nom::filter::split_spell_pt_qualifier(without_chosen).ok()?;
         let type_desc = without_chosen
             .trim_end_matches(" you cast") // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
             .trim_end_matches(" your opponents cast") // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
@@ -791,7 +793,10 @@ pub(crate) fn try_parse_cost_modification(
             (tf, false) => tf,
         };
         // CR 202.3: fold the peeled mana-value gate back into the spell filter.
-        compose_cost_mod_mana_value(base_filter, mana_value_prop)
+        compose_cost_mod_property(
+            compose_cost_mod_property(base_filter, mana_value_prop),
+            pt_prop,
+        )
     } else {
         None
     };
@@ -1869,6 +1874,12 @@ fn rebind_scoped_designation_anaphor(condition: &mut StaticCondition, antecedent
                 *player = antecedent.clone();
             }
         }
+        // CR 508.5: same scoped-subject rebind as the monarch arm above.
+        StaticCondition::IsDefendingPlayer { player } => {
+            if matches!(player, PlayerScope::ScopedPlayer) {
+                *player = antecedent.clone();
+            }
+        }
         // Only boolean structure carries nested static conditions. Quantities
         // and filters are separate scopes, so this clause does not rebind them.
         StaticCondition::DevotionGE { .. }
@@ -1907,7 +1918,7 @@ fn rebind_scoped_designation_anaphor(condition: &mut StaticCondition, antecedent
         | StaticCondition::DuringOpponentsTurn
         | StaticCondition::SharesColorWithMostCommonColorAmongPermanents
         | StaticCondition::SourceEnteredThisTurn
-        | StaticCondition::SourceHasDealtDamage
+        | StaticCondition::SourceHasDealtDamage { .. }
         | StaticCondition::SourceExertedThisTurn
         | StaticCondition::WasCast { .. }
         | StaticCondition::IsRingBearer

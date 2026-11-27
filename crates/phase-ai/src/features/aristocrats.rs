@@ -180,11 +180,7 @@ pub(crate) fn ability_is_sacrifice_outlet(ability: &AbilityDefinition) -> bool {
 
     // Gate 4: exclude pure-mana-producing sac outlets ("T, sacrifice this: add {G}").
     let effects = collect_chain_effects(ability);
-    if effects.iter().all(|e| matches!(e, Effect::Mana { .. })) {
-        return false;
-    }
-
-    true
+    !effects.iter().all(|e| matches!(e, Effect::Mana { .. }))
 }
 
 /// True if this ability is a sacrifice outlet with no mana component in the cost.
@@ -641,6 +637,7 @@ mod tests {
         AbilityDefinition::new(
             AbilityKind::Activated,
             Effect::Token {
+                enters_blocking: None,
                 name: "Saproling".to_string(),
                 power: PtValue::Fixed(1),
                 toughness: PtValue::Fixed(1),
@@ -665,6 +662,7 @@ mod tests {
         AbilityDefinition::new(
             AbilityKind::Activated,
             Effect::Token {
+                enters_blocking: None,
                 name: "Treasure".to_string(),
                 power: PtValue::Fixed(0),
                 toughness: PtValue::Fixed(0),

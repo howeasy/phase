@@ -224,6 +224,8 @@ fn create_army_token(
         sacrifice_at: None,
         source_id: ability.source_id,
         controller: ability.controller,
+        blocking_attacker: None,
+        blocking_attacker_incarnation: None,
     };
 
     let proposed = ProposedEvent::CreateToken {
@@ -307,8 +309,16 @@ mod tests {
         assert!(army.is_token);
         assert_eq!(army.power, Some(2));
         assert_eq!(army.toughness, Some(2));
-        assert!(army.card_types.subtypes.contains(&"Zombie".to_string()));
-        assert!(army.card_types.subtypes.contains(&"Army".to_string()));
+        assert!(army
+            .card_types
+            .subtypes
+            .iter()
+            .any(|i: &String| i == "Zombie"));
+        assert!(army
+            .card_types
+            .subtypes
+            .iter()
+            .any(|i: &String| i == "Army"));
         assert_eq!(army.color, vec![ManaColor::Black]);
         // 2 +1/+1 counters
         assert_eq!(
@@ -377,8 +387,12 @@ mod tests {
             .filter_map(|id| state.objects.get(id))
             .find(|obj| obj.card_types.subtypes.iter().any(|s| s == "Army"))
             .unwrap();
-        assert!(army.card_types.subtypes.contains(&"Zombie".to_string()));
-        assert!(army.card_types.subtypes.contains(&"Orc".to_string()));
+        assert!(army
+            .card_types
+            .subtypes
+            .iter()
+            .any(|i: &String| i == "Zombie"));
+        assert!(army.card_types.subtypes.iter().any(|i: &String| i == "Orc"));
     }
 
     #[test]
@@ -387,6 +401,8 @@ mod tests {
         let chatterfang_replacement = ReplacementDefinition::new(ReplacementEvent::CreateToken)
             .token_owner_scope(ControllerRef::You)
             .additional_token_spec(TokenSpec {
+                blocking_attacker: None,
+                blocking_attacker_incarnation: None,
                 characteristics: TokenCharacteristics {
                     display_name: "Squirrel".to_string(),
                     power: Some(1),

@@ -413,6 +413,7 @@ mod tests {
 
     fn creature_token_effect(count: QuantityExpr) -> Effect {
         Effect::Token {
+            enters_blocking: None,
             name: "Saproling".to_string(),
             power: engine::types::ability::PtValue::Fixed(1),
             toughness: engine::types::ability::PtValue::Fixed(1),
@@ -433,6 +434,7 @@ mod tests {
 
     fn treasure_token_effect() -> Effect {
         Effect::Token {
+            enters_blocking: None,
             name: "Treasure".to_string(),
             power: engine::types::ability::PtValue::Fixed(0),
             toughness: engine::types::ability::PtValue::Fixed(0),
@@ -676,7 +678,8 @@ mod tests {
         assert!(
             feature
                 .payoff_names
-                .contains(&"Llanowar Elves Clone".to_string()),
+                .iter()
+                .any(|i| i == "Llanowar Elves Clone"),
             "payoff_names should include the generator's name"
         );
     }
@@ -688,9 +691,7 @@ mod tests {
             .push(anthem_static(creature_you_control_filter()));
         let feature = detect(&[deck_entry(face)]);
         assert!(
-            feature
-                .anthem_names
-                .contains(&"Glorious Anthem".to_string()),
+            feature.anthem_names.iter().any(|i| i == "Glorious Anthem"),
             "anthem_names should include the anthem's name"
         );
     }

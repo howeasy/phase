@@ -3,7 +3,7 @@ use crate::types::ability::{
     graveyard_destination_rider, is_graveyard_exile_rider_subability, AbilityCondition,
     AbilityCost, CastPermissionConstraint, CastingPermission, Duration, Effect, EffectError,
     EffectKind, QuantityExpr, ResolvedAbility, SpellStackToGraveyardReplacement, TargetFilter,
-    TargetRef,
+    TargetRef, ThisWayCause,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::{BatchCompletion, GameState, WaitingFor};
@@ -76,7 +76,7 @@ pub(crate) fn looked_at_controller_library_cards(
 ///   2. the combat-damage source filter (CR 510.2) — yields `SpecificObject`
 ///      or `Or` for a bare `TrackedSet`, and `And { [source_filter, filter] }`
 ///      for the `TrackedSetFiltered` shape all 51 of these cards actually use.
-///      The `let … else` below rejects every one of those, so a combat-damage
+///      The `match` below rejects every one of those, so a combat-damage
 ///      anaphor casts nothing rather than something arbitrary;
 ///   3. the latest non-empty published set — a tracked-set shape;
 ///   4. no set at all: the sentinel `TrackedSetId(0)` is returned unchanged. It
@@ -94,13 +94,77 @@ fn tracked_set_cast_candidates(
     target_filter: &TargetFilter,
 ) -> Vec<ObjectId> {
     let bound = crate::game::targeting::resolve_tracked_set_sentinel(state, target_filter.clone());
-    let (TargetFilter::TrackedSet { id } | TargetFilter::TrackedSetFiltered { id, .. }) = bound
-    else {
-        return Vec::new();
+    let (id, caused_by) = match &bound {
+        TargetFilter::TrackedSet { id } => (*id, None),
+        TargetFilter::TrackedSetFiltered { id, caused_by, .. } => (*id, caused_by.as_ref()),
+        // Every other shape names no tracked set: nothing to cast.
+        TargetFilter::None
+        | TargetFilter::Any
+        | TargetFilter::Player
+        | TargetFilter::Controller
+        | TargetFilter::SourceController
+        | TargetFilter::ControllerAndControlledPermanents { .. }
+        | TargetFilter::Opponent
+        | TargetFilter::SelfRef
+        | TargetFilter::GrantingObject { .. }
+        | TargetFilter::SourceOrPaired
+        | TargetFilter::Typed(..)
+        | TargetFilter::Not { .. }
+        | TargetFilter::Or { .. }
+        | TargetFilter::And { .. }
+        | TargetFilter::StackAbility { .. }
+        | TargetFilter::StackSpell
+        | TargetFilter::CastingSpell
+        | TargetFilter::SpecificObject { .. }
+        | TargetFilter::SpecificPlayer { .. }
+        | TargetFilter::PlayerWhoChoseLabel { .. }
+        | TargetFilter::PlayerMatching { .. }
+        | TargetFilter::Neighbor { .. }
+        | TargetFilter::ScopedPlayer
+        | TargetFilter::AttachedTo
+        | TargetFilter::LastCreated
+        | TargetFilter::LastRevealed
+        | TargetFilter::LastZoneChanged
+        | TargetFilter::CostPaidObject
+        | TargetFilter::AmassedArmy
+        | TargetFilter::ChosenCard
+        | TargetFilter::ChoiceAssignment { .. }
+        | TargetFilter::ExiledBySource
+        | TargetFilter::ExiledCardByIndex { .. }
+        | TargetFilter::TriggeringSpellController
+        | TargetFilter::TriggeringSpellOwner
+        | TargetFilter::TriggeringPlayer
+        | TargetFilter::TriggeringSource
+        | TargetFilter::AttackedPlayerOrPlaneswalker
+        | TargetFilter::EventTarget
+        | TargetFilter::TriggeringSourceController
+        | TargetFilter::EventTargetController
+        | TargetFilter::ParentTarget
+        | TargetFilter::ParentTargetSlot { .. }
+        | TargetFilter::DeclaredPlayer { .. }
+        | TargetFilter::ParentTargetController
+        | TargetFilter::ParentTargetOwner
+        | TargetFilter::AffectedObjectOwner
+        | TargetFilter::SourceChosenPlayer
+        | TargetFilter::OriginalController
+        | TargetFilter::OriginalSource
+        | TargetFilter::PostReplacementSourceController
+        | TargetFilter::PostReplacementDamageSource
+        | TargetFilter::PostReplacementDamageTarget
+        | TargetFilter::PostReplacementDamageTargetOwner
+        | TargetFilter::DefendingPlayer
+        | TargetFilter::HasChosenName
+        | TargetFilter::ChosenDamageSource { .. }
+        | TargetFilter::Named { .. }
+        | TargetFilter::Owner
+        | TargetFilter::AllPlayers => return Vec::new(),
     };
-    let Some(members) = state.tracked_object_sets.get(&id) else {
+    if !state.tracked_object_sets.contains_key(&id) {
         return Vec::new();
-    };
+    }
+    // CR 730.3c: the members, then the components this cast reader finds (D2, D7, D4).
+    let members =
+        crate::game::merge::tracked_set_found_objects(state, id, Some(ability), caused_by);
     let mut seen = HashSet::new();
     let deduped: Vec<ObjectId> = members
         .iter()
@@ -130,17 +194,39 @@ fn tracked_set_cast_candidates(
 ///
 /// Return the live source-linked exile members of the active resolution's
 /// tracked set, preserving publication order and exact current membership.
+///
+/// CR 607.2a: restricted to the linked-exile ledger, which never records a
+/// merged component (`ZoneMoveRequest::merged_component`), so a found component
+/// could not pass.
 fn resolution_window_linked_batch_candidates(
     state: &GameState,
     source_id: ObjectId,
 ) -> Option<Vec<ObjectId>> {
-    let members = state
-        .chain_tracked_set_id
-        .and_then(|id| state.tracked_object_sets.get(&id))?;
+    let set_id = state.chain_tracked_set_id?;
+    let members = state.tracked_object_sets.get(&set_id)?;
     let linked = crate::game::players::linked_exile_cards_for_source(state, source_id);
+    let linked_ids: HashSet<ObjectId> = linked.iter().map(|link| link.exiled_id).collect();
+    // CR 608.2c: a current-resolution batch can be extended by a later
+    // instruction that publishes a different population into the same chain
+    // set. The action stamp identifies the cards exiled by this resolution;
+    // cleanup cards (for example, Portent of Calamity's revealed cards put
+    // into a graveyard) are not part of that cast window even though they share
+    // the chain set. An unannotated mixed set remains ambiguous and must fall
+    // through to the durable source-linked binding below.
+    let batch = if members.iter().all(|id| linked_ids.contains(id)) {
+        members.clone()
+    } else {
+        let causes = state.tracked_set_member_causes.get(&set_id)?;
+        let exiled_members: Vec<ObjectId> = members
+            .iter()
+            .copied()
+            .filter(|id| causes.get(id) == Some(&ThisWayCause::Exiled) && linked_ids.contains(id))
+            .collect();
+        exiled_members
+    };
     let mut seen = HashSet::new();
     Some(
-        members
+        batch
             .iter()
             .copied()
             .filter(|id| {
@@ -840,10 +926,33 @@ pub fn resolve(
         // seam and can span several player-scope publishes or follow a later
         // producer barrier, so it remains the stronger exact authority.
         if !exact_bound_batch {
-            if let Some(active_batch) =
-                resolution_window_linked_batch_candidates(state, ability.source_id)
-            {
-                target_ids = active_batch;
+            match resolution_window_linked_batch_candidates(state, ability.source_id) {
+                Some(active_batch) => {
+                    // CR 608.2c: an active producer owns even an empty batch;
+                    // do not reopen an earlier linked-exile ledger in that case.
+                    target_ids = active_batch;
+                }
+                None if matches!(
+                    driver,
+                    crate::types::ability::CastFromZoneDriver::ResolutionWindow {
+                        bounds: crate::types::ability::ResolutionCastWindow {
+                            pool: crate::types::ability::ResolutionCastPool::SourceLinked,
+                            ..
+                        }
+                    }
+                ) && target_ids.is_empty() =>
+                {
+                    // CR 607.2a + CR 608.2g: a source-anchored plural anaphor can
+                    // open a one-card resolution window over the source's durable
+                    // linked-exile ledger (Evercoat Ursine). Use that ledger only
+                    // when no current-resolution batch was published.
+                    if let ExiledBySourceBinding::LinkedExile(ids) =
+                        exiled_by_source_fallback_binding(state, ability, target_filter)
+                    {
+                        target_ids = ids;
+                    }
+                }
+                None => {}
             }
         }
     }

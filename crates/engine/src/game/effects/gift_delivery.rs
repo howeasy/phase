@@ -206,6 +206,7 @@ fn create_gift_token(
 ) -> Result<(), EffectError> {
     let creation = ResolvedAbility::new(
         Effect::Token {
+            enters_blocking: None,
             name: token.name.to_string(),
             power: PtValue::Fixed(token.power_toughness),
             toughness: PtValue::Fixed(token.power_toughness),
@@ -436,7 +437,11 @@ mod tests {
             panic!("one Treasure token for the opponent, got {tokens:?}");
         };
         assert_eq!(token.controller, PlayerId(1));
-        assert!(token.card_types.subtypes.contains(&"Treasure".to_string()));
+        assert!(token
+            .card_types
+            .subtypes
+            .iter()
+            .any(|i: &String| i == "Treasure"));
         assert!(token.card_types.core_types.contains(&CoreType::Artifact));
         // CR 111.10a: the predefined Treasure mana ability comes with the token.
         assert!(
@@ -465,7 +470,11 @@ mod tests {
         assert_eq!(token.toughness, Some(1));
         assert!(token.tapped, "Fish should enter tapped");
         assert!(token.color.contains(&ManaColor::Blue));
-        assert!(token.card_types.subtypes.contains(&"Fish".to_string()));
+        assert!(token
+            .card_types
+            .subtypes
+            .iter()
+            .any(|i: &String| i == "Fish"));
         assert!(token.card_types.core_types.contains(&CoreType::Creature));
     }
 
@@ -481,7 +490,11 @@ mod tests {
         let [token] = tokens.as_slice() else {
             panic!("one Food token for the opponent, got {tokens:?}");
         };
-        assert!(token.card_types.subtypes.contains(&"Food".to_string()));
+        assert!(token
+            .card_types
+            .subtypes
+            .iter()
+            .any(|i: &String| i == "Food"));
         // CR 111.10b: "{2}, {T}, Sacrifice this token: You gain 3 life."
         assert!(
             token.abilities.iter().any(|a| matches!(

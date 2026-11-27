@@ -378,6 +378,7 @@ fn human_response_model(waiting_for: &WaitingFor, semantic_owner: PlayerId) -> H
         | WaitingFor::SeparatePilesChoice { .. }
         | WaitingFor::CompanionReveal { .. }
         | WaitingFor::ChooseLegend { .. }
+        | WaitingFor::ReplacementDecisionOrder { .. }
         | WaitingFor::BattleProtectorChoice { .. }
         | WaitingFor::CopyRetarget { .. }
         | WaitingFor::CombatTaxPayment { .. } => {
@@ -636,6 +637,7 @@ fn classify_waiting_for(waiting_for: &WaitingFor) -> WaitingClassification {
         | WaitingFor::SeparatePilesChoice { .. }
         | WaitingFor::CompanionReveal { .. }
         | WaitingFor::ChooseLegend { .. }
+        | WaitingFor::ReplacementDecisionOrder { .. }
         | WaitingFor::CommanderZoneChoice { .. }
         | WaitingFor::BattleProtectorChoice { .. }
         | WaitingFor::AssistChoosePlayer { .. }
@@ -698,12 +700,26 @@ fn semantic_slots(state: &GameState) -> Vec<(PlayerId, InteractionSlotKind)> {
                     .collect()
             })
             .unwrap_or_default(),
-        _ => state
-            .waiting_for
-            .acting_players()
-            .into_iter()
-            .map(|player| (player, slot_kind))
-            .collect(),
+        // CR 805.5a: A player may cast a spell, activate an ability, or take a
+        // special action when their team has priority. The priority window is
+        // parked on the team's representative, but every living member needs
+        // their own interaction slot so each teammate can submit.
+        _ => {
+            if let WaitingFor::Priority { player } = &state.waiting_for {
+                if super::topology::side_takes_shared_turn(state, *player) {
+                    return super::topology::team_members(state, *player)
+                        .into_iter()
+                        .map(|member| (member, slot_kind))
+                        .collect();
+                }
+            }
+            state
+                .waiting_for
+                .acting_players()
+                .into_iter()
+                .map(|player| (player, slot_kind))
+                .collect()
+        }
     }
 }
 
@@ -4714,14 +4730,20 @@ fn selection_projection(
             action: SelectionAction::KeepWithinPower,
             source_id: Some(*source_id),
         }),
+        // CR 101.4 + CR 701.21a: exact (`minimum_count == None`) or up-to
+        // keeper; the engine publishes both bounds.
         WaitingFor::KeepExactPermanentsChoice {
             eligible,
             required_count,
+            minimum_count,
             source_id,
             ..
         } => Some(SelectionProjection {
             object_ids: eligible.clone(),
-            constraint: count_constraint(*required_count, *required_count),
+            constraint: count_constraint(
+                minimum_count.unwrap_or(*required_count),
+                *required_count,
+            ),
             confirm: ConfirmSemantics::Explicit,
             intent: InteractionIntentCode::Keep,
             action: SelectionAction::KeepExact,
@@ -5315,6 +5337,7 @@ fn selection_projection(
         | WaitingFor::SecretAgendaChoice { .. }
         | WaitingFor::CompanionReveal { .. }
         | WaitingFor::ChooseLegend { .. }
+        | WaitingFor::ReplacementDecisionOrder { .. }
         | WaitingFor::CommanderZoneChoice { .. }
         | WaitingFor::BattleProtectorChoice { .. }
         | WaitingFor::ProliferateChoice { .. }
@@ -12430,6 +12453,7 @@ mod tests {
             keep_is_distinct: Vec::new(),
             player: PlayerId(0),
             stack_entry_index: 0,
+            stack_entry_id: None,
             scope: crate::types::game_state::RetargetScope::Single,
             current_targets: vec![object_a.clone()],
             slots: vec![crate::types::game_state::RetargetSlotAddress {
@@ -12461,6 +12485,7 @@ mod tests {
             keep_is_distinct: Vec::new(),
             player: PlayerId(0),
             stack_entry_index: 0,
+            stack_entry_id: None,
             scope: crate::types::game_state::RetargetScope::Single,
             current_targets: vec![object_a.clone()],
             slots: vec![],

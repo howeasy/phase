@@ -77,6 +77,11 @@ pub(crate) struct ParsedEffectClause {
     /// resolved after line routing; see [`crate::types::ability::UnloweredGuard`].
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) unlowered_guard: Option<UnloweredGuard>,
+    /// CR 607.2a: set when this clause returns "the exiled card(s)" bound to the bare
+    /// chain sentinel. Carried onto the assembled `AbilityDefinition` and decided on the
+    /// finished tree; see [`crate::types::ability::LinkedExileReturn`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) linked_exile_return: Option<crate::types::ability::LinkedExileReturn>,
     /// CR 608.2c: the text the head instruction owns, when a compound split separated it
     /// from its "and" continuation (`try_split_targeted_compound`), which is then its own
     /// `sub_ability` checked against its own text there. `None` when the clause's text is
@@ -144,6 +149,9 @@ pub(crate) struct TokenDescription {
     /// CR 508.4: the defender named by an inline "attacking that player".
     #[serde(skip_serializing_if = "TokenAttackDestination::is_controller_chooses")]
     pub(crate) attack_destination: TokenAttackDestination,
+    /// CR 509.1h + CR 506.3e: the attacker named by an inline "that's
+    /// blocking that creature" clause. `None` = no blocking rider.
+    pub(crate) enters_blocking: Option<TargetFilter>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize)]
@@ -1114,6 +1122,13 @@ pub(crate) enum ImperativeFamilyAst {
     /// sourced it (ongoing-scheme "abandon this scheme" clauses). No-op unless
     /// the source is a face-up ongoing scheme.
     AbandonScheme,
+    /// CR 701.32b: An ability sets a scheme in motion again (My Laughter
+    /// Echoes: "set that scheme in motion again"). The referent is
+    /// event-context (`TriggeringSource`) or the ability source (`SelfRef`),
+    /// never a chosen target.
+    SetSchemeInMotion {
+        target: TargetFilter,
+    },
     /// CR 701.51b: "open N Attractions"
     OpenAttractions {
         count: u32,
@@ -1190,6 +1205,84 @@ pub(crate) enum ImperativeFamilyAst {
         count: QuantityExpr,
         is_other: bool,
     },
+}
+
+impl ImperativeAst {
+    /// CR 607.2a: the "the exiled card(s)" mark a return carries to its lowered clause.
+    /// Only a targeted return carries one; every other family classifies to `None`.
+    pub(crate) fn linked_exile_return(&self) -> Option<crate::types::ability::LinkedExileReturn> {
+        match self {
+            Self::Targeted(targeted) => targeted.linked_exile_return(),
+            Self::Numeric(_)
+            | Self::SearchCreation(_)
+            | Self::HandReveal(_)
+            | Self::Choose(_)
+            | Self::Utility(_) => None,
+        }
+    }
+}
+
+impl ImperativeFamilyAst {
+    /// CR 607.2a: the "the exiled card(s)" mark a return carries to its lowered clause.
+    /// Only a structured targeted return carries one; every other imperative family
+    /// classifies to `None`.
+    pub(crate) fn linked_exile_return(&self) -> Option<crate::types::ability::LinkedExileReturn> {
+        match self {
+            Self::Structured(ast) => ast.linked_exile_return(),
+            Self::CostResource(..)
+            | Self::ZoneCounter(..)
+            | Self::Explore
+            | Self::Connive
+            | Self::Recruit
+            | Self::Assimilate { .. }
+            | Self::ForceBlock { .. }
+            | Self::ForceAttack { .. }
+            | Self::Goad
+            | Self::ExchangeControl { .. }
+            | Self::ExchangeLifeWithStat { .. }
+            | Self::ExchangeLifeTotals { .. }
+            | Self::RedistributeLifeTotals
+            | Self::MustBeBlocked
+            | Self::Investigate
+            | Self::Populate
+            | Self::Clash
+            | Self::Behold(..)
+            | Self::Learn
+            | Self::NoteManaSpent
+            | Self::NoteNumber { .. }
+            | Self::Manifest { .. }
+            | Self::ManifestDread
+            | Self::Cloak { .. }
+            | Self::TurnFaceUp { .. }
+            | Self::TurnFaceDown { .. }
+            | Self::BecomeMonarch
+            | Self::VentureIntoDungeon
+            | Self::VentureIntoUndercity
+            | Self::TakeTheInitiative
+            | Self::Planeswalk
+            | Self::AbandonScheme
+            | Self::SetSchemeInMotion { .. }
+            | Self::OpenAttractions { .. }
+            | Self::RollToVisitAttractions
+            | Self::AssembleContraptions { .. }
+            | Self::AssembleContraptionsFromRollDifference
+            | Self::ReassembleContraption { .. }
+            | Self::Proliferate
+            | Self::TimeTravel
+            | Self::GainKeyword(..)
+            | Self::LoseKeyword(..)
+            | Self::LoseTheGame
+            | Self::WinTheGame
+            | Self::RollDie { .. }
+            | Self::FlipCoins { .. }
+            | Self::RemoveFromCombat(..)
+            | Self::Shuffle(..)
+            | Self::Put(..)
+            | Self::YouMay { .. }
+            | Self::GivePlayerCounter { .. }
+            | Self::Support { .. } => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -1335,6 +1428,47 @@ impl TargetedImperativeAst {
             other => other,
         }
     }
+
+    /// CR 607.2a: the "the exiled card(s)" mark a return carries to its lowered clause.
+    pub(crate) fn linked_exile_return(&self) -> Option<crate::types::ability::LinkedExileReturn> {
+        match self {
+            Self::Return {
+                linked_exile_return,
+                ..
+            }
+            | Self::ReturnToBattlefield {
+                linked_exile_return,
+                ..
+            }
+            | Self::ReturnToZone {
+                linked_exile_return,
+                ..
+            }
+            | Self::ReturnAllToZone {
+                linked_exile_return,
+                ..
+            } => *linked_exile_return,
+            Self::Tap { .. }
+            | Self::Untap { .. }
+            | Self::TapAll { .. }
+            | Self::UntapAll { .. }
+            | Self::TapAggregate { .. }
+            | Self::Goad { .. }
+            | Self::GoadAll { .. }
+            | Self::SetRoomDoorLock { .. }
+            | Self::Sacrifice { .. }
+            | Self::Discard { .. }
+            | Self::DiscardCard { .. }
+            | Self::ReturnAll { .. }
+            | Self::Fight { .. }
+            | Self::GainControl { .. }
+            | Self::ControlNextTurn { .. }
+            | Self::Earthbend { .. }
+            | Self::Airbend { .. }
+            | Self::ZoneCounterProxy(..)
+            | Self::Unimplemented { .. } => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -1437,6 +1571,9 @@ pub(crate) enum TargetedImperativeAst {
         /// eligible permanent at resolution via `EffectZoneChoice` rather than
         /// the targeting pipeline.
         selection: BounceSelection,
+        /// CR 607.2a: "the exiled card(s)" bound to the bare chain sentinel; carried
+        /// onto `ParsedEffectClause::linked_exile_return` at lowering.
+        linked_exile_return: Option<crate::types::ability::LinkedExileReturn>,
     },
     /// CR 400.7: Mass return-to-hand. Mirrors `TapAll`/`UntapAll`
     /// for "return all/each [filter] to their owners' hands" Oracle text.
@@ -1485,6 +1622,9 @@ pub(crate) enum TargetedImperativeAst {
         /// `forward_result` so the Aura enters attached and skips the CR 303.4f
         /// host-choice consult.
         attach_host: Option<TargetFilter>,
+        /// CR 607.2a: "the exiled card(s)" bound to the bare chain sentinel; carried
+        /// onto `ParsedEffectClause::linked_exile_return` at lowering.
+        linked_exile_return: Option<crate::types::ability::LinkedExileReturn>,
     },
     /// CR 400.6: Return to a specific non-hand, non-battlefield zone (zone change).
     ReturnToZone {
@@ -1505,6 +1645,9 @@ pub(crate) enum TargetedImperativeAst {
         /// / Forage precedent) — `Effect::ChangeZone` has no count slot of its
         /// own, so the quantity rides the clause's `MultiTargetSpec` instead.
         multi_target: Option<MultiTargetSpec>,
+        /// CR 607.2a: "the exiled card(s)" bound to the bare chain sentinel; carried
+        /// onto `ParsedEffectClause::linked_exile_return` at lowering.
+        linked_exile_return: Option<crate::types::ability::LinkedExileReturn>,
     },
     /// CR 400.7 + CR 608.2c: Mass return to a non-default zone. Lowers to
     /// `ChangeZoneAll` so the resolver scans every matching object instead of
@@ -1524,6 +1667,9 @@ pub(crate) enum TargetedImperativeAst {
         /// Threaded onto `Effect::ChangeZoneAll.enter_with_counters`. Empty for
         /// returns that carry no counters.
         enter_with_counters: Vec<(CounterType, QuantityExpr)>,
+        /// CR 607.2a: "the exiled card(s)" bound to the bare chain sentinel; carried
+        /// onto `ParsedEffectClause::linked_exile_return` at lowering.
+        linked_exile_return: Option<crate::types::ability::LinkedExileReturn>,
     },
     Fight {
         target: TargetFilter,
@@ -1569,6 +1715,14 @@ pub(crate) enum TargetedImperativeAst {
     /// Proxy for zone-counter family (destroy/exile/put counter) used during
     /// compound splitting to unify targeted and zone-counter parsing.
     ZoneCounterProxy(Box<ZoneCounterImperativeAst>),
+    /// A targeted clause the parser recognized but must not execute (CR 201.4a: a
+    /// "with that name" discard after a name choice whose characteristic
+    /// `ChoiceType::CardName` cannot carry). Lowers to an honest `Effect::unimplemented`
+    /// named `gap` carrying the printed clause, mirroring `PutImperativeAst::Unimplemented`.
+    Unimplemented {
+        gap: &'static str,
+        fragment: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -2425,6 +2579,7 @@ pub(crate) fn parsed_clause(effect: Effect) -> ParsedEffectClause {
         optional: false,
         unless_pay: None,
         unlowered_guard: None,
+        linked_exile_return: None,
         entry_onset: ContinuousEffectOnset::WhenFollowed,
     }
 }
@@ -3404,6 +3559,7 @@ pub(crate) fn duration_governs(effect: &Effect) -> bool {
         | Effect::ArrangePlanarDeckTop { .. }
         | Effect::Planeswalk
         | Effect::AbandonScheme
+        | Effect::SetSchemeInMotion { .. }
         | Effect::ChaosEnsues
         | Effect::ReverseTurnOrder
         | Effect::RedistributeLifeTotals
@@ -4009,11 +4165,13 @@ mod duration_distribution_tests_7923 {
     #[test]
     fn reconciled_cast_seam_refuses_the_bound_before_gapping_the_lifetime() {
         use crate::types::ability::{
-            CastFromZoneDriver, ResolutionCastWindow, CAST_BOUND_LOST_TO_DURATION_GAP,
+            CastFromZoneDriver, ResolutionCastPool, ResolutionCastWindow,
+            CAST_BOUND_LOST_TO_DURATION_GAP,
         };
 
         let refusable = CastFromZoneDriver::ResolutionWindow {
             bounds: ResolutionCastWindow {
+                pool: ResolutionCastPool::CurrentResolution,
                 max_casts: Some(1),
                 max_total_mv: None,
             },
