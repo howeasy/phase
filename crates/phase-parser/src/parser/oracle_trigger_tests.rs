@@ -48178,7 +48178,9 @@ fn self_trigger_bare_its_attachment_state_hoists_the_intervening_if() {
 /// Negative twin: on a trigger whose subject is not the source, "it" names the
 /// event object, so the bare `it's enchanted` must not be rebound to the source:
 /// the intervening-if stays unhoisted and the trigger fails closed (reach guard:
-/// the head parsed as an attack trigger).
+/// the head parsed as an attack trigger). No printed card has this exact shape
+/// (the nearest, Krond the Dawn-Clad, is a self trigger), so the subject name is a
+/// placeholder: the check is of the shared grammar, not of a card.
 #[test]
 fn non_self_trigger_bare_its_attachment_state_is_not_rebound_to_the_source() {
     let def = parse_trigger_line(
@@ -48187,11 +48189,8 @@ fn non_self_trigger_bare_its_attachment_state_is_not_rebound_to_the_source() {
     );
     assert_eq!(def.mode, TriggerMode::Attacks);
     assert!(
-        !matches!(
-            &def.condition,
-            Some(TriggerCondition::SourceMatchesFilter { .. })
-        ),
-        "a non-self trigger must not bind `it` to the trigger source: {:?}",
+        def.condition.is_none(),
+        "a non-self trigger must not bind `it` to the trigger source and must not invent a condition: {:?}",
         def.condition
     );
 }
