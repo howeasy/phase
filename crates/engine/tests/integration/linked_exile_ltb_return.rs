@@ -534,6 +534,13 @@ fn koh_returns_the_permanent_exiled_by_its_granted_landfall_trigger() {
             && link.exiled_id == bears
             && link.supplier == Some(ExileSupplier::Granted)
     }));
+    // The Angel was exiled by Koh's OWN printed ETB: a characteristic pair's
+    // supplier, not a granted one.
+    assert!(runner.state().exile_links.iter().any(|link| {
+        link.source_id == koh
+            && link.exiled_id == angel
+            && matches!(link.supplier, Some(ExileSupplier::Paired(_)))
+    }));
 
     drop(runner.cast(unsummon).target_object(koh).commit());
     drive_to_empty_stack(&mut runner, true, None, |_| {});
@@ -542,6 +549,14 @@ fn koh_returns_the_permanent_exiled_by_its_granted_landfall_trigger() {
         runner.state(),
         &[bears],
         "Koh's granted departure trigger must return its granted landfall exile",
+    );
+    // CR 607.5: the granted reader does not read Koh's characteristic pile, so
+    // the same trigger that returned the granted exile leaves Koh's own ETB
+    // exile where it is (the reach guard above proves the trigger ran).
+    assert_eq!(
+        runner.state().objects[&angel].zone,
+        Zone::Exile,
+        "Koh's own ETB-exiled Angel is not part of the granted trigger's pile"
     );
 }
 

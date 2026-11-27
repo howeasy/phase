@@ -473,24 +473,23 @@ fn pile_reader_pair(state: &GameState, source: &TriggerSourceContext) -> Option<
     crate::game::exile_links::resolving_exile_supplier(state, source.identity.reference.object_id)
 }
 
-/// CR 607.1 + CR 607.5: latched and LKI reads refuse a known granted exile
-/// when the reader is a characteristic pair, and require a match between two
-/// characteristic pairs. Otherwise preserve the legacy fail-open behavior.
-/// We don't track which effect granted an ability, so two unrelated grants
-/// on the same object can still share a latched or LKI pile.
+/// CR 607.1 + CR 607.5: latched and LKI reads. A characteristic pair
+/// (`Paired`) reads only its own pair's pile (`ExileSupplier::pairs_with`), so
+/// it refuses a granted exile and a different pair's exile. A granted reader
+/// (abilities acquired as a linked pair by one effect, CR 607.5) does not read a
+/// characteristic pile either: a `Paired` supplier is refused, a `Granted` one
+/// admitted. Unknown provenance (`None`) on either side keeps the legacy
+/// fail-open behavior. The grant's effect identity is not tracked, so two
+/// unrelated grants on the same object can still share a latched or LKI pile.
+/// The strict-pairing sibling is `ExileSupplier::pairs_with`.
 fn pair_compatible(supplier: Option<ExileSupplier>, reader: Option<ExileSupplier>) -> bool {
     use ExileSupplier::{Granted, Paired};
 
-    match supplier {
-        None => true,
-        Some(Granted) => match reader {
-            Some(Paired(_)) => false,
-            None | Some(Granted) => true,
-        },
-        Some(supplier @ Paired(_)) => match reader {
-            Some(reader @ Paired(_)) => supplier.pairs_with(reader),
-            None | Some(Granted) => true,
-        },
+    match (supplier, reader) {
+        (None, _) | (Some(_), None) => true,
+        (Some(Granted), Some(Granted)) => true,
+        (Some(Paired(_)), Some(Granted)) | (Some(Granted), Some(Paired(_))) => false,
+        (Some(supplier @ Paired(_)), Some(reader @ Paired(_))) => supplier.pairs_with(reader),
     }
 }
 
@@ -1905,8 +1904,10 @@ mod tests {
     }
 
     /// CR 607.1 + CR 607.5: characteristic readers exclude foreign pairs and
-    /// grants. The latched/LKI fallback admits unknown provenance and does not
-    /// distinguish grants by effect.
+    /// grants; a granted reader excludes every characteristic pair's pile
+    /// (Koh's own ETB exile is not read by its granted trigger). The
+    /// latched/LKI fallback admits unknown provenance and does not distinguish
+    /// grants by effect.
     #[test]
     fn linked_exile_pile_supplier_admission_matrix() {
         use crate::game::game_object::LinkedAbilitySource;
@@ -1927,8 +1928,8 @@ mod tests {
         for (supplier, expected) in [
             (None, [true, true, true]),
             (Some(Granted), [true, true, false]),
-            (Some(own), [true, true, true]),
-            (Some(other), [true, true, false]),
+            (Some(own), [true, false, true]),
+            (Some(other), [true, false, false]),
         ] {
             for (reader, admitted) in readers.into_iter().zip(expected) {
                 assert_eq!(

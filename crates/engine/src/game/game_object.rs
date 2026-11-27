@@ -456,7 +456,8 @@ pub struct LinkedAbilitySource {
 /// `PartialEq`/`Eq` exist only because the containing link types derive `Eq`;
 /// two `Granted` suppliers are equal but don't establish a strict pair.
 /// Use [`ExileSupplier::pairs_with`] for strict pairing. Latched and LKI
-/// trigger reads apply a separate compatibility fallback.
+/// trigger reads apply a separate compatibility fallback
+/// (`pair_compatible` in `game/players.rs`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
 pub enum ExileSupplier {

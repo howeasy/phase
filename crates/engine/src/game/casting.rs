@@ -4204,18 +4204,11 @@ fn has_exile_cast_permission(
             crate::types::ability::CastingPermission::ExileWithEnergyCost => {
                 !alt_rider && obj.owner == player
             }
-            crate::types::ability::CastingPermission::ExileWithAltCost {
-                cost_provenance, ..
-            } => {
+            crate::types::ability::CastingPermission::ExileWithAltCost { .. } => {
                 // CR 702.168b + CR 118.9a: a `NormalCost` grant restates the
                 // card's own printed cost — a normal cast route that admits
                 // an alternative-cost rider; an `Alternative` grant does not.
-                (!alt_rider
-                    || matches!(
-                        cost_provenance,
-                        crate::types::ability::ExileGrantCostProvenance::NormalCost
-                    ))
-                    && exile_alt_cost_permission_supports_cast(state, obj, player, p, None)
+                exile_alt_cost_slot_admits_cast(state, obj, player, p, alt_rider)
             }
             crate::types::ability::CastingPermission::ExileWithAltAbilityCost { .. } => {
                 !alt_rider && exile_alt_cost_permission_supports_cast(state, obj, player, p, None)
@@ -4769,6 +4762,79 @@ fn simulate_chosen_split_spell_back_face(obj: &mut crate::game::game_object::Gam
     obj.cast_face_committed = true;
 }
 
+/// CR 118.9a + CR 601.2b + CR 702.168b: does this `ExileWithAltCost` slot lend
+/// zone authority to the cast? A variant that brings its own independent
+/// alternative cost (`alt_rider`) rides only a normal-cost grant
+/// (`CastingPermission::is_normal_cost_authority_for_rider`: an `Alternative`
+/// grant underneath it would be a second alternative cost); any other variant
+/// takes every functioning slot. The one per-slot admission rule behind both
+/// `has_exile_cast_permission` and `selected_rider_zone_authority_permission_index`,
+/// so admission and the budget read cannot diverge.
+fn exile_alt_cost_slot_admits_cast(
+    state: &GameState,
+    obj: &crate::game::game_object::GameObject,
+    player: PlayerId,
+    permission: &crate::types::ability::CastingPermission,
+    alt_rider: bool,
+) -> bool {
+    (!alt_rider || permission.is_normal_cost_authority_for_rider())
+        && exile_alt_cost_permission_supports_cast(state, obj, player, permission, None)
+}
+
+/// CR 601.2a + CR 118.9a + CR 608.2c + CR 611.2a: the object grant that lends
+/// zone authority to a cast that elects no cost slot, read ONLY to charge that
+/// grant's shared cast budget (`ExileWithAltCost::single_use_group`) — never to
+/// prepare or modify the cast's cost.
+///
+/// A variant that brings its own independent alternative cost
+/// (`CastingVariant::is_independent_alternative_cost_rider`: the face-down {3},
+/// Evoke, Bestow, ...) deliberately elects no `ExileWithAltCost` slot in
+/// `selected_object_cast_permission_index` (electing a `NormalCost` grant would
+/// substitute its restated cost for the rider's own), yet
+/// `has_exile_cast_permission` admits it through that grant's zone authority
+/// (`exile_alt_cost_slot_admits_cast`, the same predicate). The cast spends
+/// that grant's budget: "a spell" is one cast (CR 608.2c).
+///
+/// Binding: at finalize, by rescan. The engine elects object grants
+/// automatically (`GameAction::CastSpell` carries no grant selector, as in
+/// `selected_object_cast_permission_index`). Precedence: among admitting slots
+/// that carry a `single_use_group`, the first in vector order is charged. This
+/// differs from `selected_object_cast_permission_index` (first supporting slot,
+/// whatever its group) on purpose: a groupless slot has no budget to charge and
+/// must not shadow a later budget-bearing slot. It is consulted only when no
+/// index was elected, so an elected `PlayFromExile` slot is never overridden.
+///
+/// Named limit: non-rider variants that elect no slot (Adventure, Prototype,
+/// Plot, Madness, ExilePermission, the graveyard keywords, ...) are route-coupled
+/// to their own permission; no printed Serpent's-Soul-Jar-class pile card
+/// exercises them, so they are not covered here. A static/Adventure route that
+/// also admits the same cast is likewise not arbitrated against the grant.
+pub(super) fn selected_rider_zone_authority_permission_index(
+    state: &GameState,
+    obj: &crate::game::game_object::GameObject,
+    player: PlayerId,
+    casting_variant: Option<CastingVariant>,
+) -> Option<CastingPermissionIndex> {
+    if obj.zone != Zone::Exile
+        || !casting_variant.is_some_and(CastingVariant::is_independent_alternative_cost_rider)
+    {
+        return None;
+    }
+    obj.casting_permissions
+        .iter()
+        .enumerate()
+        .find(|(_, permission)| {
+            matches!(
+                permission,
+                CastingPermission::ExileWithAltCost {
+                    single_use_group: Some(_),
+                    ..
+                }
+            ) && exile_alt_cost_slot_admits_cast(state, obj, player, permission, true)
+        })
+        .map(|(index, _)| CastingPermissionIndex(index))
+}
+
 pub(super) fn exile_alt_cost_permission_supports_cast(
     state: &GameState,
     obj: &crate::game::game_object::GameObject,
@@ -4806,7 +4872,9 @@ pub(super) fn exile_alt_cost_permission_supports_cast(
 
 /// CR 601.2a: Read the object-attached alternative-cost permission elected for
 /// this cast. New casts carry an exact vector index; `None` preserves the
-/// legacy first-compatible lookup for old serialized pending casts only.
+/// legacy first-compatible lookup for old serialized pending casts only. The
+/// shared-budget reader (`selected_exile_alt_cost_permission_single_use_group`)
+/// never uses that legacy lookup: an absent index elects no grant for it.
 fn selected_exile_alt_cost_permission<'a>(
     state: &GameState,
     obj: &'a crate::game::game_object::GameObject,
@@ -5088,8 +5156,11 @@ pub(super) fn selected_exile_alt_cost_permission_graveyard_replacement(
 /// CR 608.2c + CR 611.2a: the shared cast budget the cast of `object_id` spends:
 /// the `single_use_group` of the `ExileWithAltCost` permission elected for THIS
 /// cast, read before the stack move drops the object's permissions. An absent
-/// index elects no object grant here (e.g. a static `ExilePermission` cast);
-/// the legacy first-compatible lookup cannot authorize spending a group.
+/// index elects no object grant here (e.g. a static `ExilePermission` cast), so
+/// a legacy serialized pending cast with no index spends no budget; the legacy
+/// first-compatible lookup cannot authorize spending a group. A rider cast
+/// that elects no cost slot passes the index from
+/// `selected_rider_zone_authority_permission_index` instead.
 pub(super) fn selected_exile_alt_cost_permission_single_use_group(
     state: &GameState,
     object_id: ObjectId,
@@ -5379,9 +5450,10 @@ pub(super) fn selected_object_cast_permission_index(
         // elects an `ExileWithAltCost` slot — even a `NormalCost` grant only
         // lends zone authority (`has_exile_cast_permission`), while the
         // cast's cost is the rider's own; electing the slot would let cost
-        // preparation substitute the grant's restated cost for it. Named
-        // limit: a `single_use` normal-cost grant is therefore not consumed
-        // by a rider cast through it.
+        // preparation substitute the grant's restated cost for it. A
+        // `single_use` normal-cost grant is still consumed by a rider cast
+        // through it: finalize charges its budget via the separate
+        // `selected_rider_zone_authority_permission_index`.
         Some(CastingVariant::FaceDown) => None,
         _ => None,
     };

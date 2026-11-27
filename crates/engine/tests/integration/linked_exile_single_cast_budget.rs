@@ -16,8 +16,8 @@
 
 use engine::ai_support::legal_actions;
 use engine::game::scenario::{GameRunner, GameScenario, P0};
-use engine::types::actions::GameAction;
-use engine::types::game_state::ExileLink;
+use engine::types::actions::{AlternativeCastDecision, GameAction};
+use engine::types::game_state::{CastPaymentMode, ExileLink, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
@@ -272,5 +272,234 @@ fn serpents_soul_jar_grants_one_creature_cast_across_its_pile() {
     assert!(
         !cast_is_offered(&runner, second),
         "the one cast the grant allows is spent: the other Elf is not castable"
+    );
+}
+
+const BIRCHLORE_RANGERS: &str = "Tap two untapped Elves you control: Add one mana of any color.\n\
+     Morph {G} (You may cast this card face down as a 2/2 creature for {3}. Turn it face up any \
+     time for its morph cost.)";
+
+const PATRON_OF_THE_WILD: &str = "Morph {2}{G} (You may cast this card face down as a 2/2 \
+     creature for {3}. Turn it face up any time for its morph cost.)\n\
+     When this creature is turned face up, target creature gets +3/+3 until end of turn.";
+
+/// Cast `card` and, when the engine asks for the casting method, elect the
+/// face-down alternative (CR 702.37c); then pass priority until it resolves.
+fn cast_face_down_to_resolution(runner: &mut GameRunner, card: ObjectId) {
+    let card_id = runner.state().objects[&card].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: card,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("the granted card is cast");
+    if matches!(
+        runner.state().waiting_for,
+        WaitingFor::AlternativeCastChoice { .. }
+    ) {
+        runner
+            .act(GameAction::ChooseAlternativeCast {
+                choice: AlternativeCastDecision::Alternative,
+            })
+            .expect("elect the face-down alternative");
+    }
+    assert!(
+        runner.state().objects[&card].face_down,
+        "reach-guard: the cast is the face-down cast"
+    );
+    for _ in 0..10 {
+        if runner.state().stack.is_empty() {
+            return;
+        }
+        runner.act(GameAction::PassPriority).expect("pass priority");
+    }
+    panic!("the face-down cast did not resolve");
+}
+
+/// A scenario with a Soul-Jar and two real printed morph Elves on the
+/// battlefield; the caller kills them with Murder so the Jar's own dies trigger
+/// builds the pile.
+struct MorphPile {
+    runner: GameRunner,
+    jar: ObjectId,
+    first: ObjectId,
+    second: ObjectId,
+    key: Option<ObjectId>,
+    lands: Vec<ObjectId>,
+}
+
+fn morph_pile(with_key: bool, land_count: usize) -> MorphPile {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let jar = scenario
+        .add_artifact_from_oracle(P0, "Serpent's Soul-Jar", SERPENTS_SOUL_JAR)
+        .with_mana_cost(cost(&[ManaCostShard::Black], 2))
+        .id();
+    let first = scenario
+        .add_creature(P0, "Birchlore Rangers", 1, 1)
+        .from_oracle_text(BIRCHLORE_RANGERS)
+        .with_subtypes(vec!["Elf", "Druid", "Shaman"])
+        .with_mana_cost(cost(&[ManaCostShard::Green], 0))
+        .id();
+    let second = scenario
+        .add_creature(P0, "Patron of the Wild", 1, 1)
+        .from_oracle_text(PATRON_OF_THE_WILD)
+        .with_subtypes(vec!["Elf", "Shaman"])
+        .with_mana_cost(cost(&[ManaCostShard::Green], 0))
+        .id();
+    let key = with_key.then(|| {
+        scenario
+            .add_artifact_from_oracle(P0, "Voltaic Key", VOLTAIC_KEY)
+            .with_mana_cost(cost(&[], 1))
+            .id()
+    });
+    let murders: Vec<ObjectId> = (0..2)
+        .map(|_| {
+            scenario
+                .add_spell_to_hand_from_oracle(P0, "Murder", true, MURDER)
+                .with_mana_cost(cost(&[ManaCostShard::Black, ManaCostShard::Black], 1))
+                .id()
+        })
+        .collect();
+    // Half the lands are green, half blue: whichever {3} the face-down casts
+    // pay, a second {3} stays payable afterwards.
+    let lands: Vec<ObjectId> = (0..land_count)
+        .map(|i| {
+            scenario.add_basic_land(
+                P0,
+                if i % 2 == 0 {
+                    ManaColor::Green
+                } else {
+                    ManaColor::Blue
+                },
+            )
+        })
+        .collect();
+    scenario.with_mana_pool(
+        P0,
+        (0..6)
+            .map(|_| ManaUnit::new(ManaType::Black, ObjectId(0), false, vec![]))
+            .collect(),
+    );
+    let mut runner = scenario.build();
+    for (murder, card) in murders.iter().zip([first, second]) {
+        runner.cast(*murder).target_object(card).resolve();
+        assert_eq!(
+            runner.state().objects[&card].zone,
+            Zone::Exile,
+            "the Jar's dies trigger exiled the dead Elf"
+        );
+    }
+    MorphPile {
+        runner,
+        jar,
+        first,
+        second,
+        key,
+        lands,
+    }
+}
+
+/// CR 608.2c + CR 611.2a + CR 702.37c: the Soul-Jar's one creature-spell cast is
+/// spent by a FACE-DOWN cast through it too. The grant is a normal-cost
+/// authority that admits the face-down rider (CR 118.9a: the {3} is the cost,
+/// the grant only lends zone authority), so the cast must be charged to the
+/// grant's shared budget even though the face-down cast elects no cost slot.
+#[test]
+fn soul_jar_face_down_cast_spends_the_grants_single_cast_budget() {
+    let MorphPile {
+        mut runner,
+        jar,
+        first,
+        second,
+        lands,
+        ..
+    } = morph_pile(false, 6);
+    runner.activate(jar, 0).resolve();
+    assert!(cast_is_offered(&runner, first));
+    assert!(
+        cast_is_offered(&runner, second),
+        "reach-guard: the second Elf is castable before the first cast"
+    );
+    assert_eq!(tapped_count(&runner, &lands), 0);
+
+    cast_face_down_to_resolution(&mut runner, first);
+    assert_eq!(runner.state().objects[&first].zone, Zone::Battlefield);
+    assert!(runner.state().objects[&first].face_down);
+    assert_eq!(
+        tapped_count(&runner, &lands),
+        3,
+        "the face-down {{3}} is paid, not the grant's {{G}}"
+    );
+    let untapped = lands.len() - tapped_count(&runner, &lands);
+    assert!(
+        untapped >= 3,
+        "reach-guard: a second face-down {{3}} stays affordable ({untapped} lands untapped)"
+    );
+    assert!(
+        !cast_is_offered(&runner, second),
+        "the one cast the grant allows is spent: the second Elf is not castable, face up or down"
+    );
+    let second_card_id = runner.state().objects[&second].card_id;
+    assert!(
+        runner
+            .act(GameAction::CastSpell {
+                object_id: second,
+                card_id: second_card_id,
+                targets: vec![],
+                payment_mode: CastPaymentMode::Auto,
+            })
+            .is_err(),
+        "dispatching the second cast directly is refused"
+    );
+    assert_eq!(runner.state().objects[&second].zone, Zone::Exile);
+}
+
+/// Two Jar activations on one pile are two grants (two groups): a face-down
+/// cast spends exactly one of them (the first in vector order), and the other
+/// group's cast remains available for the sibling card.
+#[test]
+fn soul_jar_two_activations_face_down_spend_one_group_per_cast() {
+    let MorphPile {
+        mut runner,
+        jar,
+        first,
+        second,
+        key,
+        lands,
+    } = morph_pile(true, 8);
+    let key = key.expect("the Key is on the battlefield");
+    runner.activate(jar, 0).resolve();
+    runner.activate(key, 0).target_object(jar).resolve();
+    assert!(
+        !runner.state().objects[&jar].tapped,
+        "Voltaic Key untapped the Jar"
+    );
+    runner.activate(jar, 0).resolve();
+    assert_eq!(runner.state().exile_play_single_use_consumed.len(), 0);
+
+    cast_face_down_to_resolution(&mut runner, first);
+    assert_eq!(
+        runner.state().exile_play_single_use_consumed.len(),
+        1,
+        "exactly one activation's budget is spent by the first face-down cast"
+    );
+    assert!(
+        cast_is_offered(&runner, second),
+        "the second activation's grant is still unspent"
+    );
+    cast_face_down_to_resolution(&mut runner, second);
+    assert_eq!(runner.state().objects[&second].zone, Zone::Battlefield);
+    assert_eq!(
+        runner.state().exile_play_single_use_consumed.len(),
+        2,
+        "the second face-down cast spends the other activation's budget"
+    );
+    assert_eq!(
+        tapped_count(&runner, &lands),
+        1 + 3 + 3,
+        "the Key's {{1}} plus one face-down {{3}} per cast"
     );
 }

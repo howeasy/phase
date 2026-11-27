@@ -63700,3 +63700,81 @@ fn shared_exile_alt_cost_budget_is_spent_only_by_the_elected_permission() {
         "the elected permission spends its own budget"
     );
 }
+
+/// CR 118.9a + CR 601.2a: the rider zone-authority read charges only a
+/// normal-cost grant that carries a budget. An `Alternative`-provenance grant
+/// (a free or substitute cost) is not admitted under a face-down rider, a
+/// groupless slot never shadows a later budget-bearing one, and a non-rider
+/// variant elects through `selected_object_cast_permission_index` instead.
+#[test]
+fn rider_zone_authority_index_reads_only_budgeted_normal_cost_grants() {
+    use crate::types::ability::ExileGrantCostProvenance::{Alternative, NormalCost};
+
+    let grant = |cost_provenance, single_use_group| CastingPermission::ExileWithAltCost {
+        source_id: None,
+        cost_provenance,
+        cost: ManaCost::zero(),
+        cast_transformed: false,
+        constraint: None,
+        granted_to: None,
+        resolution_cleanup: None,
+        duration: None,
+        graveyard_replacement: None,
+        mana_spend_permission: None,
+        enters_with_counter: None,
+        enters_with_modifications: Default::default(),
+        cast_cost_modifier: None,
+        single_use_group,
+    };
+    let mut state = setup_game_at_main_phase();
+    let exiled = create_object(
+        &mut state,
+        CardId(91),
+        PlayerId(0),
+        "Exiled Creature".to_string(),
+        Zone::Exile,
+    );
+    let read = |state: &GameState, variant| {
+        selected_rider_zone_authority_permission_index(
+            state,
+            &state.objects[&exiled],
+            PlayerId(0),
+            variant,
+        )
+    };
+
+    state.objects.get_mut(&exiled).unwrap().casting_permissions = vec![
+        grant(Alternative, Some(TrackedSetId(5))),
+        grant(NormalCost, None),
+        grant(NormalCost, Some(TrackedSetId(7))),
+        grant(NormalCost, Some(TrackedSetId(8))),
+    ];
+    assert_eq!(
+        read(&state, Some(CastingVariant::FaceDown)),
+        Some(CastingPermissionIndex(2)),
+        "the first normal-cost slot with a budget is charged: not the Alternative grant, not the groupless slot"
+    );
+    assert_eq!(
+        read(&state, Some(CastingVariant::Normal)),
+        None,
+        "a non-rider variant elects through selected_object_cast_permission_index"
+    );
+    assert_eq!(read(&state, None), None);
+
+    state.objects.get_mut(&exiled).unwrap().casting_permissions =
+        vec![grant(Alternative, Some(TrackedSetId(5)))];
+    assert_eq!(
+        read(&state, Some(CastingVariant::FaceDown)),
+        None,
+        "an Alternative-provenance grant lends no zone authority to a face-down rider"
+    );
+
+    state.objects.get_mut(&exiled).unwrap().casting_permissions =
+        vec![grant(NormalCost, Some(TrackedSetId(7)))];
+    state.exile_play_single_use_consumed.insert(TrackedSetId(7));
+    assert_eq!(
+        read(&state, Some(CastingVariant::FaceDown)),
+        None,
+        "a spent budget no longer authorizes a cast"
+    );
+}

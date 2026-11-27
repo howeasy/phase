@@ -16111,12 +16111,28 @@ fn finalize_cast_with_phyrexian_choices_inner(
     // ("you may cast a spell from among cards exiled with this enchantment" —
     // Court of Locthwain), read from the elected permission before the move drops
     // it, like the `PlayFromExile` group above.
+    //
+    // CR 118.9a + CR 601.2a: a cast whose own independent alternative cost
+    // (the face-down {3}, Evoke, Bestow, ...) elects no cost slot is still
+    // admitted through a normal-cost grant's zone authority; that authority is
+    // what the shared budget is charged to. It feeds ONLY this group lookup —
+    // cost preparation and every other reader keep `casting_permission_index`.
+    let budget_permission_index = casting_permission_index.or_else(|| {
+        state.objects.get(&object_id).and_then(|obj| {
+            super::casting::selected_rider_zone_authority_permission_index(
+                state,
+                obj,
+                player,
+                Some(casting_variant),
+            )
+        })
+    });
     let single_use_alt_cost_group =
         super::casting::selected_exile_alt_cost_permission_single_use_group(
             state,
             object_id,
             player,
-            casting_permission_index,
+            budget_permission_index,
         );
 
     // CR 614.1a + CR 608.2n + CR 400.7 / CR 113.6e: Capture the `CastFromZone`
