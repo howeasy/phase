@@ -1,3 +1,4 @@
+use crate::game::conditions::eval_is_monarch;
 use crate::game::cost_payability::AbilityCostPayability;
 use crate::game::game_object::{CastOrigin, GameObject};
 use crate::types::ability::{
@@ -257,6 +258,34 @@ pub(crate) fn open_flash_timing_routes(
     .collect()
 }
 
+/// CR 601.3 + CR 702.62a: could `player` begin to cast the noninstant hand card `object_id` at
+/// instant speed, as things stand now? The begin-to-cast sibling of
+/// [`spell_confined_to_sorcery_timing`], for suspend's "If you could begin to cast this card": a
+/// granted alternative cost counts even if it can't be paid (CR 601.3c), and Sneak counts only in
+/// its own window.
+fn hand_cast_may_begin_at_instant_speed(
+    state: &crate::types::game_state::GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+) -> bool {
+    // CR 702.190a + CR 805.4a: "Any time you could cast an instant during your declare blockers
+    // step" (Bobby, Another Dwarf gives sneak to Ith, High Arcanist in hand).
+    let sneak_window = state.phase == Phase::DeclareBlockers
+        && super::players::is_turn_player(state, player)
+        && super::keywords::effective_sneak_cost(state, object_id).is_some();
+    sneak_window
+        || !open_flash_timing_routes(state, player, object_id, CastingVariant::Normal).is_empty()
+        // CR 601.3c: Primal Prayers, with or without {E} to pay.
+        || super::casting::granted_spell_alternative_cost_for(
+            state,
+            player,
+            object_id,
+            false,
+            Some(CastTimingPermission::AsThoughHadFlash),
+        )
+        .is_some()
+}
+
 /// CR 307.5 + CR 602.5d: Is `player`'s activation of ability `ability_index`
 /// of `source_id` confined to sorcery timing now? It is when one of its
 /// activation restrictions confines it (`restriction_confines_to_sorcery_timing`,
@@ -264,8 +293,8 @@ pub(crate) fn open_flash_timing_routes(
 /// timing as `AsSorcery`, the restriction the loyalty authority reads. The
 /// ability is resolved through the activation authority's own lookup, so
 /// runtime-granted abilities are covered. A `MatchesCardCastTiming` ability is
-/// read by the source's card type only, as legality reads it; a flash route
-/// for the card is not consulted. The sorcery window is not tested. A missing
+/// read for beginning the cast (flash routes count, prohibitions don't), as
+/// legality reads its timing. The sorcery window is not tested. A missing
 /// object or ability makes no claim.
 pub fn ability_confined_to_sorcery_timing(
     state: &crate::types::game_state::GameState,
@@ -707,7 +736,10 @@ fn entry_type_filter_matches(
         // Exhaustive on purpose: a new `TypeFilter` variant must fail to compile rather
         // than silently join this arm while `ledger_filter_is_evaluable`
         // keeps reporting type filters evaluable.
-        TypeFilter::Instant | TypeFilter::Sorcery => false,
+        // CR 314.1: scheme cards are nontraditional cards that are never
+        // permanents and never enter the battlefield, so a battlefield-entry
+        // record is never a scheme either.
+        TypeFilter::Instant | TypeFilter::Sorcery | TypeFilter::Scheme => false,
     }
 }
 
@@ -1418,14 +1450,15 @@ fn restriction_confines_to_sorcery_timing(
             };
             !permitted
         }
-        // CR 702.62a: "If you could begin to cast this card": a noninstant
-        // card is confined to its sorcery timing. A missing source makes no
-        // claim; legality refuses it separately. Only the card type is read,
-        // as legality has always read it.
-        ActivationRestriction::MatchesCardCastTiming => state
-            .objects
-            .get(&source_id)
-            .is_some_and(|obj| !obj.card_types.core_types.contains(&CoreType::Instant)),
+        // CR 702.62a: "If you could begin to cast this card": confined unless the card is an
+        // instant (CR 304.1) or its cast could begin at instant speed now. A missing source
+        // makes no claim; legality refuses it separately.
+        ActivationRestriction::MatchesCardCastTiming => {
+            state.objects.get(&source_id).is_some_and(|obj| {
+                !obj.card_types.core_types.contains(&CoreType::Instant)
+                    && !hand_cast_may_begin_at_instant_speed(state, player, source_id)
+            })
+        }
         // Not sorcery timing: other windows, activation counts, conditions
         // and source states.
         ActivationRestriction::AsInstant
@@ -1478,23 +1511,21 @@ fn activation_restriction_applies(
             matches!(state.waiting_for, crate::types::WaitingFor::Priority { player: holder } if holder == player)
                 && state.pending_cast.is_none()
         }
-        // CR 702.62a: "If you could begin to cast this card by putting it onto the
-        // stack from your hand" — defer to the underlying card type's natural
-        // cast timing. Instants activate any time priority is held; sorceries
-        // (and other non-instant card types) require the sorcery-speed window.
-        // Used by Suspend's hand-activated ability so future
-        // cast-timing-mirroring activations (Foretell, etc.) reuse this primitive.
-        // A missing source can't be activated.
+        // CR 702.62a + CR 702.62c: "If you could begin to cast this card by putting it onto the
+        // stack from your hand": its timing, split second, and the prohibitions checked by the cast
+        // proposal. The window is tested first, so the flash scans run only outside it. A missing
+        // source can't be activated.
         ActivationRestriction::MatchesCardCastTiming => {
-            state.objects.contains_key(&source_id)
-                && (!restriction_confines_to_sorcery_timing(
+            (is_sorcery_speed_window(state, player)
+                || !restriction_confines_to_sorcery_timing(
                     state,
                     player,
                     source_id,
                     ability_index,
                     restriction,
                     Some(gates),
-                ) || is_sorcery_speed_window(state, player))
+                ))
+                && super::casting::hand_cast_may_begin(state, player, source_id)
         }
         ActivationRestriction::DuringYourTurn => state.active_player == player,
         ActivationRestriction::DuringYourUpkeep => {
@@ -2223,6 +2254,11 @@ fn evaluate_condition_for_granter(
         // CR 702.131c: The city's blessing is a player designation that effects
         // and restrictions may identify.
         ParsedCondition::HasCityBlessing => state.city_blessing.contains(&player),
+        // CR 725.1: "if you're the monarch" reads the monarch designation off
+        // the activating player (CR 109.5), not off the source's controller —
+        // CR 602.2 can let someone else activate the ability. If no player
+        // is the monarch, the leaf is false.
+        ParsedCondition::IsMonarch => eval_is_monarch(state, player),
         // CR 702.195b: The enduring story is a player designation effects and
         // restrictions may identify.
         ParsedCondition::HasEnduringStory => state.enduring_story.contains(&player),
@@ -2660,14 +2696,30 @@ pub(crate) fn target_dependent_flash_permission_feasible(
 /// active player (or, under the shared team turns option, any player on the
 /// active team — CR 805.5a: "A player may cast a spell, activate an ability,
 /// or take a special action when their team has priority") has priority.
+/// CR 805.4a + CR 805.5a: whether `player` may act on the active turn — the
+/// active player themselves, or any living teammate when the active player's
+/// side takes shared team turns (the turn-structure predicate in
+/// `topology::side_takes_shared_turn`, so a future individual-turn team
+/// format stays correctly excluded).
+/// The single membership authority behind `is_sorcery_speed_window` and the
+/// teammate-aware special-action gates (foretell, ninjutsu-family offers,
+/// room unlocks): one spelling, so offer and enforcement cannot drift.
+pub(crate) fn acts_on_active_turn(
+    state: &crate::types::game_state::GameState,
+    player: PlayerId,
+) -> bool {
+    state.active_player == player
+        || (super::topology::side_takes_shared_turn(state, state.active_player)
+            && super::topology::team_members(state, state.active_player).contains(&player))
+}
+
 pub(crate) fn is_sorcery_speed_window(
     state: &crate::types::game_state::GameState,
     player: PlayerId,
 ) -> bool {
     matches!(state.phase, Phase::PreCombatMain | Phase::PostCombatMain)
         && state.stack.is_empty()
-        && (state.active_player == player
-            || super::players::teammates(state, state.active_player).contains(&player))
+        && acts_on_active_turn(state, player)
 }
 
 /// CR 506.1: the combat phase a "before <combat step>" window is measured in.
