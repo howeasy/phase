@@ -1813,7 +1813,6 @@ Devour counters belong only to that entrant's event, never the next copy's batch
 - Barreling Attack
 - Become the Pilot
 - Benalish Partisan
-- Bestial Menace
 - Bile Blight
 - Blood Sun
 - Brass Herald
