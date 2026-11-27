@@ -10496,7 +10496,9 @@ fn parse_spell_history_origin_props(input: &str) -> Option<(Vec<FilterProp>, usi
     })
 }
 
-fn parse_cast_origin_anywhere_other_than_suffix(input: &str) -> Option<(Vec<FilterProp>, usize)> {
+pub(crate) fn parse_cast_origin_anywhere_other_than_suffix(
+    input: &str,
+) -> Option<(Vec<FilterProp>, usize)> {
     let trimmed = input.trim_start();
     let leading_ws = input.len() - trimmed.len();
     let (rest, _) = tag::<_, _, OracleError<'_>>("from anywhere other than ")

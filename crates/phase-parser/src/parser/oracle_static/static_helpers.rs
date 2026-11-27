@@ -663,11 +663,18 @@ pub(crate) fn try_parse_cost_modification(
                 // "from anywhere other than your hand" is the NEGATION of a zone
                 // match, so it becomes a `Not(InZone)` origin predicate rather than
                 // a zone list (Savvy Trader, Fortune Teller's Talent).
-                if let Ok((_, prop)) = all_consuming(preceded(
-                    tag::<_, _, OracleError<'_>>(" from "),
-                    crate::parser::oracle_trigger::parse_cast_origin_not_hand,
-                ))
-                .parse(from_text.trim_end())
+                let origin = from_text.trim();
+                if let Some(prop) = crate::parser::oracle_nom::condition::
+                    parse_cast_origin_anywhere_other_than_suffix(origin)
+                    .filter(|(_, consumed)| *consumed == origin.len())
+                    .and_then(|(props, _)| match props.as_slice() {
+                        [prop @ FilterProp::Not { prop: inner }]
+                            if matches!(**inner, FilterProp::InZone { zone: Zone::Hand }) =>
+                        {
+                            Some(prop.clone())
+                        }
+                        _ => None,
+                    })
                 {
                     origin_exclusion = Some(prop);
                 } else if nom_primitives::scan_contains(from_text, "anywhere other than") {

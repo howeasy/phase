@@ -13,10 +13,13 @@
 //! pool (any mis-charge leaves the pool non-empty and fails the test), and
 //! every card has a control cast that must pay its full printed cost.
 //!
-//! The suite reads the committed integration card fixture, which already
-//! holds the post-fix parse of Advanced Reconstruction (the
-//! `Not(InZone(Hand))` spell filter on the level 3 static) and the printed
-//! entries for Savvy Trader, Sage of the Beyond, and Fortune Teller's Talent.
+//! The suite parses a small raw-MTGJSON fixture
+//! (`fixtures/cost_mod_cast_origin_atomic.json`: the four printed cards, the
+//! filler spells and basic lands) through `CardDatabase::from_mtgjson`, so the
+//! parser change is on the tested path.
+
+use std::path::Path;
+use std::sync::OnceLock;
 
 use engine::database::card_db::CardDatabase;
 use engine::game::casting::display_spell_cost;
@@ -35,10 +38,18 @@ use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
 use engine::types::zones::Zone;
 
-use crate::support::shared_card_db;
-
+/// The printed cards from a small raw-MTGJSON fixture, so every witness runs the
+/// production parser on the real Oracle text: reverting the parser fix reverts
+/// these cards' parse.
 fn db() -> &'static CardDatabase {
-    shared_card_db().expect("the committed integration card fixture is present")
+    static DB: OnceLock<CardDatabase> = OnceLock::new();
+    DB.get_or_init(|| {
+        CardDatabase::from_mtgjson(
+            &Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fixtures/cost_mod_cast_origin_atomic.json"),
+        )
+        .expect("the raw MTGJSON fixture parses")
+    })
 }
 
 /// A `ManaCost` literal: `cost(1, vec![ManaCostShard::Green])` is `{1}{G}`.
@@ -921,7 +932,7 @@ fn fortune_tellers_talent_level_3_reduces_the_top_of_library_cast_only() {
 /// at the top card of your library any time." Level 2: "As long as you've
 /// cast a spell this turn, you may play cards from the top of your library."
 ///
-/// CR 601.2a: the level 1 static hands P0 the look-at-top permission, which
+/// CR 401.5: the level 1 static hands P0 the look-at-top permission, which
 /// the engine's public display state carries per player
 /// (`can_look_at_top_of_library`); P1 does not get it (the static says
 /// "you"). The level 2 window is printed "As long as you've cast a spell
@@ -1023,7 +1034,7 @@ fn fortune_tellers_talent_level_1_look_and_level_2_spell_cast_gate() {
 /// hand cost {2} less to cast."
 ///
 /// CR 601.2f: leveled to 3 through the real activation actions, the turn's
-/// first main phase (CR 601.2a: the trigger exiles the milled card, and the
+/// first main phase (CR 608.2c: the trigger exiles the milled card; CR 601.2a: the
 /// cast moves it from exile onto the stack) lets P0 cast the exiled
 /// Divination for {U} ({2}{U} minus {2}) while a Divination cast from the
 /// hand pays the full {2}{U}; the level 2 trigger deals exactly 2 damage to
