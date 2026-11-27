@@ -4428,21 +4428,16 @@ fn fold_exact_damage_recipients(
     pins: &mut Option<Arc<Vec<ObjectIncarnationRef>>>,
     records: &[RecordedDamageDealt],
 ) {
-    let mut seen = (records.len() + pins.as_ref().map_or(0, |pins| pins.len()) > 16).then(|| {
-        pins.iter()
-            .flat_map(|pins| pins.iter().copied())
-            .collect::<HashSet<_>>()
-    });
+    let mut seen = pins
+        .iter()
+        .flat_map(|pins| pins.iter().copied())
+        .collect::<HashSet<_>>();
     for pin in records
         .iter()
         .filter(|record| record.amount > 0)
         .filter_map(|record| record.object_pin)
     {
-        let fresh = match &mut seen {
-            Some(seen) => seen.insert(pin),
-            None => pins.as_ref().is_none_or(|pins| !pins.contains(&pin)),
-        };
-        if fresh {
+        if seen.insert(pin) {
             Arc::make_mut(pins.get_or_insert_with(|| Arc::new(vec![]))).push(pin);
         }
     }
@@ -4585,21 +4580,18 @@ pub(super) fn fold_snapshots_into_stack_awaiting_delivery(
 /// `last_effect_amount` / `last_effect_excess_amount`, and stamp `Dealt` onto
 /// `ability` (and its `else_ability` if an `"instead"` override).
 fn finalize_awaiting_damage_result(state: &mut GameState, ability: &mut ResolvedAbility) -> bool {
-    if !matches!(
-        ability.context.direct_damage_result,
-        Some(DamageInstructionResult::AwaitingDelivery { .. })
-    ) {
-        return false;
-    }
     let Some(DamageInstructionResult::AwaitingDelivery {
         amount,
         excess,
         recipient,
         exact_recipients,
         fight_fought_creature,
-    }) = ability.context.direct_damage_result.take()
+    }) = ability
+        .context
+        .direct_damage_result
+        .take_if(|result| matches!(result, DamageInstructionResult::AwaitingDelivery { .. }))
     else {
-        unreachable!("awaiting damage result checked above");
+        return false;
     };
     // CR 608.2c: a prevention replacement inside the paused damage instruction
     // may have stamped `last_effect_count` for its own rider; clear it when the
