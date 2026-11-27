@@ -1316,6 +1316,13 @@ fn kumano_counter_rider_is_spent_by_a_mutate_merge() {
     assert!(
         matches!(r.state().waiting_for, WaitingFor::MutateMergeChoice { player, .. } if player == P0)
     );
+    assert!(
+        r.state()
+            .pending_etb_counters
+            .iter()
+            .any(|(id, _, _)| *id == gemrazer),
+        "the rider was registered for the mutating spell"
+    );
     r.act(GameAction::ChooseMutateMergeSide {
         side: engine::game::merge::MergeSide::Top,
     })
