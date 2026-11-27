@@ -4427,37 +4427,40 @@ fn fold_exact_damage_recipients(
     pins: &mut Arc<Vec<ObjectIncarnationRef>>,
     records: &[RecordedDamageDealt],
 ) {
-    let mut fresh = records
-        .iter()
-        .filter(|record| record.amount > 0)
-        .filter_map(|record| record.object_pin);
-    // An empty fold neither allocates nor takes `Arc::make_mut`'s copy path.
-    let Some(first) = fresh.next() else {
-        return;
+    let eligible = || {
+        records
+            .iter()
+            .filter(|record| record.amount > 0)
+            .filter_map(|record| record.object_pin)
     };
+    let new_eligible = eligible().count();
+    // An empty fold neither allocates nor takes `Arc::make_mut`'s copy path.
+    if new_eligible == 0 {
+        return;
+    }
     let pins = Arc::make_mut(pins);
-    let incoming = std::iter::once(first).chain(fresh);
-    // `records.len()` bounds the incoming pins, so the choice allocates nothing.
-    if pins.len() + records.len() <= EXACT_RECIPIENT_LINEAR_DEDUPE_LIMIT {
-        for pin in incoming {
+    // The path is chosen by the number of NEW eligible pins, so a few receipts folded
+    // into a large accumulator stay allocation-free.
+    if new_eligible <= EXACT_RECIPIENT_LINEAR_DEDUPE_LIMIT {
+        for pin in eligible() {
             if !pins.contains(&pin) {
                 pins.push(pin);
             }
         }
         return;
     }
-    // Large boards: one set built from the accumulator keeps the fold linear while
+    // Bulk folds: one set built from the accumulator keeps the fold linear while
     // first-delivery order is preserved by pushing in arrival order.
     let mut seen: HashSet<ObjectIncarnationRef> = pins.iter().copied().collect();
-    for pin in incoming {
+    for pin in eligible() {
         if seen.insert(pin) {
             pins.push(pin);
         }
     }
 }
 
-/// Accumulated plus incoming pins at or below which the exact-recipient fold dedupes
-/// by linear scan instead of building a set.
+/// New eligible pins at or below which the exact-recipient fold dedupes by linear scan
+/// instead of building a set.
 const EXACT_RECIPIENT_LINEAR_DEDUPE_LIMIT: usize = 16;
 
 /// CR 608.2c: the seed for a damage result whose consumer reads the exact
@@ -36961,9 +36964,21 @@ mod tests {
         let second: Vec<_> = (33..=96).map(|n| exact_damage_record(pin(n), 3)).collect();
         fold_exact_damage_recipients(&mut pins, &second);
         assert_eq!(*pins, (1..=96).map(pin).collect::<Vec<_>>());
-        // An empty fold leaves the accumulator untouched.
+        // Small fold into a large accumulator: one new receipt, a duplicate and a
+        // zero-amount record keep first-delivery order and dedupe.
+        fold_exact_damage_recipients(
+            &mut pins,
+            &[
+                exact_damage_record(pin(200), 1),
+                exact_damage_record(pin(5), 1),
+                exact_damage_record(pin(300), 0),
+            ],
+        );
+        assert_eq!(*pins, (1..=96).chain([200]).map(pin).collect::<Vec<_>>());
+        // An empty fold takes no copy path: the shared accumulator stays shared.
+        let shared = Arc::clone(&pins);
         fold_exact_damage_recipients(&mut pins, &[exact_damage_record(pin(7), 0)]);
-        assert_eq!(pins.len(), 96);
+        assert!(Arc::ptr_eq(&pins, &shared));
     }
 
     fn continuation_die_context_fixture(effect: Effect) -> (GameState, ObjectId, GameEvent) {
