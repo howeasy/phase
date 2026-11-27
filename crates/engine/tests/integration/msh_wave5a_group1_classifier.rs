@@ -93,6 +93,14 @@ fn armed_assailant_equipped_gate_grants_buff_and_menace() {
         .get_mut(&gear)
         .unwrap()
         .attached_to = Some(AttachTarget::Object(assailant));
+    // CR 301.5a: sync the host's `attachments` list, as the attach action does.
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&assailant)
+        .unwrap()
+        .attachments
+        .push(gear);
     recompute(&mut runner);
     assert_eq!(
         power(&runner, assailant),
@@ -111,6 +119,13 @@ fn armed_assailant_equipped_gate_grants_buff_and_menace() {
         .get_mut(&gear)
         .unwrap()
         .attached_to = None;
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&assailant)
+        .unwrap()
+        .attachments
+        .retain(|id| *id != gear);
     recompute(&mut runner);
     assert_eq!(power(&runner, assailant), base, "detached: base power");
     assert!(
@@ -224,6 +239,14 @@ fn patriot_equipped_anthem_buffs_others_not_self() {
         .get_mut(&gear)
         .unwrap()
         .attached_to = Some(AttachTarget::Object(patriot));
+    // CR 301.5a: sync the host's `attachments` list, as the attach action does.
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&patriot)
+        .unwrap()
+        .attachments
+        .push(gear);
     recompute(&mut runner);
     assert_eq!(
         power(&runner, ally),
@@ -243,6 +266,13 @@ fn patriot_equipped_anthem_buffs_others_not_self() {
         .get_mut(&gear)
         .unwrap()
         .attached_to = None;
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&patriot)
+        .unwrap()
+        .attachments
+        .retain(|id| *id != gear);
     recompute(&mut runner);
     assert_eq!(
         power(&runner, ally),

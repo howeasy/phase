@@ -2788,6 +2788,17 @@ pub(crate) fn evaluate_condition_with_context(
     evaluate_condition_inner(state, condition, controller, source_id, context)
 }
 
+fn source_has_attachment_subtype(state: &GameState, source_id: ObjectId, subtype: &str) -> bool {
+    state.objects.get(&source_id).is_some_and(|host| {
+        // CR 702.26b: phased-out attachments do not exist for this check;
+        // `phased_in_attachments` excludes them while their links persist.
+        crate::game::filter::phased_in_attachments(state, host).any(|att| {
+            att.attached_to.and_then(|target| target.as_object()) == Some(source_id)
+                && att.card_types.subtypes.iter().any(|s| s == subtype)
+        })
+    })
+}
+
 fn evaluate_condition_inner(
     state: &GameState,
     condition: &StaticCondition,
@@ -3152,25 +3163,13 @@ fn evaluate_condition_inner(
             .get(&source_id)
             .is_some_and(|obj| obj.controller == *player),
         // CR 301.5a: True when at least one Equipment is attached to the source object.
-        // Mirrors the attacher-is-equipment subtype check from `effects/attach.rs:64-67`.
-        // CR 301.5: Equipment can only attach to objects, so any non-Object host
-        // is rejected by `as_object`.
-        // CR 702.26b: a phased-out attachment is treated as though it does not exist.
-        StaticCondition::SourceIsEquipped => state.objects.values().any(|obj| {
-            obj.attached_to.and_then(|t| t.as_object()) == Some(source_id)
-                && !obj.is_phased_out()
-                && obj.card_types.subtypes.iter().any(|s| s == "Equipment")
-        }),
-        // CR 303.4: True when at least one Aura is attached to the source object.
-        // Aura-twin of `SourceIsEquipped` (CR 301.5a); the only delta is the
-        // subtype check ("Aura" vs "Equipment"). An Aura attaches to objects or
-        // players (CR 303.4), but a creature host is always an Object, so
-        // non-Object hosts are rejected by `as_object`.
-        StaticCondition::SourceIsEnchanted => state.objects.values().any(|obj| {
-            obj.attached_to.and_then(|t| t.as_object()) == Some(source_id)
-                && !obj.is_phased_out()
-                && obj.card_types.subtypes.iter().any(|s| s == "Aura")
-        }),
+        StaticCondition::SourceIsEquipped => {
+            source_has_attachment_subtype(state, source_id, "Equipment")
+        }
+        // CR 303.4b: True when at least one Aura is attached to the source object.
+        StaticCondition::SourceIsEnchanted => {
+            source_has_attachment_subtype(state, source_id, "Aura")
+        }
         // CR 701.37: True when the source permanent is monstrous.
         StaticCondition::SourceIsMonstrous => state
             .objects
@@ -26573,6 +26572,14 @@ mod tests {
             obj.card_types.subtypes.push("Equipment".to_string());
             obj.attached_to = Some(AttachTarget::Object(creature));
         }
+        // CR 301.5a: keep the host's `attachments` list in sync with the
+        // attachment's `attached_to` back-pointer, as the attach action does.
+        state
+            .objects
+            .get_mut(&creature)
+            .unwrap()
+            .attachments
+            .push(equipment);
         assert!(!evaluate_condition_for_test(
             &state,
             &StaticCondition::SourceIsEnchanted,
@@ -26593,6 +26600,13 @@ mod tests {
             obj.card_types.subtypes.push("Aura".to_string());
             obj.attached_to = Some(AttachTarget::Object(creature));
         }
+        // CR 303.4: sync both attachment links, as the attach action does.
+        state
+            .objects
+            .get_mut(&creature)
+            .unwrap()
+            .attachments
+            .push(aura);
         assert!(evaluate_condition_for_test(
             &state,
             &StaticCondition::SourceIsEnchanted,

@@ -38,7 +38,7 @@ use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
 use engine::types::game_state::WaitingFor;
 use engine::types::identifiers::ObjectId;
-use engine::types::mana::{ManaColor, ManaType, ManaUnit};
+use engine::types::mana::{ManaColor, ManaCost, ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::zones::Zone;
 
@@ -623,6 +623,10 @@ fn kaito_shizuki_entered_a_previous_turn_stays_phased_in_at_his_end_step() {
 // Novice Knight (static, same attachment-state arm)
 // ---------------------------------------------------------------------------
 
+const REALITY_RIPPLE: &str = "Target artifact, creature, or land phases out. (While it's phased \
+out, it's treated as though it doesn't exist. It phases in before its controller untaps during \
+their next untap step.)";
+
 /// "Defender\nAs long as this creature is enchanted or equipped, it can attack
 /// as though it didn't have defender."
 /// CR 702.3b + CR 303.4b: a Novice Knight enchanted by a printed Aura (Rancor,
@@ -708,9 +712,10 @@ fn novice_knight_equipped_can_attack_despite_defender() {
     settle_at_declare_attackers_priority(&runner);
 }
 
-/// CR 702.26b: a phased-out Equipment is treated as though it does not exist, so an
-/// equipped Novice Knight whose only attachment has phased out is not "equipped" and
-/// keeps Defender. Paired with the equipped positive above (same board, same equip).
+/// CR 702.26b: when the opponent casts Reality Ripple on the Knight's only
+/// Equipment, the Equipment is treated as though it does not exist, so Defender
+/// still prevents the Knight from attacking. Counting the retained attachment
+/// link would incorrectly offer the Knight as an attacker.
 #[test]
 fn novice_knight_with_only_a_phased_out_equipment_cannot_attack() {
     let db = load_db();
@@ -718,6 +723,11 @@ fn novice_knight_with_only_a_phased_out_equipment_cannot_attack() {
     scenario.at_phase(Phase::PreCombatMain);
     let knight = scenario.add_real_card(P0, "Novice Knight", Zone::Battlefield, db);
     let shuko = scenario.add_real_card(P0, "Shuko", Zone::Battlefield, db);
+    let bears = scenario.add_real_card(P0, "Grizzly Bears", Zone::Battlefield, db);
+    let ripple = scenario
+        .add_spell_to_hand_from_oracle(P1, "Reality Ripple", true, REALITY_RIPPLE)
+        .with_mana_cost(ManaCost::zero())
+        .id();
     let mut runner = scenario.build();
     engine::game::rehydrate_game_from_card_db(runner.state_mut(), db);
 
@@ -731,30 +741,92 @@ fn novice_knight_with_only_a_phased_out_equipment_cannot_attack() {
         Some(AttachTarget::Object(knight)),
         "reach: Shuko must be attached to the Knight (CR 301.5a)"
     );
+    assert!(runner.state().objects[&knight].attachments.contains(&shuko));
 
-    let mut events = Vec::new();
-    engine::game::phasing::phase_out_object(
-        runner.state_mut(),
-        shuko,
-        engine::game::game_object::PhaseOutCause::Directly,
-        &mut events,
+    for _ in 0..4 {
+        match &runner.state().waiting_for {
+            WaitingFor::Priority { player: P1 } => break,
+            WaitingFor::Priority { .. } => {
+                runner.act(GameAction::PassPriority).expect("pass priority");
+            }
+            other => panic!("expected priority before Reality Ripple, got {other:?}"),
+        }
+    }
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { player: P1 }
+    ));
+    runner.cast(ripple).target_object(shuko).commit().resolve();
+
+    // CR 702.26d + CR 702.26i: direct phasing preserves the zone and remembers
+    // the attachment so it can phase in attached to the same host.
+    assert_eq!(runner.state().objects[&shuko].zone, Zone::Battlefield);
+    assert_eq!(
+        runner.state().objects[&shuko].attached_to,
+        Some(AttachTarget::Object(knight))
     );
+    assert!(runner.state().objects[&knight].attachments.contains(&shuko));
     assert!(
         runner.state().objects[&shuko].is_phased_out(),
-        "reach: Shuko is phased out and keeps its attachment link (CR 702.26b)"
+        "reach: the opponent's Reality Ripple phased out Shuko"
     );
     assert!(
         runner.state().objects[&knight].is_phased_in(),
         "reach: the Knight stays phased in"
     );
+    assert!(runner.state().stack.is_empty());
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { player: P0 }
+    ));
 
     runner.advance_to_combat();
+    let WaitingFor::DeclareAttackers {
+        player: P0,
+        valid_attacker_ids,
+        ..
+    } = &runner.state().waiting_for
+    else {
+        panic!(
+            "expected P0's DeclareAttackers prompt, got {:?}",
+            runner.state().waiting_for
+        );
+    };
+    assert!(valid_attacker_ids.contains(&bears), "the Bears can attack");
+    assert!(
+        !valid_attacker_ids.contains(&knight),
+        "the Knight must not be offered as an attacker"
+    );
+    assert_eq!(valid_attacker_ids, &get_valid_attacker_ids(runner.state()));
+    assert!(validate_attackers(runner.state(), &[knight]).is_err());
+    assert!(validate_attackers(runner.state(), &[bears]).is_ok());
     assert!(
         runner
             .declare_attackers(&[(knight, AttackTarget::Player(P1))])
             .is_err(),
         "a Knight whose only Equipment is phased out still has Defender"
     );
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::DeclareAttackers { player: P0, .. }
+    ));
+    assert!(runner
+        .state()
+        .combat
+        .as_ref()
+        .is_none_or(|combat| combat.attackers.is_empty()));
+    assert!(!runner.state().objects[&knight].tapped);
+
+    runner
+        .declare_attackers(&[(bears, AttackTarget::Player(P1))])
+        .expect("the control creature can attack");
+    let combat = runner.state().combat.as_ref().expect("combat state");
+    assert!(combat
+        .attackers
+        .iter()
+        .map(|attacker| attacker.object_id)
+        .eq([bears]));
+    settle_at_declare_attackers_priority(&runner);
 }
 
 /// Negative sibling: the bare Novice Knight keeps Defender (CR 702.3b). The

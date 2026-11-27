@@ -257,6 +257,14 @@ fn cloud_keywords_gated_on_equipped() {
         obj.base_card_types = obj.card_types.clone();
         obj.attached_to = Some(AttachTarget::Object(cloud));
     }
+    // CR 301.5a: sync the host's `attachments` list, as the attach action does.
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&cloud)
+        .unwrap()
+        .attachments
+        .push(sword);
     evaluate_layers(runner.state_mut());
     assert!(
         runner.state().objects[&cloud].has_keyword(&Keyword::DoubleStrike),
@@ -275,6 +283,13 @@ fn cloud_keywords_gated_on_equipped() {
         .get_mut(&sword)
         .unwrap()
         .attached_to = None;
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&cloud)
+        .unwrap()
+        .attachments
+        .retain(|id| *id != sword);
     evaluate_layers(runner.state_mut());
     assert!(
         !runner.state().objects[&cloud].has_keyword(&Keyword::DoubleStrike),

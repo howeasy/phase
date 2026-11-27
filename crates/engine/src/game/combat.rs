@@ -12083,15 +12083,17 @@ mod tests {
     /// cannot type must WITHHOLD the defender exception, never grant it.
     ///
     /// Production (b)'s fallback was a BARE `StaticCondition::Unrecognized`, which
-    /// `evaluate_condition` reads as TRUE — so four corpus cards (Novice Knight,
-    /// Karsus Depthguard, Ichor Aberration, Surveillance Phantasm) attacked with no
-    /// regard for their printed gate. The fallback now routes through
-    /// `unenforceable_gate_marker`, whose `Not(Unrecognized)` reads FALSE while
-    /// coverage still reports the clause as an unimplemented gap.
+    /// `evaluate_condition` reads as TRUE, so a defender creature whose printed gate
+    /// the parser could not type attacked with no regard for that gate. The fallback
+    /// now routes through `unenforceable_gate_marker`, whose `Not(Unrecognized)`
+    /// reads FALSE while coverage still reports the clause as an unimplemented gap.
+    /// Novice Knight is no longer an instance: its gate now parses to a typed
+    /// condition (pinned by `novice_knight_leading_condition_form_parses_the_attachment_gate`),
+    /// so this fixture hand-builds the marker on a Novice-Knight-named carrier instead
+    /// of parsing the card.
     ///
-    /// This is the RUNTIME half of that fix: the parse-side shape is pinned by
-    /// `novice_knight_leading_condition_form_fails_closed` (since renamed `novice_knight_leading_condition_form_parses_the_attachment_gate`: Novice Knight now types its gate), but a condition shape
-    /// alone does not establish that the declaration is actually refused.
+    /// This is the RUNTIME half of that fix: a condition shape alone does not
+    /// establish that the declaration is actually refused.
     ///
     /// TWO-SIDED ON ONE CARRIER SHAPE: the inert marker withholds, and an anchored
     /// condition the engine CAN answer still offers on the same board. Without that
