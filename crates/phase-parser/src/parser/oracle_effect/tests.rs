@@ -75006,7 +75006,7 @@ fn cast_a_spell_from_linked_exile_under_a_duration_shares_one_budget() {
     };
     let one = ResolutionCastWindow {
         max_casts: Some(1),
-        max_total_mv: None,
+        ..ResolutionCastWindow::UNBOUNDED
     };
 
     // Court of Locthwain: the third sentence, behind the monarch condition.
