@@ -136,23 +136,23 @@ use crate::types::ability::{
     ControlWindow, ControllerRef, CopyChooseScope, CopyRetargetPermission, CopyScale,
     DamageModification, DamageSource, DelayedTriggerCondition, DelayedTriggerLifetime,
     DelayedTriggerPlayerBinding, DieResultBranch, DigRestOrder, Duration, EachDamageRecipient,
-    Effect, EffectOutcomeSignal, EffectScope, ExtraPhaseRecipient, FilterProp, GameRestriction,
-    GuardReading, GuessSubject, InstructionJoin, IntensityScope, IterationKindBinding,
-    KeeperConstraint, KeeperCounterMark, LibraryPosition, LibraryShuffleMode, ManaProduction,
-    ManaSpendPermission, ManaTargetRole, MultiTargetSpec, NameStickerSet, NumberDistinctness,
-    ObjectProperty, ObjectScope, ObjectSelectionCardinality, OriginConstraint, PerPlayerScope,
-    PerpetualModification, PlayPermissionInvalidation, PlayerChoiceDistinctness, PlayerFilter,
-    PlayerRelation, PlayerScope, PreventionAmount, PreventionScope, ProhibitedActivity,
-    PropertyAggregate, PtValue, QuantityExpr, QuantityRef, ReciprocalZoneChoiceRole,
-    RepeatForTiming, ReplacementCondition, ReplacementDefinition, ResolutionCastWindow,
-    RestrictionExpiry, RestrictionPlayerScope, RevealUntilDisposition, RoundingMode, SharedQuality,
-    SharedQualityRelation, SiblingCondition, SkipScope, SpellStackToGraveyardReplacement,
-    SpellbookSelection, StaticCondition, StaticDefinition, StepSkipTarget, SubAbilityLink,
-    TapStateChange, TargetFilter, TargetReadOrigin, TargetSelectionMode, ThisWayCause,
-    TokenAttackDestination, TrackedAnaphorSource, TriggerCondition, TriggerDefinition, TurnGate,
-    TypeFilter, TypedFilter, UnlessPayModifier, UnloweredGuard, UntilCondition, VoteSubject,
-    WheneverEventExpiry, ZoneChoiceCandidateSource, ZoneChoiceChooser, ZoneChoiceGatherRole,
-    ZoneOwner,
+    Effect, EffectOutcomeSignal, EffectScope, ExactDamageRecipientReader, ExtraPhaseRecipient,
+    FilterProp, GameRestriction, GuardReading, GuessSubject, InstructionJoin, IntensityScope,
+    IterationKindBinding, KeeperConstraint, KeeperCounterMark, LibraryPosition, LibraryShuffleMode,
+    ManaProduction, ManaSpendPermission, ManaTargetRole, MultiTargetSpec, NameStickerSet,
+    NumberDistinctness, ObjectProperty, ObjectScope, ObjectSelectionCardinality, OriginConstraint,
+    PerPlayerScope, PerpetualModification, PlayPermissionInvalidation, PlayerChoiceDistinctness,
+    PlayerFilter, PlayerRelation, PlayerScope, PreventionAmount, PreventionScope,
+    ProhibitedActivity, PropertyAggregate, PtValue, QuantityExpr, QuantityRef,
+    ReciprocalZoneChoiceRole, RepeatForTiming, ReplacementCondition, ReplacementDefinition,
+    ResolutionCastWindow, RestrictionExpiry, RestrictionPlayerScope, RevealUntilDisposition,
+    RoundingMode, SharedQuality, SharedQualityRelation, SiblingCondition, SkipScope,
+    SpellStackToGraveyardReplacement, SpellbookSelection, StaticCondition, StaticDefinition,
+    StepSkipTarget, SubAbilityLink, TapStateChange, TargetFilter, TargetReadOrigin,
+    TargetSelectionMode, ThisWayCause, TokenAttackDestination, TrackedAnaphorSource,
+    TriggerCondition, TriggerDefinition, TurnGate, TypeFilter, TypedFilter, UnlessPayModifier,
+    UnloweredGuard, UntilCondition, VoteSubject, WheneverEventExpiry, ZoneChoiceCandidateSource,
+    ZoneChoiceChooser, ZoneChoiceGatherRole, ZoneOwner,
 };
 // Imported on its own line rather than folded into the block above: that block
 // is the busiest merge point in this file, and a one-name addition inside it
@@ -34046,10 +34046,8 @@ fn lift_untargeted_declared_slot_destroy(
 }
 
 /// CR 608.2c: the effect of the nearest preceding clause that is not a
-/// continuation — the damage instruction a separate-sentence rider ("... dealt
-/// damage this way ...") attaches to. The single authority for "which clause does
-/// a rider attach to", shared by the regen rider guard and the die-exile
-/// binding ([`bind_die_exile_rider_antecedent`]).
+/// continuation — the damage instruction a separate-sentence regeneration rider
+/// attaches to.
 fn preceding_damage_effect(clauses: &[ClauseIr]) -> Option<&Effect> {
     clauses
         .iter()
@@ -34067,12 +34065,8 @@ fn preceding_damage_effect(clauses: &[ClauseIr]) -> Option<&Effect> {
 /// registry ([`resolve_declared_slot_anaphor`]); the rider then targets
 /// `TargetFilter::ParentTargetSlot { index }`.
 ///
-/// CR 608.2c: the anaphor "a creature / a permanent dealt damage this way" after
-/// a mass-damage clause (`DamageAll`, which declares no slot) names the set that
-/// clause published, so the rider is bound to `TrackedSet{TrackedSetId(0)}` before
-/// the no-declared-slot early returns below would leave it on `Any` (Anger of the
-/// Gods). A single-target damage clause keeps `Any` (its declared target is the
-/// recipient).
+/// CR 608.2c + CR 614.9: “dealt damage this way” instead reads the actual
+/// deliveries of one preceding damage instruction, independent of its slots.
 ///
 /// Unchanged (`Any`) when the preceding clause announces no target, its last
 /// declared slot is the antecedent, or it holds the chain's only declared slot
@@ -34083,24 +34077,32 @@ fn preceding_damage_effect(clauses: &[ClauseIr]) -> Option<&Effect> {
 fn bind_die_exile_rider_antecedent(
     mut rider: AbilityDefinition,
     rider_lower: &str,
+    original_fragment: &str,
     clauses: &[ClauseIr],
     ctx: &ParseContext,
 ) -> AbilityDefinition {
     let subject = tag::<_, _, OracleError<'_>>("if ")
         .parse(rider_lower)
         .map_or(rider_lower, |(rest, _)| rest);
-    if parse_dealt_damage_this_way_subject(subject).is_ok()
-        && matches!(
-            preceding_damage_effect(clauses),
-            Some(Effect::DamageAll { .. })
-        )
-    {
-        if let Effect::AddTargetReplacement { target, .. } = &mut *rider.effect {
-            *target = TargetFilter::TrackedSet {
-                id: TrackedSetId(0),
-            };
+    if parse_dealt_damage_this_way_subject(subject).is_ok() {
+        if let Some(producer) = exact_die_exile_damage_producer(clauses) {
+            if producer.parsed.sub_ability.is_none() {
+                if let Effect::AddTargetReplacement { target, .. } = &mut *rider.effect {
+                    *target = TargetFilter::TrackedSet {
+                        id: TrackedSetId(0),
+                    };
+                }
+                rider.exact_damage_recipient_reader = Some(ExactDamageRecipientReader {});
+                return rider;
+            }
+            if preserves_compound_die_exile_route(producer, ctx) {
+                return rider;
+            }
         }
-        return rider;
+        return AbilityDefinition::new(
+            rider.kind,
+            Effect::unimplemented("die_exile_damage_antecedent", original_fragment),
+        );
     }
     let Some((_, earlier)) = clauses.split_last() else {
         return rider;
@@ -34154,6 +34156,106 @@ fn bind_die_exile_rider_antecedent(
             }
         }
     }
+}
+
+fn exact_die_exile_damage_producer(clauses: &[ClauseIr]) -> Option<&ClauseIr> {
+    // Assembly mirrors die-exile riders across an earlier bargain override.
+    // A receipt reader is valid only on its proven producing branch.
+    if clauses.iter().any(|clause| {
+        matches!(
+            clause.condition,
+            Some(AbilityCondition::AdditionalCostPaidInstead)
+        ) || matches!(
+            clause.parsed.condition,
+            Some(AbilityCondition::AdditionalCostPaidInstead)
+        )
+    }) {
+        return None;
+    }
+    let (mut producer, earlier) = clauses.split_last()?;
+    if matches!(producer.disposition, ClauseDisposition::Continue { .. }) {
+        let preceding = earlier.last()?;
+        let binding = producer.where_x_binding();
+        if preceding.boundary != Some(ClauseBoundary::Comma)
+            || binding.expression.is_none()
+            || binding.expression != preceding.where_x_binding().expression
+        {
+            return None;
+        }
+        producer = preceding;
+    }
+    (matches!(
+        producer.disposition,
+        ClauseDisposition::Emit {
+            followup: None,
+            intrinsic: None
+        }
+    ) && matches!(
+        producer.parsed.effect,
+        Effect::DealDamage {
+            damage_source: None,
+            ..
+        } | Effect::DamageAll {
+            damage_source: None,
+            ..
+        }
+    ) && producer.parsed.distribute.is_none()
+        && !producer.parsed.optional
+        && !producer.is_optional
+        && producer.condition.is_none()
+        && producer.parsed.condition.is_none()
+        && producer.parsed.unlowered_guard.is_none()
+        && producer.opponent_may_scope.is_none()
+        && producer.repeat_for.is_none()
+        && producer.player_scope.is_none()
+        && producer.delayed_condition.is_none()
+        && producer.prefix_delayed_condition.is_none()
+        && producer.unless_pay.is_none()
+        && producer.parsed.unless_pay.is_none())
+    .then_some(producer)
+}
+
+fn preserves_compound_die_exile_route(producer: &ClauseIr, ctx: &ParseContext) -> bool {
+    let parsed = &producer.parsed;
+    let mandatory_damage_target = |effect: &Effect| {
+        matches!(effect, Effect::DealDamage {
+            amount: QuantityExpr::Fixed { .. }, damage_source: None, excess: None, target,
+        } if lower::target_filter_is_single_object_target(target))
+    };
+    if parsed.multi_target.is_some()
+        || producer.multi_target.is_some()
+        || parsed.optional_targeting
+        || !mandatory_damage_target(&parsed.effect)
+    {
+        return false;
+    }
+    let mut node = parsed.sub_ability.as_deref();
+    while let Some(step) = node {
+        if !mandatory_damage_target(&step.effect)
+            || step.condition.is_some()
+            || step.else_ability.is_some()
+            || step.optional
+            || step.optional_targeting
+            || step.multi_target.is_some()
+            || step.distribute.is_some()
+            || step.repeat_for.is_some()
+            || step.unless_pay.is_some()
+        {
+            return false;
+        }
+        node = step.sub_ability.as_deref();
+    }
+    let Some(text) = producer.source.fragment() else {
+        return false;
+    };
+    try_parse_multi_target_damage_chain_inner(
+        text,
+        &mut ctx.clone(),
+        DamageTargetContext::FreshClause,
+    )
+    .is_some_and(|verified| {
+        verified.effect == parsed.effect && verified.sub_ability == parsed.sub_ability
+    })
 }
 
 /// CR 115.1 + CR 608.2c: a clause gated by a target P/T threshold
@@ -52847,23 +52949,20 @@ fn parse_effect_chain_ir_body(
 
         // CR 614.1a + CR 514.2: "If [target] would die this turn, exile it
         // instead." — damage-spell rider that registers a one-shot, EOT-scoped
-        // replacement on the parent ability's target. Checked early because
-        // the rider has its own complete grammar and shouldn't be subject to
-        // the generic "if X, [effect]" conditional stripping or to "instead"
-        // replacement-style clause matching. Attaches as sub_ability of the
-        // previous def so it inherits the parent's resolved target via
-        // ParentTarget at runtime.
+        // replacement. The full grammar owns this rider before generic
+        // condition stripping; bind its scope before normal chain assembly.
         let rider_lower = normalized_text.to_lowercase();
         if let Some(rider_def) =
             try_parse_die_exile_rider(rider_lower.trim_end_matches('.').trim(), kind)
         {
+            let rider_def = bind_die_exile_rider_antecedent(
+                rider_def,
+                &rider_lower,
+                normalized_text,
+                builder.clauses(),
+                ctx,
+            );
             if !builder.is_empty() {
-                let rider_def = bind_die_exile_rider_antecedent(
-                    rider_def,
-                    &rider_lower,
-                    builder.clauses(),
-                    ctx,
-                );
                 builder
                     .clause(
                         normalized_text,
@@ -52872,6 +52971,20 @@ fn parse_effect_chain_ir_body(
                         ClauseDisposition::Absorb {
                             rider: Box::new(rider_def),
                             kind: AbsorbKind::DieExile,
+                        },
+                    )
+                    .push();
+                continue;
+            }
+            if matches!(&*rider_def.effect, Effect::Unimplemented { .. }) {
+                builder
+                    .clause(
+                        normalized_text,
+                        parsed_clause(*rider_def.effect),
+                        chunk.boundary_after,
+                        ClauseDisposition::Emit {
+                            followup: None,
+                            intrinsic: None,
                         },
                     )
                     .push();

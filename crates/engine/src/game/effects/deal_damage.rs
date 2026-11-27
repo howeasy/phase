@@ -3452,6 +3452,7 @@ fn stashed_tail(
             state,
             ability,
             owned_prefix.as_deref().unwrap_or(dealt_before_pause),
+            tail.context.exact_damage_recipient_reader,
         );
         tail.set_direct_damage_result(Some(awaiting), owner);
     }
@@ -3469,6 +3470,7 @@ fn keep_chain_identity(
     ability: &ResolvedAbility,
 ) -> ResolvedAbility {
     node.context = ability.context.clone();
+    node.context.exact_damage_recipient_reader = None;
     node.ability_index = ability.ability_index;
     // CR 608.2f + CR 700.1: a remaining portion of a simultaneous batch keeps the guards
     // the batch read; nothing else is such a portion (`apply_parent_chain_context`).
@@ -5907,6 +5909,69 @@ mod tests {
         assert_eq!((state.players[0].life, state.players[1].life), (18, 16));
     }
 
+    #[test]
+    fn exact_damage_pins_keep_owner_order_and_deduplicate_incarnations() {
+        use crate::types::ability::ExactDamageRecipientReader;
+        let state = GameState::new_two_player(42);
+        let source = ObjectId(200);
+        let producer = ResolvedAbility::new(
+            Effect::DealDamage {
+                amount: QuantityExpr::Fixed { value: 2 },
+                target: TargetFilter::Any,
+                damage_source: None,
+                excess: None,
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        );
+        let mut reader = ResolvedAbility::new(
+            Effect::unimplemented("damage receipt test", "damage receipt test"),
+            vec![],
+            source,
+            PlayerId(0),
+        );
+        reader.context.exact_damage_recipient_reader = Some(ExactDamageRecipientReader {});
+        let pin = |id, incarnation| ObjectIncarnationRef {
+            object_id: ObjectId(id),
+            incarnation,
+        };
+        let first = pin(1, 2);
+        let later = pin(1, 3);
+        let other_owner = pin(2, 1);
+        let receipt = |pin: ObjectIncarnationRef, amount| RecordedDamageDealt {
+            target: TargetRef::Object(pin.object_id),
+            amount,
+            excess: 0,
+            object_pin: Some(pin),
+        };
+        let valid_owner = DamageDeliveryOwnerId(1);
+        let result = new_awaiting_damage_result_from_snapshots(
+            &state,
+            &producer,
+            &[receipt(first, 2), receipt(first, 3)],
+            reader.context.exact_damage_recipient_reader,
+        );
+        reader.set_direct_damage_result(Some(result), Some(valid_owner));
+        assert!(!fold_snapshots_into_chain_awaiting_delivery(
+            &mut reader,
+            DamageDeliveryOwnerId(2),
+            &[receipt(other_owner, 6)],
+        ));
+        assert!(fold_snapshots_into_chain_awaiting_delivery(
+            &mut reader,
+            valid_owner,
+            &[
+                receipt(first, 1),
+                receipt(later, 2),
+                receipt(other_owner, 0)
+            ],
+        ));
+        assert!(matches!(&reader.context.direct_damage_result,
+            Some(DamageInstructionResult::AwaitingDelivery { exact_recipients: Some(pins), .. })
+                if pins.as_slice() == &[first, later]));
+    }
+
     /// CR 120.1 + CR 616.1: distinct owned deliveries by the same source
     /// cannot settle each other's parked batch or populate each other's reader.
     #[test]
@@ -5933,6 +5998,7 @@ mod tests {
                     amount: 0,
                     excess: None,
                     recipient: AwaitedDamageRecipient::None,
+                    exact_recipients: None,
                     fight_fought_creature: None,
                 }),
                 batch_owner,

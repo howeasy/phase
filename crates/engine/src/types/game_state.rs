@@ -19314,7 +19314,7 @@ pub(crate) fn normalize_damage_delivery_owners(state: &mut GameState) -> Result<
         fn parked_chain(&mut self, node: &ResolvedAbility, mirrored: bool) -> Result<(), String> {
             if let Some(owner) = node.context.damage_delivery_owner {
                 self.reserve(owner)?;
-                match (&node.effect, node.context.direct_damage_result) {
+                match (&node.effect, node.context.direct_damage_result.as_ref()) {
                     (Effect::ResumeDamageBatch { .. }, _) => {
                         if !self.batches.insert(owner) {
                             return Err("unrelated parked damage batches share an owner".into());

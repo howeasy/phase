@@ -108636,9 +108636,8 @@ fn player_scope_rebind_of_life_lost_preserves_the_window() {
 
 /// CR 608.2c + CR 614.1a: each printed mass-damage face of "[noun] dealt damage
 /// this way would die this turn, exile it instead" lowers to a head `DamageAll`
-/// whose sub-ability carries the die-exile replacement bound to the set the
-/// damage clause published (`TrackedSet{TrackedSetId(0)}`), not the `Any` route
-/// (which reads declared targets an each-creature spell does not have).
+/// whose sub-ability carries a reader bound to the instruction's exact receipts,
+/// without declaring a target slot.
 /// CR 109.2 + CR 614.1: the carried replacement's `valid_card` is the subject's
 /// own card-type noun conjoined with the carrier (`creature_gated`: "a creature
 /// dealt damage this way"), or the bare carrier (Underworld Fires' "a permanent
@@ -108677,6 +108676,11 @@ fn assert_mass_damage_die_exile_shape(
     let rider = head.sub_ability.as_ref().unwrap_or_else(|| {
         panic!("{name}: the die-exile rider must absorb into the damage clause")
     });
+    assert!(rider.exact_damage_recipient_reader.is_some(), "{name}");
+    assert!(
+        extract_target_filter_from_effect(&rider.effect).is_none(),
+        "{name}"
+    );
     let Effect::AddTargetReplacement {
         replacement,
         target,
@@ -108797,9 +108801,8 @@ fn die_exile_rider_valid_card(oracle: &str) -> Option<TargetFilter> {
 #[test]
 fn die_exile_rider_carries_the_subjects_card_type_noun() {
     let creature_gated = creature_gated_die_exile_valid_card();
-    // Verbatim Oracle text (MTGJSON 5.3.0+20261116). "a creature dealt damage this
-    // way" after a single-target "any target" clause keeps the `Any` route but still
-    // names creatures only.
+    // Verbatim Oracle text (MTGJSON 5.3.0+20261116). The live noun stays on
+    // the replacement, independent of the damage instruction's target filter.
     for oracle in [
         "Touch of the Void deals 3 damage to any target. If a creature dealt damage this way would die this turn, exile it instead.",
         "Pillar of Flame deals 2 damage to any target. If a creature dealt damage this way would die this turn, exile it instead.",
@@ -108853,13 +108856,9 @@ fn die_exile_rider_carries_the_subjects_card_type_noun() {
     );
 }
 
-/// Scope boundary, NOT a correctness claim: a SINGLE-target damage clause keeps
-/// the `Any` route (its declared target is the recipient). That rider installs
-/// regardless of whether damage was dealt, a pre-existing defect tracked as
-/// phase-rs/phase#10965; this pin flips when that issue lands. Reach-guard: the
-/// head is `DealDamage` and the rider exists.
+/// SHAPE: a targeted damage producer owns the receipt, not the rider's target.
 #[test]
-fn die_exile_rider_after_single_target_damage_keeps_any_route() {
+fn die_exile_rider_after_single_target_damage_reads_exact_receipts() {
     let def = parse_effect_chain(
         "Pillar of Flame deals 2 damage to any target. If a creature dealt damage this way would die this turn, exile it instead.",
         AbilityKind::Spell,
@@ -108874,13 +108873,118 @@ fn die_exile_rider_after_single_target_damage_keeps_any_route() {
         matches!(
             &*rider.effect,
             Effect::AddTargetReplacement {
-                target: TargetFilter::Any,
+                target: TargetFilter::TrackedSet {
+                    id: TrackedSetId(0)
+                },
                 ..
             }
         ),
-        "single-target riders keep Any (#10965), got {:?}",
+        "damage rider must use the non-declaring population operand, got {:?}",
         rider.effect
     );
+    assert!(rider.exact_damage_recipient_reader.is_some());
+    assert!(def.exact_damage_recipient_reader.is_none());
+    assert!(extract_target_filter_from_effect(&rider.effect).is_none());
+}
+
+// SHAPE: all spell routes select the exact immediate reader; Demonfire's
+// independent Hellbent clause is not a support claim.
+#[test]
+fn die_exile_rider_marks_the_printed_direct_spell_routes() {
+    for (name, oracle) in [
+        ("Annihilating Fire", "Annihilating Fire deals 3 damage to any target. If a creature dealt damage this way would die this turn, exile it instead."),
+        ("Demonfire", "Demonfire deals X damage to any target. If a creature dealt damage this way would die this turn, exile it instead.\nHellbent — If you have no cards in hand, this spell can't be countered and the damage can't be prevented."),
+        ("Incendiary Flow", "Incendiary Flow deals 3 damage to any target. If a creature dealt damage this way would die this turn, exile it instead."),
+        ("Pillar of Flame", "Pillar of Flame deals 2 damage to any target. If a creature dealt damage this way would die this turn, exile it instead."),
+        ("Red Sun's Zenith", "Red Sun's Zenith deals X damage to any target. If a creature dealt damage this way would die this turn, exile it instead. Shuffle Red Sun's Zenith into its owner's library."),
+        ("Spikefield Hazard", "Spikefield Hazard deals 1 damage to any target. If a permanent dealt damage this way would die this turn, exile it instead."),
+        ("Touch of the Void", "Devoid (This card has no color.)\nTouch of the Void deals 3 damage to any target. If a creature dealt damage this way would die this turn, exile it instead."),
+        ("Yamabushi's Flame", "Yamabushi's Flame deals 3 damage to any target. If a creature dealt damage this way would die this turn, exile it instead."),
+    ] {
+        let parsed = parse_oracle_text(oracle, name, &[], &["Sorcery".to_string()], &[]);
+        let damage = &parsed.abilities[0];
+        assert!(matches!(&*damage.effect, Effect::DealDamage { target: TargetFilter::Any, .. }), "{name}");
+        let rider = damage.sub_ability.as_deref().expect(name);
+        assert!(matches!(&*rider.effect, Effect::AddTargetReplacement {
+            target: TargetFilter::TrackedSet { id: TrackedSetId(0) }, ..
+        }), "{name}");
+        assert!(rider.exact_damage_recipient_reader.is_some(), "{name}");
+        assert!(extract_target_filter_from_effect(&rider.effect).is_none(), "{name}");
+        if name == "Red Sun's Zenith" {
+            assert!(matches!(rider.sub_ability.as_deref().map(|node| &*node.effect),
+                Some(Effect::Shuffle { .. })));
+        }
+    }
+}
+
+// SHAPE: nearby grammars still use their own authority.
+#[test]
+fn die_exile_rider_does_not_claim_declared_source_or_regeneration_readers() {
+    let cases = [
+        ("Scorching Dragonfire", "Scorching Dragonfire deals 3 damage to target creature or planeswalker. If that creature or planeswalker would die this turn, exile it instead.", 1, true),
+        ("Fiery Annihilation", "Fiery Annihilation deals 5 damage to target creature. Exile up to one target Equipment attached to that creature. If that creature would die this turn, exile it instead.", 1, true),
+        ("Torch the Tower", "Bargain (You may sacrifice an artifact, enchantment, or token as you cast this spell.)\nTorch the Tower deals 2 damage to target creature or planeswalker. If this spell was bargained, instead it deals 3 damage to that permanent and you scry 1.\nIf a permanent dealt damage by Torch the Tower would die this turn, exile it instead.", 1, true),
+        ("Incinerate", "Incinerate deals 3 damage to any target. A creature dealt damage this way can't be regenerated this turn.", 1, false),
+        ("Cone of Flame", "Cone of Flame deals 1 damage to any target, 2 damage to another target, and 3 damage to a third target.", 3, false),
+    ];
+    for (name, oracle, minimum_damage_nodes, has_replacement) in cases {
+        let parsed = parse_oracle_text(oracle, name, &[], &["Instant".into()], &[]);
+        let mut pending: Vec<_> = parsed.abilities.iter().collect();
+        let mut damage = 0usize;
+        let mut replacement = false;
+        while let Some(node) = pending.pop() {
+            assert!(node.exact_damage_recipient_reader.is_none(), "{oracle}");
+            damage += usize::from(matches!(&*node.effect, Effect::DealDamage { .. }));
+            replacement |= matches!(&*node.effect, Effect::AddTargetReplacement { .. });
+            pending.extend(node.sub_ability.as_deref());
+            pending.extend(node.else_ability.as_deref());
+        }
+        assert!(damage >= minimum_damage_nodes, "{oracle}");
+        assert_eq!(replacement, has_replacement, "{oracle}");
+    }
+}
+
+// SHAPE: Serpentine Spike's compound list remains a confirmed `target_wrong`.
+#[test]
+fn die_exile_rider_preserves_serpentine_spike_compound_list() {
+    let def = parse_effect_chain(
+        "Serpentine Spike deals 2 damage to target creature, 3 damage to another target creature, and 4 damage to a third target creature. If a creature dealt damage this way would die this turn, exile it instead.",
+        AbilityKind::Spell,
+    );
+    let mut cursor = &def;
+    for value in [2, 3, 4] {
+        assert!(matches!(&*cursor.effect, Effect::DealDamage {
+            amount: QuantityExpr::Fixed { value: actual }, target: TargetFilter::Typed(_), ..
+        } if *actual == value));
+        assert!(cursor.exact_damage_recipient_reader.is_none());
+        cursor = cursor.sub_ability.as_deref().expect("next damage or rider");
+    }
+    assert!(matches!(
+        &*cursor.effect,
+        Effect::AddTargetReplacement {
+            target: TargetFilter::Any,
+            ..
+        }
+    ));
+    assert!(cursor.exact_damage_recipient_reader.is_none());
+}
+
+// SHAPE: no printed face has this broken provenance; Pillar of Flame is the
+// positive control in the preceding test. The strict gap retains its own text.
+#[test]
+fn die_exile_rider_without_immediate_damage_producer_is_a_local_gap() {
+    const RIDER: &str = "If a creature dealt damage this way would die this turn, exile it instead";
+    for prefix in ["", "~ deals 2 damage to any target. Draw a card. "] {
+        let def = parse_effect_chain(&format!("{prefix}{RIDER}."), AbilityKind::Spell);
+        let mut tail = &def;
+        while let Some(sub) = tail.sub_ability.as_deref() {
+            tail = sub;
+        }
+        assert!(
+            matches!(&*tail.effect, Effect::Unimplemented { name, description, .. }
+            if name == "die_exile_damage_antecedent" && description.as_deref() == Some(RIDER))
+        );
+    }
 }
 
 /// Every `Typed` leg of a (possibly `Or`/`And`-wrapped) filter.

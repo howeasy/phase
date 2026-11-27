@@ -179,9 +179,11 @@ expression: "&ir"
                           }
                         },
                         "target": {
-                          "type": "Any"
+                          "type": "TrackedSet",
+                          "id": 0
                         }
                       },
+                      "exact_damage_recipient_reader": {},
                       "cost": null,
                       "sub_ability": null,
                       "duration": null,

@@ -1927,7 +1927,7 @@ fn flag_source_combat_pairing(p: &mut RwProfile, target: &TargetFilter) {
 /// event-context tags anywhere in its typed AST? The single authority for
 /// `legacy_batch_prompt` (CR 603.3b batch-ordering parity).
 fn contains_legacy_event_ref(a: &ResolvedAbility) -> bool {
-    legacy_effect(&a.effect)
+    (a.context.exact_damage_recipient_reader.is_none() && legacy_effect(&a.effect))
         || a.child_links()
             .any(|(_, child)| contains_legacy_event_ref(child))
         || a.condition.as_ref().is_some_and(legacy_ability_condition)
@@ -1948,7 +1948,7 @@ fn contains_legacy_event_ref(a: &ResolvedAbility) -> bool {
 /// D5: the same descent over a nested `AbilityDefinition` body (deferred
 /// triggers, choice branches, coin/die sub-effects, modal modes).
 fn legacy_definition(a: &AbilityDefinition) -> bool {
-    legacy_effect(&a.effect)
+    (a.exact_damage_recipient_reader.is_none() && legacy_effect(&a.effect))
         || a.sub_ability.as_deref().is_some_and(legacy_definition)
         || a.else_ability.as_deref().is_some_and(legacy_definition)
         || a.condition.as_ref().is_some_and(legacy_ability_condition)
@@ -4926,10 +4926,11 @@ fn walk_definition(
         cost: _,
         description: _,
         target_prompt: _,
-        declares_chosen_group: _,  // definition-local target identity
-        reads_chosen_group: _,     // effect and target metadata are walked above
-        declares_return_result: _, // producer effect accounts for publication
-        reads_return_result,       // instruction-local result is member-bound
+        declares_chosen_group: _,         // definition-local target identity
+        reads_chosen_group: _,            // effect and target metadata are walked above
+        declares_return_result: _,        // producer effect accounts for publication
+        reads_return_result,              // instruction-local result is member-bound
+        exact_damage_recipient_reader: _, // instruction-local delivery, not an ambient set read
         activation_restrictions: _,
         // Payment-time only; it cannot create a resolution-time dependency.
         activation_mana_payment_restriction: _,

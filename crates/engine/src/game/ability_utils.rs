@@ -240,6 +240,7 @@ pub fn build_resolved_from_def_with_targets(
     resolved.target_reads = def.target_reads;
     resolved.declares_return_result = def.declares_return_result;
     resolved.reads_return_result = def.reads_return_result.clone();
+    resolved.context.exact_damage_recipient_reader = def.exact_damage_recipient_reader;
     resolved.context.face_down_in_exile = def.face_down_in_exile;
     resolved.context.ability_tag = def.ability_tag;
     resolved.context.granting_object = def.granting_object;
@@ -404,6 +405,7 @@ pub(crate) fn apply_instead_swap(
     overridden.reads_chosen_group = sub.reads_chosen_group;
     overridden.declares_return_result = sub.declares_return_result;
     overridden.reads_return_result = sub.reads_return_result.clone();
+    overridden.context.exact_damage_recipient_reader = sub.context.exact_damage_recipient_reader;
     overridden.duration = sub.duration.clone();
     // CR 608.2c: The override sub is consumed; its own sub_ability becomes the
     // new chain tail. The else_ability mirrors that chain.

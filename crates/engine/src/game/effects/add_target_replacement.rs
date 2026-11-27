@@ -4,15 +4,15 @@ use crate::game::replacement::EventModifiers;
 use crate::game::targeting::{triggering_spell, triggering_spell_identity, TriggeringSpell};
 use crate::types::ability::{
     expiry_from_duration, host_gate_enforceable, quantity_ref_recipient_read,
-    replacement_install_is_refused, AbilityDefinition, CastManaObjectScope, DamageTargetFilter,
-    DamageTargetPlayerScope, Effect, EffectError, EffectKind, ObjectScope, PlayerFilter,
-    QuantityExpr, QuantityRef, RecipientRead, ReplacementCondition, ReplacementDefinition,
-    ReplacementDurationExpiry, ResolvedAbility, RestrictionExpiry, SourceExclusion, TargetFilter,
-    TargetRef,
+    replacement_install_is_refused, AbilityDefinition, CastManaObjectScope,
+    DamageInstructionResult, DamageTargetFilter, DamageTargetPlayerScope, Effect, EffectError,
+    EffectKind, ObjectScope, PlayerFilter, QuantityExpr, QuantityRef, RecipientRead,
+    ReplacementCondition, ReplacementDefinition, ReplacementDurationExpiry, ResolvedAbility,
+    RestrictionExpiry, SourceExclusion, TargetFilter, TargetRef,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
-use crate::types::identifiers::ObjectId;
+use crate::types::identifiers::{ObjectId, TrackedSetId};
 use crate::types::replacements::ReplacementEvent;
 use crate::types::zones::Zone;
 
@@ -575,6 +575,36 @@ fn replacement_targets(
     ability: &ResolvedAbility,
     target: &TargetFilter,
 ) -> Vec<TargetRef> {
+    if ability.context.exact_damage_recipient_reader.is_some() {
+        let (
+            Effect::AddTargetReplacement {
+                target:
+                    TargetFilter::TrackedSet {
+                        id: TrackedSetId(0),
+                    },
+                ..
+            },
+            Some(DamageInstructionResult::Dealt {
+                exact_recipients: Some(pins),
+                ..
+            }),
+        ) = (&ability.effect, &ability.context.direct_damage_result)
+        else {
+            return Vec::new();
+        };
+        // CR 400.7: a departed occurrence cannot pass its rider to a new object.
+        return pins
+            .iter()
+            .filter(|pin| {
+                pin.is_current(state)
+                    && state
+                        .objects
+                        .get(&pin.object_id)
+                        .is_some_and(|obj| obj.zone == Zone::Battlefield)
+            })
+            .map(|pin| TargetRef::Object(pin.object_id))
+            .collect();
+    }
     // CR 608.2b: a bound ParentTarget, including authoritative emptiness,
     // precedes event and attached-host fallback.
     if matches!(target, TargetFilter::ParentTarget) {
@@ -694,7 +724,9 @@ pub fn resolve(
     // `ability.controller` latched below) and of floating entry-modifier riders
     // (Communal Brewing's "that creature enters with X additional +1/+1
     // counters on it").
-    if matches!(target, TargetFilter::None) {
+    if matches!(target, TargetFilter::None)
+        && ability.context.exact_damage_recipient_reader.is_none()
+    {
         let replacement = replacement_with_ability_expiry(replacement, ability)?;
         let Some(mut replacement) = bind_replacement_to_trigger_source(replacement, state) else {
             return Ok(());
@@ -853,6 +885,57 @@ mod tests {
             source_name: None,
             source_incarnation: None,
             applied: Default::default(),
+        }
+    }
+
+    /// CR 400.7: an old recipient pin is not the current battlefield object.
+    #[test]
+    fn exact_die_exile_reader_rejects_stale_and_closed_empty_inputs() {
+        use crate::types::ability::ExactDamageRecipientReader;
+        use crate::types::identifiers::ObjectIncarnationRef;
+        use std::sync::Arc;
+
+        let mut state = GameState::new_two_player(42);
+        let target = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Victim".into(),
+            Zone::Battlefield,
+        );
+        let stale = ObjectIncarnationRef {
+            object_id: target,
+            incarnation: state.objects[&target].incarnation,
+        };
+        state.objects.get_mut(&target).unwrap().bump_incarnation();
+        let current = ObjectIncarnationRef {
+            object_id: target,
+            incarnation: state.objects[&target].incarnation,
+        };
+        let filter = TargetFilter::TrackedSet {
+            id: TrackedSetId(0),
+        };
+        let mut rider = ResolvedAbility::new(
+            Effect::AddTargetReplacement {
+                replacement: Box::new(ReplacementDefinition::new(ReplacementEvent::Moved)),
+                target: filter.clone(),
+            },
+            vec![TargetRef::Object(target)],
+            ObjectId(200),
+            PlayerId(0),
+        );
+        rider.context.exact_damage_recipient_reader = Some(ExactDamageRecipientReader {});
+        assert!(replacement_targets(&state, &rider, &filter).is_empty());
+        for (pins, expected) in [
+            (None, vec![]),
+            (Some(stale), vec![]),
+            (Some(current), vec![TargetRef::Object(target)]),
+        ] {
+            rider.context.direct_damage_result = Some(DamageInstructionResult::Dealt {
+                recipient: Some(current),
+                exact_recipients: pins.map(|pin| Arc::new(vec![pin])),
+            });
+            assert_eq!(replacement_targets(&state, &rider, &filter), expected);
         }
     }
 

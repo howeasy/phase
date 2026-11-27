@@ -15,9 +15,8 @@
 //! the graveyard, and the damaged survivor's own later death is exiled. Bouncer's Beatdown, the
 //! both-modes test and the planeswalker test (0 loyalty, CR 704.5i) have their own setups.
 //!
-//! Deliberately NOT covered: "If a creature dealt damage this way would die ..." faces
-//! (Pillar of Flame, Annihilating Fire, ...). Their rider is not gated on damage having
-//! actually been dealt (CR 615.6 prevention), so their census rows stay.
+//! This file covers only the preceding demonstrative shapes, not the distinct
+//! “dealt damage this way” riders on Pillar of Flame, Annihilating Fire, and peers.
 
 use engine::game::scenario::{CastOutcome, GameRunner, GameScenario, P0, P1};
 use engine::types::identifiers::ObjectId;

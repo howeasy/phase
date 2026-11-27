@@ -37881,6 +37881,10 @@ pub struct ReturnResultReadSpec {
     pub recipient: ControllerRef,
 }
 
+/// Reads only object recipients of the immediately preceding damage instruction.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExactDamageRecipientReader {}
+
 /// Parsed ability definition with typed effect. Zero remaining_params.
 ///
 /// `Serialize` is hand-written (see `impl Serialize for AbilityDefinition`) so
@@ -37901,6 +37905,7 @@ pub struct AbilityDefinition {
     pub reads_chosen_group: Option<ChosenGroupId>,
     pub declares_return_result: Option<ReturnResultId>,
     pub reads_return_result: Option<(ReturnResultId, ReturnResultReadSpec)>,
+    pub exact_damage_recipient_reader: Option<ExactDamageRecipientReader>,
     pub cost: Option<AbilityCost>,
     pub sub_ability: Option<Box<AbilityDefinition>>,
     /// CR 608.2c: Alternative branch executed when the condition on this ability is NOT met.
@@ -38387,6 +38392,8 @@ struct AbilityDefinitionRepr<'a> {
     declares_return_result: &'a Option<ReturnResultId>,
     #[serde(skip_serializing_if = "Option::is_none")]
     reads_return_result: &'a Option<(ReturnResultId, ReturnResultReadSpec)>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    exact_damage_recipient_reader: &'a Option<ExactDamageRecipientReader>,
     cost: &'a Option<AbilityCost>,
     sub_ability: &'a Option<Box<AbilityDefinition>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -38486,6 +38493,7 @@ impl Serialize for AbilityDefinition {
             reads_chosen_group,
             declares_return_result,
             reads_return_result,
+            exact_damage_recipient_reader,
             cost,
             sub_ability,
             else_ability,
@@ -38542,6 +38550,7 @@ impl Serialize for AbilityDefinition {
             reads_chosen_group,
             declares_return_result,
             reads_return_result,
+            exact_damage_recipient_reader,
             cost,
             sub_ability,
             else_ability,
@@ -38633,6 +38642,8 @@ struct AbilityDefinitionDe {
     declares_return_result: Option<ReturnResultId>,
     #[serde(default)]
     reads_return_result: Option<(ReturnResultId, ReturnResultReadSpec)>,
+    #[serde(default)]
+    exact_damage_recipient_reader: Option<ExactDamageRecipientReader>,
     #[serde(default)]
     cost: Option<AbilityCost>,
     #[serde(default)]
@@ -38750,6 +38761,7 @@ impl<'de> Deserialize<'de> for AbilityDefinition {
             reads_chosen_group: de.reads_chosen_group,
             declares_return_result: de.declares_return_result,
             reads_return_result: de.reads_return_result,
+            exact_damage_recipient_reader: de.exact_damage_recipient_reader,
             cost: de.cost,
             sub_ability: de.sub_ability,
             else_ability: de.else_ability,
@@ -39186,6 +39198,7 @@ impl AbilityDefinition {
             reads_chosen_group: None,
             declares_return_result: None,
             reads_return_result: None,
+            exact_damage_recipient_reader: None,
             cost: None,
             sub_ability: None,
             else_ability: None,
