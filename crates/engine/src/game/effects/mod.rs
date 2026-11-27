@@ -6174,7 +6174,6 @@ pub(crate) fn apply_parent_chain_context(
     if child_awaited_damage.is_some() {
         child.context.direct_damage_result = child_awaited_damage;
     } else if !deal_damage::is_multi_event_damage_instruction(&parent.effect)
-        || (child_exact_reader.is_some() && parent.context.exact_damage_recipient_reader.is_some())
         || matches!(
             parent.context.direct_damage_result,
             Some(DamageInstructionResult::ContinuationPortion)
