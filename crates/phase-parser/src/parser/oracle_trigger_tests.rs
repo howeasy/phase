@@ -48193,6 +48193,13 @@ fn non_self_trigger_bare_its_attachment_state_is_not_rebound_to_the_source() {
         "a non-self trigger must not bind `it` to the trigger source and must not invent a condition: {:?}",
         def.condition
     );
+    // CR 603.4: the unbound guard fails the trigger closed instead of firing unconditionally.
+    assert!(matches!(
+        def.execute
+            .as_deref()
+            .map(|ability| ability.effect.as_ref()),
+        Some(Effect::Unimplemented { .. })
+    ));
 }
 
 /// CR 608.2c: "Then for each opponent, … that player's graveyard …"
