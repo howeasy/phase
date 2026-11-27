@@ -125,6 +125,12 @@ pub fn merge_object_onto(
     // location. The stack entry was already popped in `stack::resolve_top`. The
     // stack-only `mutate_form` marker is cleared — it is now a component.
     crate::game::zones::absorb_component(state, merging_id, None);
+    // CR 730.2b + CR 400.7 + CR 614.1c: the merged spell never enters the
+    // battlefield, so a pending "enters with an additional counter" rider made
+    // for it is spent; the component later split off is a new object.
+    state
+        .pending_etb_counters
+        .retain(|(pending_id, _, _)| *pending_id != merging_id);
     if let Some(merging) = state.objects.get_mut(&merging_id) {
         merging.mutate_form = None;
         // CR 730.2b/c + CR 614.1d: a merged component never enters the

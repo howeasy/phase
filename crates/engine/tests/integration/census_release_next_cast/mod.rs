@@ -1248,6 +1248,98 @@ fn kumano_counter_rider_row_leaves_with_a_countered_creature() {
     assert_idle(&r);
 }
 
+/// Remand answers the creature spell while the delayed trigger is still on the stack: the trigger
+/// resolves with its spell already gone, registers nothing, and the recast gets no counter
+/// (CR 603.7c, CR 400.7).
+#[test]
+fn kumano_counter_rider_is_not_registered_for_a_spell_remanded_in_response() {
+    let (mut s, saga) = saga_board("Kumano Faces Kakkazan");
+    let bears = card(&mut s, "Grizzly Bears", Zone::Hand);
+    remand_for_p1(&mut s);
+    let mut r = s.build();
+    run_chapter(&mut r, saga, 2, vec![]);
+    let remand = r
+        .state()
+        .objects
+        .iter()
+        .find_map(|(id, o)| (o.name == "Remand" && o.owner == P1).then_some(*id))
+        .expect("P1 holds Remand");
+    fund(&mut r, P0, ManaType::Green, 4);
+    fund(&mut r, P1, ManaType::Blue, 2);
+    cast_action(&mut r, bears);
+    assert_eq!(
+        r.state().stack.len(),
+        2,
+        "the Bears and the delayed trigger above it"
+    );
+    assert!(r.state().pending_etb_counters.is_empty());
+    r.act(GameAction::PassPriority).expect("P0 passes");
+    assert!(matches!(r.state().waiting_for, WaitingFor::Priority { player } if player == P1));
+    cast_action(&mut r, remand);
+    play(&mut r, vec![]);
+    assert_eq!(zone(&r, bears), Zone::Hand);
+    assert!(
+        r.state().pending_etb_counters.is_empty(),
+        "the trigger resolved with its spell gone and registered no rider"
+    );
+    cast(&mut r, bears, vec![]);
+    assert_eq!(zone(&r, bears), Zone::Battlefield);
+    assert_eq!(counters(&r, bears, CounterType::Plus1Plus1), 0);
+    assert_idle(&r);
+}
+
+/// A creature spell that merges (mutate) never enters the battlefield, so its rider is spent: after
+/// the merged permanent is bounced, the recast Gemrazer is a new object with no counter
+/// (CR 730.2b, CR 400.7).
+#[test]
+fn kumano_counter_rider_is_spent_by_a_mutate_merge() {
+    let (mut s, saga) = saga_board("Kumano Faces Kakkazan");
+    let host = card(&mut s, "Grizzly Bears", Zone::Battlefield);
+    let gemrazer = card(&mut s, "Gemrazer", Zone::Hand);
+    let unsummon = card(&mut s, "Unsummon", Zone::Hand);
+    pad_libraries(&mut s);
+    let mut r = s.build();
+    engine::game::rehydrate_game_from_card_db(r.state_mut(), db());
+    run_chapter(&mut r, saga, 2, vec![]);
+    fund(&mut r, P0, ManaType::Green, 3);
+    let offered = engine::ai_support::legal_actions(r.state())
+        .into_iter()
+        .find(|a| matches!(a, GameAction::CastSpell { object_id, .. } if *object_id == gemrazer))
+        .expect("the mutate cast is offered");
+    r.act(offered).expect("the mutate cast is accepted");
+    // The host is the only legal mutate target, so the engine announces it itself.
+    assert_eq!(
+        r.state().stack.iter().filter(|e| e.id == gemrazer).count(),
+        1
+    );
+    r.advance_until_stack_empty();
+    assert!(
+        matches!(r.state().waiting_for, WaitingFor::MutateMergeChoice { player, .. } if player == P0)
+    );
+    r.act(GameAction::ChooseMutateMergeSide {
+        side: engine::game::merge::MergeSide::Top,
+    })
+    .expect("the merge placement is accepted");
+    r.advance_until_stack_empty();
+    assert_eq!(
+        r.state().objects[&host].merged_components.len(),
+        2,
+        "host and Gemrazer are one merged permanent"
+    );
+    assert!(
+        r.state().pending_etb_counters.is_empty(),
+        "the merged spell never entered, its rider is spent"
+    );
+    fund(&mut r, P0, ManaType::Blue, 1);
+    // The merged permanent is the only creature, so Unsummon's target is announced by the engine.
+    cast(&mut r, unsummon, vec![]);
+    assert_eq!(zone(&r, gemrazer), Zone::Hand);
+    fund(&mut r, P0, ManaType::Green, 6);
+    cast(&mut r, gemrazer, vec![]);
+    assert_eq!(zone(&r, gemrazer), Zone::Battlefield);
+    assert_eq!(counters(&r, gemrazer, CounterType::Plus1Plus1), 0);
+}
+
 /// Yuna, Grand Summoner: the same for her two-counter rider.
 #[test]
 fn yuna_counter_rider_does_not_follow_a_remanded_creature() {

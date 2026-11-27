@@ -36754,10 +36754,23 @@ fn resolve_add_pending_etb_counters(
         _ => None,
     });
 
-    if let Some(oid) = object_id {
+    // CR 603.7c + CR 400.7: the delayed trigger affects only the spell that
+    // was cast. If that spell already left the stack (Remanded or countered
+    // with this trigger still waiting), the card now elsewhere is a new object
+    // and the rider is not registered for it.
+    let spell_still_on_stack = matches!(
         state
-            .pending_etb_counters
-            .push((oid, counter_type, resolved_count));
+            .current_trigger_event
+            .as_ref()
+            .and_then(|event| crate::game::targeting::triggering_spell_for_event(state, event)),
+        Some(crate::game::targeting::TriggeringSpell::OnStack(_))
+    );
+    if let Some(oid) = object_id {
+        if spell_still_on_stack {
+            state
+                .pending_etb_counters
+                .push((oid, counter_type, resolved_count));
+        }
     } else {
         tracing::warn!(
             "AddPendingETBCounters: no SpellCast trigger event found — counters not registered"
