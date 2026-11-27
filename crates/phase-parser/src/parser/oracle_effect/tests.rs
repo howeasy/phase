@@ -108911,8 +108911,19 @@ fn die_exile_rider_marks_the_printed_direct_spell_routes() {
         assert!(rider.exact_damage_recipient_reader.is_some(), "{name}");
         assert!(extract_target_filter_from_effect(&rider.effect).is_none(), "{name}");
         if name == "Red Sun's Zenith" {
-            assert!(matches!(rider.sub_ability.as_deref().map(|node| &*node.effect),
-                Some(Effect::Shuffle { .. })));
+            let move_to_library = rider.sub_ability.as_deref().expect("move Zenith");
+            assert!(matches!(
+                &*move_to_library.effect,
+                Effect::ChangeZone {
+                    destination: Zone::Library,
+                    target: TargetFilter::SelfRef,
+                    ..
+                }
+            ));
+            assert!(matches!(
+                move_to_library.sub_ability.as_deref().map(|node| &*node.effect),
+                Some(Effect::Shuffle { target: TargetFilter::Owner })
+            ));
         }
     }
 }
