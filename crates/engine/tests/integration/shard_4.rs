@@ -300,6 +300,8 @@ mod limited_deck_format_gate;
 mod lingering_modal_land_face;
 mod linked_exile_ltb_return;
 mod linked_exile_return_binding;
+mod linked_exile_single_cast_budget;
+mod linked_pile_live_read;
 mod living_armor_target_mana_value_1375;
 mod living_conundrum_skip_empty_draw;
 mod living_death_ordering_2932;
