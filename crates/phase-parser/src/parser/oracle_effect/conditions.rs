@@ -19610,7 +19610,7 @@ fn its_a_subtype_spell_in_a_cast_trigger_binds_the_event_spell() {
             .and_then(|def| def.sub_ability.as_deref())
             .expect("the trigger body has a rider");
         match rider.condition.as_ref() {
-            Some(AbilityCondition::TargetMatchesFilter { subject, .. }) => subject.clone(),
+            Some(AbilityCondition::TargetMatchesFilter { subject, .. }) => *subject,
             other => panic!("expected a referent condition, got {other:?}"),
         }
     }
