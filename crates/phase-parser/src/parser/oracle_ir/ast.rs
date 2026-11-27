@@ -2762,7 +2762,7 @@ pub(crate) fn cast_cost_modifier_without_host_gap(
 }
 
 /// CR 601.2f + CR 608.2c: a `CastFromZone` that still carries a
-/// `cast_cost_modifier` on a driver OTHER than `LingeringPermission` would drop
+/// `cast_cost_modifier` on a non-lingering driver would drop
 /// that rider at resolution, so the clause becomes the
 /// `CAST_COST_MODIFIER_WITHOUT_HOST_GAP` instead.
 ///
@@ -2770,8 +2770,8 @@ pub(crate) fn cast_cost_modifier_without_host_gap(
 /// axis because the two riders ride opposite mechanisms:
 /// `record_lingering_permissions` is the one site that stamps a cost modifier
 /// onto the permissions the grant creates, so a lingering driver
-/// (`LingeringPermission` or `LingeringWindow`) is the only kind with a slot — while an additional cost is charged only by the
-/// during-resolution cast.
+/// is the only kind with a slot — while an additional cost is charged only by
+/// the during-resolution cast.
 ///
 /// Called at the one seam that can DEGRADE an already-stamped grant off the
 /// lingering mechanism (`attach_alt_cost_to_prior_cast_from_zone`, beside its
@@ -4014,7 +4014,7 @@ mod duration_distribution_tests_7923 {
             alt_ability_cost: None,
             constraint: None,
             duration,
-            driver: CastFromZoneDriver::LingeringPermission,
+            driver: CastFromZoneDriver::PER_OBJECT_LINGERING,
             mana_spend_permission: None,
             additional_cost: None,
             cast_cost_modifier: None,
@@ -4202,7 +4202,7 @@ mod duration_distribution_tests_7923 {
         // ROW 2 — only this PR's rule applies: the driver reconciles cleanly, so the
         // unevaluable inner lifetime is what gaps the node.
         let lifetime_only = stamped_with(
-            &cast_from_zone_driven(unevaluable, CastFromZoneDriver::LingeringPermission),
+            &cast_from_zone_driven(unevaluable, CastFromZoneDriver::PER_OBJECT_LINGERING),
             &outer(),
         );
         assert_eq!(
@@ -4224,7 +4224,7 @@ mod duration_distribution_tests_7923 {
         // gapped, the driver is reconciled, and the governing window is written.
         // Without this the three rows above would pass on a seam that gaps everything.
         let ok = stamped_with(
-            &cast_from_zone_driven(None, CastFromZoneDriver::LingeringPermission),
+            &cast_from_zone_driven(None, CastFromZoneDriver::PER_OBJECT_LINGERING),
             &outer(),
         );
         assert_eq!(
@@ -4239,7 +4239,7 @@ mod duration_distribution_tests_7923 {
                 assert_eq!(duration.as_ref(), Some(&outer()), "the window is written");
                 assert_eq!(
                     driver,
-                    &CastFromZoneDriver::LingeringPermission,
+                    &CastFromZoneDriver::PER_OBJECT_LINGERING,
                     "CR 608.2g: the driver is reconciled, not refused"
                 );
             }

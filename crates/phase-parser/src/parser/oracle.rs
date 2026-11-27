@@ -18,12 +18,12 @@ use crate::types::ability::{
     AdditionalCost, CardPlayMode, CastFromZoneDriver, CastManaSpentMetric, CastTimingPermission,
     CastingPermission, CastingRestriction, ChoiceType, ChosenSubtypeKind, ContinuousModification,
     ControllerRef, CostReduction, CounterSourceRider, DamageRedirectTarget,
-    DelayedTriggerCondition, Duration, Effect, EffectScope, FilterProp, GuardReading, ModalChoice,
-    ParitySource, ParsedCondition, PermissionGrantee, PlayerFilter, QuantityExpr, QuantityRef,
-    ReplacementDefinition, ReplacementMode, ResolutionCastWindow, SolveCondition,
-    SpellCastingOption, StaticCondition, StaticDefinition, SubAbilityLink, TapStateChange,
-    TargetFilter, TriggerCondition, TriggerDefinition, TypeFilter, TypedFilter, UnloweredGuard,
-    VoteSubject,
+    DelayedTriggerCondition, Duration, Effect, EffectScope, FilterProp, GuardReading,
+    LingeringCastBudget, ModalChoice, ParitySource, ParsedCondition, PermissionGrantee,
+    PlayerFilter, QuantityExpr, QuantityRef, ReplacementDefinition, ReplacementMode,
+    ResolutionCastWindow, SolveCondition, SpellCastingOption, StaticCondition, StaticDefinition,
+    SubAbilityLink, TapStateChange, TargetFilter, TriggerCondition, TriggerDefinition, TypeFilter,
+    TypedFilter, UnloweredGuard, VoteSubject,
 };
 use crate::types::ability_visit::{
     granter_symbols, visit_ability_def_scoped, visit_direct_effect_ability_payloads,
@@ -3269,11 +3269,16 @@ fn coordinated_exile_play_effect(effect: &Effect) -> Option<Effect> {
                         && *bounds == ResolutionCastWindow::UNBOUNDED
                 }
                 // CR 611.2a: Magus of the Mind — "Until end of turn".
-                CastFromZoneDriver::LingeringPermission => duration.is_some(),
-                CastFromZoneDriver::DuringResolution => false,
+                CastFromZoneDriver::LingeringPermission {
+                    budget: LingeringCastBudget::PerObject,
+                } => duration.is_some(),
                 // CR 608.2c: a grant-scoped cap of one cannot be folded into a
                 // "play lands and cast spells" conjunct, which has no budget channel.
-                CastFromZoneDriver::LingeringWindow { .. } => false,
+                // Exhaustiveness guard: the typed linked-exile pile does not reach this fold.
+                CastFromZoneDriver::LingeringPermission {
+                    budget: LingeringCastBudget::SharedSingleCast,
+                } => false,
+                CastFromZoneDriver::DuringResolution => false,
             };
             faithful.then(|| {
                 let mut effect = effect.clone();

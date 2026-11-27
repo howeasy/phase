@@ -1323,7 +1323,7 @@ mod tests {
                 alt_ability_cost: None,
                 constraint: None,
                 duration: None,
-                driver: crate::types::ability::CastFromZoneDriver::LingeringPermission,
+                driver: crate::types::ability::CastFromZoneDriver::PER_OBJECT_LINGERING,
                 mana_spend_permission: None,
                 additional_cost: None,
                 cast_cost_modifier: None,

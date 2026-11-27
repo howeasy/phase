@@ -3,5 +3,5 @@
     "full",
     "wire"
   ],
-  "reason": "Add the ability pair (supplier) to ExileLink and LinkedExileSnapshot, a single_use_group on ExileWithAltCost, and the CastFromZoneDriver::LingeringWindow variant (assimilate a creature card exiled with the source, #10664)"
+  "reason": "Add the ability pair (supplier) to ExileLink and LinkedExileSnapshot, a single_use_group on ExileWithAltCost, and a `budget` parameter on `CastFromZoneDriver::LingeringPermission` (assimilate a creature card exiled with the source, #10664)"
 }

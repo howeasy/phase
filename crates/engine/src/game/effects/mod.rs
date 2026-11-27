@@ -71996,7 +71996,7 @@ mod tests {
                 alt_ability_cost: None,
                 constraint: None,
                 duration: None,
-                driver: CastFromZoneDriver::LingeringPermission,
+                driver: CastFromZoneDriver::PER_OBJECT_LINGERING,
                 mana_spend_permission: None,
                 additional_cost: None,
                 cast_cost_modifier: None,
@@ -72190,7 +72190,7 @@ mod tests {
             "CR 305.2b: no land drop left, no offer"
         );
         let lingering =
-            play_instruction(source, Some(land), CastFromZoneDriver::LingeringPermission);
+            play_instruction(source, Some(land), CastFromZoneDriver::PER_OBJECT_LINGERING);
         assert!(
             !optional_effect_is_infeasible(&state, &lingering),
             "a lingering Play grant is not probed"
@@ -72353,7 +72353,7 @@ mod tests {
 
         // A lingering Play grant is always grantable and unprobed.
         let (state, source, _) = play_feasibility_board(Zone::Exile, false);
-        let lingering = play_instruction(source, None, CastFromZoneDriver::LingeringPermission);
+        let lingering = play_instruction(source, None, CastFromZoneDriver::PER_OBJECT_LINGERING);
         assert!(
             !optional_effect_is_infeasible(&state, &lingering),
             "a lingering Play grant with no link is not probed"
@@ -72696,7 +72696,7 @@ mod tests {
         for mode in [CardPlayMode::Cast, CardPlayMode::Play] {
             for driver in [
                 CastFromZoneDriver::DuringResolution,
-                CastFromZoneDriver::LingeringPermission,
+                CastFromZoneDriver::PER_OBJECT_LINGERING,
             ] {
                 let mut ability = ResolvedAbility::new(
                     Effect::CastFromZone {
@@ -72748,7 +72748,7 @@ mod tests {
                 alt_ability_cost: None,
                 constraint: None,
                 duration: None,
-                driver: CastFromZoneDriver::LingeringPermission,
+                driver: CastFromZoneDriver::PER_OBJECT_LINGERING,
                 mana_spend_permission: None,
                 additional_cost: None,
                 cast_cost_modifier: None,
@@ -73245,7 +73245,7 @@ mod tests {
                 alt_ability_cost: None,
                 constraint: None,
                 duration: None,
-                driver: CastFromZoneDriver::LingeringPermission,
+                driver: CastFromZoneDriver::PER_OBJECT_LINGERING,
                 mana_spend_permission: None,
                 additional_cost: None,
                 cast_cost_modifier: None,
@@ -73368,7 +73368,7 @@ mod tests {
                 alt_ability_cost: None,
                 constraint: None,
                 duration: None,
-                driver: CastFromZoneDriver::LingeringPermission,
+                driver: CastFromZoneDriver::PER_OBJECT_LINGERING,
                 mana_spend_permission: None,
                 additional_cost: None,
                 cast_cost_modifier: None,

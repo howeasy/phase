@@ -20,7 +20,7 @@ use engine::game::scenario_db::GameScenarioDbExt;
 use engine::parser::oracle::parse_oracle_text;
 use engine::types::ability::{
     AbilityDefinition, CardPlayMode, CastFromZoneDriver, CastingPermission, ControllerRef, Effect,
-    ResolutionCastWindow, TargetFilter,
+    LingeringCastBudget, ResolutionCastWindow, TargetFilter,
 };
 use engine::types::actions::GameAction;
 use engine::types::counter::CounterType;
@@ -134,7 +134,9 @@ fn magus_of_the_mind_lowers_a_play_grant_until_end_of_turn() {
                 without_paying_mana_cost: true,
                 mode: CardPlayMode::Play,
                 duration: Some(engine::types::ability::Duration::UntilEndOfTurn),
-                driver: CastFromZoneDriver::LingeringPermission,
+                driver: CastFromZoneDriver::LingeringPermission {
+                    budget: LingeringCastBudget::PerObject,
+                },
                 ..
             }
         ),

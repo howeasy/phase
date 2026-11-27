@@ -5,8 +5,8 @@ use engine::game::effects::resolve_ability_chain;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::visibility::filter_state_for_viewer;
 use engine::types::ability::{
-    CardPlayMode, CastFromZoneDriver, DigSource, Effect, QuantityExpr, ResolvedAbility,
-    SubAbilityLink, TargetFilter, TargetRef,
+    CardPlayMode, CastFromZoneDriver, DigSource, Effect, LingeringCastBudget, QuantityExpr,
+    ResolvedAbility, SubAbilityLink, TargetFilter, TargetRef,
 };
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
@@ -485,7 +485,7 @@ fn missing_look_referent_does_not_play_inherited_unrelated_object() {
             alt_ability_cost: None,
             constraint: None,
             duration: None,
-            driver: CastFromZoneDriver::LingeringPermission,
+            driver: CastFromZoneDriver::PER_OBJECT_LINGERING,
             mana_spend_permission: None,
             additional_cost: None,
             cast_cost_modifier: None,
@@ -532,7 +532,9 @@ fn missing_look_referent_does_not_play_inherited_unrelated_object() {
         Effect::CastFromZone {
             target: TargetFilter::ParentTarget,
             mode: CardPlayMode::Play,
-            driver: CastFromZoneDriver::LingeringPermission,
+            driver: CastFromZoneDriver::LingeringPermission {
+                budget: LingeringCastBudget::PerObject,
+            },
             ..
         }
     ));

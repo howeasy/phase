@@ -2924,22 +2924,33 @@ impl std::str::FromStr for CardPlayMode {
     }
 }
 
+/// CR 608.2c + CR 611.2a: How a lingering grant counts casts over its objects.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum LingeringCastBudget {
+    /// Each object has an independent permission; the grant has no shared cap.
+    #[default]
+    PerObject,
+    /// Casting one card spends the permissions that the same grant wrote.
+    SharedSingleCast,
+}
+
 /// CR 608.2g vs CR 118.9: Which casting *mechanism* an `Effect::CastFromZone`
 /// drives — i.e. *when* relative to the granting ability's resolution the card
 /// is cast. This is orthogonal to `duration` (CR 611.2a permission-expiry),
 /// `mode` (CR 601.2 cast vs CR 305.1 play), and `alt_ability_cost` (CR 118.9
 /// cost-substitution); none of those describe the casting mechanism, so the
 /// router must read this field rather than inferring the mechanism from them.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum CastFromZoneDriver {
     /// CR 118.9: Grant a lingering `CastingPermission` on the target card(s)
     /// and return — the controller casts the card later, during the granting
-    /// effect's own (or a future) priority window. The default for every
-    /// permission-granting cast-from-zone effect: Discover/Nashi/Jeleva-style
-    /// "you may cast those exiled cards", whose `duration` then governs how
-    /// long the unused permission survives.
-    #[default]
-    LingeringPermission,
+    /// effect's own (or a future) priority window. The default budget is per
+    /// object, as in Discover/Nashi/Jeleva-style grants. The `duration` governs
+    /// how long each unused permission survives.
+    LingeringPermission {
+        #[serde(default)]
+        budget: LingeringCastBudget,
+    },
     /// CR 608.2g: Cast the card *as the granting ability resolves* — the card
     /// goes onto the stack immediately via `initiate_cast_during_resolution`,
     /// and the CR 608.2g timing bypass (sorcery-speed / empty-stack /
@@ -2977,19 +2988,17 @@ pub enum CastFromZoneDriver {
     /// turn, you may cast spells from among them") is a DIFFERENT class: it
     /// really does grant a permission exercised at a later priority window, so
     /// `with_lingering_duration` degrades this variant back to
-    /// `LingeringPermission` when the parser stamps a duration on the grant —
-    /// but only when `bounds` are unbounded. A window that printed a cast cap or
-    /// a running-total budget has no faithful lingering form, so that degrade
-    /// REFUSES (`None`) and the clause becomes an honest gap instead.
+    /// `PER_OBJECT_LINGERING` when the parser stamps a duration on the grant —
+    /// but only when `bounds` are unbounded. This reconciliation does not
+    /// promote a bounded resolution batch to a shared lingering grant. It
+    /// refuses (`None`) instead, so the clause becomes an honest gap.
     ResolutionWindow { bounds: ResolutionCastWindow },
-    /// CR 608.2c + CR 611.2a: Grant a lingering permission on every card of a
-    /// persistent source-linked pile (Court of Locthwain, Idol of Endurance) AND
-    /// enforce the printed cast cap across the whole grant: the permissions the
-    /// one resolution writes share a budget (`single_use_group` on each
-    /// `ExileWithAltCost`), so a cap of one authorizes one cast total, not one
-    /// per card. Carries the bound it enforces; only an exactly-one cap is
-    /// representable (`CastFromZoneDriver::for_batch_bounds`).
-    LingeringWindow { bounds: ResolutionCastWindow },
+}
+
+impl Default for CastFromZoneDriver {
+    fn default() -> Self {
+        Self::PER_OBJECT_LINGERING
+    }
 }
 
 /// CR 608.2c + CR 202.3: The two bounds a resolution-scoped free-cast window
@@ -3044,8 +3053,7 @@ impl ResolutionCastPool {
 impl ResolutionCastWindow {
     /// The batch-wide bounds of a clause that prints NO cast cap and no
     /// running-total budget ("you may cast any number of spells from among
-    /// them"). Every mechanism can represent this faithfully, because there is
-    /// nothing to represent.
+    /// them").
     pub const UNBOUNDED: Self = Self {
         pool: ResolutionCastPool::CurrentResolution,
         max_casts: None,
@@ -3067,8 +3075,8 @@ impl ResolutionCastWindow {
     }
 
     /// CR 608.2c: `true` when the clause printed a cap of exactly one cast and
-    /// no other bound — the ONLY bound a single-card during-resolution
-    /// mechanism can enforce, because that mechanism casts exactly one card.
+    /// no other bound — the only bound a one-card resolution mechanism or a
+    /// shared single-cast lingering grant can enforce.
     pub fn is_exactly_one_cast(&self) -> bool {
         let Self {
             max_casts,
@@ -3104,8 +3112,7 @@ impl ResolutionCastWindow {
 /// construct a `CastFromZoneDriver` for a `from among` batch by any other route.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum CastMechanism {
-    /// A per-object permission exercised at a LATER priority window. Chosen
-    /// for:
+    /// A permission exercised at a later priority window. Chosen for:
     /// - paid batch casts — CR 118.9: the free-cast window primitive models no
     ///   mana payment, so a cast paying a cost lingers;
     /// - batch land plays — CR 305.1: playing a land is a special action, and
@@ -3115,11 +3122,7 @@ pub enum CastMechanism {
     ///
     /// At runtime a land//land modal DFC bound outside the graveyard also keeps
     /// a lingering grant (CR 712.12 election — follow-up).
-    LingeringPermission,
-    /// CR 608.2c + CR 611.2a: a lingering permission over a persistent linked pile
-    /// whose grant shares one cast budget across its per-card permissions.
-    /// Enforces an exactly-one cap and nothing else.
-    LingeringWindow,
+    LingeringPermission { budget: LingeringCastBudget },
     /// CR 608.2g: cast exactly ONE card as the granting ability resolves. The
     /// self-library-peek form ("look at the top four cards of your library. You
     /// may cast a spell from among them …"), whose private-library selection
@@ -3132,15 +3135,13 @@ pub enum CastMechanism {
     /// never leave that hand, so there is no exiled batch for a
     /// resolution-scoped window to offer.
     ///
-    /// Its `CastFromZoneDriver` value is the `LingeringPermission` default
-    /// because the router does not dispatch this form on the driver at all: it
-    /// reaches `open_private_zone_cast_selection` through the empty-target
+    /// Its driver value is `PER_OBJECT_LINGERING`: the router ignores the driver
+    /// and reaches `open_private_zone_cast_selection` through the empty-target
     /// private-zone tail in `game/effects/cast_from_zone.rs`, which opens
     /// `WaitingFor::EffectZoneChoice { count: 1, min_count: 0, up_to: true }`.
     /// THAT is what enforces the printed cap of one, which is why this is a
-    /// distinct mechanism from `LingeringPermission` and not an alias for it:
-    /// the two share a driver value but not a counting capability, and this enum
-    /// records the capability.
+    /// distinct mechanism from the per-object lingering grant: the two share
+    /// a driver value but not a counting capability.
     ResolutionTimePrivateZonePick,
     /// CR 608.2g: a resolution-scoped free-cast window over the batch, bounded
     /// by `ResolutionCastWindow`.
@@ -3148,6 +3149,10 @@ pub enum CastMechanism {
 }
 
 impl CastFromZoneDriver {
+    pub const PER_OBJECT_LINGERING: Self = Self::LingeringPermission {
+        budget: LingeringCastBudget::PerObject,
+    };
+
     /// CR 608.2c + CR 202.3 + CR 608.2g: **the single authority pairing a
     /// casting mechanism with the batch-wide bounds it must enforce.** Returns
     /// `None` when no driver of `mechanism` can enforce `bounds` — the caller
@@ -3163,8 +3168,8 @@ impl CastFromZoneDriver {
     ///
     /// | mechanism | bounds it can enforce | why |
     /// |---|---|---|
-    /// | [`CastMechanism::LingeringPermission`] | unbounded only | `record_lingering_permissions` writes an INDEPENDENT `CastingPermission` per object (`game/effects/cast_from_zone.rs`). There is no grant-scoped ledger, so `N` of a batch of `M > N` cannot be enforced — the controller may cast all `M`. |
-    /// | [`CastMechanism::LingeringWindow`] | exactly one cast | the permissions one resolution writes share a `single_use_group` budget, so one cast under any of them voids the rest. |
+    /// | [`CastMechanism::LingeringPermission`] with `PerObject` | unbounded only | `record_lingering_permissions` writes an independent `CastingPermission` per object, with no grant-scoped cap. |
+    /// | [`CastMechanism::LingeringPermission`] with `SharedSingleCast` | exactly one cast | the permissions one resolution writes share a `single_use_group` budget, so one cast under any of them voids the rest. |
     /// | [`CastMechanism::SingleCardDuringResolution`] | exactly one cast | `initiate_cast_during_resolution` puts exactly one card on the stack. It cannot reach `N > 1`, and it cannot honor an unbounded clause either. |
     /// | [`CastMechanism::ResolutionTimePrivateZonePick`] | exactly one cast | `open_private_zone_cast_selection` opens `EffectZoneChoice { count: 1, up_to: true }`. Same one-card ceiling, enforced by the private-zone tail rather than by the driver. |
     /// | [`CastMechanism::ResolutionWindow`] | any bounds | `Effect::FreeCastFromZones`' stop-early loop reads `ResolutionCastWindow` directly. |
@@ -3179,16 +3184,15 @@ impl CastFromZoneDriver {
         bounds: ResolutionCastWindow,
     ) -> Option<Self> {
         match mechanism {
-            // CR 118.9: per-object permissions with no shared budget. Only a
-            // clause that prints no bound at all is represented faithfully.
-            CastMechanism::LingeringPermission => {
-                bounds.is_unbounded().then_some(Self::LingeringPermission)
+            CastMechanism::LingeringPermission { budget } => {
+                // CR 608.2c + CR 611.2a: the printed bound must fit the
+                // counting capability of the lingering grant.
+                let supported = match budget {
+                    LingeringCastBudget::PerObject => bounds.is_unbounded(),
+                    LingeringCastBudget::SharedSingleCast => bounds.is_exactly_one_cast(),
+                };
+                supported.then_some(Self::LingeringPermission { budget })
             }
-            // CR 608.2c + CR 611.2a: the grant-scoped budget counts exactly one
-            // cast across the permissions of one resolution.
-            CastMechanism::LingeringWindow => bounds
-                .is_exactly_one_cast()
-                .then_some(Self::LingeringWindow { bounds }),
             // CR 608.2g: exactly one card reaches the stack, so this mechanism
             // is honest for an exact single-card cap and for nothing else — not
             // for `N > 1` (under-permissive), and not for an unbounded clause.
@@ -3196,36 +3200,36 @@ impl CastFromZoneDriver {
                 .is_exactly_one_cast()
                 .then_some(Self::DuringResolution),
             // CR 608.2g: the private-zone pick is likewise a one-card ceiling.
-            // Its DRIVER value is the `LingeringPermission` default (the router
-            // reaches this form through the empty-target private-zone tail, not
-            // through the driver), but its counting CAPABILITY is one — so it is
-            // matched separately here and must not be folded into the
-            // `LingeringPermission` arm above, which accepts only unbounded.
-            CastMechanism::ResolutionTimePrivateZonePick => bounds
-                .is_exactly_one_cast()
-                .then_some(Self::LingeringPermission),
+            // The router reaches this form through the empty-target private-zone
+            // tail, not through the driver. Its per-object driver value does not
+            // describe its counting capability.
+            CastMechanism::ResolutionTimePrivateZonePick => {
+                bounds
+                    .is_exactly_one_cast()
+                    .then_some(Self::LingeringPermission {
+                        budget: LingeringCastBudget::PerObject,
+                    })
+            }
             // CR 608.2c + CR 202.3: the window is the one mechanism with count
             // and running-total channels, so it carries every bound.
             CastMechanism::ResolutionWindow => Some(Self::ResolutionWindow { bounds }),
         }
     }
 
-    /// Serde skip predicate — the `LingeringPermission` default is the common
-    /// Serde skip predicate — the `LingeringPermission` default is the common
-    /// case and is elided from serialized `Effect::CastFromZone` bodies.
+    /// Serde skip predicate — elide only the default per-object budget.
     pub fn is_default(&self) -> bool {
-        matches!(self, CastFromZoneDriver::LingeringPermission)
-    }
-
-    /// CR 118.9 + CR 611.2a: true for both mechanisms that grant lingering
-    /// permissions exercised at a later priority window. The single predicate
-    /// the parser's optional-effect and cost-rider seams ask, so a new lingering
-    /// mechanism cannot be missed by one of them.
-    pub fn is_lingering(&self) -> bool {
         matches!(
             self,
-            CastFromZoneDriver::LingeringPermission | CastFromZoneDriver::LingeringWindow { .. }
+            Self::LingeringPermission {
+                budget: LingeringCastBudget::PerObject
+            }
         )
+    }
+
+    /// True for any grant exercised at a later priority window, regardless
+    /// of how it counts casts. Used by the parser's optional and cost riders.
+    pub fn is_lingering(&self) -> bool {
+        matches!(self, Self::LingeringPermission { .. })
     }
 
     /// CR 608.2g: true iff this effect casts the SINGLE resolved target as the
@@ -3242,11 +3246,11 @@ impl CastFromZoneDriver {
     }
 
     /// CR 608.2g + CR 608.2c + CR 202.3: The bounds of the resolution-scoped
-    /// free-cast window this driver opens, or `None` for the two single-card
-    /// mechanisms. The single authority the `cast_from_zone` router reads to
+    /// free-cast window this driver opens, or `None` for other drivers.
+    /// The single authority the `cast_from_zone` router reads to
     /// decide whether to convert the grant into an `Effect::FreeCastFromZones`
-    /// window over the batch. `LingeringWindow` is not one: it grants lingering
-    /// permissions and carries its bound for the grant-scoped budget.
+    /// window over the batch. Lingering permissions never open that window,
+    /// even if they carry a shared cast budget.
     pub fn window_bounds(&self) -> Option<ResolutionCastWindow> {
         match self {
             CastFromZoneDriver::ResolutionWindow { bounds } => Some(*bounds),
@@ -3267,19 +3271,21 @@ impl CastFromZoneDriver {
     /// carries a bound; see the next paragraph.
     ///
     /// `None` is a REFUSAL, and the fallible return type is the point: the
-    /// degrade is expressed as `for_batch_bounds(LingeringPermission, …)`, so a
-    /// window that printed a cast cap or a CR 202.3 running-total budget cannot
-    /// be silently downgraded into a per-object permission that has nowhere to
-    /// put it. Callers must turn `None` into an honest gap
+    /// degrade passes `PerObject` to `for_batch_bounds`, so a window that
+    /// printed a cast cap or a running-total budget cannot silently lose it.
+    /// Callers must turn `None` into an honest gap
     /// (`CAST_BOUND_LOST_TO_DURATION_GAP`), never into a driver. This is the
     /// reconciliation half of the same choke point `for_batch_bounds` is the
     /// selection half of; making it `Option` is what forces every present and
     /// future downgrade site to face the question at compile time.
     pub fn with_lingering_duration(self) -> Option<Self> {
         match self {
-            CastFromZoneDriver::ResolutionWindow { bounds } => {
-                Self::for_batch_bounds(CastMechanism::LingeringPermission, bounds)
-            }
+            Self::ResolutionWindow { bounds } => Self::for_batch_bounds(
+                CastMechanism::LingeringPermission {
+                    budget: LingeringCastBudget::PerObject,
+                },
+                bounds,
+            ),
             // CR 608.2g + CR 117.1a: a during-resolution cast happens AS the
             // ability resolves, with no priority window in between. A stated
             // lifetime says the opposite, so the two are mutually exclusive and
@@ -3292,16 +3298,9 @@ impl CastFromZoneDriver {
             // permission COSTS, not when it is exercised. The affected cards are
             // measured in the double parse cited by the change that moved this
             // arm, not listed here, where the list would go stale unnoticed.
-            CastFromZoneDriver::DuringResolution => Some(CastFromZoneDriver::LingeringPermission),
-            // Already the lingering mechanism; a stated duration only stamps its
-            // lifetime.
-            CastFromZoneDriver::LingeringPermission => {
-                Some(CastFromZoneDriver::LingeringPermission)
-            }
-            // Already lingering and already carrying its budget.
-            CastFromZoneDriver::LingeringWindow { bounds } => {
-                Some(CastFromZoneDriver::LingeringWindow { bounds })
-            }
+            Self::DuringResolution => Some(Self::PER_OBJECT_LINGERING),
+            // Stamping a lifetime leaves an existing lingering budget intact.
+            driver @ Self::LingeringPermission { .. } => Some(driver),
         }
     }
 }
@@ -6393,6 +6392,41 @@ mod resolution_cast_face_policy_serde_tests {
         assert!(encoded.get("indicated_action").is_some());
         let round_tripped: ResolutionCastCleanup = serde_json::from_value(encoded).unwrap();
         assert_eq!(round_tripped, carried);
+    }
+
+    #[test]
+    fn cast_from_zone_serde_preserves_only_the_nondefault_budget() {
+        let cast_from_zone = |driver| Effect::CastFromZone {
+            target: TargetFilter::ExiledBySource,
+            without_paying_mana_cost: true,
+            mode: CardPlayMode::Cast,
+            cast_transformed: false,
+            alt_ability_cost: None,
+            constraint: None,
+            duration: Some(Duration::UntilEndOfTurn),
+            driver,
+            mana_spend_permission: None,
+            additional_cost: None,
+            cast_cost_modifier: None,
+        };
+
+        let shared = cast_from_zone(CastFromZoneDriver::LingeringPermission {
+            budget: LingeringCastBudget::SharedSingleCast,
+        });
+        let encoded = serde_json::to_value(&shared).unwrap();
+        assert_eq!(
+            encoded["driver"],
+            serde_json::json!({ "LingeringPermission": { "budget": "SharedSingleCast" } })
+        );
+        assert_eq!(serde_json::from_value::<Effect>(encoded).unwrap(), shared);
+
+        let per_object = cast_from_zone(CastFromZoneDriver::PER_OBJECT_LINGERING);
+        let encoded = serde_json::to_value(&per_object).unwrap();
+        assert!(encoded.get("driver").is_none());
+        assert_eq!(
+            serde_json::from_value::<Effect>(encoded).unwrap(),
+            per_object
+        );
     }
 }
 
@@ -26186,7 +26220,7 @@ pub enum Effect {
         /// Suspend's last-counter cast per CR 702.62a, Rebound's upkeep
         /// recast per CR 702.88a) versus grant a lingering permission the
         /// controller acts on at a later priority window
-        /// (`LingeringPermission`, the default for Discover/Nashi). The
+        /// (`LingeringPermission`, with a per-object budget by default). The
         /// router in `cast_from_zone::resolve` reads THIS field, not `duration`
         /// (which is CR 611.2a permission-expiry and means nothing about the
         /// casting mechanism). See issue #1520.

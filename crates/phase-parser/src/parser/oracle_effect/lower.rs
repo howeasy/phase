@@ -49,12 +49,12 @@ use crate::types::ability::{
     CastPermissionConstraint, CastingPermission, ChoiceType, CoinFlipRun, CombatHistoryScope,
     Comparator, ConjureSource, ContinuousEffectOnset, ContinuousModification, ControllerRef,
     CountBinding, DamageChannel, DamageSource, DelayedTriggerCondition, Duration, Effect,
-    EffectScope, ExiledSpellRider, FilterProp, GameRestriction, LibraryPosition, MultiTargetSpec,
-    NameStickerSet, ObjectProperty, ObjectScope, PermissionGrantee, PlayerFilter, PlayerRelation,
-    PreventionAmount, PreventionScope, PropertyAggregate, PtValue, QuantityExpr, QuantityRef,
-    RepeatForTiming, RestrictionPlayerScope, RoundingMode, SpellStackToGraveyardReplacement,
-    StaticCondition, StaticDefinition, SubAbilityLink, TargetChoiceTiming, TargetFilter,
-    TargetSelectionMode, TypeFilter, TypedFilter,
+    EffectScope, ExiledSpellRider, FilterProp, GameRestriction, LibraryPosition,
+    LingeringCastBudget, MultiTargetSpec, NameStickerSet, ObjectProperty, ObjectScope,
+    PermissionGrantee, PlayerFilter, PlayerRelation, PreventionAmount, PreventionScope,
+    PropertyAggregate, PtValue, QuantityExpr, QuantityRef, RepeatForTiming, RestrictionPlayerScope,
+    RoundingMode, SpellStackToGraveyardReplacement, StaticCondition, StaticDefinition,
+    SubAbilityLink, TargetChoiceTiming, TargetFilter, TargetSelectionMode, TypeFilter, TypedFilter,
 };
 use crate::types::ability_visit::nodes_mut::visit_ability_def;
 use crate::types::ability_visit::DefinitionNodeMut;
@@ -1279,8 +1279,8 @@ pub(super) fn attach_cast_cost_modifier_to_previous_play_from_exile(
     true
 }
 
-/// Walk the previous def and its `sub_ability` chain for a
-/// lingering-driver (`LingeringPermission` or `LingeringWindow`) `Effect::CastFromZone`'s rider slot. Mirrors
+/// Walk the previous def and its `sub_ability` chain for the rider slot on a
+/// `CastFromZone` with a lingering driver. Mirrors
 /// [`find_prev_play_from_exile_permission_mut`]: the grant lands as a sibling
 /// def in the compound "exile … then you may play it" shape and as a nested
 /// sub-ability in the self-contained one, and the rider must absorb either way.
@@ -1425,7 +1425,7 @@ mod linked_exile_cleanup_tests {
             alt_ability_cost: None,
             constraint: None,
             duration: None,
-            driver: CastFromZoneDriver::LingeringPermission,
+            driver: CastFromZoneDriver::PER_OBJECT_LINGERING,
             mana_spend_permission: None,
             additional_cost: None,
             cast_cost_modifier: None,
@@ -4573,7 +4573,13 @@ pub(super) fn bind_cast_of_created_card_copy(defs: &mut [AbilityDefinition]) {
             if let Effect::CastFromZone { target, driver, .. } = &mut *def.effect {
                 if matches!(target, TargetFilter::ParentTarget) {
                     *target = TargetFilter::LastCreated;
-                    if matches!(driver, CastFromZoneDriver::LingeringPermission) {
+                    // Only the default per-object grant becomes an immediate cast.
+                    if matches!(
+                        driver,
+                        CastFromZoneDriver::LingeringPermission {
+                            budget: LingeringCastBudget::PerObject,
+                        }
+                    ) {
                         *driver = CastFromZoneDriver::DuringResolution;
                     }
                 }

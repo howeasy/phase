@@ -18,7 +18,7 @@ use crate::parser::parse_oracle_text;
 use crate::parser::swallow_evidence::UnitEvidence;
 use crate::types::ability::extract_target_filter_from_effect;
 use crate::types::ability::CardPlayMode::{Cast, Play};
-use crate::types::ability::CastFromZoneDriver::{DuringResolution, LingeringPermission};
+use crate::types::ability::CastFromZoneDriver::DuringResolution;
 use crate::types::ability::{
     AbilityUseTally, ActivationRestriction, AttachSelection, AttachmentKind, AttachmentReferent,
     CardSelectionMode, CastCostModifier, CastManaObjectScope, CastManaSpentMetric, ChooseOneOfKind,
@@ -44838,7 +44838,9 @@ fn emry_this_turn_grant_stays_lingering_not_during_resolution() {
         matches!(
             &*cast.effect,
             Effect::CastFromZone {
-                driver: LingeringPermission,
+                driver: CastFromZoneDriver::LingeringPermission {
+                    budget: LingeringCastBudget::PerObject,
+                },
                 ..
             }
         ),
@@ -61191,13 +61193,13 @@ fn from_among_batch_cast_driver_refuses_an_unrepresentable_cap_on_every_axis() {
     );
     assert_eq!(
         lowering_without_stated_duration(Cast, true, durational_ok),
-        FromAmongBatchLowering::Driver(LingeringPermission),
+        FromAmongBatchLowering::Driver(CastFromZoneDriver::PER_OBJECT_LINGERING),
         "reach guard: a stated duration over an UNBOUNDED batch must still keep \
          the lingering grant"
     );
     assert_eq!(
         lowering_without_stated_duration(Cast, false, paid_ok),
-        FromAmongBatchLowering::Driver(LingeringPermission),
+        FromAmongBatchLowering::Driver(CastFromZoneDriver::PER_OBJECT_LINGERING),
         "reach guard: a paid UNBOUNDED batch cast must still keep the lingering grant"
     );
 
@@ -61549,7 +61551,7 @@ fn from_among_batch_cast_driver_refuses_a_representable_cap_no_mechanism_can_car
     ] {
         assert_eq!(
             lowering_without_stated_duration(mode, without_paying, rest),
-            FromAmongBatchLowering::Driver(LingeringPermission),
+            FromAmongBatchLowering::Driver(CastFromZoneDriver::PER_OBJECT_LINGERING),
             "reach guard ({label}): an unbounded head on this axis must still \
              build the lingering grant"
         );
@@ -61642,7 +61644,7 @@ fn a_stated_duration_promotes_a_paid_cap_of_one_to_a_single_use_grant() {
     // cap decision and not "any paid duration-bearing clause now promotes".
     assert_eq!(
         lowering_with_stated_duration(Cast, false, "spells from among those cards"),
-        FromAmongBatchLowering::Driver(LingeringPermission),
+        FromAmongBatchLowering::Driver(CastFromZoneDriver::PER_OBJECT_LINGERING),
         "reach guard: an unbounded paid batch keeps the per-object lingering grant"
     );
 }
@@ -61720,27 +61722,37 @@ fn cast_mechanism_bound_pairing_table_is_exact() {
         ..Default::default()
     };
 
-    // Lingering permissions have no shared budget: unbounded only.
+    let per_object = CastMechanism::LingeringPermission {
+        budget: LingeringCastBudget::PerObject,
+    };
     assert_eq!(
-        CastFromZoneDriver::for_batch_bounds(CastMechanism::LingeringPermission, unbounded),
-        Some(LingeringPermission)
+        CastFromZoneDriver::for_batch_bounds(per_object, unbounded),
+        Some(CastFromZoneDriver::PER_OBJECT_LINGERING)
     );
     for bounded in [one, two, budget] {
         assert_eq!(
-            CastFromZoneDriver::for_batch_bounds(CastMechanism::LingeringPermission, bounded),
+            CastFromZoneDriver::for_batch_bounds(per_object, bounded),
             None,
-            "lingering permissions cannot carry {bounded:?}"
+            "per-object permissions cannot carry {bounded:?}"
         );
     }
 
-    // The grant-scoped budget carries exactly one cast.
+    let shared = CastMechanism::LingeringPermission {
+        budget: LingeringCastBudget::SharedSingleCast,
+    };
     assert_eq!(
-        CastFromZoneDriver::for_batch_bounds(CastMechanism::LingeringWindow, one),
-        Some(CastFromZoneDriver::LingeringWindow { bounds: one })
+        CastFromZoneDriver::for_batch_bounds(shared, one),
+        Some(CastFromZoneDriver::LingeringPermission {
+            budget: LingeringCastBudget::SharedSingleCast,
+        })
     );
-    for rejected in [unbounded, two, budget] {
+    let one_with_mv = ResolutionCastWindow {
+        max_total_mv: Some(10),
+        ..one
+    };
+    for rejected in [unbounded, two, budget, one_with_mv] {
         assert_eq!(
-            CastFromZoneDriver::for_batch_bounds(CastMechanism::LingeringWindow, rejected),
+            CastFromZoneDriver::for_batch_bounds(shared, rejected),
             None,
             "the grant-scoped budget cannot carry {rejected:?}"
         );
@@ -61755,7 +61767,7 @@ fn cast_mechanism_bound_pairing_table_is_exact() {
         ),
         (
             CastMechanism::ResolutionTimePrivateZonePick,
-            LingeringPermission,
+            CastFromZoneDriver::PER_OBJECT_LINGERING,
         ),
     ] {
         assert_eq!(
@@ -61789,10 +61801,9 @@ fn cast_mechanism_bound_pairing_table_is_exact() {
 /// resolution-scoped window back to a lingering permission — correctly, because
 /// the controller then casts at a later priority window. What was NOT correct is
 /// that the degrade silently discarded whatever bound the window carried.
-/// `with_lingering_duration` is now expressed as
-/// `for_batch_bounds(LingeringPermission, …)`, so it refuses exactly when the
-/// selection side does, and its `Option` return is what forces each of the three
-/// seams to face the refusal.
+/// `with_lingering_duration` calls `for_batch_bounds` with the `PerObject`
+/// budget, so it refuses when that budget cannot enforce the bound. Its
+/// `Option` return forces each of the three seams to handle the refusal.
 #[test]
 fn duration_reconciliation_refuses_a_bound_the_lingering_grant_cannot_carry() {
     use crate::types::ability::ResolutionCastWindow;
@@ -61803,21 +61814,23 @@ fn duration_reconciliation_refuses_a_bound_the_lingering_grant_cannot_carry() {
             bounds: ResolutionCastWindow::UNBOUNDED,
         }
         .with_lingering_duration(),
-        Some(LingeringPermission),
+        Some(CastFromZoneDriver::PER_OBJECT_LINGERING),
         "reach guard: an unbounded window must still degrade to the lingering grant"
     );
-    // The two single-card mechanisms carry no batch bound, so neither can refuse
-    // — but the during-resolution one still DEGRADES: CR 608.2g + CR 117.1a, a
-    // cast that happens as the ability resolves has no later priority window,
-    // which is exactly what a stated lifetime claims.
+    // A single during-resolution cast has no later priority window, so it
+    // degrades to a per-object grant. Already-lingering grants keep their budgets.
     assert_eq!(
         CastFromZoneDriver::DuringResolution.with_lingering_duration(),
-        Some(LingeringPermission)
+        Some(CastFromZoneDriver::PER_OBJECT_LINGERING)
     );
     assert_eq!(
-        LingeringPermission.with_lingering_duration(),
-        Some(LingeringPermission)
+        CastFromZoneDriver::PER_OBJECT_LINGERING.with_lingering_duration(),
+        Some(CastFromZoneDriver::PER_OBJECT_LINGERING)
     );
+    let shared = CastFromZoneDriver::LingeringPermission {
+        budget: LingeringCastBudget::SharedSingleCast,
+    };
+    assert_eq!(shared.with_lingering_duration(), Some(shared));
 
     for bounds in [
         ResolutionCastWindow {
@@ -61865,7 +61878,9 @@ fn leading_duration_over_a_capped_window_refuses() {
         matches!(
             &control,
             Effect::CastFromZone {
-                driver: LingeringPermission,
+                driver: CastFromZoneDriver::LingeringPermission {
+                    budget: LingeringCastBudget::PerObject,
+                },
                 duration: Some(Duration::UntilEndOfTurn),
                 ..
             }
@@ -61897,7 +61912,9 @@ fn trailing_duration_over_a_capped_window_refuses() {
         matches!(
             &control,
             Effect::CastFromZone {
-                driver: LingeringPermission,
+                driver: CastFromZoneDriver::LingeringPermission {
+                    budget: LingeringCastBudget::PerObject,
+                },
                 ..
             }
         ),
@@ -61980,7 +61997,9 @@ fn from_among_plural_head_nouns_are_unbounded_including_lands() {
             &effect,
             Effect::CastFromZone {
                 mode: CardPlayMode::Play,
-                driver: LingeringPermission,
+                driver: CastFromZoneDriver::LingeringPermission {
+                    budget: LingeringCastBudget::PerObject,
+                },
                 ..
             }
         ),
@@ -69767,27 +69786,45 @@ fn filter_cast_driver_authority_is_duration_blind() {
     assert_eq!(d(Cast, false, true, true, false), DuringResolution);
     // Colossal Dreadmaw / Form of the Mulldrifter / Sen Triplets: full-cost
     // hand cast (durational or not) -> standing grant.
-    assert_eq!(d(Cast, false, false, true, false), LingeringPermission);
+    assert_eq!(
+        d(Cast, false, false, true, false),
+        CastFromZoneDriver::PER_OBJECT_LINGERING
+    );
     // Tasha: non-hand free pool, no chosen card.
-    assert_eq!(d(Cast, true, false, false, false), LingeringPermission);
+    assert_eq!(
+        d(Cast, true, false, false, false),
+        CastFromZoneDriver::PER_OBJECT_LINGERING
+    );
     // Expertise cycle / Brain in a Jar / Twinning Glass: hand free.
     assert_eq!(d(Cast, true, false, true, false), DuringResolution);
     // Xander's Pact: exile-origin alt cost — hand gate, not duration.
-    assert_eq!(d(Cast, false, true, false, false), LingeringPermission);
+    assert_eq!(
+        d(Cast, false, true, false, false),
+        CastFromZoneDriver::PER_OBJECT_LINGERING
+    );
     // CR 305.1 land plays have no during-resolution mechanism.
-    assert_eq!(d(Play, true, false, true, false), LingeringPermission);
+    assert_eq!(
+        d(Play, true, false, true, false),
+        CastFromZoneDriver::PER_OBJECT_LINGERING
+    );
     // Ogre Battlecaster / Helmut Zemo / Toshiro Umezawa: ONE chosen graveyard
     // card at its printed cost is cast as the ability resolves (CR 608.2g).
     assert_eq!(d(Cast, false, false, false, true), DuringResolution);
     // Memory Plunder / Torrential Gearhulk: the free chosen graveyard card is
     // routed by the resolver's own shape guard; the driver is not changed for
     // it here.
-    assert_eq!(d(Cast, true, false, false, true), LingeringPermission);
+    assert_eq!(
+        d(Cast, true, false, false, true),
+        CastFromZoneDriver::PER_OBJECT_LINGERING
+    );
     // A stated lifetime ("this turn") is stamped afterwards and degrades the
     // driver; that seam is `with_lingering_duration`, not this authority.
     // An alternative cost on a chosen graveyard card is not the printed-cost
     // form.
-    assert_eq!(d(Cast, false, true, false, true), LingeringPermission);
+    assert_eq!(
+        d(Cast, false, true, false, true),
+        CastFromZoneDriver::PER_OBJECT_LINGERING
+    );
 }
 
 /// CR 608.2g (issue #8775): the printed-cost "you may cast target … card from
@@ -69816,7 +69853,7 @@ fn a_paid_chosen_graveyard_cast_is_lowered_as_a_during_resolution_cast() {
     // A stated lifetime is a later priority window (CR 611.2a).
     assert_eq!(
         driver_of("You may cast target creature card from your graveyard this turn."),
-        LingeringPermission
+        CastFromZoneDriver::PER_OBJECT_LINGERING
     );
 }
 
@@ -74990,13 +75027,11 @@ fn cast_from_zone_in_chain(ability: &AbilityDefinition) -> Option<&AbilityDefini
 /// CR 608.2c + CR 611.2a + CR 607.2a: "until end of turn, you may cast a [creature]
 /// spell from among cards exiled with [this object]" prints a cap of one cast over
 /// a persistent linked pile and states a duration, so its grant shares one budget
-/// (`LingeringWindow`) and its "may" stays inside the grant rather than becoming
+/// (`SharedSingleCast`) and its "may" stays inside the grant rather than becoming
 /// an accept/decline prompt. A plural clause, or one stating no duration
 /// (Jeleva, Nephalia's Scourge), keeps the per-object permission.
 #[test]
 fn cast_a_spell_from_linked_exile_under_a_duration_shares_one_budget() {
-    use crate::types::ability::ResolutionCastWindow;
-
     let window = |def: &AbilityDefinition| {
         let found = cast_from_zone_in_chain(def).expect("a CastFromZone in the chain");
         let Effect::CastFromZone { driver, .. } = &*found.effect else {
@@ -75004,9 +75039,8 @@ fn cast_a_spell_from_linked_exile_under_a_duration_shares_one_budget() {
         };
         (*driver, found.optional)
     };
-    let one = ResolutionCastWindow {
-        max_casts: Some(1),
-        ..ResolutionCastWindow::UNBOUNDED
+    let shared = CastFromZoneDriver::LingeringPermission {
+        budget: LingeringCastBudget::SharedSingleCast,
     };
 
     // Court of Locthwain: the third sentence, behind the monarch condition.
@@ -75028,7 +75062,7 @@ fn cast_a_spell_from_linked_exile_under_a_duration_shares_one_budget() {
         .find(|execute| cast_from_zone_in_chain(execute).is_some())
         .map(window)
         .expect("Court's upkeep trigger casts from linked exile");
-    assert_eq!(driver, CastFromZoneDriver::LingeringWindow { bounds: one });
+    assert_eq!(driver, shared);
     assert!(
         !optional,
         "the grant's own accept lives in the cast, not a prompt"
@@ -75050,10 +75084,7 @@ fn cast_a_spell_from_linked_exile_under_a_duration_shares_one_budget() {
         .iter()
         .find(|ability| cast_from_zone_in_chain(ability).is_some())
         .expect("Idol's activated ability casts from linked exile");
-    assert_eq!(
-        window(def),
-        (CastFromZoneDriver::LingeringWindow { bounds: one }, false)
-    );
+    assert_eq!(window(def), (shared, false));
 
     // Serpent's Soul-Jar: the paid form.
     let jar = parse_oracle_text(
@@ -75070,10 +75101,7 @@ fn cast_a_spell_from_linked_exile_under_a_duration_shares_one_budget() {
         .iter()
         .find(|ability| cast_from_zone_in_chain(ability).is_some())
         .expect("Soul-Jar's activated ability casts from linked exile");
-    assert_eq!(
-        window(def),
-        (CastFromZoneDriver::LingeringWindow { bounds: one }, false)
-    );
+    assert_eq!(window(def), (shared, false));
 
     // No stated duration (Jeleva's attack trigger): the per-object permission stays.
     let jeleva = parse_oracle_text(
@@ -75091,7 +75119,7 @@ fn cast_a_spell_from_linked_exile_under_a_duration_shares_one_budget() {
         .find(|execute| cast_from_zone_in_chain(execute).is_some())
         .map(window)
         .expect("Jeleva's attack trigger casts from linked exile");
-    assert_eq!(driver, CastFromZoneDriver::LingeringPermission);
+    assert_eq!(driver, CastFromZoneDriver::PER_OBJECT_LINGERING);
 
     // No stated duration (Kaho's activated ability, kaho_minamo_historian_linked_exile.rs):
     // the per-object permission stays, so its behaviour is the base one.
@@ -75111,7 +75139,7 @@ fn cast_a_spell_from_linked_exile_under_a_duration_shares_one_budget() {
         .find(|ability| cast_from_zone_in_chain(ability).is_some())
         .map(window)
         .expect("Kaho's activated ability casts from linked exile");
-    assert_eq!(driver, CastFromZoneDriver::LingeringPermission);
+    assert_eq!(driver, CastFromZoneDriver::PER_OBJECT_LINGERING);
 }
 
 const CODIE_CONTINUATION_TEXT: &str = "Add {W}{U}{B}{R}{G}. When you next cast a spell this turn, \
@@ -79429,7 +79457,8 @@ fn a_free_cast_grant_with_a_stated_lifetime_is_a_lingering_permission() {
             "{name}: the printed lifetime must reach the effect's own duration slot"
         );
         assert_eq!(
-            *driver, LingeringPermission,
+            *driver,
+            CastFromZoneDriver::PER_OBJECT_LINGERING,
             "{name}: CR 611.2a — a stated lifetime means the permission is exercised at a later \
              priority window, so the mechanism is the lingering grant"
         );
@@ -84484,7 +84513,7 @@ fn refuse_cast_cost_modifier_on_unsupported_driver_spares_only_the_lingering_dri
         cast_cost_modifier: Some(CastCostModifier::reduce(ManaCost::generic(2))),
     };
 
-    let mut kept = cast_from_zone(LingeringPermission);
+    let mut kept = cast_from_zone(CastFromZoneDriver::PER_OBJECT_LINGERING);
     refuse_cast_cost_modifier_on_unsupported_driver(&mut kept);
     assert!(
         matches!(
@@ -89803,7 +89832,9 @@ fn cast_a_type_list_card_exiled_with_self_is_a_resolution_cast_of_the_linked_poo
             &*lingering.effect,
             Effect::CastFromZone {
                 target: TargetFilter::And { filters },
-                driver: crate::types::ability::CastFromZoneDriver::LingeringPermission,
+                driver: CastFromZoneDriver::LingeringPermission {
+                    budget: LingeringCastBudget::PerObject,
+                },
                 duration: Some(_),
                 ..
             } if filters.contains(&TargetFilter::ExiledBySource)
@@ -89834,7 +89865,9 @@ fn cast_a_type_list_card_exiled_with_self_is_a_resolution_cast_of_the_linked_poo
             &*raphael.effect,
             Effect::CastFromZone {
                 target: TargetFilter::And { filters },
-                driver: crate::types::ability::CastFromZoneDriver::LingeringPermission,
+                driver: CastFromZoneDriver::LingeringPermission {
+                    budget: LingeringCastBudget::PerObject,
+                },
                 ..
             } if filters.contains(&TargetFilter::ExiledBySource)
         ),
@@ -104364,7 +104397,9 @@ fn durational_and_batch_play_forms_keep_their_drivers() {
             &*cast.effect,
             Effect::CastFromZone {
                 mode: Play,
-                driver: LingeringPermission,
+                driver: CastFromZoneDriver::LingeringPermission {
+                    budget: LingeringCastBudget::PerObject,
+                },
                 ..
             }
         ),
@@ -104380,7 +104415,9 @@ fn durational_and_batch_play_forms_keep_their_drivers() {
             Effect::CastFromZone {
                 mode: Play,
                 duration: Some(Duration::UntilEndOfTurn),
-                driver: LingeringPermission,
+                driver: CastFromZoneDriver::LingeringPermission {
+                    budget: LingeringCastBudget::PerObject,
+                },
                 ..
             }
         ),

@@ -11,9 +11,9 @@ use engine::game::visibility::filter_state_for_viewer;
 use engine::parser::oracle::parse_oracle_text;
 use engine::types::ability::{
     AbilityDefinition, CastFromZoneDriver, CastPermissionConstraint, CastingPermission, ChoiceType,
-    Comparator, ContinuousModification, ControllerRef, Duration, Effect, FilterProp, ObjectScope,
-    QuantityExpr, QuantityRef, ResolutionCastWindow, ResolvedAbility, TargetFilter, TypeFilter,
-    TypedFilter,
+    Comparator, ContinuousModification, ControllerRef, Duration, Effect, FilterProp,
+    LingeringCastBudget, ObjectScope, QuantityExpr, QuantityRef, ResolutionCastWindow,
+    ResolvedAbility, TargetFilter, TypeFilter, TypedFilter,
 };
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
@@ -305,7 +305,7 @@ fn a_stated_duration_keeps_the_grant_a_lingering_permission() {
             None,
             "{name} states a duration, so it must NOT become a resolution-scoped window"
         );
-        assert_eq!(*driver, CastFromZoneDriver::LingeringPermission, "{name}");
+        assert_eq!(*driver, CastFromZoneDriver::PER_OBJECT_LINGERING, "{name}");
     }
 }
 
@@ -549,7 +549,9 @@ fn duration_and_hand_anaphors_stay_lingering_permissions() {
             matches!(
                 parsed_cast_from_zone(&parsed),
                 Effect::CastFromZone {
-                    driver: CastFromZoneDriver::LingeringPermission,
+                    driver: CastFromZoneDriver::LingeringPermission {
+                        budget: LingeringCastBudget::PerObject,
+                    },
                     ..
                 }
             ),
@@ -3724,7 +3726,7 @@ fn the_omenkeel_plural_land_play_is_not_refused() {
     );
     assert_eq!(
         *driver,
-        CastFromZoneDriver::LingeringPermission,
+        CastFromZoneDriver::PER_OBJECT_LINGERING,
         "a plural head noun prints no cap, so the land-play permission stands"
     );
 }
@@ -3885,7 +3887,7 @@ fn sentence_leading_duration_over_a_capped_coordinated_cast_refuses() {
     };
     assert_eq!(
         *driver,
-        CastFromZoneDriver::LingeringPermission,
+        CastFromZoneDriver::PER_OBJECT_LINGERING,
         "reach guard: Magus prints an unbounded plural head, so the coordinated \
          duration must still degrade it cleanly"
     );

@@ -138,21 +138,21 @@ use crate::types::ability::{
     DelayedTriggerPlayerBinding, DieResultBranch, DigRestOrder, Duration, EachDamageRecipient,
     Effect, EffectOutcomeSignal, EffectScope, ExtraPhaseRecipient, FilterProp, GameRestriction,
     GuardReading, GuessSubject, InstructionJoin, IntensityScope, IterationKindBinding,
-    KeeperConstraint, KeeperCounterMark, LibraryPosition, LibraryShuffleMode, ManaProduction,
-    ManaSpendPermission, ManaTargetRole, MultiTargetSpec, NameStickerSet, NumberDistinctness,
-    ObjectProperty, ObjectScope, ObjectSelectionCardinality, OriginConstraint, PerPlayerScope,
-    PerpetualModification, PlayPermissionInvalidation, PlayerChoiceDistinctness, PlayerFilter,
-    PlayerRelation, PlayerScope, PreventionAmount, PreventionScope, ProhibitedActivity,
-    PropertyAggregate, PtValue, QuantityExpr, QuantityRef, ReciprocalZoneChoiceRole,
-    RepeatForTiming, ReplacementCondition, ReplacementDefinition, ResolutionCastWindow,
-    RestrictionExpiry, RestrictionPlayerScope, RevealUntilDisposition, RoundingMode, SharedQuality,
-    SharedQualityRelation, SiblingCondition, SkipScope, SpellStackToGraveyardReplacement,
-    SpellbookSelection, StaticCondition, StaticDefinition, StepSkipTarget, SubAbilityLink,
-    TapStateChange, TargetFilter, TargetReadOrigin, TargetSelectionMode, ThisWayCause,
-    TokenAttackDestination, TrackedAnaphorSource, TriggerCondition, TriggerDefinition, TurnGate,
-    TypeFilter, TypedFilter, UnlessPayModifier, UnloweredGuard, UntilCondition, VoteSubject,
-    WheneverEventExpiry, ZoneChoiceCandidateSource, ZoneChoiceChooser, ZoneChoiceGatherRole,
-    ZoneOwner,
+    KeeperConstraint, KeeperCounterMark, LibraryPosition, LibraryShuffleMode, LingeringCastBudget,
+    ManaProduction, ManaSpendPermission, ManaTargetRole, MultiTargetSpec, NameStickerSet,
+    NumberDistinctness, ObjectProperty, ObjectScope, ObjectSelectionCardinality, OriginConstraint,
+    PerPlayerScope, PerpetualModification, PlayPermissionInvalidation, PlayerChoiceDistinctness,
+    PlayerFilter, PlayerRelation, PlayerScope, PreventionAmount, PreventionScope,
+    ProhibitedActivity, PropertyAggregate, PtValue, QuantityExpr, QuantityRef,
+    ReciprocalZoneChoiceRole, RepeatForTiming, ReplacementCondition, ReplacementDefinition,
+    ResolutionCastWindow, RestrictionExpiry, RestrictionPlayerScope, RevealUntilDisposition,
+    RoundingMode, SharedQuality, SharedQualityRelation, SiblingCondition, SkipScope,
+    SpellStackToGraveyardReplacement, SpellbookSelection, StaticCondition, StaticDefinition,
+    StepSkipTarget, SubAbilityLink, TapStateChange, TargetFilter, TargetReadOrigin,
+    TargetSelectionMode, ThisWayCause, TokenAttackDestination, TrackedAnaphorSource,
+    TriggerCondition, TriggerDefinition, TurnGate, TypeFilter, TypedFilter, UnlessPayModifier,
+    UnloweredGuard, UntilCondition, VoteSubject, WheneverEventExpiry, ZoneChoiceCandidateSource,
+    ZoneChoiceChooser, ZoneChoiceGatherRole, ZoneOwner,
 };
 // Imported on its own line rather than folded into the block above: that block
 // is the busiest merge point in this file, and a one-name addition inside it
@@ -39141,12 +39141,10 @@ fn exiled_cast_target_with_type_gate(rest: &str) -> TargetFilter {
 enum FromAmongBatchLowering {
     /// The mechanism can carry the printed bound. Lower to `Effect::CastFromZone`.
     Driver(CastFromZoneDriver),
-    /// CR 611.2a + CR 601.2a: a PAID batch grant that prints a cap of exactly one
-    /// AND states a durational scope. No `CastFromZoneDriver` represents this —
-    /// `LingeringPermission` records an independent per-object permission with no
-    /// shared budget, so it would grant the whole batch — but
-    /// `CastingPermission::PlayFromExile { single_use: true }` does: it is a
-    /// grant-scoped budget of ONE shared across every object carrying the same
+    /// CR 611.2a + CR 601.2a: a paid, durational batch grant over cards from
+    /// this resolution. The per-object driver cannot enforce an exactly-one
+    /// cap, so this path uses `CastingPermission::PlayFromExile { single_use: true }`.
+    /// The resulting budget allows one cast across all objects carrying the same
     /// `single_use_group`. Chandra, Hope's Beacon +1 already lowers to that shape
     /// through `try_parse_cast_from_tracked_exile_grant`; this is the same shape
     /// reached from the batch-anaphor surfaces (Locke, Treasure Hunter;
@@ -39201,12 +39199,9 @@ impl FromAmongBatchLowering {
 /// ONE place, `CastFromZoneDriver::for_batch_bounds`: either the clause prints a
 /// cast cap this engine cannot express at all (`CastCapReading::Unrepresentable`
 /// — Wand of Wonder's "up to X", a literal outside `u8`), or it prints a bound
-/// that IS expressible but the mechanism this grammar selects has no channel for
-/// it. Only `ResolutionWindow` has count and running-total channels —
-/// `LingeringPermission` records a per-object permission with no shared cast
-/// budget (`game/effects/cast_from_zone.rs`) and `DuringResolution` casts
-/// exactly one card — so *every* other mechanism would silently DROP the printed
-/// bound and grant an uncapped permission where the card prints a hard cap.
+/// that is expressible but the selected mechanism cannot enforce. For this
+/// grammar, `ResolutionWindow` carries the count and running-total channels;
+/// `PerObject` carries neither.
 /// Callers must turn `None` into the honest gap node via
 /// `from_among_batch_cast_effect`, never into a driver.
 fn from_among_batch_cast_driver(
@@ -39220,7 +39215,7 @@ fn from_among_batch_cast_driver(
     // pairing authority. Deciding the mechanism first and reading the bound
     // afterwards was the defect this whole family kept reproducing: "cast up to
     // two sorcery spells from among them" for a PAID or duration-bearing clause
-    // landed on `LingeringPermission`, i.e. an uncapped later-priority
+    // landed on a `PerObject` lingering grant, i.e. an uncapped later-priority
     // permission — strictly more permissive than the printed instruction.
     let Some(bounds) = from_among_batch_bounds(rest) else {
         return FromAmongBatchLowering::Refused;
@@ -39246,7 +39241,9 @@ fn from_among_batch_cast_driver(
     // one decision it is needed for.
     let mechanism =
         if mode != CardPlayMode::Cast || !without_paying || clause_states_a_duration(rest) {
-            CastMechanism::LingeringPermission
+            CastMechanism::LingeringPermission {
+                budget: LingeringCastBudget::PerObject,
+            }
         } else {
             CastMechanism::ResolutionWindow
         };
@@ -39562,14 +39559,10 @@ fn single_use_tracked_set_cast_grant(
 ///
 /// CR 608.2c makes the printed "up to N" part of the instruction the controller
 /// follows, so a lowering that DROPS the bound permits more casts than the card
-/// does. Every shape `try_parse_cast_effect` can build either carries the bound
-/// in `ResolutionCastWindow.max_casts` or carries no count at all:
-/// `CastFromZoneDriver::LingeringPermission` records per-object permissions with
-/// no shared cast budget (`game/effects/cast_from_zone.rs`), `DuringResolution`
-/// casts one card, and the Branch-2 / Branch-3 filter forms have no count
-/// channel either. So once `parse_representable_cast_count` refuses the printed
-/// literal, there is no remaining lowering that keeps the bound and falling
-/// through would grant an UNCAPPED permission where a hard cap is printed.
+/// does. The shared lingering budget enforces only one cast, and only
+/// `ResolutionWindow` carries arbitrary representable counts. Once
+/// `parse_representable_cast_count` refuses the literal, falling through would
+/// grant an uncapped permission where a hard cap is printed.
 ///
 /// Refusing the whole clause is the project's honest-gap signal: the surface
 /// stays red in coverage instead of shipping a silent rules error. This is the
@@ -39595,7 +39588,7 @@ fn refuse_unrepresentable_cast_cap(rest: &str) -> Option<Effect> {
 /// cap that has simply run out of arms with a count channel. Every remaining
 /// arm (the persistent exile-link anaphor, the Triple Triad owned-plus-lesser
 /// grant, the Branch-2 filter form and the Branch-3 bare fallback) builds a
-/// `CastFromZone` whose driver is either a per-object `LingeringPermission` or a
+/// `CastFromZone` whose driver is either a `PerObject` lingering permission or a
 /// single-card `DuringResolution`, so a printed `"up to N"` reaching one of them
 /// is dropped outright. Two real cards still do exactly that, and both landed
 /// on `TargetFilter::Any` — the most permissive grant the engine can express:
@@ -41016,7 +41009,7 @@ fn try_parse_cast_effect(lower: &str, ctx: &ParseContext) -> Option<Effect> {
         } else if resolves_now {
             crate::types::ability::CastFromZoneDriver::DuringResolution
         } else {
-            crate::types::ability::CastFromZoneDriver::LingeringPermission
+            crate::types::ability::CastFromZoneDriver::PER_OBJECT_LINGERING
         };
         // CR 406.6 + CR 607.2a + CR 608.2c: a singular "the exiled card"
         // anaphor binds durably to `ExiledBySource` when no earlier clause in
@@ -41240,7 +41233,7 @@ fn try_parse_cast_effect(lower: &str, ctx: &ParseContext) -> Option<Effect> {
                 // private-zone tail in `game/effects/cast_from_zone.rs`
                 // (`EffectZoneChoice { count: 1, up_to: true }`) rather than by
                 // the driver — which is exactly why the mechanism is named
-                // `ResolutionTimePrivateZonePick` and not `LingeringPermission`
+                // `ResolutionTimePrivateZonePick` and not a `PerObject` lingering grant
                 // even though the two share a driver value. Stating it here
                 // makes a future "up to two … from among those cards" hand form
                 // refuse instead of silently reaching a one-card pick.
@@ -41350,8 +41343,9 @@ fn try_parse_cast_effect(lower: &str, ctx: &ParseContext) -> Option<Effect> {
     // grows across resolutions, and the printed "a spell" bounds each ACTIVATION
     // rather than the set. A cap of exactly one cast under a STATED duration (Court
     // of Locthwain, Idol of Endurance, Serpent's Soul-Jar) is read below and lowers
-    // to `CastFromZoneDriver::LingeringWindow`: the per-object permissions that one
-    // resolution writes share one budget (`ExileWithAltCost::single_use_group`).
+    // to a lingering permission with `SharedSingleCast`: the per-object
+    // permissions that one resolution writes share one budget
+    // (`ExileWithAltCost::single_use_group`).
     //
     // KNOWN RESIDUAL (pre-existing, deliberately NOT closed here): the singular
     // members that state NO duration (Jeleva, Kylox's Voltstrider, Kaho, Tasha,
@@ -41391,22 +41385,23 @@ fn try_parse_cast_effect(lower: &str, ctx: &ParseContext) -> Option<Effect> {
         // spell from among cards exiled with ~") under a STATED duration ("until
         // end of turn" — Court of Locthwain, Idol of Endurance, Serpent's Soul-Jar)
         // bounds the whole grant, so the permissions it writes share one budget
-        // (`CastFromZoneDriver::LingeringWindow`, chosen through the pairing
-        // authority). Every other shape keeps the per-object permission; see the
-        // residual above.
+        // (`SharedSingleCast`, chosen through the pairing authority). Every
+        // other shape keeps the per-object permission; see the residual above.
         let driver = if mode == CardPlayMode::Cast
             && (ctx.stated_clause_duration.is_some() || clause_states_a_duration(rest))
         {
             from_among_batch_bounds(rest)
                 .and_then(|bounds| {
-                    crate::types::ability::CastFromZoneDriver::for_batch_bounds(
-                        CastMechanism::LingeringWindow,
+                    CastFromZoneDriver::for_batch_bounds(
+                        CastMechanism::LingeringPermission {
+                            budget: LingeringCastBudget::SharedSingleCast,
+                        },
                         bounds,
                     )
                 })
-                .unwrap_or(crate::types::ability::CastFromZoneDriver::LingeringPermission)
+                .unwrap_or(CastFromZoneDriver::PER_OBJECT_LINGERING)
         } else {
-            crate::types::ability::CastFromZoneDriver::LingeringPermission
+            CastFromZoneDriver::PER_OBJECT_LINGERING
         };
         return Some(Effect::CastFromZone {
             target,
@@ -41519,7 +41514,7 @@ fn try_parse_cast_effect(lower: &str, ctx: &ParseContext) -> Option<Effect> {
             alt_ability_cost: None,
             constraint,
             duration: None,
-            driver: crate::types::ability::CastFromZoneDriver::LingeringPermission,
+            driver: crate::types::ability::CastFromZoneDriver::PER_OBJECT_LINGERING,
             mana_spend_permission: None,
             cast_cost_modifier: None,
             additional_cost: None,
@@ -41638,7 +41633,7 @@ fn try_parse_cast_effect(lower: &str, ctx: &ParseContext) -> Option<Effect> {
         alt_ability_cost: None,
         constraint,
         duration: None,
-        driver: crate::types::ability::CastFromZoneDriver::LingeringPermission,
+        driver: crate::types::ability::CastFromZoneDriver::PER_OBJECT_LINGERING,
         mana_spend_permission: None,
         additional_cost: None,
         cast_cost_modifier: None,
@@ -41712,7 +41707,7 @@ fn during_resolution_for_filter_cast_clause(
 ) -> crate::types::ability::CastFromZoneDriver {
     use crate::types::ability::CastFromZoneDriver;
     if mode != CardPlayMode::Cast {
-        return CastFromZoneDriver::LingeringPermission;
+        return CastFromZoneDriver::PER_OBJECT_LINGERING;
     }
     if hand_origin && (without_paying || alt_is_some) {
         return CastFromZoneDriver::DuringResolution;
@@ -41720,7 +41715,7 @@ fn during_resolution_for_filter_cast_clause(
     if chosen_graveyard_card && !without_paying && !alt_is_some {
         return CastFromZoneDriver::DuringResolution;
     }
-    CastFromZoneDriver::LingeringPermission
+    CastFromZoneDriver::PER_OBJECT_LINGERING
 }
 
 /// CR 601.2b: The parser gap name for a cast clause whose "in addition to its

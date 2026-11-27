@@ -2,8 +2,8 @@ use crate::game::zone_pipeline::{self, BatchMoveResult, ZoneMoveRequest};
 use crate::types::ability::{
     graveyard_destination_rider, is_graveyard_exile_rider_subability, AbilityCondition,
     AbilityCost, CastPermissionConstraint, CastingPermission, Duration, Effect, EffectError,
-    EffectKind, QuantityExpr, ResolvedAbility, SpellStackToGraveyardReplacement, TargetFilter,
-    TargetRef, ThisWayCause,
+    EffectKind, LingeringCastBudget, QuantityExpr, ResolvedAbility,
+    SpellStackToGraveyardReplacement, TargetFilter, TargetRef, ThisWayCause,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::{BatchCompletion, GameState, WaitingFor};
@@ -1052,8 +1052,7 @@ pub fn resolve(
                 crate::types::ability::CastFromZoneDriver::ResolutionWindow { .. } => {
                     crate::game::casting::resolution_land_card_admission
                 }
-                crate::types::ability::CastFromZoneDriver::LingeringPermission
-                | crate::types::ability::CastFromZoneDriver::LingeringWindow { .. }
+                crate::types::ability::CastFromZoneDriver::LingeringPermission { .. }
                 | crate::types::ability::CastFromZoneDriver::DuringResolution => {
                     crate::game::casting::resolution_land_front_card_admission
                 }
@@ -3131,15 +3130,16 @@ fn record_lingering_permissions(
     // set: registering one would make it the highest id, which a later
     // `TrackedSet { id: 0 }` anaphor in the same chain would mis-bind to.
     let single_use_group = match driver {
-        crate::types::ability::CastFromZoneDriver::LingeringWindow { bounds }
-            if bounds.is_exactly_one_cast() =>
-        {
+        crate::types::ability::CastFromZoneDriver::LingeringPermission {
+            budget: LingeringCastBudget::SharedSingleCast,
+        } => {
             let group = crate::types::identifiers::TrackedSetId(state.next_tracked_set_id);
             state.next_tracked_set_id += 1;
             Some(group)
         }
-        crate::types::ability::CastFromZoneDriver::LingeringWindow { .. }
-        | crate::types::ability::CastFromZoneDriver::LingeringPermission
+        crate::types::ability::CastFromZoneDriver::LingeringPermission {
+            budget: LingeringCastBudget::PerObject,
+        }
         | crate::types::ability::CastFromZoneDriver::DuringResolution
         | crate::types::ability::CastFromZoneDriver::ResolutionWindow { .. } => None,
     };
@@ -3625,7 +3625,7 @@ mod tests {
                     alt_ability_cost: None,
                     constraint: None,
                     duration: None,
-                    driver: CastFromZoneDriver::LingeringPermission,
+                    driver: CastFromZoneDriver::PER_OBJECT_LINGERING,
                     mana_spend_permission: None,
                     additional_cost: None,
                     cast_cost_modifier: None,
@@ -4141,7 +4141,7 @@ mod tests {
                 alt_ability_cost: None,
                 constraint: None,
                 duration: None,
-                driver: CastFromZoneDriver::LingeringPermission,
+                driver: CastFromZoneDriver::PER_OBJECT_LINGERING,
                 mana_spend_permission: None,
                 additional_cost: None,
                 cast_cost_modifier: None,
@@ -4249,7 +4249,7 @@ mod tests {
                 alt_ability_cost: None,
                 constraint: None,
                 duration: None,
-                driver: crate::types::ability::CastFromZoneDriver::LingeringPermission,
+                driver: crate::types::ability::CastFromZoneDriver::PER_OBJECT_LINGERING,
                 mana_spend_permission: None,
                 additional_cost: None,
                 cast_cost_modifier: None,
@@ -4312,7 +4312,7 @@ mod tests {
                 ),
                 constraint: None,
                 duration: None,
-                driver: crate::types::ability::CastFromZoneDriver::LingeringPermission,
+                driver: crate::types::ability::CastFromZoneDriver::PER_OBJECT_LINGERING,
                 mana_spend_permission: None,
                 additional_cost: None,
                 cast_cost_modifier: None,
@@ -4361,7 +4361,7 @@ mod tests {
                 alt_ability_cost: None,
                 constraint: None,
                 duration: None,
-                driver: CastFromZoneDriver::LingeringPermission,
+                driver: crate::types::ability::CastFromZoneDriver::PER_OBJECT_LINGERING,
                 mana_spend_permission: None,
                 additional_cost: None,
                 cast_cost_modifier: None,
@@ -4407,7 +4407,7 @@ mod tests {
         *duration = Some(Duration::UntilEndOfTurn);
         assert_eq!(
             stashed_driver(timed_free_cast),
-            CastFromZoneDriver::LingeringPermission,
+            CastFromZoneDriver::PER_OBJECT_LINGERING,
             "a timed free hand cast keeps its lingering driver"
         );
 
@@ -4418,7 +4418,7 @@ mod tests {
         *mode = CardPlayMode::Play;
         assert_eq!(
             stashed_driver(free_play),
-            CastFromZoneDriver::LingeringPermission,
+            CastFromZoneDriver::PER_OBJECT_LINGERING,
             "a free hand play is not a resolution-time spell cast"
         );
 
@@ -4433,7 +4433,7 @@ mod tests {
         *without_paying_mana_cost = false;
         assert_eq!(
             stashed_driver(full_cost),
-            CastFromZoneDriver::LingeringPermission,
+            CastFromZoneDriver::PER_OBJECT_LINGERING,
             "a full-cost hand cast keeps its lingering driver"
         );
 
@@ -4449,7 +4449,7 @@ mod tests {
         });
         assert_eq!(
             stashed_driver(alternative_cost),
-            CastFromZoneDriver::LingeringPermission,
+            CastFromZoneDriver::PER_OBJECT_LINGERING,
             "an alternate-cost hand grant keeps its lingering driver"
         );
     }
@@ -4468,7 +4468,7 @@ mod tests {
                 alt_ability_cost: None,
                 constraint: None,
                 duration: Some(Duration::UntilEndOfTurn),
-                driver: crate::types::ability::CastFromZoneDriver::LingeringPermission,
+                driver: crate::types::ability::CastFromZoneDriver::PER_OBJECT_LINGERING,
                 mana_spend_permission: None,
                 additional_cost: None,
                 cast_cost_modifier: None,
@@ -4522,7 +4522,7 @@ mod tests {
                 alt_ability_cost: None,
                 constraint: None,
                 duration: None,
-                driver: CastFromZoneDriver::LingeringPermission,
+                driver: crate::types::ability::CastFromZoneDriver::PER_OBJECT_LINGERING,
                 mana_spend_permission: None,
                 additional_cost: None,
                 cast_cost_modifier: None,
@@ -4605,7 +4605,7 @@ mod tests {
                     alt_ability_cost: None,
                     constraint: None,
                     duration: None,
-                    driver: CastFromZoneDriver::LingeringPermission,
+                    driver: crate::types::ability::CastFromZoneDriver::PER_OBJECT_LINGERING,
                     mana_spend_permission: None,
                     additional_cost: None,
                     cast_cost_modifier: None,
@@ -4652,7 +4652,7 @@ mod tests {
                 alt_ability_cost: None,
                 constraint: None,
                 duration: None,
-                driver: CastFromZoneDriver::LingeringPermission,
+                driver: crate::types::ability::CastFromZoneDriver::PER_OBJECT_LINGERING,
                 mana_spend_permission: None,
                 additional_cost: None,
                 cast_cost_modifier: None,
@@ -5124,7 +5124,7 @@ mod tests {
                 alt_ability_cost: None,
                 constraint: None,
                 duration: None,
-                driver: crate::types::ability::CastFromZoneDriver::LingeringPermission,
+                driver: crate::types::ability::CastFromZoneDriver::PER_OBJECT_LINGERING,
                 mana_spend_permission: None,
                 additional_cost: None,
                 cast_cost_modifier: None,
@@ -5168,7 +5168,7 @@ mod tests {
                 alt_ability_cost: None,
                 constraint: None,
                 duration: None,
-                driver: crate::types::ability::CastFromZoneDriver::LingeringPermission,
+                driver: crate::types::ability::CastFromZoneDriver::PER_OBJECT_LINGERING,
                 mana_spend_permission: None,
                 additional_cost: None,
                 cast_cost_modifier: None,
@@ -5204,7 +5204,7 @@ mod tests {
                 alt_ability_cost: None,
                 constraint: None,
                 duration: None,
-                driver: crate::types::ability::CastFromZoneDriver::LingeringPermission,
+                driver: crate::types::ability::CastFromZoneDriver::PER_OBJECT_LINGERING,
                 mana_spend_permission: None,
                 additional_cost: None,
                 cast_cost_modifier: None,
@@ -5278,7 +5278,7 @@ mod tests {
                 alt_ability_cost: None,
                 constraint: None,
                 duration: None,
-                driver: crate::types::ability::CastFromZoneDriver::LingeringPermission,
+                driver: crate::types::ability::CastFromZoneDriver::PER_OBJECT_LINGERING,
                 mana_spend_permission: None,
                 additional_cost: None,
                 cast_cost_modifier: None,
@@ -5419,7 +5419,7 @@ mod tests {
                 alt_ability_cost: None,
                 constraint: None,
                 duration: None,
-                driver: crate::types::ability::CastFromZoneDriver::LingeringPermission,
+                driver: crate::types::ability::CastFromZoneDriver::PER_OBJECT_LINGERING,
                 mana_spend_permission: None,
                 additional_cost: None,
                 cast_cost_modifier: None,
@@ -5956,7 +5956,7 @@ mod tests {
                         filter: TargetFilter::Any,
                     },
                 }),
-                driver: CastFromZoneDriver::LingeringPermission,
+                driver: crate::types::ability::CastFromZoneDriver::PER_OBJECT_LINGERING,
                 mana_spend_permission: None,
                 additional_cost: None,
                 cast_cost_modifier: None,
@@ -6019,7 +6019,7 @@ mod tests {
                 alt_ability_cost: None,
                 constraint: None,
                 duration: None,
-                driver: crate::types::ability::CastFromZoneDriver::LingeringPermission,
+                driver: crate::types::ability::CastFromZoneDriver::PER_OBJECT_LINGERING,
                 mana_spend_permission: None,
                 additional_cost: None,
                 cast_cost_modifier: None,
@@ -6061,7 +6061,7 @@ mod tests {
                 alt_ability_cost: None,
                 constraint: None,
                 duration: None,
-                driver: CastFromZoneDriver::LingeringPermission,
+                driver: crate::types::ability::CastFromZoneDriver::PER_OBJECT_LINGERING,
                 mana_spend_permission: None,
                 additional_cost: None,
                 cast_cost_modifier: None,
@@ -6242,7 +6242,7 @@ mod tests {
                 alt_ability_cost: None,
                 constraint: None,
                 duration: None,
-                driver: CastFromZoneDriver::LingeringPermission,
+                driver: crate::types::ability::CastFromZoneDriver::PER_OBJECT_LINGERING,
                 mana_spend_permission: None,
                 additional_cost: None,
                 cast_cost_modifier: None,
@@ -6311,7 +6311,7 @@ mod tests {
                 alt_ability_cost: None,
                 constraint: Some(constraint.clone()),
                 duration: None,
-                driver: crate::types::ability::CastFromZoneDriver::LingeringPermission,
+                driver: crate::types::ability::CastFromZoneDriver::PER_OBJECT_LINGERING,
                 mana_spend_permission: None,
                 additional_cost: None,
                 cast_cost_modifier: None,
@@ -7146,7 +7146,7 @@ mod tests {
                 alt_ability_cost: None,
                 constraint: None,
                 duration: Some(Duration::UntilEndOfTurn),
-                driver: CastFromZoneDriver::LingeringPermission,
+                driver: crate::types::ability::CastFromZoneDriver::PER_OBJECT_LINGERING,
                 mana_spend_permission: None,
                 additional_cost: None,
                 cast_cost_modifier: None,
@@ -7328,7 +7328,7 @@ mod tests {
                 instruction(
                     source,
                     TargetFilter::ExiledBySource,
-                    CastFromZoneDriver::LingeringPermission,
+                    CastFromZoneDriver::PER_OBJECT_LINGERING,
                     vec![],
                 ),
             ),

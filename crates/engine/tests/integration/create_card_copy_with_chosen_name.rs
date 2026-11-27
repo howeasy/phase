@@ -1430,7 +1430,7 @@ fn an_independent_later_cast_clause_keeps_its_own_target_and_window() {
         );
         assert_eq!(
             *driver,
-            CastFromZoneDriver::LingeringPermission,
+            CastFromZoneDriver::PER_OBJECT_LINGERING,
             "an independent cast clause keeps its window"
         );
     }
