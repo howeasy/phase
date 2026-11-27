@@ -2271,6 +2271,7 @@ face = [
   { key = "sylvan smite", class = "target_wrong", clauses = ["Then that creature deals damage equal to its power to target creature you don't control."] },
   { key = "syncopate", class = "wrong_zone", clauses = ["If that spell is countered this way, exile it instead of putting it into its owner's graveyard."] },
   { key = "syr vondam, sunstar exemplar", class = "condition_wrong", clauses = ["Whenever another creature you control dies or is put into exile, put a +1/+1 counter on Syr Vondam and you gain 1 life.", "When Syr Vondam dies or is put into exile while its power is 4 or greater, destroy up to one target nonland permanent."] },
+  { key = "syrix, carrier of the flame", class = "wrong_zone", clauses = ["Whenever another Phoenix you control dies, you may cast this card from your graveyard."] },
   { key = "t.a.p.p.e.r.", class = "cost_wrong", clauses = ["{T}, Tap an untapped creature you control that has a hat: Tap target creature."] },
   { key = "taigam's strike", class = "target_wrong", clauses = ["and can't be blocked this turn."] },
   { key = "tainted adversary", class = "missing_effect", clauses = ["When this creature enters, you may pay {2}{B} any number of times.", "When you pay this cost one or more times, put that many +1/+1 counters on this creature, then create twice that many 2/2 black Zombie creature tokens with decayed."] },

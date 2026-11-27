@@ -298,20 +298,22 @@ fn compare_population(raw: &Map<String, Value>, populations: &[(&ConfirmedMispar
 }
 
 /// Sandstalker Moloch (its dig publishes every looked-at card, ticket 359) and
-/// Sarevok, Deathbringer (a typeless permanent leaving is not counted) parse their
-/// intervening-if gates but are not claimed: the committed rows make both report an
-/// honest `Misparse:` gap, with the parse and the five claimed cards untouched.
+/// Sarevok, Deathbringer (a typeless permanent leaving is not counted) and Syrix,
+/// Carrier of the Flame (its graveyard-cast trigger keeps `trigger_zones` at the
+/// battlefield, so it cannot fire from the graveyard) parse their
+/// intervening-if gates but are not claimed: the committed rows make all three report an
+/// honest `Misparse:` gap, with the parse and the four claimed cards untouched.
 #[test]
 fn intervening_if_unclaimed_cards_stay_unsupported_and_claimed_cards_stay_supported() {
     let unclaimed = [
         ("sandstalker moloch", MisparseClass::WrongObject),
         ("sarevok, deathbringer", MisparseClass::ConditionWrong),
+        ("syrix, carrier of the flame", MisparseClass::WrongZone),
     ];
     let claimed = [
         "kaito shizuki",
         "krond the dawn-clad",
         "warchanter skald",
-        "syrix, carrier of the flame",
         "novice knight",
     ];
     let pool: Map<String, Value> = unclaimed

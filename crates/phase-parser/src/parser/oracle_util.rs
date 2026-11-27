@@ -3628,10 +3628,17 @@ mod tests {
         // Production normalizes per Oracle line (the card's other lines carry a
         // `~` from "this token", which would skip the whole-text fallback), so the
         // trigger line is the input here.
-        let text = "At the beginning of your end step, if Kaito entered this turn, he phases out.\n[-7]: You get an emblem with \"As long as you control a Kaito planeswalker, draw a card.\"";
+        let text = "At the beginning of your end step, if Kaito entered this turn, he phases out.\n[-7]: You get an emblem with \"Whenever a creature you control deals combat damage to a player, search your library for a blue or black creature card, put it onto the battlefield, then shuffle.\"";
         assert_eq!(
             normalize_card_name_refs(text, "Kaito Shizuki"),
-            "At the beginning of your end step, if ~ entered this turn, he phases out.\n[-7]: You get an emblem with \"As long as you control a Kaito planeswalker, draw a card.\""
+            "At the beginning of your end step, if ~ entered this turn, he phases out.\n[-7]: You get an emblem with \"Whenever a creature you control deals combat damage to a player, search your library for a blue or black creature card, put it onto the battlefield, then shuffle.\""
+        );
+        // Printed type-position reference (Gideon of the Trials' emblem): the same
+        // planeswalker-first-name path keeps "a Gideon planeswalker" literal.
+        let gideon = "[0]: You get an emblem with \"As long as you control a Gideon planeswalker, you can't lose the game and your opponents can't win the game.\"";
+        assert_eq!(
+            normalize_card_name_refs(gideon, "Gideon of the Trials"),
+            gideon
         );
         let lord = "Other Merfolk you control get +1/+1.";
         assert_eq!(normalize_card_name_refs(lord, "Merfolk Mistbinder"), lord);
