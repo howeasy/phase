@@ -30661,8 +30661,8 @@ pub fn default_replacement_recipient_any() -> ReplacementRecipient {
 /// variant reads an instruction result rather than a filter, so it cannot live
 /// on `TargetFilter` without forcing every filter consumer to answer an operand
 /// that is meaningless outside the replacement seam.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(from = "ReplacementRecipientWire", into = "ReplacementRecipientWire")]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(from = "ReplacementRecipientWire")]
 pub enum ReplacementRecipient {
     Filter(TargetFilter),
     /// CR 608.2c + CR 614.9 (redirection) + CR 615.6 (prevented damage is never
@@ -30673,8 +30673,9 @@ pub enum ReplacementRecipient {
 
 /// Wire form of [`ReplacementRecipient`]. A `Filter` serializes as exactly the
 /// bare `TargetFilter`, so every pre-existing `target` value is byte-identical.
-/// `Prior` is tried first; no `TargetFilter` variant carries its tag.
-#[derive(Serialize, Deserialize)]
+/// `Prior` is tried first; no `TargetFilter` variant carries its tag. Decode-only:
+/// serialization is hand-written below so a `Filter` is written by reference.
+#[derive(Deserialize)]
 #[serde(untagged)]
 enum ReplacementRecipientWire {
     Prior(PriorDamageRecipientsWire),
@@ -30698,13 +30699,13 @@ impl From<ReplacementRecipientWire> for ReplacementRecipient {
     }
 }
 
-impl From<ReplacementRecipient> for ReplacementRecipientWire {
-    fn from(recipient: ReplacementRecipient) -> Self {
-        match recipient {
+impl Serialize for ReplacementRecipient {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match self {
             ReplacementRecipient::PriorDamageRecipients => {
-                ReplacementRecipientWire::Prior(PriorDamageRecipientsWire::PriorDamageRecipients)
+                PriorDamageRecipientsWire::PriorDamageRecipients.serialize(serializer)
             }
-            ReplacementRecipient::Filter(filter) => ReplacementRecipientWire::Filter(filter),
+            ReplacementRecipient::Filter(filter) => filter.serialize(serializer),
         }
     }
 }
@@ -30784,6 +30785,23 @@ mod replacement_recipient_tests {
                 recipient
             );
         }
+    }
+
+    #[test]
+    fn serialization_is_byte_identical_to_the_owned_wire_shape() {
+        let filter = TargetFilter::Typed(
+            TypedFilter::creature()
+                .controller(ControllerRef::Opponent)
+                .properties(vec![FilterProp::Tapped]),
+        );
+        assert_eq!(
+            serde_json::to_string(&ReplacementRecipient::Filter(filter.clone())).unwrap(),
+            serde_json::to_string(&filter).unwrap()
+        );
+        assert_eq!(
+            serde_json::to_string(&ReplacementRecipient::PriorDamageRecipients).unwrap(),
+            r#"{"type":"PriorDamageRecipients"}"#
+        );
     }
 
     #[test]

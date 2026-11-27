@@ -4436,12 +4436,29 @@ fn fold_exact_damage_recipients(
         return;
     };
     let pins = Arc::make_mut(pins);
-    for pin in std::iter::once(first).chain(fresh) {
-        if !pins.contains(&pin) {
+    let incoming = std::iter::once(first).chain(fresh);
+    // `records.len()` bounds the incoming pins, so the choice allocates nothing.
+    if pins.len() + records.len() <= EXACT_RECIPIENT_LINEAR_DEDUPE_LIMIT {
+        for pin in incoming {
+            if !pins.contains(&pin) {
+                pins.push(pin);
+            }
+        }
+        return;
+    }
+    // Large boards: one set built from the accumulator keeps the fold linear while
+    // first-delivery order is preserved by pushing in arrival order.
+    let mut seen: HashSet<ObjectIncarnationRef> = pins.iter().copied().collect();
+    for pin in incoming {
+        if seen.insert(pin) {
             pins.push(pin);
         }
     }
 }
+
+/// Accumulated plus incoming pins at or below which the exact-recipient fold dedupes
+/// by linear scan instead of building a set.
+const EXACT_RECIPIENT_LINEAR_DEDUPE_LIMIT: usize = 16;
 
 /// CR 608.2c: the seed for a damage result whose consumer reads the exact
 /// recipients of the preceding instruction. The accumulator's own presence is
@@ -36917,6 +36934,37 @@ mod tests {
         LibraryInstructionActor, LibraryPosition, ParentTargetMissingReason,
         SearchSelectionConstraint, SpentColor, UNION_DEPTH_BUDGET,
     };
+
+    fn exact_damage_record(pin: ObjectIncarnationRef, amount: u32) -> RecordedDamageDealt {
+        RecordedDamageDealt {
+            target: TargetRef::Object(pin.object_id),
+            amount,
+            excess: 0,
+            object_pin: Some(pin),
+        }
+    }
+
+    /// CR 120.8 + CR 400.7: a bulk fold (past the linear-dedupe limit) keeps
+    /// first-delivery order and dedupes, including across a resumed delivery.
+    #[test]
+    fn exact_damage_fold_bulk_preserves_order_and_dedupes_across_resume() {
+        let pin = |n: u64| ObjectIncarnationRef::of(ObjectId(n), 1);
+        let mut pins = Arc::new(Vec::new());
+        // First delivery: 64 distinct pins, each delivered twice, plus a zero-damage
+        // record that must not count.
+        let mut first: Vec<_> = (1..=64).map(|n| exact_damage_record(pin(n), 1)).collect();
+        first.extend((1..=64).rev().map(|n| exact_damage_record(pin(n), 2)));
+        first.push(exact_damage_record(pin(500), 0));
+        fold_exact_damage_recipients(&mut pins, &first);
+        assert_eq!(*pins, (1..=64).map(pin).collect::<Vec<_>>());
+        // Resumed delivery: half overlap the accumulator, half are new.
+        let second: Vec<_> = (33..=96).map(|n| exact_damage_record(pin(n), 3)).collect();
+        fold_exact_damage_recipients(&mut pins, &second);
+        assert_eq!(*pins, (1..=96).map(pin).collect::<Vec<_>>());
+        // An empty fold leaves the accumulator untouched.
+        fold_exact_damage_recipients(&mut pins, &[exact_damage_record(pin(7), 0)]);
+        assert_eq!(pins.len(), 96);
+    }
 
     fn continuation_die_context_fixture(effect: Effect) -> (GameState, ObjectId, GameEvent) {
         let mut state = GameState::new_two_player(42);

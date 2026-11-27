@@ -736,10 +736,11 @@ fn strip_key(value: &mut serde_json::Value, key: &str) -> usize {
 /// CR 616.1 + CR 608.2c + CR 614.9: Pillar of Flame parks on a replacement
 /// ordering BEFORE any delivery, so its reader accumulator is `Some([])`. That
 /// empty accumulator must survive save/restore (it is the only reader gate), and
-/// an old save that lacks the field restores as a non-reader and installs nothing.
+/// a save missing the field (still carrying `PriorDamageRecipients`) restores as a
+/// non-reader and installs nothing.
 #[test]
 fn pillar_parked_before_any_delivery_keeps_its_empty_reader_across_save_restore() {
-    for old_save in [false, true] {
+    for field_stripped in [false, true] {
         let mut scenario = GameScenario::new();
         scenario.at_phase(Phase::PreCombatMain);
         let victim = scenario.add_creature(P1, "Victim", 0, 20).id();
@@ -764,7 +765,7 @@ fn pillar_parked_before_any_delivery_keeps_its_empty_reader_across_save_restore(
         );
         let mut captured = save(runner.state());
         assert!(captured.to_string().contains("\"exact_recipients\":[]"));
-        if old_save {
+        if field_stripped {
             assert!(strip_key(&mut captured, "exact_recipients") > 0);
         }
         let mut resumed = restore(captured);
@@ -782,8 +783,11 @@ fn pillar_parked_before_any_delivery_keeps_its_empty_reader_across_save_restore(
         else {
             panic!("the reader is parked awaiting delivery");
         };
-        if old_save {
-            assert!(exact_recipients.is_none(), "an old save is a non-reader");
+        if field_stripped {
+            assert!(
+                exact_recipients.is_none(),
+                "a field-stripped save is a non-reader"
+            );
         } else {
             assert_eq!(exact_recipients.as_deref().map(Vec::len), Some(0));
         }
@@ -797,12 +801,12 @@ fn pillar_parked_before_any_delivery_keeps_its_empty_reader_across_save_restore(
             resumed.state().objects[&victim].damage_marked,
             6 | 8
         ));
-        assert_eq!(installed(&resumed, victim), usize::from(!old_save));
+        assert_eq!(installed(&resumed, victim), usize::from(!field_stripped));
         destroy(
             &mut resumed,
             removal,
             victim,
-            if old_save {
+            if field_stripped {
                 Zone::Graveyard
             } else {
                 Zone::Exile
