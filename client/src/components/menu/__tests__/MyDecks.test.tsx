@@ -73,7 +73,8 @@ vi.mock("../../../hooks/useSetSymbols", () => ({
   useSetSymbol,
 }));
 
-vi.mock("../../../services/deckCompatibility", () => ({
+vi.mock("../../../services/deckCompatibility", async (importOriginal) => ({
+  ...await importOriginal<typeof import("../../../services/deckCompatibility")>(),
   evaluateDeckCompatibilityBatch: vi.fn(),
 }));
 
@@ -434,6 +435,54 @@ describe("MyDecks", () => {
     expect(screen.queryByText("CMD")).not.toBeInTheDocument();
     expect(await screen.findByText("BO3", { selector: "span" })).toBeInTheDocument();
     expect(await screen.findByText("Unknown 1")).toBeInTheDocument();
+  });
+
+  it("describes an unsupported card with the engine's gap clause and handler in the coverage tooltip", async () => {
+    saveDeck("Coverage Deck", { main: [{ name: "Island", count: 60 }], sideboard: [] });
+
+    vi.mocked(evaluateDeckCompatibilityBatch).mockResolvedValue({
+      "Coverage Deck": {
+        standard: { compatible: true, reasons: [] },
+        commander: { compatible: false, reasons: [] },
+        bo3_ready: false,
+        unknown_cards: [],
+        selected_format_compatible: true,
+        selected_format_reasons: [],
+        color_identity: ["U"],
+        color_distribution: [],
+        coverage: {
+          total_unique: 1,
+          supported_unique: 0,
+          unsupported_cards: [{
+            name: "Arcane Adaptation",
+            gaps: ["Replacement:as_enters_projection"],
+            copies: 2,
+            gap_details: [{
+              handler: "Replacement:as_enters_projection",
+              source_text: "As this permanent enters, the engine cannot yet apply the changes its entering choice makes to other permanents (CR 614.12)",
+            }],
+          }],
+        },
+      },
+    });
+
+    render(
+      <MyDecks
+        mode="select"
+        selectedFormat="Standard"
+        activeDeckName="Coverage Deck"
+        onSelectDeck={vi.fn()}
+        onConfirmSelection={vi.fn()}
+      />,
+    );
+
+    const tooltip = (await screen.findByTitle(/Unsupported \(1 unique, 2 copies\)/)).getAttribute("title") ?? "";
+    expect(tooltip).toContain(
+      "As this permanent enters, the engine cannot yet apply the changes its entering choice makes to other permanents (CR 614.12)",
+    );
+    expect(tooltip).toContain("[Replacement:as_enters_projection]");
+    expect(tooltip).toContain("2x Arcane Adaptation");
+    expect(tooltip).toContain("2 copies");
   });
 
   it("uses supported game formats as deck filters without offering BO3 as a format", async () => {

@@ -372,7 +372,9 @@ pub enum ParseCategory {
 pub struct GapDetail {
     /// Handler key in "Category:label" format (e.g., "Effect:unknown", "Trigger:ChangesZone").
     pub handler: String,
-    /// The Oracle text fragment that produced this gap.
+    /// The Oracle text fragment that produced this gap; for the deck-only
+    /// entry-projection labels, which no printed clause produces, the engine's
+    /// plain-English explanation instead.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source_text: Option<String>,
     /// Typed reasons for this gap, one per contributing verdict. Omitted from the JSON
@@ -8620,11 +8622,21 @@ fn clause_from_lines<'a>(lines: impl Iterator<Item = &'a str>) -> Option<String>
 }
 
 /// The text that says what a gap with no recorded source fragment concerns, most
-/// specific first: the printed lines a silent drop left uncovered; the phrase or
-/// feature its own diagnosis names; the printed line holding the text in its
-/// handler's argument (`Static:Unrecognized(...)`) or its label (`Keyword:X`);
-/// and last the handler itself, so the text is never empty.
+/// specific first: the engine's plain-English explanation for the deck-only
+/// entry-projection labels (they name no printed clause); the printed lines a
+/// silent drop left uncovered; the phrase or feature its own diagnosis names;
+/// the printed line holding the text in its handler's argument
+/// (`Static:Unrecognized(...)`) or its label (`Keyword:X`); and last the
+/// handler itself, so the text is never empty.
 fn blank_gap_text(gap: &GapDetail, lines: &[String], dropped: &[&str]) -> String {
+    // The report never emits these two deck-only labels, so nothing else here
+    // has ever described them; say what the projection limit means.
+    if gap.handler == ENTRY_PROJECTION_GAP {
+        return "As this permanent enters, the engine cannot yet apply the changes its entering choice makes to other permanents (CR 614.12)".to_string();
+    }
+    if gap.handler == ENTRY_CONSUMER_GAP {
+        return "An effect here reads an entering permanent's characteristics before the engine can project them (CR 614.12)".to_string();
+    }
     if gap.handler.starts_with("SilentDrop:") && !dropped.is_empty() {
         return dropped.join(" / ");
     }
@@ -29941,6 +29953,18 @@ mod blank_gap_text_tests {
     fn handler_label_is_matched_case_insensitively_against_lines() {
         let text = blank_gap_text(&gap("Keyword:flying", vec![]), &lines(), &[]);
         assert_eq!(text, "Flying");
+    }
+
+    #[test]
+    fn deck_only_entry_gaps_carry_a_specific_explanation() {
+        for handler in [ENTRY_PROJECTION_GAP, ENTRY_CONSUMER_GAP] {
+            let text = blank_gap_text(&gap(handler, vec![]), &lines(), &[]);
+            assert!(text.contains("CR 614.12"), "{handler}: {text}");
+            assert!(
+                !text.contains(handler),
+                "{handler} must not fall back to its handler label: {text}"
+            );
+        }
     }
 
     #[test]

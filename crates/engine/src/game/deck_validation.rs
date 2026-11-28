@@ -432,7 +432,8 @@ pub struct UnsupportedCard {
     /// report's own authority (`CardFaceCoverage::explained_gap_details`), so for
     /// a face the two are equal except for the deck-only entry-projection gaps
     /// (`ENTRY_PROJECTION_GAP`, `ENTRY_CONSUMER_GAP`), which the verdict lists
-    /// and the report omits by policy.
+    /// and the report omits by policy. Those two carry the engine's own
+    /// plain-English explanation of the projection limit, not a printed clause.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub gap_details: Vec<crate::game::coverage::GapDetail>,
     /// Number of copies of this card in the deck (main + sideboard + commander).
