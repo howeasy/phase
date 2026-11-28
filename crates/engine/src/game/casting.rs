@@ -30632,8 +30632,10 @@ fn may_sacrifice_for_cost(
     if super::static_abilities::object_cant_be_sacrificed_by(state, player, id) {
         return false;
     }
+    // CR 118.3: the general "can't sacrifice" bar was already evaluated by
+    // `object_cant_be_sacrificed_by` above, so only the CantPayCost half runs now.
     matches!(scope, Some(super::costs::PaymentScope::TurnFaceUp { .. }))
-        || !super::static_abilities::player_cant_sacrifice_as_cost(state, player, id)
+        || !super::static_abilities::player_cant_pay_sacrifice_cost(state, player, id)
 }
 
 pub fn find_eligible_sacrifice_targets(

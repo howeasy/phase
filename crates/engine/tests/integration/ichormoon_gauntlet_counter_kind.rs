@@ -13,12 +13,19 @@
 //! and exactly one more counter of that kind is put on it. Both kinds' final
 //! counts are asserted, so an implementation that ignores the kind answer — or
 //! grows the wrong kind — cannot pass.
+//!
+//! The planeswalker grant is witnessed on the same footing: the granted
+//! "[0]: Proliferate" runs through the real loyalty-activation path and opens
+//! the CR 701.34a choice, and the granted "[−12]" pays twelve loyalty for an
+//! extra turn (CR 500.7) — both read from the live object after the layer-6
+//! ability grant (CR 613.1f), not from the parsed fixture text.
 
 use crate::support::shared_card_db;
 use engine::game::coverage::card_face_gaps;
+use engine::game::layers::{flush_layers, mark_layers_full};
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::scenario_db::GameScenarioDbExt;
-use engine::types::ability::{AbilityDefinition, Effect};
+use engine::types::ability::{AbilityCost, AbilityDefinition, Effect, TargetRef};
 use engine::types::actions::GameAction;
 use engine::types::counter::CounterType;
 use engine::types::game_state::WaitingFor;
@@ -195,6 +202,164 @@ fn noncreature_cast_prompts_kind_and_only_chosen_kind_grows() {
         runner.state().objects[&gauntlet].zone,
         Zone::Battlefield,
         "the Gauntlet itself is untouched"
+    );
+}
+
+// ─── Loyalty grants through the real activation pipeline ────────────────────
+
+/// P0's precombat main with (optionally) Ichormoon Gauntlet, a blank
+/// planeswalker carrying `loyalty` loyalty counters, and a filler permanent
+/// with one Stun counter. Layers are flushed so the Gauntlet's layer-6
+/// `GrantAbility` (CR 613.1f) has been applied to the planeswalker's live
+/// `abilities` when the test reads them.
+fn loyalty_board(loyalty: u32, with_gauntlet: bool) -> (GameRunner, ObjectId, ObjectId) {
+    let db = shared_card_db().expect("integration card fixture must load");
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    if with_gauntlet {
+        scenario.add_real_card(P0, "Ichormoon Gauntlet", Zone::Battlefield, db);
+    }
+    let walker = scenario
+        .add_planeswalker_from_oracle(P0, "Ichormoon Test Walker", "Jace", loyalty, "")
+        .id();
+    let carrier = scenario
+        .add_enchantment_from_oracle(P0, "Test Counter Carrier", "")
+        .id();
+    scenario.with_counter(carrier, CounterType::Stun, 1);
+    let mut runner = scenario.build();
+    mark_layers_full(runner.state_mut());
+    flush_layers(runner.state_mut());
+    (runner, walker, carrier)
+}
+
+/// Index of the live loyalty ability with the given loyalty cost on `source`.
+fn loyalty_index(runner: &GameRunner, source: ObjectId, amount: i32) -> usize {
+    runner.state().objects[&source]
+        .abilities
+        .iter()
+        .position(|ability| ability.cost == Some(AbilityCost::Loyalty { amount }))
+        .unwrap_or_else(|| {
+            panic!(
+                "expected a [{amount}] loyalty ability on the planeswalker; got {:?}",
+                runner.state().objects[&source].abilities
+            )
+        })
+}
+
+/// CR 606.3 + CR 606.4 + CR 613.1f + CR 701.34a: the Gauntlet's "[0]:
+/// Proliferate" exists on P0's planeswalker only because the grant was applied,
+/// activating it through the loyalty path removes no loyalty, and resolution
+/// asks P0 which permanents grow — exactly one counter of the kind already
+/// there lands on the chosen permanent.
+#[test]
+fn granted_zero_ability_proliferates_through_loyalty_activation() {
+    let (mut runner, walker, carrier) = loyalty_board(12, true);
+    let zero = loyalty_index(&runner, walker, 0);
+    assert!(
+        matches!(
+            runner.state().objects[&walker].abilities[zero]
+                .effect
+                .as_ref(),
+            Effect::Proliferate
+        ),
+        "the [0] grant must be Proliferate; got {:?}",
+        runner.state().objects[&walker].abilities[zero].effect
+    );
+
+    // CR 606.2 + CR 606.3: own main phase, empty stack, priority — the real
+    // loyalty activation route. It stops at the proliferate choice.
+    let _outcome = runner.activate(walker, zero).resolve();
+
+    let WaitingFor::ProliferateChoice { player, eligible } = runner.state().waiting_for.clone()
+    else {
+        panic!(
+            "CR 701.34a: proliferate must ask which permanents grow, got {:?}",
+            runner.state().waiting_for
+        );
+    };
+    assert_eq!(player, P0, "P0 chooses what to proliferate");
+    assert!(
+        eligible.contains(&TargetRef::Object(carrier)),
+        "the carrier with a Stun counter is eligible: {eligible:?}"
+    );
+    runner
+        .act(GameAction::SelectTargets {
+            targets: vec![TargetRef::Object(carrier)],
+        })
+        .expect("the proliferate answer must be accepted");
+
+    assert_eq!(
+        counters(&runner, carrier, CounterType::Stun),
+        2,
+        "the chosen permanent gained exactly one counter of its kind"
+    );
+    assert_eq!(
+        runner.state().objects[&walker].loyalty,
+        Some(12),
+        "CR 606.4: a [0] cost removes no loyalty"
+    );
+    assert!(runner.state().stack.is_empty());
+}
+
+/// CR 500.7 + CR 606.3 + CR 606.4 + CR 613.1f: the granted "[−12]: Take an
+/// extra turn after this one." is a real loyalty ability on the planeswalker;
+/// activating it once (the CR 606.3 limit) pays twelve of its twenty loyalty
+/// and, on resolution, queues the extra turn for its controller.
+#[test]
+fn granted_minus_twelve_ability_buys_an_extra_turn() {
+    let (mut runner, walker, _carrier) = loyalty_board(20, true);
+    let minus_twelve = loyalty_index(&runner, walker, -12);
+    let ability = &runner.state().objects[&walker].abilities[minus_twelve];
+    assert_eq!(
+        ability.cost,
+        Some(AbilityCost::Loyalty { amount: -12 }),
+        "the granted cost is [-12] loyalty"
+    );
+    assert!(
+        matches!(ability.effect.as_ref(), Effect::ExtraTurn { .. }),
+        "the granted effect is an extra turn; got {:?}",
+        ability.effect
+    );
+
+    let _outcome = runner.activate(walker, minus_twelve).resolve();
+
+    assert_eq!(
+        runner.state().extra_turns.len(),
+        1,
+        "CR 500.7: exactly one extra turn is queued"
+    );
+    assert_eq!(
+        runner.state().extra_turns[0].player,
+        P0,
+        "the activator takes the extra turn"
+    );
+    assert_eq!(
+        runner.state().objects[&walker].loyalty,
+        Some(8),
+        "CR 606.4: [-12] removes twelve loyalty (20 -> 8)"
+    );
+    assert_eq!(
+        runner.state().objects[&walker].zone,
+        Zone::Battlefield,
+        "the walker survives the payment"
+    );
+    assert!(runner.state().stack.is_empty());
+}
+
+/// Negative control: the identical blank planeswalker without the Gauntlet has
+/// no live loyalty abilities, so neither grant is offered (the same board and
+/// the same layer flush).
+#[test]
+fn without_the_gauntlet_the_walker_gains_no_loyalty_abilities() {
+    let (runner, walker, _carrier) = loyalty_board(20, false);
+    assert!(
+        runner.state().objects[&walker].abilities.is_empty(),
+        "no Gauntlet means no granted loyalty abilities: {:?}",
+        runner.state().objects[&walker].abilities
+    );
+    assert!(
+        !engine::game::planeswalker::can_activate_loyalty(runner.state(), walker, P0),
+        "the bare planeswalker offers no loyalty activation"
     );
 }
 

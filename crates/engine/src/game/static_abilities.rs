@@ -1851,7 +1851,10 @@ pub fn player_cant_pay_life_as_cost(state: &GameState, player_id: PlayerId) -> b
 ///
 /// The object filter is evaluated per candidate permanent so broad costs like
 /// "sacrifice a permanent" can still be paid with legal objects outside the
-/// prohibited filter (for Yasharn, lands remain legal).
+/// prohibited filter (for Yasharn, lands remain legal). This is the general
+/// bar (CR 701.21a) composed with the cost-only one; callers that already
+/// consulted the general bar through `object_cant_be_sacrificed_by` use
+/// `player_cant_pay_sacrifice_cost` directly to avoid the second scan.
 pub fn player_cant_sacrifice_as_cost(
     state: &GameState,
     player_id: PlayerId,
@@ -1859,9 +1862,25 @@ pub fn player_cant_sacrifice_as_cost(
 ) -> bool {
     // CR 701.21a: a general "can't sacrifice <filter>" static (Quark) also bars
     // paying a sacrifice cost with that permanent (CR 118.3).
-    if player_cant_sacrifice(state, player_id, object_id) {
-        return true;
-    }
+    player_cant_sacrifice(state, player_id, object_id)
+        || player_cant_pay_sacrifice_cost(state, player_id, object_id)
+}
+
+/// CR 118.3 + CR 601.2h + CR 602.2b: Check whether a `CantPayCost` static
+/// ability prohibits `player_id` from sacrificing `object_id` as a cost.
+///
+/// Cost-scoped only: the general "can't sacrifice" bar (CR 701.21a) lives in
+/// `player_cant_sacrifice` and is NOT re-scanned here, so a caller that already
+/// evaluated it composes this predicate alone.
+///
+/// The object filter is evaluated per candidate permanent so broad costs like
+/// "sacrifice a permanent" can still be paid with legal objects outside the
+/// prohibited filter (for Yasharn, lands remain legal).
+pub(crate) fn player_cant_pay_sacrifice_cost(
+    state: &GameState,
+    player_id: PlayerId,
+    object_id: ObjectId,
+) -> bool {
     // CR 604.1: O(1) presence gate — no CantPayCost static means no prohibition.
     if !static_kind_present(state, StaticModeKind::CantPayCost) {
         return false;
