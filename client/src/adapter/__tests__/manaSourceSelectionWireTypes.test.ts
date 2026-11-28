@@ -42,9 +42,11 @@ describe("mana-source selection wire types", () => {
         },
       },
       "OnlyForFaceDownSpell",
+      { OnlyForSpellProperty: "Commander" },
       {
         OnlyForAny: [
           { OnlyForSpellType: "Artifact" },
+          { OnlyForSpellProperty: "NotOwnedByCaster" },
           "OnlyForActivation",
         ],
       },

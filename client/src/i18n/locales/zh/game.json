@@ -1618,6 +1618,13 @@
       "onlyForCreatureType": "仅可用于{{creatureType}}咒语。",
       "onlyForFaceDownSpell": "仅可用于面朝下的咒语。",
       "onlyForSpecialAction": "仅可用于{{action}}特殊动作。",
+      "onlyForSpellProperty": "仅可用于{{property}}。",
+      "spellProperty": {
+        "commander": "你的指挥官",
+        "notOwnedByCaster": "你不拥有的咒语",
+        "noAbilities": "没有异能的咒语",
+        "withoutXInManaCost": "魔法力费用中没有{X}的咒语"
+      },
       "onlyForSpell": "仅可用于咒语。",
       "onlyForSpellColor": "仅可用于{{color}}色的咒语。",
       "onlyForSpellFromZone": "仅可用于{{polarity}} {{zone}}的咒语。",
@@ -2043,6 +2050,7 @@
     "onlyForCreatureType": "只能用于施放所选类别的生物咒语",
     "onlyForFaceDownSpell": "只能用于施放面朝下的咒语",
     "onlyForSpecialAction": "只能用于特定的特殊动作",
+    "onlyForSpellProperty": "只能用于施放具有特定属性的咒语",
     "onlyForSpell": "只能用于施放咒语",
     "onlyForSpellColor": "只能用于施放所选颜色的咒语",
     "onlyForSpellFromZone": "只能用于从允许的区域施放咒语",

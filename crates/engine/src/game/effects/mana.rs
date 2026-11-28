@@ -799,6 +799,12 @@ pub(crate) fn resolve_restrictions(
                     count: *count,
                 })
             }
+            // CR 106.6 + CR 903.3d / CR 108.3 / CR 113.1 + CR 113.3 /
+            // CR 202.1 + CR 107.3: Lower the static spell-property leaf into the
+            // runtime gate checked against `SpellMeta` by `allows_spell`.
+            ManaSpendRestriction::SpellProperty(property) => {
+                Some(ManaRestriction::OnlyForSpellProperty(*property))
+            }
             ManaSpendRestriction::SpellFromZone(zs) => {
                 Some(ManaRestriction::OnlyForSpellFromZone(*zs))
             }

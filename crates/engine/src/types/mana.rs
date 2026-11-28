@@ -338,6 +338,7 @@ fn cmp_mana_restriction(left: &ManaRestriction, right: &ManaRestriction) -> std:
             ManaRestriction::OnlyForSpecialAction(_) => 17,
             ManaRestriction::Impossible => 18,
             ManaRestriction::ConvokePayment => 19,
+            ManaRestriction::OnlyForSpellProperty(_) => 20,
         }
     }
     rank(left).cmp(&rank(right)).then_with(|| match (left, right) {
@@ -426,6 +427,13 @@ fn cmp_mana_restriction(left: &ManaRestriction, right: &ManaRestriction) -> std:
             ManaRestriction::OnlyForSpecialAction(a),
             ManaRestriction::OnlyForSpecialAction(b),
         ) => special_action_rank(*a).cmp(&special_action_rank(*b)),
+        // CR 106.6: Distinct spell-property payloads are distinct wire rows; the
+        // derived `Ord` on `SpellProperty` is the comparison axis (declaration
+        // order), not its serialized encoding.
+        (
+            ManaRestriction::OnlyForSpellProperty(a),
+            ManaRestriction::OnlyForSpellProperty(b),
+        ) => a.cmp(b),
         _ => std::cmp::Ordering::Equal,
     })
 }
@@ -1206,6 +1214,38 @@ mod tests {
         ManaUnit::new(color, source, false, restrictions)
     }
 
+    fn spell_property_selection(property: SpellProperty) -> ManaSourceSelection {
+        ManaSourceSelection {
+            source: ObjectIncarnationRef::of(ObjectId(1), 0),
+            ability_index: None,
+            mana_type: ManaType::Green,
+            output: ManaSourceOutput::Concrete(ManaType::Green),
+            atomic_combination: None,
+            restrictions: vec![ManaRestriction::OnlyForSpellProperty(property)],
+            penalty: ManaSourcePenalty::None,
+            taps_for_mana: Vec::new(),
+        }
+    }
+
+    // CR 106.6: `cmp_stable` is the stable order of the action wire. Two rows
+    // that differ only in the spell-property payload must not compare `Equal`
+    // (they are distinct selections), while identical payloads stay `Equal`.
+    #[test]
+    fn cmp_stable_orders_distinct_spell_properties() {
+        use std::cmp::Ordering;
+
+        let commander = spell_property_selection(SpellProperty::Commander);
+        let no_abilities = spell_property_selection(SpellProperty::NoAbilities);
+        // Derived `SpellProperty` order: Commander < NotOwnedByCaster <
+        // NoAbilities < WithoutXInManaCost.
+        assert_eq!(commander.cmp_stable(&no_abilities), Ordering::Less);
+        assert_eq!(no_abilities.cmp_stable(&commander), Ordering::Greater);
+        assert_eq!(
+            commander.cmp_stable(&spell_property_selection(SpellProperty::Commander)),
+            Ordering::Equal
+        );
+    }
+
     #[test]
     fn empty_mana_pool_decisions_count_only_valid_unique_drops() {
         let mut state = crate::types::game_state::GameState::new_two_player(42);
@@ -1453,6 +1493,8 @@ mod tests {
             cant_spend_mana: false,
             spend_only_on_x_colors: None,
             spend_only_on_x_generic_count: 0,
+            caster_relation: Default::default(),
+            has_no_abilities: false,
         };
         let spent = pool
             .spend_for(ManaType::Green, &PaymentContext::Spell(&spell))
@@ -1484,6 +1526,8 @@ mod tests {
             cant_spend_mana: false,
             spend_only_on_x_colors: None,
             spend_only_on_x_generic_count: 0,
+            caster_relation: Default::default(),
+            has_no_abilities: false,
         };
         assert!(pool
             .spend_for(ManaType::Green, &PaymentContext::Spell(&elf_spell))
@@ -1549,6 +1593,8 @@ mod tests {
             cant_spend_mana: false,
             spend_only_on_x_colors: None,
             spend_only_on_x_generic_count: 0,
+            caster_relation: Default::default(),
+            has_no_abilities: false,
         };
         assert!(pool
             .spend_for(ManaType::Green, &PaymentContext::Spell(&goblin_spell))

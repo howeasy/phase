@@ -35,6 +35,7 @@ import {
 } from "../adapter/types";
 import type {
   InteractionManaRestriction,
+  InteractionManaSpellProperty,
   InteractionPresentationSurface,
   ViewerInteraction,
 } from "../adapter/generated/interaction";
@@ -3472,6 +3473,17 @@ export function manaRestrictionLabel(
       });
     case "onlyForSpecialAction":
       return t("gamePage.manaRestrictions.onlyForSpecialAction", restriction.data);
+    case "onlyForSpellProperty": {
+      const propertyKeys = {
+        commander: "gamePage.manaRestrictions.spellProperty.commander",
+        notOwnedByCaster: "gamePage.manaRestrictions.spellProperty.notOwnedByCaster",
+        noAbilities: "gamePage.manaRestrictions.spellProperty.noAbilities",
+        withoutXInManaCost: "gamePage.manaRestrictions.spellProperty.withoutXInManaCost",
+      } as const satisfies Record<InteractionManaSpellProperty, ParseKeys<"game">>;
+      return t("gamePage.manaRestrictions.onlyForSpellProperty", {
+        property: t(propertyKeys[restriction.data.property]),
+      });
+    }
     case "impossible":
       return t("gamePage.manaRestrictions.impossible");
     case "convokePayment":

@@ -694,6 +694,7 @@
     "onlyForXCosts": "Spend only on costs that include {X}",
     "onlyForAny": "Spend only on one of the listed uses",
     "onlyForSpecialAction": "Spend only on a specific special action",
+    "onlyForSpellProperty": "Spend only to cast spells with a specific property",
     "impossible": "This mana can't be spent",
     "convokePayment": "Convoke payment",
     "grantsProperty": "Grants a property to the spell",
@@ -1330,6 +1331,13 @@
       "onlyForFaceDownSpell": "Only for face-down spells.",
       "onlyForAny": "Only for one of these uses: {{restrictions}}",
       "onlyForSpecialAction": "Only for the {{action}} special action.",
+      "onlyForSpellProperty": "Only for {{property}}.",
+      "spellProperty": {
+        "commander": "your commander",
+        "notOwnedByCaster": "spells you don't own",
+        "noAbilities": "spells with no abilities",
+        "withoutXInManaCost": "spells without {X} in their mana cost"
+      },
       "impossible": "This mana can't be spent.",
       "convokePayment": "Only for this convoke payment.",
       "anySpell": "any"

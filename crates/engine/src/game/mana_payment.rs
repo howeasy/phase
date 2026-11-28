@@ -9573,6 +9573,8 @@ mod tests {
             cant_spend_mana: false,
             spend_only_on_x_colors: None,
             spend_only_on_x_generic_count: 0,
+            caster_relation: Default::default(),
+            has_no_abilities: false,
         };
         let elf_ctx = PaymentContext::Spell(&elf);
         assert!(can_pay_for_spell(
@@ -9600,6 +9602,8 @@ mod tests {
             cant_spend_mana: false,
             spend_only_on_x_colors: None,
             spend_only_on_x_generic_count: 0,
+            caster_relation: Default::default(),
+            has_no_abilities: false,
         };
         let goblin_ctx = PaymentContext::Spell(&goblin);
         assert!(!can_pay_for_spell(
@@ -9653,6 +9657,8 @@ mod tests {
             cant_spend_mana: false,
             spend_only_on_x_colors: None,
             spend_only_on_x_generic_count: 0,
+            caster_relation: Default::default(),
+            has_no_abilities: false,
         };
         let thought_knot_ctx = PaymentContext::Spell(&thought_knot);
         assert!(can_pay_for_spell(
@@ -9679,6 +9685,8 @@ mod tests {
             cant_spend_mana: false,
             spend_only_on_x_colors: None,
             spend_only_on_x_generic_count: 0,
+            caster_relation: Default::default(),
+            has_no_abilities: false,
         };
         let colored_eldrazi_ctx = PaymentContext::Spell(&colored_eldrazi);
         assert!(!can_pay_for_spell(
@@ -9742,6 +9750,8 @@ mod tests {
             cant_spend_mana: false,
             spend_only_on_x_colors: None,
             spend_only_on_x_generic_count: 0,
+            caster_relation: Default::default(),
+            has_no_abilities: false,
         };
         let colored_spell_ctx = PaymentContext::Spell(&colored_spell);
         assert!(!can_pay_for_spell(
@@ -9824,6 +9834,8 @@ mod tests {
             cant_spend_mana: false,
             spend_only_on_x_colors: None,
             spend_only_on_x_generic_count: 0,
+            caster_relation: Default::default(),
+            has_no_abilities: false,
         };
         let artifact = SpellMeta {
             types: vec!["Artifact".to_string()],
@@ -9838,6 +9850,8 @@ mod tests {
             cant_spend_mana: false,
             spend_only_on_x_colors: None,
             spend_only_on_x_generic_count: 0,
+            caster_relation: Default::default(),
+            has_no_abilities: false,
         };
         let creature_types = ["Creature".to_string()];
         let activation = PaymentContext::Activation {
@@ -9965,6 +9979,8 @@ mod tests {
             cant_spend_mana: false,
             spend_only_on_x_colors: None,
             spend_only_on_x_generic_count: 0,
+            caster_relation: Default::default(),
+            has_no_abilities: false,
         };
         let flashback_ctx = PaymentContext::Spell(&flashback_spell);
         assert!(can_pay_for_spell(
@@ -9993,6 +10009,8 @@ mod tests {
             cant_spend_mana: false,
             spend_only_on_x_colors: None,
             spend_only_on_x_generic_count: 0,
+            caster_relation: Default::default(),
+            has_no_abilities: false,
         };
         let normal_ctx = PaymentContext::Spell(&normal_spell);
         assert!(!can_pay_for_spell(
@@ -10044,6 +10062,8 @@ mod tests {
             cant_spend_mana: false,
             spend_only_on_x_colors: None,
             spend_only_on_x_generic_count: 0,
+            caster_relation: Default::default(),
+            has_no_abilities: false,
         };
         let gy_ctx = PaymentContext::Spell(&graveyard_flashback_spell);
         assert!(can_pay_for_spell(
@@ -10072,6 +10092,8 @@ mod tests {
             cant_spend_mana: false,
             spend_only_on_x_colors: None,
             spend_only_on_x_generic_count: 0,
+            caster_relation: Default::default(),
+            has_no_abilities: false,
         };
         let hand_ctx = PaymentContext::Spell(&hand_flashback_spell);
         assert!(!can_pay_for_spell(

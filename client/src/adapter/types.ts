@@ -1242,6 +1242,14 @@ export type SpecialAction =
   | "Foretell"
   | "Suspend";
 
+// Mirrors `crate::types::mana::SpellProperty` (CR 106.6): a static property of
+// the spell a restricted mana may be spent on. Plain externally-tagged payload.
+export type SpellProperty =
+  | "Commander"
+  | "NotOwnedByCaster"
+  | "NoAbilities"
+  | "WithoutXInManaCost";
+
 export type ManaRestriction =
   // "Spend this mana only to cast spells."
   | "OnlyForSpell"
@@ -1291,6 +1299,10 @@ export type ManaRestriction =
   | { CannotCastSpellFromZone: Zone }
   // "Spend this mana only to cast a face-down spell."
   | "OnlyForFaceDownSpell"
+  // "Spend this mana only to cast your commander" / "spells you don't own" /
+  // "creature spells with no abilities" / "a spell that's one or more colors
+  // without {X} in its mana cost" (CR 106.6).
+  | { OnlyForSpellProperty: SpellProperty }
   // "Spend this mana only to activate abilities."
   | "OnlyForActivation"
   // "Spend this mana only on costs that include {X}."

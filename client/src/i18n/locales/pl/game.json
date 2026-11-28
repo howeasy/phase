@@ -658,6 +658,7 @@
     "onlyForXCosts": "Wydaj tylko na koszty zawierające {X}",
     "onlyForAny": "Wydaj tylko na jedno z wymienionych zastosowań",
     "onlyForSpecialAction": "Wydaj tylko na określoną akcję specjalną",
+    "onlyForSpellProperty": "Wydaj tylko na rzucanie czarów o określonej właściwości",
     "impossible": "Ta mana nie może zostać wydana",
     "convokePayment": "Płatność Convoke",
     "grantsProperty": "Nadaje czarowi właściwość",
@@ -1294,6 +1295,13 @@
       "onlyForFaceDownSpell": "Tylko na czary zakryte.",
       "onlyForAny": "Tylko do jednego z tych zastosowań: {{restrictions}}",
       "onlyForSpecialAction": "Tylko do specjalnej akcji {{action}}.",
+      "onlyForSpellProperty": "Tylko dla {{property}}.",
+      "spellProperty": {
+        "commander": "twojego dowódcy",
+        "notOwnedByCaster": "czarów, których nie posiadasz",
+        "noAbilities": "czarów bez zdolności",
+        "withoutXInManaCost": "czarów bez {X} w koszcie many"
+      },
       "impossible": "Ta mana nie może zostać wydana.",
       "convokePayment": "Tylko do tej płatności konwokacji.",
       "anySpell": "dowolny"
