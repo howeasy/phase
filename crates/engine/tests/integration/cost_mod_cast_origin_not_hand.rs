@@ -2094,3 +2094,173 @@ fn savvy_trader_reduces_garths_copy_cast_from_outside_the_game() {
         "a Disenchant cast from P0's hand pays its full printed {{1}}{{W}}, not the reduced {{W}}"
     );
 }
+
+/// Savvy Trader ({3}{G}): "When this creature enters, exile target permanent
+/// card from your graveyard. You may play that card for as long as it remains
+/// exiled."
+///
+/// CR 305.1: "play" authorizes the land special action, so the exiled Forest —
+/// played, never cast — must move onto the battlefield through the public
+/// `GameAction::PlayLand`, and the permission is live because the card remains
+/// exiled. The unchosen Grizzly Bears keeps the target prompt open (the engine
+/// auto-commits a unique legal target).
+#[test]
+fn savvy_trader_plays_an_exiled_land_through_play_land() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    // Exact funding for the Trader's {3}{G}; playing a land costs no mana.
+    scenario.with_mana_pool(P0, units("CCCG"));
+    let savvy = scenario.add_real_card(P0, "Savvy Trader", Zone::Hand, db());
+    let gy_forest = scenario.add_real_card(P0, "Forest", Zone::Graveyard, db());
+    // A second permanent card in the graveyard keeps the target prompt open.
+    let gy_bears = scenario.add_real_card(P0, "Grizzly Bears", Zone::Graveyard, db());
+
+    let mut r = scenario.build();
+    engine::game::rehydrate_game_from_card_db(r.state_mut(), db());
+
+    let card_id = r.state().objects[&savvy].card_id;
+    r.act(GameAction::CastSpell {
+        object_id: savvy,
+        card_id,
+        targets: vec![],
+        payment_mode: CastPaymentMode::Auto,
+    })
+    .expect("cast Savvy Trader from hand for its full printed {3}{G}");
+
+    pass_until_trigger_target_prompt(&mut r, "Savvy Trader enters");
+    r.act(GameAction::ChooseTarget {
+        target: Some(TargetRef::Object(gy_forest)),
+    })
+    .expect("exile the Forest through the public target action");
+    pass_until_stack_empty(&mut r, "Savvy Trader enters trigger");
+
+    assert_eq!(
+        zone_of(&r, savvy),
+        Zone::Battlefield,
+        "Savvy Trader resolved"
+    );
+    assert_eq!(
+        zone_of(&r, gy_forest),
+        Zone::Exile,
+        "the trigger exiled the Forest"
+    );
+    assert_eq!(
+        zone_of(&r, gy_bears),
+        Zone::Graveyard,
+        "the unchosen Bears stays in the graveyard"
+    );
+    assert!(
+        r.state().objects[&gy_forest]
+            .casting_permissions
+            .iter()
+            .any(|permission| matches!(
+                permission,
+                CastingPermission::PlayFromExile { granted_to, .. } if *granted_to == P0
+            )),
+        "the exiled Forest carries the play-from-exile permission for P0, got {:?}",
+        r.state().objects[&gy_forest].casting_permissions
+    );
+
+    let card_id = r.state().objects[&gy_forest].card_id;
+    r.act(GameAction::PlayLand {
+        object_id: gy_forest,
+        card_id,
+    })
+    .expect("play the exiled Forest through the public land action");
+    assert_eq!(
+        zone_of(&r, gy_forest),
+        Zone::Battlefield,
+        "the exiled Forest was played as a land"
+    );
+    assert_eq!(
+        zone_of(&r, gy_bears),
+        Zone::Graveyard,
+        "the land play disturbed nothing else in the graveyard"
+    );
+    assert_eq!(pool_size(&r, P0), 0, "playing a land costs no mana");
+    assert_settled(&r, P0, "Savvy Trader land play");
+}
+
+/// Advanced Reconstruction ({3}{R} Enchantment — Class). Level 1: "At the
+/// beginning of your first main phase, mill a card, then exile a card from
+/// your graveyard at random. You may play the exiled card this turn."
+///
+/// CR 305.1: the exiled card is a Forest — a land, so the printed "play"
+/// permission is exercised through the public `GameAction::PlayLand`, not the
+/// spell-cast path. This witness makes no cost-reduction claim: the {2}
+/// reduction is the level 3 clause, inactive while the Class stays at level 1.
+#[test]
+fn advanced_reconstruction_level_1_plays_the_exiled_land_through_play_land() {
+    // Level 1: no level bar activated.
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let ar = scenario.add_real_card(P0, "Advanced Reconstruction", Zone::Battlefield, db());
+    // Library, top first: the draw step takes the Island, the level 1
+    // trigger mills and exiles the Forest (the only graveyard card, so the
+    // random exile is deterministic), and the Mountain stays on top.
+    let draw_step_card = scenario.add_real_card(P0, "Island", Zone::Library, db());
+    let milled = scenario.add_real_card(P0, "Forest", Zone::Library, db());
+    let _library_filler = scenario.add_real_card(P0, "Mountain", Zone::Library, db());
+    // Draw-step filler for the turn cycle the witness crosses.
+    scenario.with_library_top(P1, &["Forest"; 2]);
+
+    let mut r = scenario.build();
+    engine::game::rehydrate_game_from_card_db(r.state_mut(), db());
+    assert_eq!(
+        r.state().objects[&ar].class_level,
+        Some(1),
+        "the printed Class enters the battlefield at level 1"
+    );
+
+    // The next P0 precombat main, reached through public turn actions; the
+    // stack is empty on return, so the level 1 trigger has already resolved.
+    let trigger_turn = r.state().turn_number;
+    advance_to_next_p0_main(&mut r, trigger_turn, "Advanced Reconstruction level 1 turn");
+    assert!(
+        r.state().turn_number > trigger_turn,
+        "a full turn cycle was crossed through public actions"
+    );
+    assert_eq!(
+        r.state().phase,
+        Phase::PreCombatMain,
+        "the turn reached its first main phase"
+    );
+    assert_eq!(
+        zone_of(&r, draw_step_card),
+        Zone::Hand,
+        "the draw step took the top card"
+    );
+    assert_eq!(
+        zone_of(&r, milled),
+        Zone::Exile,
+        "the trigger milled the Forest and exiled it from the graveyard"
+    );
+    assert!(
+        r.state().objects[&milled]
+            .casting_permissions
+            .iter()
+            .any(|permission| matches!(
+                permission,
+                CastingPermission::PlayFromExile {
+                    duration: Duration::UntilEndOfTurn,
+                    granted_to,
+                    ..
+                } if *granted_to == P0
+            )),
+        "the exiled Forest carries the printed this-turn play permission, got {:?}",
+        r.state().objects[&milled].casting_permissions
+    );
+
+    let card_id = r.state().objects[&milled].card_id;
+    r.act(GameAction::PlayLand {
+        object_id: milled,
+        card_id,
+    })
+    .expect("play the exiled Forest through the public land action");
+    assert_eq!(
+        zone_of(&r, milled),
+        Zone::Battlefield,
+        "the exiled Forest was played as a land"
+    );
+    assert_settled(&r, P0, "Advanced Reconstruction land play");
+}
