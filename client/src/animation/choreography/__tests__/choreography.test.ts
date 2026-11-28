@@ -420,3 +420,39 @@ describe("event choreographies under both presenters", () => {
     });
   }
 });
+
+describe("a combat pair's returning hit", () => {
+  it("shows its number when the slam lands, not when the step starts", () => {
+    const band = { flightMs: 320, returnMs: 380, hang: true };
+    const strike = (source: number, target: number): StepEffect => ({
+      ...effectFor({
+        type: "DamageDealt",
+        data: { source_id: source, target: { Object: target }, amount: 3, is_combat: true },
+      }),
+      strikeBand: band,
+    });
+    const back = strike(Y, X);
+    const calls: string[] = [];
+    const delays: number[] = [];
+    const sfx = vi.spyOn(audioManager, "playSfx").mockImplementation(() => {});
+    presentEffect(back, {
+      stepEffects: [strike(X, Y), back],
+      owningStepMs: 900,
+      snapshotSeq: 1,
+      pace: 0.5,
+      vfxQuality: "full",
+      reduceMotion: false,
+      classic: {
+        ...recordingClassic(calls),
+        scheduleStepTimeout: (_callback, delay) => {
+          delays.push(delay);
+        },
+      },
+      cardVfx: createCardVfxPresenter(() => null),
+    });
+    sfx.mockRestore();
+
+    expect(calls.filter((call) => call.startsWith("float"))).toEqual([]);
+    expect(delays).toEqual([160]);
+  });
+});

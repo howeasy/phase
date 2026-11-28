@@ -88,8 +88,16 @@ export const presentDamageDealt: Choreography = (effect, context) => {
     if (!slammed) {
       // Paired return, missing source element, or representative already
       // mid-slam: show the floating damage number (+ SFX) without a slam.
-      audioManager.playSfx("DamageDealt");
-      classic.spawnFloat(pos, -amount, "#ef4444");
+      const showHit = () => {
+        audioManager.playSfx("DamageDealt");
+        classic.spawnFloat(pos, -amount, "#ef4444");
+      };
+      // A combat pair is one exchange: its return lands when the slam does.
+      if (isPairedReturn && effect.strikeBand) {
+        classic.scheduleStepTimeout(showHit, effect.strikeBand.flightMs * pace);
+      } else {
+        showHit();
+      }
     }
     return;
   }

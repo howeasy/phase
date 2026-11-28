@@ -466,6 +466,31 @@ describe("PermanentCard committed-attacker lunge", () => {
     clock.mockRestore();
   });
 
+  it("does not start a suppressed lunge after a redraw once motion is on", () => {
+    usePreferencesStore.setState({ animationSpeedMultiplier: 0 });
+    useGameStore.setState({
+      events: [{ type: "AttackersDeclared", data: { attacker_ids: [OBJECT], defending_player: 1 } }],
+    });
+    const first = render(view([OBJECT]));
+    first.unmount();
+    usePreferencesStore.setState({ animationSpeedMultiplier: 1 });
+
+    render(view([OBJECT]));
+
+    expect(lastCard().animate?.y).toBe(ATTACK_SLIDE);
+  });
+
+  it("does not resume a lunge once reduced motion is on", () => {
+    const first = render(view([]));
+    first.rerender(view([OBJECT]));
+    first.unmount();
+    motionState.reduced = true;
+
+    render(view([OBJECT]));
+
+    expect(lastCard().animate?.y).toBe(ATTACK_SLIDE);
+  });
+
   it("keeps today's plain slide at speed 0", () => {
     usePreferencesStore.setState({ animationSpeedMultiplier: 0 });
     const { rerender } = render(view([]));

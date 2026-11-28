@@ -245,9 +245,12 @@ function toEffect(
   const baseDuration = EVENT_DURATIONS[event.type] ?? DEFAULT_DURATION;
   const multiplier = pacingMultipliers[eventCategory(event.type)];
   const strikeBonus = strikeBand ? combatStrikeDurationBonusMs(strikeBand) : 0;
+  // The card slam does not follow the category multiplier, so the time a
+  // heavier strike adds must not either: scaled down, the step would end before
+  // the hit lands.
   const effect: StepEffect = {
     event,
-    duration: Math.round((baseDuration + strikeBonus) * multiplier),
+    duration: Math.round(baseDuration * multiplier) + strikeBonus,
   };
   if (strikeBand) effect.strikeBand = strikeBand;
   return effect;

@@ -8,6 +8,7 @@ import {
 import { buildGameState } from "../../test/factories/gameStateFactory";
 import {
   COMBAT_STRIKE_BANDS,
+  combatStrikeDurationBonusMs,
   combatStrikeBandForEvent,
   combatStrikeBandForPower,
   type CombatStrikeBand,
@@ -113,15 +114,17 @@ describe("normalizeEvents combat strike timing", () => {
     expect(compileStepsToBeats(steps)[0].impactAtMs).toBe(band.flightMs);
   });
 
-  it("scales the duration growth by the same combat pace as the base", () => {
-    const band = COMBAT_STRIKE_BANDS.heavy;
+  it("keeps a step longer than its impact when combat pacing is shortened", () => {
+    const band = COMBAT_STRIKE_BANDS.colossal;
     const [step] = normalizeEvents([combatHit(ATTACKER, { Player: PLAYER })], {
-      preEventState: preState(5),
-      pacingMultipliers: { effects: 1, combat: 0.5, banners: 1 },
+      preEventState: preState(8),
+      pacingMultipliers: { effects: 1, combat: 0.25, banners: 1 },
     });
 
-    expect(step.duration).toBe(Math.round(durationFor(band) * 0.5));
-    expect(step.effects[0].duration).toBe(step.duration);
+    expect(step.duration).toBe(
+      Math.round(EVENT_DURATIONS.DamageDealt * 0.25) + combatStrikeDurationBonusMs(band),
+    );
+    expect(step.duration).toBeGreaterThan(band.flightMs);
   });
 
   it("paired blocker damage keeps the slamming direction's band and duration", () => {

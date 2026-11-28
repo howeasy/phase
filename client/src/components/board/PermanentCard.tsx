@@ -570,17 +570,23 @@ export const PermanentCard = memo(function PermanentCard({
         return;
       }
       if (seen?.attacking) return;
+      const multiplier = usePreferencesStore.getState().animationSpeedMultiplier;
+      const still = reduceMotion || !(multiplier > 0);
       const played = lungeRecord(objectId, sessionGeneration);
       if (played) {
-        setLunge(remainingLunge(played, performance.now()));
+        setLunge(still ? null : remainingLunge(played, performance.now()));
         return;
       }
       // A card that appears already attacking is new only if this update says so.
       const picked = !committedAttackerIds.has(objectId);
       if (!seen && !picked && !declaredNow(objectId)) return;
+      if (still) {
+        // Spent unplayed: turning motion on later must not start it late.
+        recordLunge(objectId, { generation: sessionGeneration, startedAt: 0, lunge: null });
+        setLunge(null);
+        return;
+      }
       if (!obj) return;
-      const multiplier = usePreferencesStore.getState().animationSpeedMultiplier;
-      if (reduceMotion || !(multiplier > 0)) return;
       const band = attackLungeBand(obj.power);
       // Compact height uses its own smaller magnitude; an opponent's card mirrors
       // the direction because its slide already points the other way.
