@@ -7,8 +7,8 @@ use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::types::ability::{
     AbilityDefinition, AbilityKind, CastManaObjectScope, CastManaSpentMetric, ChoiceType,
     Comparator, ControllerRef, Effect, EffectScope, ObjectScope, PlayerFilter, PlayerRelation,
-    PlayerScope, QuantityExpr, QuantityRef, TapStateChange, TargetFilter, TargetSelectionMode,
-    TypedFilter,
+    PlayerScope, QuantityExpr, QuantityRef, ReplacementRecipient, TapStateChange, TargetFilter,
+    TargetSelectionMode, TypedFilter,
 };
 use engine::types::actions::GameAction;
 use engine::types::counter::CounterType;
@@ -51,7 +51,7 @@ fn source(scenario: &mut GameScenario, execute: AbilityDefinition) -> ObjectId {
         .expect("Brewing must parse its cast trigger");
     let Effect::AddTargetReplacement {
         replacement,
-        target: TargetFilter::None,
+        target: ReplacementRecipient::Filter(TargetFilter::None),
     } = trigger
         .execute
         .as_mut()

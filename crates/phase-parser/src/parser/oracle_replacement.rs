@@ -7755,7 +7755,7 @@ pub(crate) fn parse_whenever_you_cast_enters_with_trigger(
         AbilityKind::Spell,
         Effect::AddTargetReplacement {
             replacement: Box::new(replacement),
-            target: TargetFilter::None,
+            target: TargetFilter::None.into(),
         },
     );
     // CR 608.2c + CR 609.3: exile first, then install even if exile is impossible.
@@ -8648,7 +8648,7 @@ pub(crate) fn parse_windowed_enter_wasnt_cast_exile_install(
     let def = parse_creature_enter_wasnt_cast_exile_replacement(norm_lower, original_text)?;
     Some(Effect::AddTargetReplacement {
         replacement: Box::new(def),
-        target: TargetFilter::None,
+        target: TargetFilter::None.into(),
     })
 }
 
@@ -9117,7 +9117,7 @@ fn parse_graveyard_exile_replacement(
 /// same family — the mirror image of [`parse_graveyard_exile_replacement`].
 ///
 /// Accepts exactly the definitions that one declines (a stated window) and wraps
-/// them in `Effect::AddTargetReplacement { target: TargetFilter::None }`, the
+/// them in `Effect::AddTargetReplacement { target: TargetFilter::None.into() }`, the
 /// engine's existing "install this self-contained definition globally" slot
 /// (`game/effects/add_target_replacement.rs`). The resolver anchors
 /// `source_controller` to the resolving ability's controller, so a
@@ -9140,7 +9140,7 @@ pub(crate) fn parse_windowed_graveyard_redirect_install(text: &str) -> Option<Ef
     def.expiry.as_ref()?;
     Some(Effect::AddTargetReplacement {
         replacement: Box::new(def),
-        target: TargetFilter::None,
+        target: TargetFilter::None.into(),
     })
 }
 
@@ -10651,7 +10651,7 @@ pub(crate) fn parse_oneshot_enter_as_copy_replacement(norm_lower: &str) -> Optio
 
     Some(Effect::AddTargetReplacement {
         replacement: Box::new(replacement),
-        target: TargetFilter::None,
+        target: TargetFilter::None.into(),
     })
 }
 
@@ -31734,7 +31734,10 @@ mod tests {
         else {
             panic!("expected AddTargetReplacement, got {:?}", exec.effect);
         };
-        assert_eq!(target, &TargetFilter::None);
+        assert_eq!(
+            target,
+            &crate::types::ability::ReplacementRecipient::Filter(TargetFilter::None)
+        );
         assert!(
             replacement.consume_on_apply,
             "floating install must be one-shot (CR 614.1c: one qualifying entry, then gone)"
@@ -31819,7 +31822,10 @@ mod tests {
         else {
             panic!("expected AddTargetReplacement, got {:?}", exec.effect);
         };
-        assert_eq!(target, &TargetFilter::None);
+        assert_eq!(
+            target,
+            &crate::types::ability::ReplacementRecipient::Filter(TargetFilter::None)
+        );
         assert!(
             replacement.consume_on_apply,
             "floating install must be one-shot, or it would apply to a later, \
@@ -32151,7 +32157,10 @@ mod tests {
         else {
             panic!("expected AddTargetReplacement, got {:?}", execute.effect);
         };
-        assert_eq!(target, &TargetFilter::None);
+        assert_eq!(
+            target,
+            &crate::types::ability::ReplacementRecipient::Filter(TargetFilter::None)
+        );
         replacement
     }
 
@@ -38019,7 +38028,11 @@ mod snapshot_tests {
         else {
             panic!("expected AddTargetReplacement");
         };
-        assert_eq!(target, TargetFilter::None, "shield is a global install");
+        assert_eq!(
+            target,
+            crate::types::ability::ReplacementRecipient::Filter(TargetFilter::None),
+            "shield is a global install"
+        );
         assert_eq!(replacement.event, ReplacementEvent::ChangeZone);
         assert_eq!(replacement.destination_zone, Some(Zone::Battlefield));
         assert_eq!(
@@ -38089,7 +38102,7 @@ mod snapshot_tests {
         };
         assert_eq!(
             target,
-            &TargetFilter::None,
+            &crate::types::ability::ReplacementRecipient::Filter(TargetFilter::None),
             "Mystic installs a global entry shield"
         );
         let execute = replacement.execute.as_ref().expect("copy execute");

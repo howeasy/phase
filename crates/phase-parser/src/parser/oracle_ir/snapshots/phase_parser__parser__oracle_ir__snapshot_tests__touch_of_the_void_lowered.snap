@@ -75,7 +75,7 @@ expression: "&lowered"
             }
           },
           "target": {
-            "type": "Any"
+            "type": "PriorDamageRecipients"
           }
         },
         "cost": null,

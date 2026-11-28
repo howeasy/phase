@@ -16902,7 +16902,7 @@ mod tests {
             AbilityKind::Spell,
             Effect::AddTargetReplacement {
                 replacement: Box::new(repl),
-                target: TargetFilter::Any,
+                target: TargetFilter::Any.into(),
             },
         )
     }
@@ -17612,7 +17612,7 @@ mod tests {
                 AbilityKind::Spell,
                 Effect::AddTargetReplacement {
                     replacement: Box::new(decline_only.clone()),
-                    target: TargetFilter::Any,
+                    target: TargetFilter::Any.into(),
                 },
             )),
             "a stranded return in a decline-only payload must strand"
@@ -22978,7 +22978,7 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
                     replacement: Box::new(
                         ReplacementDefinition::new(ReplacementEvent::Draw).mode(mode.clone()),
                     ),
-                    target: TargetFilter::Any,
+                    target: TargetFilter::Any.into(),
                 },
             ));
             let mut effect_owned_subtype_missing = Vec::new();
@@ -23059,7 +23059,7 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
                             decline: Some(Box::new(decline)),
                         }),
                 ),
-                target: TargetFilter::Any,
+                target: TargetFilter::Any.into(),
             },
         );
 

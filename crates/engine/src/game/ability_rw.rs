@@ -3335,11 +3335,16 @@ fn legacy_effect(x: &Effect) -> bool {
         // CR 725.1 + CR 115.1: "target opponent becomes the monarch".
         | Effect::BecomeMonarch { target }
         | Effect::GrantCastingPermission { target, .. }
-        | Effect::AddTargetReplacement { target, .. }
         | Effect::DiscardCard { target, .. }
         // CR 122.1 + CR 603.2c: only the reproduction target carries a legacy tag;
         // the per-kind magnitude is a plain enum with no batch-prompt semantics.
         | Effect::ReproduceEventCounters { target, .. } => legacy_target_filter(target),
+
+        // CR 608.2c: the prior-damage operand is an instruction result, not a
+        // legacy event tag, so only a held filter can be legacy.
+        Effect::AddTargetReplacement { target, .. } => {
+            target.filter().is_some_and(legacy_target_filter)
+        }
 
         Effect::PutOnTopOrBottom {
             target,
@@ -9215,6 +9220,27 @@ mod tests {
                 .legacy_batch_prompt()
         );
         assert!(ability_rw_profile(&with_exile(tagged)).legacy_batch_prompt());
+    }
+
+    /// CR 603.3b + CR 608.2c: the prior-damage operand is an instruction result,
+    /// never a legacy event tag; a `Filter` carrying a legacy tag (the positive
+    /// control, proving the `.filter()` route is reached) still flags.
+    #[test]
+    fn prior_damage_recipients_is_not_a_legacy_event_tag() {
+        use crate::types::ability::{ReplacementDefinition, ReplacementRecipient};
+        use crate::types::replacements::ReplacementEvent;
+        let rider = |target: ReplacementRecipient| {
+            ra(Effect::AddTargetReplacement {
+                replacement: Box::new(ReplacementDefinition::new(ReplacementEvent::Moved)),
+                target,
+            })
+        };
+        let tagged = rider(ReplacementRecipient::Filter(TargetFilter::TriggeringPlayer));
+        assert!(legacy_effect(&tagged.effect));
+        assert!(ability_rw_profile(&tagged).legacy_batch_prompt());
+        let prior = rider(ReplacementRecipient::PriorDamageRecipients);
+        assert!(!legacy_effect(&prior.effect));
+        assert!(!ability_rw_profile(&prior).legacy_batch_prompt());
     }
 
     fn zone_moves_performed_by(actor: LibraryInstructionActor) -> [Effect; 2] {

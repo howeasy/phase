@@ -190,7 +190,7 @@ fn leaves_battlefield_exile_step() -> AbilityDefinition {
         AbilityKind::Spell,
         Effect::AddTargetReplacement {
             replacement: Box::new(replacement),
-            target: TargetFilter::SelfRef,
+            target: TargetFilter::SelfRef.into(),
         },
     )
     .description(

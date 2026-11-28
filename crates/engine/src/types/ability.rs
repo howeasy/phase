@@ -1,6 +1,7 @@
 pub use phase_ast::types::ability::*;
 
 use std::collections::HashSet;
+use std::sync::Arc;
 
 use serde::de;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -2002,7 +2003,7 @@ impl AwaitedDamageRecipient {
 
 /// CR 608.2c + CR 614.9: what a damage instruction did, as its direct child
 /// reads it (`SpellContext::direct_damage_result`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum DamageInstructionResult {
     /// The instruction has dealt its damage. `recipient` is the single object
@@ -2011,6 +2012,8 @@ pub enum DamageInstructionResult {
     Dealt {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         recipient: Option<ObjectIncarnationRef>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        exact_recipients: Option<Arc<Vec<ObjectIncarnationRef>>>,
     },
     /// CR 616.1 + CR 608.2c: The instruction paused before all of its damage
     /// settled, and this child awaits completion. Accumulates the instruction's
@@ -2022,6 +2025,8 @@ pub enum DamageInstructionResult {
         excess: Option<i32>,
         #[serde(default)]
         recipient: AwaitedDamageRecipient,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        exact_recipients: Option<Arc<Vec<ObjectIncarnationRef>>>,
         /// CR 701.14a + CR 120.10: When the awaiting parent was `Effect::Fight`,
         /// its scalar/excess channel tracks only excess dealt to this fought
         /// creature (`FightExcessOnFoughtCreature`), never the fighting subject.
@@ -6654,7 +6659,7 @@ impl ResolvedAbility {
             .is_some_and(|condition| condition.is_instead_override())
         {
             if let Some(base) = self.else_ability.as_deref_mut() {
-                base.context.direct_damage_result = result;
+                base.context.direct_damage_result = result.clone();
                 base.context.damage_delivery_owner = owner;
             }
         }

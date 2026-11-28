@@ -179,7 +179,7 @@ expression: "&ir"
                           }
                         },
                         "target": {
-                          "type": "Any"
+                          "type": "PriorDamageRecipients"
                         }
                       },
                       "cost": null,

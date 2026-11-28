@@ -5957,7 +5957,7 @@ mod tests {
         )));
         let add_target_repl = Effect::AddTargetReplacement {
             replacement: Box::new(atr_replacement),
-            target: TargetFilter::Any,
+            target: TargetFilter::Any.into(),
         };
         walk_effect(&add_target_repl, &mut names);
 

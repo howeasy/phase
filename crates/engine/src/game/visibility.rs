@@ -2,6 +2,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
 use crate::game::game_object::ObjectIncarnationRefExt;
+use crate::types::ability::DamageInstructionResult;
 use crate::types::ability_visit::{
     granter_symbols, granter_symbols_mut, DefinitionNode, DefinitionNodeMut,
 };
@@ -27,6 +28,17 @@ pub const HIDDEN_CARD_NAME: &str = "Hidden Card";
 fn redact_parent_target_iteration_members(ability: &mut crate::types::ability::ResolvedAbility) {
     ability.context.parent_target_iteration_members = None;
     ability.context.damage_delivery_owner = None;
+    match ability.context.direct_damage_result.as_mut() {
+        Some(
+            DamageInstructionResult::AwaitingDelivery {
+                exact_recipients, ..
+            }
+            | DamageInstructionResult::Dealt {
+                exact_recipients, ..
+            },
+        ) => *exact_recipients = None,
+        Some(DamageInstructionResult::ContinuationPortion) | None => {}
+    }
     for (_, child) in ability.child_links_mut() {
         redact_parent_target_iteration_members(child);
     }
@@ -9566,6 +9578,90 @@ mod tests {
             pending_effect.context.parent_target_iteration_members, None,
             "a viewer snapshot must not expose the private look-result object ids"
         );
+    }
+
+    #[test]
+    fn unless_payment_hides_exact_damage_receipts_on_both_view_boundaries() {
+        use crate::game::derived_views::ClientGameStateRef;
+        use crate::types::ability::{
+            AwaitedDamageRecipient, ReplacementDefinition, ReplacementRecipient,
+        };
+        use crate::types::identifiers::DamageDeliveryOwnerId;
+        use crate::types::replacements::ReplacementEvent;
+
+        // A real damage pause stores its reader in the hidden resolution stack.
+        // Use a visible carrier here to exercise the shared recursive redactor.
+        let mut state = GameState::new_two_player(42);
+        let pin = ObjectIncarnationRef {
+            object_id: ObjectId(11),
+            incarnation: 2,
+        };
+        let pins = Arc::new(vec![pin]);
+        let mut pending = ResolvedAbility::new(
+            Effect::AddTargetReplacement {
+                replacement: Box::new(ReplacementDefinition::new(ReplacementEvent::Moved)),
+                target: ReplacementRecipient::PriorDamageRecipients,
+            },
+            vec![],
+            ObjectId(10),
+            PlayerId(0),
+        );
+        pending.context.damage_delivery_owner = Some(DamageDeliveryOwnerId(12));
+        let mut child = pending.clone();
+        child.context.direct_damage_result = Some(DamageInstructionResult::Dealt {
+            recipient: None,
+            exact_recipients: Some(pins.clone()),
+        });
+        pending.context.direct_damage_result = Some(DamageInstructionResult::AwaitingDelivery {
+            amount: 2,
+            excess: None,
+            recipient: AwaitedDamageRecipient::Single { recipient: pin },
+            exact_recipients: Some(pins),
+            fight_fought_creature: None,
+        });
+        pending.sub_ability = Some(Box::new(child));
+        state.waiting_for = WaitingFor::UnlessPayment {
+            player: PlayerId(0),
+            cost: AbilityCost::PayLife {
+                amount: QuantityExpr::Fixed { value: 2 },
+            },
+            pending_effect: Box::new(pending),
+            trigger_event: None,
+            effect_description: None,
+            remaining: Vec::new(),
+            affected_object: None,
+            repeat: None,
+        };
+        let authoritative = serde_json::to_value(&state).unwrap();
+        let filtered = filter_state_for_viewer(&state, PlayerId(0));
+        let wire = serde_json::to_value(ClientGameStateRef::wrap_filtered(
+            &state,
+            &state,
+            Some(PlayerId(0)),
+        ))
+        .unwrap();
+        let filtered_json = serde_json::to_value(&filtered).unwrap();
+        let original_prompt = &authoritative["waiting_for"]["data"];
+        for json in [&filtered_json, &wire["state"]] {
+            let prompt = &json["waiting_for"]["data"];
+            assert_eq!(prompt["player"], original_prompt["player"]);
+            assert_eq!(prompt["cost"], original_prompt["cost"]);
+            let original = &original_prompt["pending_effect"];
+            let projected = &prompt["pending_effect"];
+            for (source, output, tag) in [
+                (original, projected, "AwaitingDelivery"),
+                (&original["sub_ability"], &projected["sub_ability"], "Dealt"),
+            ] {
+                assert_eq!(source["context"]["damage_delivery_owner"], 12);
+                assert!(source["context"]["direct_damage_result"]["exact_recipients"].is_array());
+                let context = &output["context"];
+                assert!(context.get("damage_delivery_owner").is_none());
+                assert_eq!(context["direct_damage_result"]["type"], tag);
+                assert!(context["direct_damage_result"]
+                    .get("exact_recipients")
+                    .is_none());
+            }
+        }
     }
 
     /// CR 608.2d: the paused resolution-time division effect is retained in

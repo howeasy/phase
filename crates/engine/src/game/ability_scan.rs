@@ -2085,7 +2085,10 @@ fn scan_effect(x: &Effect, mode: ScanMode) -> Axes<'_> {
             replacement,
             target,
         } => Axes::CONSERVATIVE
-            .or(scan_target_filter(target, target_ctx, mode))
+            // `PriorDamageRecipients` holds no filter and contributes no axes.
+            .or(target.filter().map_or(Axes::NONE, |filter| {
+                scan_target_filter(filter, target_ctx, mode)
+            }))
             .or(replacement_definition_axes(
                 replacement,
                 None,

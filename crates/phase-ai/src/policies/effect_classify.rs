@@ -4056,7 +4056,7 @@ mod create_boon_polarity_tests {
                 execute: Some(Box::new(tap)),
                 ..ReplacementDefinition::new(ReplacementEvent::ChangeZone)
             }),
-            target: TargetFilter::None,
+            target: TargetFilter::None.into(),
         }
     }
 

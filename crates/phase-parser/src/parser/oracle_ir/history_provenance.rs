@@ -1504,7 +1504,7 @@ mod tests {
                     )
                     .execute(lowered.value),
                 ),
-                target: crate::types::ability::TargetFilter::None,
+                target: crate::types::ability::TargetFilter::None.into(),
             },
         );
         let mut finished = transport.finish(wrapper);

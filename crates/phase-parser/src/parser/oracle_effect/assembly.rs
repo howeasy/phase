@@ -6358,7 +6358,7 @@ mod arena_tests {
     fn replacement_shield_effect() -> Effect {
         Effect::AddTargetReplacement {
             replacement: Box::new(ReplacementDefinition::new(ReplacementEvent::DamageDone)),
-            target: TargetFilter::Any,
+            target: TargetFilter::Any.into(),
         }
     }
 

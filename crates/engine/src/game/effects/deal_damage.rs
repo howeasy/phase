@@ -3452,6 +3452,7 @@ fn stashed_tail(
             state,
             ability,
             owned_prefix.as_deref().unwrap_or(dealt_before_pause),
+            super::exact_recipient_accumulator(&tail),
         );
         tail.set_direct_damage_result(Some(awaiting), owner);
     }
@@ -5907,6 +5908,97 @@ mod tests {
         assert_eq!((state.players[0].life, state.players[1].life), (18, 16));
     }
 
+    #[test]
+    fn exact_damage_pins_keep_owner_order_and_deduplicate_incarnations() {
+        use crate::types::ability::{ReplacementDefinition, ReplacementRecipient};
+        use crate::types::replacements::ReplacementEvent;
+        use std::sync::Arc;
+        let state = GameState::new_two_player(42);
+        let source = ObjectId(200);
+        let producer = ResolvedAbility::new(
+            Effect::DealDamage {
+                amount: QuantityExpr::Fixed { value: 2 },
+                target: TargetFilter::Any,
+                damage_source: None,
+                excess: None,
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        );
+        let mut reader = ResolvedAbility::new(
+            Effect::AddTargetReplacement {
+                replacement: Box::new(ReplacementDefinition::new(ReplacementEvent::Moved)),
+                target: ReplacementRecipient::PriorDamageRecipients,
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        );
+        let pin = |id, incarnation| ObjectIncarnationRef {
+            object_id: ObjectId(id),
+            incarnation,
+        };
+        let first = pin(1, 2);
+        let later = pin(1, 3);
+        let other_owner = pin(2, 1);
+        let receipt = |pin: ObjectIncarnationRef, amount| RecordedDamageDealt {
+            target: TargetRef::Object(pin.object_id),
+            amount,
+            excess: 0,
+            object_pin: Some(pin),
+        };
+        let valid_owner = DamageDeliveryOwnerId(1);
+        let result = new_awaiting_damage_result_from_snapshots(
+            &state,
+            &producer,
+            &[receipt(first, 2), receipt(first, 3)],
+            crate::game::effects::exact_recipient_accumulator(&reader),
+        );
+        reader.set_direct_damage_result(Some(result), Some(valid_owner));
+        assert!(!fold_snapshots_into_chain_awaiting_delivery(
+            &mut reader,
+            DamageDeliveryOwnerId(2),
+            &[receipt(other_owner, 6)],
+        ));
+        assert!(fold_snapshots_into_chain_awaiting_delivery(
+            &mut reader,
+            valid_owner,
+            &[
+                receipt(first, 1),
+                receipt(later, 2),
+                receipt(other_owner, 0)
+            ],
+        ));
+        assert!(matches!(&reader.context.direct_damage_result,
+            Some(DamageInstructionResult::AwaitingDelivery { exact_recipients: Some(pins), .. })
+                if pins.as_slice() == [first, later]));
+
+        // An empty fold (zero-amount and pin-less receipts) neither allocates
+        // nor copies the shared accumulator.
+        let mut seeded = Arc::new(vec![first]);
+        let witness = Arc::clone(&seeded);
+        let pinless = RecordedDamageDealt {
+            target: TargetRef::Player(PlayerId(1)),
+            amount: 3,
+            excess: 0,
+            object_pin: None,
+        };
+        crate::game::effects::fold_exact_damage_recipients(
+            &mut seeded,
+            &[receipt(other_owner, 0), pinless],
+        );
+        assert!(Arc::ptr_eq(&seeded, &witness));
+        drop(witness);
+        assert_eq!(Arc::strong_count(&seeded), 1);
+        assert_eq!(seeded.as_slice(), [first]);
+        let mut empty = Arc::new(Vec::new());
+        crate::game::effects::fold_exact_damage_recipients(&mut empty, &[receipt(other_owner, 0)]);
+        assert!(empty.is_empty());
+        // A non-reader seeds nothing.
+        assert!(crate::game::effects::exact_recipient_accumulator(&producer).is_none());
+    }
+
     /// CR 120.1 + CR 616.1: distinct owned deliveries by the same source
     /// cannot settle each other's parked batch or populate each other's reader.
     #[test]
@@ -5933,6 +6025,7 @@ mod tests {
                     amount: 0,
                     excess: None,
                     recipient: AwaitedDamageRecipient::None,
+                    exact_recipients: None,
                     fight_fought_creature: None,
                 }),
                 batch_owner,

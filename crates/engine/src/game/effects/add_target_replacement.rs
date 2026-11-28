@@ -4,11 +4,11 @@ use crate::game::replacement::EventModifiers;
 use crate::game::targeting::{triggering_spell, triggering_spell_identity, TriggeringSpell};
 use crate::types::ability::{
     expiry_from_duration, host_gate_enforceable, quantity_ref_recipient_read,
-    replacement_install_is_refused, AbilityDefinition, CastManaObjectScope, DamageTargetFilter,
-    DamageTargetPlayerScope, Effect, EffectError, EffectKind, ObjectScope, PlayerFilter,
-    QuantityExpr, QuantityRef, RecipientRead, ReplacementCondition, ReplacementDefinition,
-    ReplacementDurationExpiry, ResolvedAbility, RestrictionExpiry, SourceExclusion, TargetFilter,
-    TargetRef,
+    replacement_install_is_refused, AbilityDefinition, CastManaObjectScope,
+    DamageInstructionResult, DamageTargetFilter, DamageTargetPlayerScope, Effect, EffectError,
+    EffectKind, ObjectScope, PlayerFilter, QuantityExpr, QuantityRef, RecipientRead,
+    ReplacementCondition, ReplacementDefinition, ReplacementDurationExpiry, ReplacementRecipient,
+    ResolvedAbility, RestrictionExpiry, SourceExclusion, TargetFilter, TargetRef,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
@@ -573,8 +573,35 @@ fn freeze_entry_counter_quantities(
 fn replacement_targets(
     state: &GameState,
     ability: &ResolvedAbility,
-    target: &TargetFilter,
+    recipient: &ReplacementRecipient,
 ) -> Vec<TargetRef> {
+    let target = match recipient {
+        ReplacementRecipient::PriorDamageRecipients => {
+            // CR 608.2c + CR 614.9 (redirection) + CR 615.6 (prevented damage
+            // never happens): the rider binds to the objects the preceding
+            // damage instruction actually delivered positive damage to.
+            let Some(DamageInstructionResult::Dealt {
+                exact_recipients: Some(pins),
+                ..
+            }) = &ability.context.direct_damage_result
+            else {
+                return Vec::new();
+            };
+            // CR 400.7: a departed occurrence cannot pass its rider to a new object.
+            return pins
+                .iter()
+                .filter(|pin| {
+                    pin.is_current(state)
+                        && state
+                            .objects
+                            .get(&pin.object_id)
+                            .is_some_and(|obj| obj.zone == Zone::Battlefield)
+                })
+                .map(|pin| TargetRef::Object(pin.object_id))
+                .collect();
+        }
+        ReplacementRecipient::Filter(target) => target,
+    };
     // CR 608.2b: a bound ParentTarget, including authoritative emptiness,
     // precedes event and attached-host fallback.
     if matches!(target, TargetFilter::ParentTarget) {
@@ -694,7 +721,7 @@ pub fn resolve(
     // `ability.controller` latched below) and of floating entry-modifier riders
     // (Communal Brewing's "that creature enters with X additional +1/+1
     // counters on it").
-    if matches!(target, TargetFilter::None) {
+    if matches!(target, ReplacementRecipient::Filter(TargetFilter::None)) {
         let replacement = replacement_with_ability_expiry(replacement, ability)?;
         let Some(mut replacement) = bind_replacement_to_trigger_source(replacement, state) else {
             return Ok(());
@@ -856,6 +883,59 @@ mod tests {
         }
     }
 
+    /// CR 400.7: an old recipient pin is not the current battlefield object.
+    #[test]
+    fn exact_die_exile_reader_rejects_stale_and_closed_empty_inputs() {
+        use crate::types::identifiers::ObjectIncarnationRef;
+        use std::sync::Arc;
+
+        let mut state = GameState::new_two_player(42);
+        let target = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Victim".into(),
+            Zone::Battlefield,
+        );
+        let stale = ObjectIncarnationRef {
+            object_id: target,
+            incarnation: state.objects[&target].incarnation,
+        };
+        state.objects.get_mut(&target).unwrap().bump_incarnation();
+        let current = ObjectIncarnationRef {
+            object_id: target,
+            incarnation: state.objects[&target].incarnation,
+        };
+        let recipient = ReplacementRecipient::PriorDamageRecipients;
+        let mut rider = ResolvedAbility::new(
+            Effect::AddTargetReplacement {
+                replacement: Box::new(ReplacementDefinition::new(ReplacementEvent::Moved)),
+                target: recipient.clone(),
+            },
+            vec![TargetRef::Object(target)],
+            ObjectId(200),
+            PlayerId(0),
+        );
+        assert!(replacement_targets(&state, &rider, &recipient).is_empty());
+        for (pins, expected) in [
+            (None, vec![]),
+            (Some(stale), vec![]),
+            (Some(current), vec![TargetRef::Object(target)]),
+        ] {
+            rider.context.direct_damage_result = Some(DamageInstructionResult::Dealt {
+                recipient: Some(current),
+                exact_recipients: pins.map(|pin| Arc::new(vec![pin])),
+            });
+            assert_eq!(replacement_targets(&state, &rider, &recipient), expected);
+        }
+        // `TrackedSet(0)` is an ordinary filter now, not a marker: with the
+        // result still holding a live pin it reads the (empty) chain set.
+        let ordinary = ReplacementRecipient::Filter(TargetFilter::TrackedSet {
+            id: TrackedSetId(0),
+        });
+        assert!(replacement_targets(&state, &rider, &ordinary).is_empty());
+    }
+
     /// CR 514.2 + CR 615.3: a shield-carrying replacement installed by a resolving
     /// ability that stated NO representable window gets the engine's turn window at
     /// this seam, so `turns::execute_cleanup` — which reads `expiry` alone — can
@@ -901,7 +981,7 @@ mod tests {
         let ability = ResolvedAbility::new(
             Effect::AddTargetReplacement {
                 replacement: Box::new(shield),
-                target: TargetFilter::Any,
+                target: TargetFilter::Any.into(),
             },
             vec![TargetRef::Object(target)],
             source,
@@ -938,7 +1018,7 @@ mod tests {
         let rider_ability = ResolvedAbility::new(
             Effect::AddTargetReplacement {
                 replacement: Box::new(rider),
-                target: TargetFilter::Any,
+                target: TargetFilter::Any.into(),
             },
             vec![TargetRef::Object(target)],
             source,
@@ -987,7 +1067,7 @@ mod tests {
         let mut ability = ResolvedAbility::new(
             Effect::AddTargetReplacement {
                 replacement: Box::new(rider),
-                target: TargetFilter::Any,
+                target: TargetFilter::Any.into(),
             },
             vec![],
             source,
@@ -1032,7 +1112,7 @@ mod tests {
         let mut ability = ResolvedAbility::new(
             Effect::AddTargetReplacement {
                 replacement: Box::new(rider),
-                target: TargetFilter::Any,
+                target: TargetFilter::Any.into(),
             },
             vec![TargetRef::Object(declared_target)],
             source,
@@ -1074,7 +1154,7 @@ mod tests {
         let mut ability = ResolvedAbility::new(
             Effect::AddTargetReplacement {
                 replacement: Box::new(rider),
-                target: TargetFilter::Any,
+                target: TargetFilter::Any.into(),
             },
             vec![],
             source,
@@ -1110,7 +1190,7 @@ mod tests {
         let ability = ResolvedAbility::new(
             Effect::AddTargetReplacement {
                 replacement: Box::new(rider),
-                target: TargetFilter::Any,
+                target: TargetFilter::Any.into(),
             },
             vec![TargetRef::Object(target)],
             source,
@@ -1159,7 +1239,7 @@ mod tests {
         let ability = ResolvedAbility::new(
             Effect::AddTargetReplacement {
                 replacement: Box::new(rider),
-                target,
+                target: target.into(),
             },
             vec![],
             source,
@@ -1322,7 +1402,7 @@ mod tests {
         let mut ability = ResolvedAbility::new(
             Effect::AddTargetReplacement {
                 replacement: Box::new(shield),
-                target: TargetFilter::Any,
+                target: TargetFilter::Any.into(),
             },
             vec![TargetRef::Object(target)],
             source,
@@ -1394,7 +1474,7 @@ mod tests {
         let ability = ResolvedAbility::new(
             Effect::AddTargetReplacement {
                 replacement: Box::new(repl),
-                target: TargetFilter::Any,
+                target: TargetFilter::Any.into(),
             },
             vec![TargetRef::Object(target)],
             ObjectId(0),
@@ -1463,7 +1543,7 @@ mod tests {
         let mut durable = ResolvedAbility::new(
             Effect::AddTargetReplacement {
                 replacement: Box::new(ReplacementDefinition::new(ReplacementEvent::Untap)),
-                target: TargetFilter::Any,
+                target: TargetFilter::Any.into(),
             },
             vec![TargetRef::Object(host)],
             source,
@@ -1480,7 +1560,7 @@ mod tests {
         let transient = ResolvedAbility::new(
             Effect::AddTargetReplacement {
                 replacement: Box::new(eot),
-                target: TargetFilter::Any,
+                target: TargetFilter::Any.into(),
             },
             vec![TargetRef::Object(host)],
             source,
@@ -1558,7 +1638,7 @@ mod tests {
         let ability = ResolvedAbility::new(
             Effect::AddTargetReplacement {
                 replacement: Box::new(repl),
-                target: TargetFilter::Any,
+                target: TargetFilter::Any.into(),
             },
             vec![TargetRef::Object(id)],
             ObjectId(0),
@@ -1633,7 +1713,7 @@ mod tests {
         let ability = ResolvedAbility::new(
             Effect::AddTargetReplacement {
                 replacement: Box::new(replacement),
-                target: TargetFilter::None,
+                target: TargetFilter::None.into(),
             },
             vec![TargetRef::Object(copy_source)],
             ObjectId(0),
@@ -1675,7 +1755,7 @@ mod tests {
         let mut ability = ResolvedAbility::new(
             Effect::AddTargetReplacement {
                 replacement: Box::new(replacement),
-                target: TargetFilter::TriggeringPlayer,
+                target: TargetFilter::TriggeringPlayer.into(),
             },
             Vec::new(),
             ObjectId(7),
@@ -1745,7 +1825,7 @@ mod tests {
         let mut ability = ResolvedAbility::new(
             Effect::AddTargetReplacement {
                 replacement: Box::new(replacement),
-                target: TargetFilter::TriggeringPlayer,
+                target: TargetFilter::TriggeringPlayer.into(),
             },
             Vec::new(),
             ObjectId(7),
@@ -1792,7 +1872,7 @@ mod tests {
         let mut ability = ResolvedAbility::new(
             Effect::AddTargetReplacement {
                 replacement: Box::new(replacement),
-                target: TargetFilter::None,
+                target: TargetFilter::None.into(),
             },
             Vec::new(),
             ObjectId(7),
@@ -1861,7 +1941,7 @@ mod tests {
         let mut ability = ResolvedAbility::new(
             Effect::AddTargetReplacement {
                 replacement: Box::new(replacement),
-                target: TargetFilter::None,
+                target: TargetFilter::None.into(),
             },
             Vec::new(),
             // Installing ability controlled by PlayerId(0) — the anchor source.
@@ -1948,7 +2028,7 @@ mod tests {
         let install_ability = ResolvedAbility::new(
             Effect::AddTargetReplacement {
                 replacement: Box::new(repl),
-                target: TargetFilter::None,
+                target: TargetFilter::None.into(),
             },
             Vec::new(),
             cutpurse_id,
@@ -2064,7 +2144,7 @@ mod tests {
         let install_ability = ResolvedAbility::new(
             Effect::AddTargetReplacement {
                 replacement: Box::new(repl),
-                target: TargetFilter::None,
+                target: TargetFilter::None.into(),
             },
             Vec::new(),
             cutpurse_id,
@@ -2155,7 +2235,7 @@ mod tests {
         let install_ability = ResolvedAbility::new(
             Effect::AddTargetReplacement {
                 replacement: Box::new(repl),
-                target: TargetFilter::None,
+                target: TargetFilter::None.into(),
             },
             Vec::new(),
             cutpurse_id,
@@ -2347,7 +2427,7 @@ mod tests {
         let mut ability = ResolvedAbility::new(
             Effect::AddTargetReplacement {
                 replacement: Box::new(replacement),
-                target: TargetFilter::None,
+                target: TargetFilter::None.into(),
             },
             Vec::new(),
             source,

@@ -23746,7 +23746,7 @@ fn angels_grace_emits_cant_lose_cant_win_and_life_floor() {
             } => {
                 assert_eq!(
                     *target,
-                    TargetFilter::None,
+                    crate::types::ability::ReplacementRecipient::Filter(TargetFilter::None),
                     "self-contained floating replacement takes no per-target binding"
                 );
                 assert_eq!(
@@ -23834,7 +23834,10 @@ fn angel_of_grace_trigger_lifts_life_floor_with_duration() {
     else {
         panic!("trigger body must lift to AddTargetReplacement, got {execute:#?}");
     };
-    assert_eq!(*target, TargetFilter::None);
+    assert_eq!(
+        *target,
+        crate::types::ability::ReplacementRecipient::Filter(TargetFilter::None)
+    );
     assert_eq!(
         replacement.damage_modification,
         Some(DamageModification::LifeFloor { minimum: 1 })
@@ -32811,7 +32814,7 @@ fn demote_net_reaches_every_ability_carrier() {
             AbilityKind::Spell,
             Effect::AddTargetReplacement {
                 replacement: Box::new(ReplacementDefinition::new(ReplacementEvent::Untap)),
-                target: TargetFilter::Any,
+                target: TargetFilter::Any.into(),
             },
         );
         def.duration = Some(Duration::WhileHostOnBattlefield);
@@ -34261,7 +34264,7 @@ fn render_net_reaches_every_nested_description_carrier() {
     atr.execute = Some(Box::new(ability("add_target_replacement_execute")));
     parsed.abilities.push(carrier(Effect::AddTargetReplacement {
         replacement: Box::new(atr),
-        target: TargetFilter::Any,
+        target: TargetFilter::Any.into(),
     }));
     tags.extend(["add_target_replacement", "add_target_replacement_execute"]);
 

@@ -11,8 +11,9 @@ use engine::game::visibility::filter_state_for_viewer;
 use engine::parser::oracle::parse_oracle_text;
 use engine::types::ability::{
     AbilityCondition, AbilityDefinition, AbilityKind, DelayedTriggerCondition, Effect, FilterProp,
-    OriginConstraint, QuantityExpr, ReplacementCondition, ReplacementDefinition, RestrictionExpiry,
-    TargetChoiceTiming, TargetFilter, TargetRef, TypedFilter,
+    OriginConstraint, QuantityExpr, ReplacementCondition, ReplacementDefinition,
+    ReplacementRecipient, RestrictionExpiry, TargetChoiceTiming, TargetFilter, TargetRef,
+    TypedFilter,
 };
 use engine::types::actions::GameAction;
 use engine::types::game_state::{PersistedGameState, StackEntryKind, WaitingFor};
@@ -2265,7 +2266,7 @@ fn storm_herald_preserves_delayed_exile_continuation() {
     }
     match find_leave_rider(execute) {
         Some(Effect::AddTargetReplacement {
-            target: TargetFilter::TrackedSet { .. },
+            target: ReplacementRecipient::Filter(TargetFilter::TrackedSet { .. }),
             ..
         }) => {}
         Some(Effect::Unimplemented { .. }) => {}

@@ -58,7 +58,7 @@ use engine::parser::oracle_static::parse_static_line;
 use engine::parser::parse_oracle_text;
 use engine::types::ability::{
     AbilityDefinition, CardPlayMode, ControllerRef, Effect, FilterProp, ReplacementDefinition,
-    RestrictionExpiry, StaticDefinition, TargetFilter,
+    ReplacementRecipient, RestrictionExpiry, StaticDefinition, TargetFilter,
 };
 use engine::types::replacements::ReplacementEvent;
 use engine::types::statics::{CastFrequency, StaticMode};
@@ -125,7 +125,7 @@ fn windowed_installs(parsed: &ParsedAbilities) -> Vec<&ReplacementDefinition> {
     fn walk<'a>(def: &'a AbilityDefinition, found: &mut Vec<&'a ReplacementDefinition>) {
         if let Effect::AddTargetReplacement {
             replacement,
-            target: TargetFilter::None,
+            target: ReplacementRecipient::Filter(TargetFilter::None),
         } = &*def.effect
         {
             found.push(replacement);
