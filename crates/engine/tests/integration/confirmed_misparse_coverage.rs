@@ -1201,27 +1201,27 @@ fn deck_compatibility_publishes_multi_clause_census_gaps_for_printed_cards() {
 
 /// A deck that spells a card by an alias or a composite name resolves to the
 /// same export key the report uses, so the census lookup still finds its
-/// clauses. A key built from the raw spelling ("grima, saruman's footman") would
+/// clauses. A key built from the raw spelling ("lim-dul's paladin") would
 /// miss the census row and fall back to a generic handler line, failing the
 /// clause assertions below.
 #[test]
 fn deck_compatibility_census_clauses_survive_alias_and_composite_spellings() {
-    const GRIMA_CLAUSE: &str = "Then that player puts the exiled cards that weren't cast this way on the bottom of their library in a random order.";
+    const PALADIN_CLAUSE: &str = "Whenever this creature attacks and isn't blocked, it assigns no combat damage this turn and defending player loses 4 life.";
     const ANNEX_CLAUSES: [&str; 2] = [
         "If you control a Demon, each opponent loses 2 life and you gain 2 life.",
         "Otherwise, you lose 2 life.",
     ];
-    let db = printed_pool(&["plains", "gríma, saruman's footman", "unholy annex"]);
+    let db = printed_pool(&["plains", "lim-dûl's paladin", "unholy annex"]);
 
     // Exact spelling first: the reference for the alias and composite rows.
-    let exact_grima = verdict_coverage(&db, &["Gríma, Saruman's Footman"]);
+    let exact_paladin = verdict_coverage(&db, &["Lim-Dûl's Paladin"]);
     let exact_annex = verdict_coverage(&db, &["Unholy Annex"]);
     assert_census_gap(
         &db,
-        unsupported_named(&exact_grima, "Gríma, Saruman's Footman"),
-        "gríma, saruman's footman",
-        MisparseClass::DroppedQualifier,
-        &[GRIMA_CLAUSE],
+        unsupported_named(&exact_paladin, "Lim-Dûl's Paladin"),
+        "lim-dûl's paladin",
+        MisparseClass::MissingEffect,
+        &[PALADIN_CLAUSE],
     );
     assert_census_gap(
         &db,
@@ -1232,11 +1232,11 @@ fn deck_compatibility_census_clauses_survive_alias_and_composite_spellings() {
     );
 
     // Unaccented alias: `fold_card_name_key` resolves it to the accented key.
-    let alias = verdict_coverage(&db, &["Grima, Saruman's Footman"]);
+    let alias = verdict_coverage(&db, &["Lim-Dul's Paladin"]);
     assert_eq!(alias.unsupported_cards.len(), 1);
     assert_eq!(
         serde_json::to_value(&alias.unsupported_cards[0]).unwrap(),
-        serde_json::to_value(&exact_grima.unsupported_cards[0]).unwrap(),
+        serde_json::to_value(&exact_paladin.unsupported_cards[0]).unwrap(),
         "an alias spelling publishes the same unsupported card"
     );
     // Composite spelling: the front face names the stored face.
@@ -1249,10 +1249,7 @@ fn deck_compatibility_census_clauses_survive_alias_and_composite_spellings() {
     );
 
     // One card under two spellings is one entry, counted twice, with one list.
-    let both = verdict_coverage(
-        &db,
-        &["Grima, Saruman's Footman", "Gríma, Saruman's Footman"],
-    );
+    let both = verdict_coverage(&db, &["Lim-Dul's Paladin", "Lim-Dûl's Paladin"]);
     assert_eq!(both.unsupported_cards.len(), 1);
     assert_eq!(both.unsupported_cards[0].copies, 2);
     assert_eq!(both.unsupported_cards[0].gap_details.len(), 1);
@@ -1260,22 +1257,16 @@ fn deck_compatibility_census_clauses_survive_alias_and_composite_spellings() {
     // The alias row equals the report's row for the stored key.
     let report = report(&db);
     assert_eq!(
-        serde_json::to_value(&report["gríma, saruman's footman"].gap_details).unwrap(),
+        serde_json::to_value(&report["lim-dûl's paladin"].gap_details).unwrap(),
         serde_json::to_value(&alias.unsupported_cards[0].gap_details).unwrap()
     );
 
     // Hostile: a name no step resolves yields no entry and no panic, beside a
     // resolvable unsupported card that does produce one.
-    let unknown = verdict_coverage(
-        &db,
-        &["Grima, Saruman's Footman", "Totally Not A Real Card Xyzzy"],
-    );
+    let unknown = verdict_coverage(&db, &["Lim-Dul's Paladin", "Totally Not A Real Card Xyzzy"]);
     assert_eq!(unknown.total_unique, 1);
     assert_eq!(unknown.unsupported_cards.len(), 1);
-    assert_eq!(
-        unknown.unsupported_cards[0].name,
-        "Gríma, Saruman's Footman"
-    );
+    assert_eq!(unknown.unsupported_cards[0].name, "Lim-Dûl's Paladin");
 }
 
 /// The one intended divergence from the report: entry-projection gaps (CR 614.12,
