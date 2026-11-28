@@ -63655,8 +63655,8 @@ fn grant_digest_covers_the_enters_tapped_rider() {
 
 /// CR 608.2c + CR 611.2a: a cast carrying no elected object-permission index
 /// (a static `CastingVariant::ExilePermission` cast, which deliberately elects
-/// none) spends no shared `ExileWithAltCost` budget (Idol of Endurance, Court of
-/// Locthwain, Serpent's Soul-Jar), because the legacy first-compatible scan
+/// none) spends no shared `ExileWithAltCost` budget (Idol of Endurance,
+/// Serpent's Soul-Jar), because the legacy first-compatible scan
 /// could otherwise charge an unrelated grant the cast did not use.
 #[test]
 fn shared_exile_alt_cost_budget_is_spent_only_by_the_elected_permission() {
