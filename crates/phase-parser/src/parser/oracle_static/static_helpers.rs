@@ -651,8 +651,11 @@ pub(crate) fn try_parse_cost_modification(
                 // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
                 let from_text = &prefix[from_idx..];
                 // CR 109.5 + CR 400.3: "your hand" is the static source's
-                // controller's hand. A card cast from a different player's
-                // hand also qualifies, since a card in a hand is in its owner's hand.
+                // controller's hand, and a card in a hand is identified by its
+                // owner — not by what "Opponent" happens to mean at evaluation
+                // time. The exclusion is therefore the negation of "in hand AND
+                // owned by the controller"; with no AllOf, De Morgan gives
+                // AnyOf[Not(InZone(Hand)), Not(Owned(You))].
                 let origin = from_text.trim();
                 if crate::parser::oracle_nom::condition::parse_cast_origin_exclusion_of_your_zone(
                     origin,
@@ -664,8 +667,10 @@ pub(crate) fn try_parse_cost_modification(
                             FilterProp::Not {
                                 prop: Box::new(FilterProp::InZone { zone: Zone::Hand }),
                             },
-                            FilterProp::Owned {
-                                controller: ControllerRef::Opponent,
+                            FilterProp::Not {
+                                prop: Box::new(FilterProp::Owned {
+                                    controller: ControllerRef::You,
+                                }),
                             },
                         ],
                     });

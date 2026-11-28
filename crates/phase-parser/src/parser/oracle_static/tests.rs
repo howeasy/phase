@@ -45456,13 +45456,17 @@ fn burden_of_proof_otherwise_branch_cannot_block_detectives() {
 }
 
 fn outside_your_hand() -> FilterProp {
+    // CR 109.5 + CR 400.3: not (in hand AND owned by the controller), via
+    // De Morgan — AnyOf[Not(InZone(Hand)), Not(Owned(You))].
     FilterProp::AnyOf {
         props: vec![
             FilterProp::Not {
                 prop: Box::new(FilterProp::InZone { zone: Zone::Hand }),
             },
-            FilterProp::Owned {
-                controller: ControllerRef::Opponent,
+            FilterProp::Not {
+                prop: Box::new(FilterProp::Owned {
+                    controller: ControllerRef::You,
+                }),
             },
         ],
     }

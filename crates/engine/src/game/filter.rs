@@ -25166,16 +25166,20 @@ mod tests {
         ));
     }
 
-    // Shape-only: nearest printed card is Savvy Trader. Keep the same caster
-    // for both hands so using the caster instead of the owner fails the test.
+    // Shape-only: nearest printed card is Savvy Trader. "Your hand" is the
+    // negation of "in hand AND owned by the controller" (De Morgan:
+    // AnyOf[Not(InZone(Hand)), Not(Owned(You))]). Keep the same caster for
+    // both hands so using the caster instead of the owner fails the test.
     #[test]
     fn spell_object_filter_excludes_only_the_source_controllers_hand() {
         let mut state = setup();
         let you = PlayerId(0);
         let opponent = PlayerId(1);
         let source = add_creature(&mut state, you, "Savvy Trader");
-        let opponent_owned = FilterProp::Owned {
-            controller: ControllerRef::Opponent,
+        let not_you_owned = FilterProp::Not {
+            prop: Box::new(FilterProp::Owned {
+                controller: ControllerRef::You,
+            }),
         };
         let origin_filter =
             TargetFilter::Typed(TypedFilter::card().properties(vec![FilterProp::AnyOf {
@@ -25183,11 +25187,9 @@ mod tests {
                     FilterProp::Not {
                         prop: Box::new(FilterProp::InZone { zone: Zone::Hand }),
                     },
-                    opponent_owned.clone(),
+                    not_you_owned,
                 ],
             }]));
-        let opponent_filter =
-            TargetFilter::Typed(TypedFilter::card().properties(vec![opponent_owned]));
 
         for (origin, owner, expected) in [
             (Zone::Hand, you, false),
@@ -25218,18 +25220,6 @@ mod tests {
                 expected,
                 "{origin:?}, owner {owner:?}"
             );
-            if origin == Zone::Hand && owner == opponent {
-                for filter in [&opponent_filter, &origin_filter] {
-                    assert!(!spell_object_matches_filter_from(
-                        spell,
-                        origin,
-                        you,
-                        filter,
-                        you,
-                        &[],
-                    ));
-                }
-            }
         }
     }
 

@@ -780,6 +780,7 @@ face = [
   { key = "forgeborn phoenix", class = "wrong_zone", clauses = ["Whenever Forgeborn Phoenix or equipped creature dies, it perpetually gains \"Whenever an equipped creature you control deals combat damage to a player or planeswalker, return this card from your graveyard to battlefield tapped.\""] },
   { key = "fork", class = "missing_effect", clauses = ["Copy target instant or sorcery spell, except that the copy is red."] },
   { key = "form of the mulldrifter", class = "missing_effect", clauses = ["You may cast creature cards from your hand as though they were the card Mulldrifter."] },
+  { key = "fortune teller's talent", class = "wrong_zone", clauses = ["You may look at the top card of your library any time."] },
   { key = "fortune's favor", class = "missing_effect", clauses = ["Target opponent looks at the top four cards of your library and separates them into a face-down pile and a face-up pile.", "Put one pile into your hand and the other into your graveyard."] },
   { key = "fossil find", class = "missing_effect", clauses = ["then reorder your graveyard as you choose."] },
   { key = "fraction jackson", class = "dropped_qualifier", clauses = ["{G}, {T}: Return target card with a ½ on it from your graveyard to your hand."] },

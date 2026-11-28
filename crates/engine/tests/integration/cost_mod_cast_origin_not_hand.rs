@@ -3,13 +3,14 @@
 //!
 //! The parser used to drop the origin qualifier, so the static reduced every
 //! spell its controller cast, hand casts included (`spell_filter: null`); the
-//! static now excludes only the static controller's own hand. Each witness loads
-//! the printed card through `add_real_card` and drives it through the public
-//! `GameRunner` actions. CR 601.2f: the reduction enters the total cost of a
-//! cast announced from anywhere other than that hand; CR 601.2a: a cast moves
-//! the card from the zone it is in onto the stack, so its origin is the
-//! zone the card is cast from. The witnesses check displayed costs and actual
-//! payment, including a free cast that owes a tax before reductions.
+//! static now excludes only the static controller's own hand (CR 400.3: that
+//! hand is identified by the card's owner, not by what "opponent" means). Each
+//! witness loads the printed card through `add_real_card` and drives it through
+//! the public `GameRunner` actions. CR 601.2f: the reduction enters the total
+//! cost of a cast announced from anywhere other than that hand; CR 601.2a: a
+//! cast moves the card from the zone it is in onto the stack, so its origin is
+//! the zone the card is cast from. The witnesses check displayed costs and
+//! actual payment, including a free cast that owes a tax before reductions.
 //!
 //! The suite parses a small raw-MTGJSON fixture
 //! (`fixtures/cost_mod_cast_origin_atomic.json`: the printed cards of the class
@@ -22,7 +23,6 @@ use std::sync::OnceLock;
 use engine::database::card_db::CardDatabase;
 use engine::game::casting::display_spell_cost;
 use engine::game::combat::AttackTarget;
-use engine::game::derived::derive_display_state;
 use engine::game::mana_sources::activatable_mana_actions_for_player;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::scenario_db::GameScenarioDbExt;
@@ -1153,9 +1153,11 @@ fn sage_reduction_never_touches_coloured_mana_dream_twist() {
 // ===== Fortune Teller's Talent =====
 
 /// Fortune Teller's Talent ({U} Enchantment — Class), level 3 clause: "Spells
-/// you cast from anywhere other than your hand cost {2} less to cast." Level 2
-/// first grants "As long as you've cast a spell this turn, you may play cards
-/// from the top of your library."
+/// you cast from anywhere other than your hand cost {2} less to cast."
+///
+/// This witness covers the COST clause only, not card support: the level 1
+/// look-at-top static and the level 2 top-of-library play permission are not
+/// asserted here.
 ///
 /// CR 601.2f: at level 2 the top-of-library cast (CR 601.2a: the card moves
 /// from the library onto the stack) costs its full printed {2}{U}; only the
@@ -1278,34 +1280,35 @@ fn fortune_tellers_talent_level_3_reduces_the_top_of_library_cast_only() {
     assert_settled(&r, P0, "Fortune Teller's Talent");
 }
 
-// ===== Fortune Teller's Talent: the level 1 look and the level 2 gate =====
+// ===== Fortune Teller's Talent: the level 2 top-of-library gate =====
 
-/// Fortune Teller's Talent ({U} Enchantment — Class). Level 1: "You may look
-/// at the top card of your library any time." Level 2: "As long as you've
-/// cast a spell this turn, you may play cards from the top of your library."
+/// Fortune Teller's Talent ({U} Enchantment — Class), level 2 clause: "As long
+/// as you've cast a spell this turn, you may play cards from the top of your
+/// library."
 ///
-/// CR 401.5: the level 1 static hands P0 the look-at-top permission, which
-/// the engine's public display state carries per player
-/// (`can_look_at_top_of_library`); P1 does not get it (the static says
-/// "you"). The level 2 window is printed "As long as you've cast a spell
-/// this turn": with no spell cast this turn the top-of-library Divination is
-/// NOT castable (no cast may move it from the library onto the stack, so
-/// `display_spell_cost` is `None`), and casting the hand Divination this
-/// turn opens the window at the top card's full printed {2}{U} — the {2}
-/// reduction is the level 3 clause and is inactive here.
+/// CR 601.2a + CR 601.2f: until a spell has been cast this turn, the level 2
+/// window is closed, so the Divination on top of the library is neither shown
+/// as castable nor accepted as a cast — the pool still holds the spare {2}{U},
+/// so the cost is affordable and the rejection discriminates on the gate, not
+/// on mana. Casting the hand Dream Twist ({U}; it targets P1, so P0's library
+/// top is untouched) opens the window, and the top card then shows its full
+/// printed {2}{U}; the level 3 {2} reduction is inactive at level 2. The level 1
+/// look-at-top static and the level 2 permission beyond this gate are not
+/// card-support claims.
 #[test]
-fn fortune_tellers_talent_level_1_look_and_level_2_spell_cast_gate() {
+fn fortune_tellers_talent_level_2_top_cast_needs_a_spell_cast_this_turn() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
-    // Exact funding: Level 2 {3}{U} + the hand Divination {2}{U}.
-    scenario.with_mana_pool(P0, units("CCCCCUU"));
+    // Exact funding: Level 2 {3}{U} + the hand Dream Twist {U} + a spare
+    // {2}{U} so the top-of-library Divination is affordable when the gate
+    // rejects it — the rejection must be the gate, not the mana.
+    scenario.with_mana_pool(P0, units("CCCCCUUU"));
     let talent = scenario.add_real_card(P0, "Fortune Teller's Talent", Zone::Battlefield, db());
-    let hand_divination = scenario.add_real_card(P0, "Divination", Zone::Hand, db());
-    // Library, top first: the hand Divination draws the two basics, then the
-    // Divination the level 2 window gates sits on top.
-    let _draw_a = scenario.add_real_card(P0, "Island", Zone::Library, db());
-    let _draw_b = scenario.add_real_card(P0, "Forest", Zone::Library, db());
+    let dream_twist = scenario.add_real_card(P0, "Dream Twist", Zone::Hand, db());
+    // Library, top first: the Divination the level 2 window gates is the top
+    // card throughout; Dream Twist targets P1, so P0's library never changes.
     let top_divination = scenario.add_real_card(P0, "Divination", Zone::Library, db());
+    scenario.with_library_top(P1, &["Forest"; 3]);
 
     let mut r = scenario.build();
     engine::game::rehydrate_game_from_card_db(r.state_mut(), db());
@@ -1313,24 +1316,6 @@ fn fortune_tellers_talent_level_1_look_and_level_2_spell_cast_gate() {
         r.state().objects[&talent].class_level,
         Some(1),
         "the printed Class enters the battlefield at level 1"
-    );
-
-    // Level 1: P0 may look at the top card of their library any time.
-    derive_display_state(r.state_mut());
-    assert!(
-        r.state().players[P0.0 as usize].can_look_at_top_of_library,
-        "level 1: P0 may look at the top card of their own library"
-    );
-    assert!(
-        !r.state().players[P1.0 as usize].can_look_at_top_of_library,
-        "the level 1 static says 'you': P1 does not get the look permission"
-    );
-
-    // At level 1 the level 2 window is closed.
-    assert_eq!(
-        display_spell_cost(r.state(), P0, top_divination),
-        None,
-        "at level 1 the top-of-library Divination is not castable"
     );
 
     let level_two_bar = level_bar_index(&r, talent, 2);
@@ -1341,26 +1326,53 @@ fn fortune_tellers_talent_level_1_look_and_level_2_spell_cast_gate() {
         "the {{3}}{{U}} bar must set level 2"
     );
 
-    // THE level 2 gate: no spell has been cast this turn, so the printed
-    // "As long as you've cast a spell this turn" window is closed.
+    // THE gate: no spell has been cast this turn, so the printed "As long as
+    // you've cast a spell this turn" window is closed. This display check is
+    // the discriminating assertion: it ignores mana affordability.
     assert_eq!(
         display_spell_cost(r.state(), P0, top_divination),
         None,
         "at level 2 with no spell cast this turn the top-of-library Divination is not castable"
     );
 
-    // A spell cast this turn opens the window — at full price (the {2}
-    // reduction is the level 3 clause).
-    assert_eq!(
-        display_spell_cost(r.state(), P0, hand_divination),
-        Some(cost(2, vec![ManaCostShard::Blue])),
-        "the hand Divination pays its full printed {{2}}{{U}}"
+    // The closure is real, not a display omission: the public cast action is
+    // rejected and the card stays on top of the library. The pool still holds
+    // the spare {2}{U}, so the {2}{U} cost is payable — the rejection is the
+    // level 2 gate, not affordability.
+    let card_id = r.state().objects[&top_divination].card_id;
+    assert!(
+        r.act(GameAction::CastSpell {
+            object_id: top_divination,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .is_err(),
+        "with no spell cast this turn the top-of-library Divination cannot be cast"
     );
-    let hand_cast = r.cast(hand_divination).resolve();
     assert_eq!(
-        hand_cast.zone_of(hand_divination),
+        zone_of(&r, top_divination),
+        Zone::Library,
+        "the rejected cast leaves the Divination in the library"
+    );
+    assert_eq!(
+        r.state().players[P0.0 as usize].library.front(),
+        Some(&top_divination),
+        "the rejected cast leaves the Divination on top of the library"
+    );
+
+    // Casting a spell this turn (Dream Twist from hand, targeting P1) opens
+    // the window without touching P0's library top.
+    let dream_twist_cast = r.cast(dream_twist).target_player(P1).resolve();
+    assert_eq!(
+        dream_twist_cast.zone_of(dream_twist),
         Zone::Graveyard,
-        "the hand Divination is castable at full price"
+        "the hand Dream Twist resolves and goes to the graveyard"
+    );
+    assert_eq!(
+        r.state().players[P0.0 as usize].library.front(),
+        Some(&top_divination),
+        "Dream Twist targeted P1, so the Divination is still P0's library top"
     );
     assert_eq!(
         display_spell_cost(r.state(), P0, top_divination),
@@ -1370,10 +1382,10 @@ fn fortune_tellers_talent_level_1_look_and_level_2_spell_cast_gate() {
 
     assert_eq!(
         pool_size(&r, P0),
-        0,
-        "the pool funded exactly {{3}}{{U}} + {{2}}{{U}} and is now empty"
+        3,
+        "the spare {{2}}{{U}} is unspent: the rejected cast spent no mana, and the level 2 bar plus Dream Twist consumed {{3}}{{U}} + {{U}}"
     );
-    assert_settled(&r, P0, "Fortune Teller's Talent levels 1 and 2");
+    assert_settled(&r, P0, "Fortune Teller's Talent level 2 gate");
 }
 
 // ===== Advanced Reconstruction =====
