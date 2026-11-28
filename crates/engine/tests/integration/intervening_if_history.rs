@@ -30,8 +30,8 @@ use crate::support::shared_card_db;
 
 fn card_db() -> &'static CardDatabase {
     shared_card_db().expect(
-        "integration_cards.json.gz must contain the printed witnesses; a missing fixture is a \
-         failure, never a skip",
+        "the integration card database must contain the printed Syrix witnesses; a missing \
+         fixture is a failure, never a skip",
     )
 }
 

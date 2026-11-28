@@ -330,6 +330,13 @@ fn intervening_if_unclaimed_cards_stay_unsupported_and_claimed_cards_stay_suppor
         ("syrix, carrier of the flame", MisparseClass::WrongZone),
         ("krond the dawn-clad", MisparseClass::TargetWrong),
     ];
+    for (key, class) in fenced {
+        assert_eq!(
+            fixture()[key]["metadata"]["confirmed_misparse"].clone(),
+            serde_json::to_value(class).unwrap(),
+            "the committed fixture row carries the stamped class: {key}"
+        );
+    }
     let pool: Map<String, Value> = fenced
         .iter()
         .map(|(key, _)| *key)
