@@ -1,6 +1,11 @@
 import type { GameEvent, GameState } from "../adapter/types";
 import type { AnimationEvent, AnimationStep, PacingCategory, StepEffect } from "./types";
 import {
+  type CombatStrikeBand,
+  combatStrikeBandForEvent,
+  combatStrikeDurationBonusMs,
+} from "./combatStrike";
+import {
   DEFAULT_DURATION,
   EVENT_DURATIONS,
   GROUPED_COMBAT_DAMAGE_DURATION_MS,
@@ -100,6 +105,10 @@ interface NormalizeEventsOptions {
    *  a later batch, after the card has left where it was cast from; its
    *  announcement gets a step of its own so the flight lifts the card from there. */
   announcementState?: AnnouncementState | null;
+  /** The state BEFORE `events`. Combat strike bands are read from it once,
+   *  here, and carried on each effect. Omitted by callers that have none
+   *  (tests, previews): every combat hit then keeps today's fixed slam. */
+  preEventState?: GameState | null;
 }
 
 type AnnouncementState = Pick<GameState, "stack" | "has_pending_cast">;
@@ -150,11 +159,14 @@ function destructionOfMove(events: GameEvent[], index: number): { type: Destruct
  * (i.e., source and Object target are swapped), indicating a single attacker↔blocker
  * engagement. Scans all steps because the engine emits all attacker assignments
  * before any blocker assignments, so pairs are never adjacent in the event stream.
+ *
+ * Returns the already-present effect that slams, so a merged return can copy its
+ * band and duration and never move the shared impact frame.
  */
-function findCombatPairStep(
+function findCombatPairMatch(
   effect: StepEffect,
   steps: AnimationStep[],
-): AnimationStep | null {
+): { step: AnimationStep; slamming: StepEffect } | null {
   if (effect.event.type !== "DamageDealt") return null;
   const { source_id, target } = effect.event.data;
   if (!("Object" in target)) return null;
@@ -168,7 +180,7 @@ function findCombatPairStep(
         "Object" in prevTarget &&
         prevTarget.Object === source_id
       ) {
-        return step;
+        return { step, slamming: e };
       }
     }
   }
@@ -228,10 +240,17 @@ function meldPresentedZoneChanges(events: GameEvent[]): Set<number> {
 function toEffect(
   event: GameEvent,
   pacingMultipliers: Record<PacingCategory, number>,
+  strikeBand?: CombatStrikeBand,
 ): StepEffect {
   const baseDuration = EVENT_DURATIONS[event.type] ?? DEFAULT_DURATION;
   const multiplier = pacingMultipliers[eventCategory(event.type)];
-  return { event, duration: Math.round(baseDuration * multiplier) };
+  const strikeBonus = strikeBand ? combatStrikeDurationBonusMs(strikeBand) : 0;
+  const effect: StepEffect = {
+    event,
+    duration: Math.round((baseDuration + strikeBonus) * multiplier),
+  };
+  if (strikeBand) effect.strikeBand = strikeBand;
+  return effect;
 }
 
 function groupedCombatDamageDuration(
@@ -385,6 +404,11 @@ function adjacentCombatSideEffects(
   return sideEffects;
 }
 
+/**
+ * One collapsed run of combat damage to a player. It is presented as a flurry,
+ * not card slams, so it carries no strike band and keeps the flurry's own fixed
+ * impact delay (`GROUPED_DAMAGE_FLURRY_IMPACT_DELAY_MS`).
+ */
 function buildGroupedStep(
   playerId: number,
   sourceIds: number[],
@@ -874,6 +898,12 @@ export function normalizeEvents(
   options?: NormalizeEventsOptions,
 ): AnimationStep[] {
   const pacingMultipliers = options?.pacingMultipliers ?? defaultPacingMultipliers();
+  // One band decision per combat hit, from the state before this batch.
+  const strikeBands = new Map<GameEvent, CombatStrikeBand>();
+  for (const event of events) {
+    const band = combatStrikeBandForEvent(event, options?.preEventState);
+    if (band) strikeBands.set(event, band);
+  }
   const steps: AnimationStep[] = [];
   let destructionTail: { step: AnimationStep; until: number } | null = null;
   const { replacements: aggregateReplacements, fallbackBlockedIndices } = findAggregateReplacements(events, pacingMultipliers);
@@ -913,7 +943,7 @@ export function normalizeEvents(
     const isAnnouncement = event.type === "StackPushed" && announcements.has(event.data.object_id);
     if (isNonVisualEvent(event) && !isAnnouncement) continue;
 
-    const effect = toEffect(event, pacingMultipliers);
+    const effect = toEffect(event, pacingMultipliers, strikeBands.get(event));
 
     if (destructionTail && index <= destructionTail.until) {
       destructionTail.step.effects.push(effect);
@@ -952,10 +982,15 @@ export function normalizeEvents(
 
     // DamageDealt: pair attacker↔blocker into the same step regardless of position,
     // since the engine emits all attacker assignments before all blocker assignments.
-    const pairStep = findCombatPairStep(effect, steps);
-    if (pairStep) {
-      pairStep.effects.push(effect);
-      pairStep.duration = stepDuration(pairStep.effects);
+    const pair = findCombatPairMatch(effect, steps);
+    if (pair) {
+      // Only the first direction slams. The return carries the slamming effect's
+      // band and duration so its own creature's power cannot move the impact frame.
+      if (pair.slamming.strikeBand) effect.strikeBand = pair.slamming.strikeBand;
+      else delete effect.strikeBand;
+      effect.duration = pair.slamming.duration;
+      pair.step.effects.push(effect);
+      pair.step.duration = stepDuration(pair.step.effects);
       continue;
     }
 

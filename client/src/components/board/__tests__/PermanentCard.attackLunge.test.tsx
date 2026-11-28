@@ -5,11 +5,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { GameObject, GameState } from "../../../adapter/types.ts";
 import { ATTACK_LUNGE_BANDS } from "../../../animation/attackLunge.ts";
+import { resetLungeLedger } from "../../../animation/attackLungeLedger.ts";
 import { useGameStore } from "../../../stores/gameStore.ts";
 import { usePreferencesStore } from "../../../stores/preferencesStore.ts";
 import { useUiStore } from "../../../stores/uiStore.ts";
-import { buildGameObject, buildObjectMap } from "../../../test/factories/gameObjectFactory.ts";
-import { buildGameState, buildPriorityWaitingFor } from "../../../test/factories/gameStateFactory.ts";
+import { gameObjectFactory } from "../../../test/factories/gameObjectFactory.ts";
+import { gameStateFactory } from "../../../test/factories/gameStateFactory.ts";
 import { BoardInteractionContext } from "../BoardInteractionContext.tsx";
 import { PermanentCard } from "../PermanentCard.tsx";
 
@@ -82,29 +83,18 @@ const OBJECT = 1;
 const ATTACK_SLIDE = -30;
 
 function makeObject(power: number | null = 2): GameObject {
-  return buildGameObject({
-    id: OBJECT,
-    card_id: 100,
-    zone: "Battlefield",
-    name: "Grizzly Bears",
-    power,
-    toughness: 2,
-    base_power: power,
-    base_toughness: 2,
-    color: ["Green"],
-    base_color: ["Green"],
-    entered_battlefield_turn: null,
-    card_types: { supertypes: [], core_types: ["Creature"], subtypes: [] },
-  });
+  return gameObjectFactory
+    .creature()
+    .onBattlefield()
+    .withPower(power)
+    .colored("Green")
+    .withId(OBJECT)
+    .named("Grizzly Bears")
+    .build();
 }
 
 function makeState(power: number | null = 2): GameState {
-  return buildGameState({
-    objects: buildObjectMap(makeObject(power)),
-    battlefield: [OBJECT],
-    stack: [],
-    waiting_for: buildPriorityWaitingFor(),
-  });
+  return gameStateFactory.withObjects(makeObject(power)).build();
 }
 
 function setPower(power: number | null): void {
@@ -178,6 +168,7 @@ function setInnerHeight(value: number) {
 }
 
 beforeEach(() => {
+  resetLungeLedger();
   motionState.reduced = false;
   motionState.cards.length = 0;
   useMatchMedia();
@@ -334,10 +325,12 @@ describe("PermanentCard committed-attacker lunge", () => {
     if (mountedFirst) played.rerender(view([OBJECT]));
     expect(frames(lastCard().animate?.y)).toHaveLength(4);
     played.unmount();
+    const clock = vi.spyOn(performance, "now").mockReturnValue(performance.now() + 5000);
 
     render(view([OBJECT]));
 
     expect(lastCard().animate?.y).toBe(ATTACK_SLIDE);
+    clock.mockRestore();
   });
 
   it("does not replay a hidden member when its collapsed group expands", () => {
@@ -416,13 +409,61 @@ describe("PermanentCard committed-attacker lunge", () => {
     expect(yTransition(lastCard()).duration).toBeCloseTo(ATTACK_LUNGE_BANDS[1].durationMs / 1000);
   });
 
-  it("keeps today's plain slide while attackers are being selected", () => {
-    useUiStore.setState({ combatMode: "attackers", selectedAttackers: [OBJECT] });
+  const choose = (ids: number[]) =>
+    act(() => {
+      useUiStore.setState({ combatMode: "attackers", selectedAttackers: ids });
+    });
 
+  it("lunges when the attacker is picked and not again when it is declared", () => {
+    const { rerender } = render(view([]));
+
+    choose([OBJECT]);
+    const played = lastCard().animate?.y;
+    expect(frames(played)).toHaveLength(4);
+
+    rerender(view([OBJECT]));
+    choose([]);
+
+    expect(lastCard().animate?.y).toBe(played);
+  });
+
+  it("lunges again when an attacker is dropped and picked once more", () => {
     render(view([]));
+    choose([OBJECT]);
+    choose([]);
+    expect(lastCard().animate?.y).toBe(0);
+
+    choose([OBJECT]);
+
+    expect(frames(lastCard().animate?.y)).toHaveLength(4);
+  });
+
+  it("carries a running lunge through a redraw", () => {
+    const clock = vi.spyOn(performance, "now").mockReturnValue(1000);
+    const first = render(view([]));
+    choose([OBJECT]);
+    const played = frames(lastCard().animate?.y);
+    first.unmount();
+
+    clock.mockReturnValue(1150);
+    render(view([OBJECT]));
+
+    expect(frames(lastCard().animate?.y)).toEqual(played);
+    expect(yTransition(lastCard()).delay).toBeCloseTo(-0.15);
+    clock.mockRestore();
+  });
+
+  it("does not replay a finished lunge after a redraw", () => {
+    const clock = vi.spyOn(performance, "now").mockReturnValue(1000);
+    const first = render(view([]));
+    choose([OBJECT]);
+    first.unmount();
+
+    clock.mockReturnValue(1000 + ATTACK_LUNGE_BANDS[1].durationMs);
+    render(view([OBJECT]));
 
     expect(lastCard().animate?.y).toBe(ATTACK_SLIDE);
-    expect(frames(lastCard().animate?.y)).toHaveLength(0);
+    clock.mockRestore();
   });
 
   it("keeps today's plain slide at speed 0", () => {

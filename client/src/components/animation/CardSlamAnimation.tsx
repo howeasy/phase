@@ -1,4 +1,5 @@
-import { CARD_SLAM_FLIGHT_MS } from "../../animation/types.ts";
+import type { CombatStrikeBand } from "../../animation/combatStrike.ts";
+import { CARD_SLAM_FLIGHT_MS, CARD_SLAM_RETURN_MS } from "../../animation/types.ts";
 
 /**
  * Elements with a slam currently in flight. A collapsed identical-permanent
@@ -22,6 +23,10 @@ const activeSlams = new WeakSet<HTMLElement>();
  * `start` is when the slam begins on the frame clock (`performance.now()`),
  * so an effect given the same start lands on the same frame.
  *
+ * `strike` is the combat strike band carried by the effect (a powerful hit
+ * flies longer and hangs at the wind-up); omitted, the slam is today's fixed
+ * 200 ms flight, 220 ms return, no hang.
+ *
  * Returns `true` if the slam started (and will fire `onImpact`), or `false`
  * if the element is already mid-slam — letting the caller show a floating
  * number instead of dropping the hit entirely.
@@ -33,6 +38,7 @@ export function applyCardSlam(
   speedMultiplier: number,
   onImpact: () => void,
   start: number,
+  strike?: CombatStrikeBand,
 ): boolean {
   if (activeSlams.has(element)) return false;
   activeSlams.add(element);
@@ -43,12 +49,14 @@ export function applyCardSlam(
   const dx = targetX - centerX;
   const dy = targetY - centerY;
 
-  const flightMs = CARD_SLAM_FLIGHT_MS * speedMultiplier;
+  const flightMs = (strike?.flightMs ?? CARD_SLAM_FLIGHT_MS) * speedMultiplier;
   const recoilMs = 80 * speedMultiplier;
-  const returnMs = 220 * speedMultiplier;
+  const returnMs = (strike?.returnMs ?? CARD_SLAM_RETURN_MS) * speedMultiplier;
   const totalMs = flightMs + recoilMs + returnMs;
   const distance = Math.hypot(dx, dy);
-  const pullback = Math.min(16, distance * 0.08);
+  const hang = strike?.hang === true;
+  // A hanging wind-up pulls back 1.6x further and holds there.
+  const pullback = Math.min(16, distance * 0.08) * (hang ? 1.6 : 1);
   const ux = distance > 0 ? dx / distance : 0;
   const uy = distance > 0 ? dy / distance : 0;
   let impactFired = false;
@@ -69,9 +77,24 @@ export function applyCardSlam(
     }
 
     if (elapsed < flightMs) {
-      // Brief anticipation, then a fast lunge. Keep the shared impact clock.
       const t = elapsed / flightMs;
-      if (t < 0.3) {
+      if (hang) {
+        // Wind back over the first 25%, hold until 70%, then accelerate in.
+        if (t < 0.25) {
+          const windup = Math.sin((t / 0.25) * Math.PI / 2);
+          element.style.translate = `${-ux * pullback * windup}px ${-uy * pullback * windup}px`;
+          element.style.scale = `${1 + 0.06 * windup}`;
+        } else if (t < 0.7) {
+          element.style.translate = `${-ux * pullback}px ${-uy * pullback}px`;
+          element.style.scale = "1.06";
+        } else {
+          const p = (t - 0.7) / 0.3;
+          const eased = p * p;
+          element.style.translate = `${-ux * pullback + (dx + ux * pullback) * eased}px ${-uy * pullback + (dy + uy * pullback) * eased}px`;
+          element.style.scale = `${1.06 + 0.04 * Math.sin(p * Math.PI) - 0.06 * eased}`;
+        }
+      } else if (t < 0.3) {
+        // Brief anticipation, then a fast lunge. Keep the shared impact clock.
         const windup = Math.sin((t / 0.3) * Math.PI / 2);
         element.style.translate = `${-ux * pullback * windup}px ${-uy * pullback * windup}px`;
         element.style.scale = `${1 + 0.06 * windup}`;

@@ -3,7 +3,7 @@ import type React from "react";
 import { memo, useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 
-import type { GameEvent, GameObject, Keyword, ObjectId } from "../../adapter/types.ts";
+import type { GameObject, Keyword, ObjectId } from "../../adapter/types.ts";
 import { cardImageLookup, tokenFiltersForObject } from "../../services/cardImageLookup.ts";
 import { useCanActForWaitingState, usePlayerId } from "../../hooks/usePlayerId.ts";
 import { dispatchAction } from "../../game/dispatch.ts";
@@ -25,6 +25,13 @@ import { useSpectatorMode } from "../../hooks/useSpectatorMode.ts";
 import { isUnbounded, pillsOf, useCounterDisplay } from "../../hooks/useCounterDisplay.ts";
 import { useAnimationStore } from "../../stores/animationStore.ts";
 import { attackLungeBand } from "../../animation/attackLunge.ts";
+import {
+  forgetEndedAttacks,
+  lungeRecord,
+  recordLunge,
+  remainingLunge,
+  type CardLunge,
+} from "../../animation/attackLungeLedger.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { renderDescription } from "../../utils/description.ts";
 import { usePreferencesStore } from "../../stores/preferencesStore.ts";
@@ -88,24 +95,11 @@ const HOVERED_ATTACHMENT_HOST_Z_INDEX = 80;
 const EMPTY_KEYWORD_BADGES: Keyword[] = [];
 const EMPTY_LINKED_EXILE_IDS: ObjectId[] = [];
 
-/** Attack declarations already lunged, per committed update. */
-const lungedByUpdate = new WeakMap<GameEvent[], Set<ObjectId>>();
-
-/**
- * Whether the committed update declares `id` attacking and no card has lunged
- * for it yet; claims it. The events outlive the commit, so a later remount
- * (a group expanding or collapsing) must find its declaration already spent.
- */
-function claimDeclaredLunge(id: ObjectId): boolean {
-  const { events } = useGameStore.getState();
-  const declared = events.some(
-    (event) => event.type === "AttackersDeclared" && event.data.attacker_ids.includes(id),
-  );
-  if (!declared) return false;
-  const claimed = lungedByUpdate.get(events) ?? new Set<ObjectId>();
-  if (claimed.has(id)) return false;
-  lungedByUpdate.set(events, claimed.add(id));
-  return true;
+/** Whether the committed update declares `id` attacking. */
+function declaredNow(id: ObjectId): boolean {
+  return useGameStore
+    .getState()
+    .events.some((event) => event.type === "AttackersDeclared" && event.data.attacker_ids.includes(id));
 }
 
 /** Fraction of the lunge at which the wind-up position is reached. */
@@ -114,15 +108,6 @@ const LUNGE_ARRIVAL = 0.18;
 const LUNGE_SNAP = 0.12;
 /** Per-segment easing for a hanging lunge: pull out, hold, snap in, settle. */
 const LUNGE_HANG_EASE: Easing[] = ["easeOut", "linear", "easeIn", "easeOut"];
-
-interface CardLunge {
-  /** Frozen at the commit: later power changes cannot restart or reshape it. */
-  yKeyframes: number[];
-  scaleKeyframes: number[];
-  times: number[];
-  ease: Easing | Easing[];
-  durationMs: number;
-}
 
 /** The y translation currently painted on a card (its own transform, if any). */
 function currentTranslateY(element: HTMLElement | null): number {
@@ -560,75 +545,94 @@ export const PermanentCard = memo(function PermanentCard({
     showAttachmentFan();
   }, [showAttachmentFan]);
 
-  // Committed attackers lunge once, on the commit that adds them to combat.
-  // Declaring attackers can split a permanent group and remount a card within
-  // that commit, so a mount lunges only for a declaration in the committed
-  // events that no card has played yet. A restored session is never new.
+  // An attacker lunges once per attack: when its controller picks it, or, for an
+  // attack nobody picked here, on the update that declares it. The ledger lets a
+  // redrawn card carry on where it was. A restored session is never a new attack.
   const reduceMotion = useReducedMotion() === true;
-  const committedAttacker = committedAttackerIds.has(objectId);
+  const attackingNow =
+    committedAttackerIds.has(objectId)
+    || (combatMode === "attackers" && selectedAttackers.includes(objectId));
   const [lunge, setLunge] = useState<CardLunge | null>(null);
   const sessionGeneration = useGameStore((s) => s.gameSessionGeneration);
-  const seenAttack = useRef<{ generation: number; committed: boolean } | null>(null);
+  const seenAttack = useRef<{ generation: number; attacking: boolean } | null>(null);
 
   useLayoutEffect(() => {
+    const isAttacker = (id: ObjectId) =>
+      committedAttackerIds.has(id)
+      || (combatMode === "attackers" && selectedAttackers.includes(id));
+    forgetEndedAttacks(isAttacker);
+    const seen = seenAttack.current;
+    seenAttack.current = { generation: sessionGeneration, attacking: attackingNow };
+
+    const advance = () => {
+      if (!attackingNow || (seen && seen.generation !== sessionGeneration)) {
+        setLunge(null);
+        return;
+      }
+      if (seen?.attacking) return;
+      const played = lungeRecord(objectId, sessionGeneration);
+      if (played) {
+        setLunge(remainingLunge(played, performance.now()));
+        return;
+      }
+      // A card that appears already attacking is new only if this update says so.
+      const picked = !committedAttackerIds.has(objectId);
+      if (!seen && !picked && !declaredNow(objectId)) return;
+      if (!obj) return;
+      const multiplier = usePreferencesStore.getState().animationSpeedMultiplier;
+      if (reduceMotion || !(multiplier > 0)) return;
+      const band = attackLungeBand(obj.power);
+      // Compact height uses its own smaller magnitude; an opponent's card mirrors
+      // the direction because its slide already points the other way.
+      const magnitude = isCompactHeight ? 12 : 30;
+      const direction = obj.controller === playerId ? -1 : 1;
+      const from = currentTranslateY(cardRef.current);
+      // Wind-up pulls back from wherever the card sits; the thrust is measured
+      // from the card's slot.
+      const windUp = from - direction * magnitude * band.windUp;
+      const thrust = direction * magnitude * band.thrust;
+      const rest = direction * magnitude;
+      const hanging = band.hang > 0;
+      const next: CardLunge = {
+        // A hanging band repeats the wind-up frame with explicit times, then
+        // snaps to the thrust over a short, accelerating segment.
+        yKeyframes: hanging
+          ? [from, windUp, windUp, thrust, rest]
+          : [from, windUp, thrust, rest],
+        scaleKeyframes: hanging
+          ? [1, 1, 1, band.peakScale, 1]
+          : [1, 1, band.peakScale, 1],
+        times: hanging
+          ? [
+              0,
+              LUNGE_ARRIVAL,
+              LUNGE_ARRIVAL + band.hang,
+              LUNGE_ARRIVAL + band.hang + LUNGE_SNAP,
+              1,
+            ]
+          : [0, 0.35, 0.7, 1],
+        ease: hanging ? LUNGE_HANG_EASE : "easeInOut",
+        durationMs: band.durationMs * Math.min(multiplier, 1),
+        elapsedMs: 0,
+      };
+      recordLunge(objectId, { generation: sessionGeneration, startedAt: performance.now(), lunge: next });
+      setLunge(next);
+    };
+    advance();
+
     // A collapsed card plays for the members it stands in for: spend theirs too,
     // so expanding the group later does not play them late.
+    const own = lungeRecord(objectId, sessionGeneration);
     for (const id of coveredIds ?? []) {
-      if (id !== objectId) claimDeclaredLunge(id);
+      if (id === objectId || !isAttacker(id) || lungeRecord(id, sessionGeneration)) continue;
+      recordLunge(id, own ?? { generation: sessionGeneration, startedAt: 0, lunge: null });
     }
-    const committed = committedAttackerIds.has(objectId);
-    const seen = seenAttack.current;
-    seenAttack.current = { generation: sessionGeneration, committed };
-    if (!committed || (seen && seen.generation !== sessionGeneration)) {
-      setLunge(null);
-      return;
-    }
-    if (seen?.committed) return;
-    // A card that was already here lunges on the change itself, and claims it.
-    if (!claimDeclaredLunge(objectId) && !seen) return;
-    if (!obj) return;
-    const multiplier = usePreferencesStore.getState().animationSpeedMultiplier;
-    if (reduceMotion || !(multiplier > 0)) return;
-    const band = attackLungeBand(obj.power);
-    // Compact height uses its own smaller magnitude; an opponent's card mirrors
-    // the direction because its slide already points the other way.
-    const magnitude = isCompactHeight ? 12 : 30;
-    const direction = obj.controller === playerId ? -1 : 1;
-    const from = currentTranslateY(cardRef.current);
-    // Wind-up pulls back from wherever the card sits (it may already be slid
-    // forward from being selected); the thrust is measured from the card's slot,
-    // so a selected attacker reaches no further than an opponent's.
-    const windUp = from - direction * magnitude * band.windUp;
-    const thrust = direction * magnitude * band.thrust;
-    const rest = direction * magnitude;
-    const hanging = band.hang > 0;
-    setLunge({
-      // A hanging band repeats the wind-up frame with explicit times, then
-      // snaps to the thrust over a short, accelerating segment.
-      yKeyframes: hanging
-        ? [from, windUp, windUp, thrust, rest]
-        : [from, windUp, thrust, rest],
-      scaleKeyframes: hanging
-        ? [1, 1, 1, band.peakScale, 1]
-        : [1, 1, band.peakScale, 1],
-      times: hanging
-        ? [
-            0,
-            LUNGE_ARRIVAL,
-            LUNGE_ARRIVAL + band.hang,
-            LUNGE_ARRIVAL + band.hang + LUNGE_SNAP,
-            1,
-          ]
-        : [0, 0.35, 0.7, 1],
-      ease: hanging ? LUNGE_HANG_EASE : "easeInOut",
-      durationMs: band.durationMs * Math.min(multiplier, 1),
-    });
-  }, [committedAttackerIds, coveredIds, objectId, obj, isCompactHeight, playerId, reduceMotion, sessionGeneration]);
+  }, [attackingNow, combatMode, committedAttackerIds, coveredIds, objectId, obj, isCompactHeight, playerId, reduceMotion, selectedAttackers, sessionGeneration]);
 
   // The lunge is a finite keyframe run; after it, y is the resting slide again.
   useEffect(() => {
     if (!lunge) return;
-    const timer = window.setTimeout(() => setLunge(null), lunge.durationMs);
+    const timer = window.setTimeout(() => setLunge(null), lunge.durationMs - lunge.elapsedMs);
     return () => window.clearTimeout(timer);
   }, [lunge]);
 
@@ -643,6 +647,8 @@ export const PermanentCard = memo(function PermanentCard({
       duration: lunge.durationMs / 1000,
       times: lunge.times,
       ease: lunge.ease,
+      // A negative delay starts the run partway through.
+      delay: -lunge.elapsedMs / 1000,
     };
     return { rotate: spring, opacity: spring, y: keyframes, scale: keyframes };
   }, [lunge]);
@@ -713,7 +719,7 @@ export const PermanentCard = memo(function PermanentCard({
   // Combat state — check both UI selection and committed combat state
   const isSelectingAttacker =
     combatMode === "attackers" && selectedAttackers.includes(objectId);
-  const isCommittedAttacker = committedAttacker;
+  const isCommittedAttacker = committedAttackerIds.has(objectId);
   const isAttacking = isSelectingAttacker || isCommittedAttacker;
   const isBlocking =
     combatMode === "blockers" && blockerAssignments.has(objectId);

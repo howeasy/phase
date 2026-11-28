@@ -75,7 +75,7 @@ function beatImpactMs(step: AnimationStep): number {
     const event = effect.event;
     const delay = event.type === "LifeChanged"
       ? lifeChangeImpactDelayMs(effect, step.effects, event.data.player_id)
-      : impactDelayMsForAnimationEvent(event);
+      : impactDelayMsForAnimationEvent(event, null, effect.strikeBand);
     if (delay > impact) impact = delay;
   }
   return Math.min(impact, step.duration);

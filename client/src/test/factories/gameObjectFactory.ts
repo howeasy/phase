@@ -91,6 +91,15 @@ export class GameObjectFactory extends Factory<GameObject> {
     return this.params({ tapped: true });
   }
 
+  /** Current and printed power; `null` for a permanent that reports none. */
+  withPower(power: number | null) {
+    return this.params({ power, base_power: power });
+  }
+
+  colored(...color: GameObject["color"]) {
+    return this.params({ color, base_color: color });
+  }
+
   named(name: string) {
     return this.params({ name });
   }

@@ -51,6 +51,33 @@ describe("applyCardSlam", () => {
     vi.advanceTimersByTime(600);
   });
 
+  it("hangs a powerful strike: a 1.6x pullback held mid-flight, impact at the band's flight", () => {
+    const el = card();
+    const impact = vi.fn();
+    applyCardSlam(el, 400, 0, 1, impact, performance.now(), {
+      flightMs: 320,
+      returnMs: 380,
+      hang: true,
+    });
+
+    vi.advanceTimersByTime(4 * FRAME_MS); // 64 ms: 20% of the 320 ms flight
+    expect(offset(el)[0]).toBeLessThan(-20);
+
+    vi.advanceTimersByTime(96); // 160 ms: mid-hold
+    const held = offset(el)[0];
+    expect(held).toBeCloseTo(-25.43, 1);
+
+    vi.advanceTimersByTime(48); // 208 ms: still holding
+    expect(offset(el)[0]).toBeCloseTo(held, 5);
+
+    vi.advanceTimersByTime(48); // 256 ms: accelerating in
+    expect(offset(el)[0]).toBeGreaterThan(0);
+    expect(impact).not.toHaveBeenCalled();
+
+    vi.advanceTimersByTime(64); // 320 ms: impact frame
+    expect(impact).toHaveBeenCalledOnce();
+  });
+
   it("cleans up an expired slam without replaying its damage feedback", () => {
     const frames: FrameRequestCallback[] = [];
     const raf = vi.spyOn(window, "requestAnimationFrame").mockImplementation((callback) => {

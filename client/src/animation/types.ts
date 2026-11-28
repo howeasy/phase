@@ -1,4 +1,5 @@
 import type { GameEvent, GameState } from "../adapter/types";
+import type { CombatStrikeBand } from "./combatStrike";
 import { damageCauseOf } from "./damageCause";
 
 /** Visual effects tier.
@@ -74,6 +75,10 @@ export interface StepEffect {
   event: AnimationEvent;
   duration: number;
   displayOnly?: true;
+  /** This effect's combat strike band, decided once by `normalizeEvents` from
+   *  the pre-event state. Absent for non-combat damage and for calls with no
+   *  pre-event state (today's fixed slam). */
+  strikeBand?: CombatStrikeBand;
 }
 
 export interface AnimationStep {
@@ -131,6 +136,10 @@ export const DEFAULT_DURATION = 200;
 /** How long the card slam flight phase takes before impact (ms, before speed multiplier). */
 export const CARD_SLAM_FLIGHT_MS = 200;
 
+/** How long the card slam's return to rest takes after its recoil (ms, before
+ *  speed multiplier). The landing band's other values live in `combatStrike`. */
+export const CARD_SLAM_RETURN_MS = 220;
+
 export function isPlayerDamageAnimationEvent(event: AnimationEvent, playerId: number): boolean {
   if (event.type === "GroupedDamageFlurry") {
     return event.data.player_id === playerId;
@@ -143,11 +152,24 @@ export function isPlayerDamageAnimationEvent(event: AnimationEvent, playerId: nu
 export const DAMAGE_CAUSE_IMPACT_MS = 440;
 
 /** When `event`'s hit lands. `causeState` is the pre-event state when card VFX
- *  present damage causes (`damageCauseOf`), else `null`. */
-export function impactDelayMsForAnimationEvent(event: AnimationEvent, causeState: GameState | null = null): number {
+ *  present damage causes (`damageCauseOf`), else `null`. `strikeBand` is the
+ *  band the normalizer carried on the effect; without one (non-combat damage,
+ *  no pre-event state) the fixed slam timing is today's. */
+export function impactDelayMsForAnimationEvent(
+  event: AnimationEvent,
+  causeState: GameState | null = null,
+  strikeBand?: CombatStrikeBand,
+): number {
   if (event.type === "GroupedDamageFlurry") return GROUPED_DAMAGE_FLURRY_IMPACT_DELAY_MS;
-  if (event.type === "DamageDealt" && "Player" in event.data.target) {
-    return damageCauseOf(event, causeState) ? DAMAGE_CAUSE_IMPACT_MS : CARD_SLAM_FLIGHT_MS;
+  if (event.type === "DamageDealt") {
+    if ("Player" in event.data.target) {
+      return damageCauseOf(event, causeState)
+        ? DAMAGE_CAUSE_IMPACT_MS
+        : (strikeBand?.flightMs ?? CARD_SLAM_FLIGHT_MS);
+    }
+    // A creature strike lands when its slam does; only a carried band (a
+    // combat hit normalized from the pre-event state) reports it.
+    return strikeBand?.flightMs ?? 0;
   }
   return 0;
 }
@@ -176,7 +198,9 @@ export function lifeChangeImpactDelayMs(
     ? effects.find((effect) => effect.event.type === "GroupedDamageFlurry")
     : undefined;
   const impactEvent = playerDamageEffect?.event ?? groupedDamageEffect?.event;
-  return impactEvent ? impactDelayMsForAnimationEvent(impactEvent, causeState) : 0;
+  return impactEvent
+    ? impactDelayMsForAnimationEvent(impactEvent, causeState, playerDamageEffect?.strikeBand)
+    : 0;
 }
 
 /** Base "your turn / opponent's turn" banner display duration, before any

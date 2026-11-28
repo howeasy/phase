@@ -60,10 +60,11 @@ export const presentDamageDealt: Choreography = (effect, context) => {
             classic.landDamageHit(pos, amount, false);
           },
           slamStartMs,
+          effect.strikeBand,
         )
       : false;
     if (slammed) {
-      const impactDelayMs = CARD_SLAM_FLIGHT_MS * pace;
+      const impactDelayMs = (effect.strikeBand?.flightMs ?? CARD_SLAM_FLIGHT_MS) * pace;
       const slam = { amount, pace, startMs: slamStartMs, impactDelayMs };
       landBlow = cardVfx.presentBlow(
         { kind: "blow", sourceId: source_id, target, ...slam },
@@ -110,6 +111,7 @@ export const presentDamageDealt: Choreography = (effect, context) => {
             classic.landDamageHit(pos, amount, "Player" in target);
           },
           slamStartMs,
+          effect.strikeBand,
         )
       : false;
     if (slammed) {
@@ -121,7 +123,7 @@ export const presentDamageDealt: Choreography = (effect, context) => {
           amount,
           pace,
           startMs: slamStartMs,
-          impactDelayMs: CARD_SLAM_FLIGHT_MS * pace,
+          impactDelayMs: (effect.strikeBand?.flightMs ?? CARD_SLAM_FLIGHT_MS) * pace,
         },
         landBlow,
       );

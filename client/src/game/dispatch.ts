@@ -656,7 +656,13 @@ async function processAction(
   const pacingMultipliers = usePreferencesStore.getState().pacingMultipliers;
   const steps = skipPresentation
     ? []
-    : normalizeEvents(events, { pacingMultipliers, announcementState: announcementStateFor(newState) });
+    : normalizeEvents(events, {
+        pacingMultipliers,
+        announcementState: announcementStateFor(newState),
+        // `gameState` was read before the action was submitted and the new
+        // snapshot (`newState`) is still uncommitted: this is the pre-event state.
+        preEventState: gameState,
+      });
 
   // 7. Play animations through the Director, which owns the one clock. It
   //    applies speed × stack pressure once (so the snapshot cannot commit
@@ -1046,9 +1052,16 @@ async function processRemoteUpdateInner(
 
   // 3. Normalize events into animation steps
   const pacingMultipliers = usePreferencesStore.getState().pacingMultipliers;
+  // The store has not committed this update yet (step 5): its gameState is the
+  // state before `events`, while `state` is the post-update snapshot.
+  const preEventState = useGameStore.getState().gameState;
   const steps = skipAnimation
     ? []
-    : normalizeEvents(events, { pacingMultipliers, announcementState: announcementStateFor(state) });
+    : normalizeEvents(events, {
+        pacingMultipliers,
+        announcementState: announcementStateFor(state),
+        preEventState,
+      });
 
   // 4. Play animations through the Director (the one clock, paced by speed ×
   //    stack pressure on this remote path too).
