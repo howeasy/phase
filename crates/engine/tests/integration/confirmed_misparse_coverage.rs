@@ -308,8 +308,8 @@ fn compare_population(raw: &Map<String, Value>, populations: &[(&ConfirmedMispar
 /// after the whole resolution (an effect such as Croaking Curse taps the creature
 /// and then attaches a Role) instead of at the event, contrary to CR 603.4, so
 /// its trigger stays an honest `Effect::Unimplemented` gap exactly as on main and
-/// it needs no committed row. The remaining claimed cards (Kaito Shizuki, Novice
-/// Knight) stay supported and gap-free.
+/// it needs no committed row. The remaining claimed card, Novice Knight, stays
+/// supported and gap-free.
 /// Sandstalker Moloch (shared dig path, ticket 359) and Sarevok,
 /// Deathbringer (a typeless permanent leaving is not counted) keep their committed
 /// rows; their gates stay unparsed (`unclaimed_history_gates_stay_unparsed`), so
@@ -325,7 +325,7 @@ fn intervening_if_unclaimed_cards_stay_unsupported_and_claimed_cards_stay_suppor
     ] {
         assert_eq!(committed.class_of(key), Some(class), "committed row: {key}");
     }
-    let claimed = ["kaito shizuki", "novice knight"];
+    let claimed = ["novice knight"];
     let fenced = [
         ("syrix, carrier of the flame", MisparseClass::WrongZone),
         ("krond the dawn-clad", MisparseClass::TargetWrong),

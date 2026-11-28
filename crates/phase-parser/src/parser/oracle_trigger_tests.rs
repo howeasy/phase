@@ -32034,48 +32034,6 @@ fn parse_hixus_keeps_entered_this_turn_intervening_if() {
     assert_eq!(def.condition, Some(TriggerCondition::SourceEnteredThisTurn));
 }
 
-/// F3: Kaito Shizuki's printed text names itself by its first name ("if Kaito
-/// entered this turn"). "Kaito" is also that planeswalker's subtype, so the
-/// short-name fallback must normalize the subject occurrence while a type-position
-/// occurrence stays literal. Fed through the production `parse_oracle_text` (all
-/// four printed lines, U+2212 loyalty markers), the end-step trigger must keep its
-/// intervening-if as `SourceEnteredThisTurn` (CR 603.4) and no clause may fall back
-/// to `Effect::Unimplemented`.
-///
-/// Revert-failing: removing the `is_planeswalker_name` branch in `oracle_util.rs`
-/// leaves "Kaito" unreplaced, the gate unparsed, and the trigger fails closed.
-#[test]
-fn kaito_shizuki_printed_text_keeps_its_entered_this_turn_gate() {
-    let parsed = parse_oracle_text(
-        "At the beginning of your end step, if Kaito entered this turn, he phases out.\n\
-         [+1]: Draw a card. Then discard a card unless you attacked this turn.\n\
-         [−2]: Create a 1/1 blue Ninja creature token with \"This token can't be blocked.\"\n\
-         [−7]: You get an emblem with \"Whenever a creature you control deals combat damage to a player, search your library for a blue or black creature card, put it onto the battlefield, then shuffle.\"",
-        "Kaito Shizuki",
-        &[],
-        &["Legendary".into(), "Planeswalker".into()],
-        &["Kaito".into()],
-    );
-    assert!(
-        parsed
-            .triggers
-            .iter()
-            .any(|trigger| trigger.condition == Some(TriggerCondition::SourceEnteredThisTurn)),
-        "expected the end-step trigger to keep its entered-this-turn gate, got {:?}",
-        parsed
-            .triggers
-            .iter()
-            .map(|trigger| (&trigger.mode, &trigger.condition))
-            .collect::<Vec<_>>()
-    );
-    for ability in &parsed.abilities {
-        assert_no_unimplemented(ability);
-    }
-    for trigger in &parsed.triggers {
-        assert_no_unimplemented(trigger.execute.as_deref().expect("trigger effect"));
-    }
-}
-
 #[test]
 fn bridge_monarch() {
     assert_eq!(

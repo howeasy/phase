@@ -12,8 +12,6 @@
 //!     enchanted or equipped, create a 2/1 red Dwarf Berserker creature token."
 //!     Its compound gate is deliberately not parsed (CR 603.4), so the trigger's
 //!     unsupported effect creates no token.
-//!   - Kaito Shizuki: "At the beginning of your end step, if Kaito entered
-//!     this turn, he phases out."
 //!
 //! Krond the Dawn-Clad is also fenced by a confirmed-misparse row; these tests
 //! only prove its parse and runtime behaviour in the covered scenarios, not the
@@ -38,7 +36,7 @@
 
 use engine::database::card_db::CardDatabase;
 use engine::game::combat::{get_valid_attacker_ids, validate_attackers, AttackTarget};
-use engine::game::game_object::{AttachTarget, PhaseStatus};
+use engine::game::game_object::AttachTarget;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::scenario_db::GameScenarioDbExt;
 use engine::types::ability::{AbilityTag, Effect, TargetRef};
@@ -77,24 +75,6 @@ fn settle_at_declare_attackers_priority(runner: &GameRunner) {
             WaitingFor::Priority { player: P0 }
         ),
         "expected P0's post-declaration priority (CR 508.2), got {:?}",
-        runner.state().waiting_for
-    );
-}
-
-/// Assert the end-step priority window: the stack is empty and a player holds
-/// priority (CR 513.1).
-fn settle_at_end_step_priority(runner: &GameRunner) {
-    assert!(
-        runner.state().stack.is_empty(),
-        "the stack must be empty in the end step, got {:?}",
-        runner.stack_names()
-    );
-    assert!(
-        matches!(
-            runner.state().waiting_for,
-            WaitingFor::Priority { player: P0 }
-        ),
-        "expected P0's end-step priority (CR 513.1), got {:?}",
         runner.state().waiting_for
     );
 }
@@ -545,160 +525,6 @@ fn warchanter_skald_compound_gate_stays_unparsed_and_creates_no_token() {
         "the unparsed compound gate must create no Dwarf Berserker token"
     );
     settle_at_declare_attackers_priority(&runner);
-}
-
-// ---------------------------------------------------------------------------
-// Kaito Shizuki
-// ---------------------------------------------------------------------------
-
-/// How Kaito is on the battlefield for the end-step run.
-enum KaitoEntry {
-    /// Cast from hand this turn through the real cast pipeline.
-    CastFromHandThisTurn,
-    /// Pre-existing permanent: entered a previous turn (`add_real_card` models
-    /// a card that entered on a prior turn, and `at_phase` sets turn 2).
-    EnteredBeforeThisTurn,
-}
-
-/// Drive one Kaito board to the beginning of P0's end step and settle the
-/// stack: P0 casts Kaito from hand (paying {1}{U}{B} from the scenario-funded
-/// pool) or starts with him already on the battlefield, the turn machinery
-/// advances (auto-declaring the empty attack declaration), and the run stops
-/// in the end-step priority window (CR 513.1).
-fn kaito_reaching_end_step(entry: KaitoEntry) -> (GameRunner, ObjectId) {
-    let db = load_db();
-    let mut scenario = GameScenario::new();
-    scenario.at_phase(Phase::PreCombatMain);
-    let kaito = match entry {
-        KaitoEntry::CastFromHandThisTurn => {
-            scenario.with_mana_pool(
-                P0,
-                vec![
-                    one_mana(ManaType::Colorless),
-                    one_mana(ManaType::Blue),
-                    one_mana(ManaType::Black),
-                ],
-            );
-            scenario.add_real_card(P0, "Kaito Shizuki", Zone::Hand, db)
-        }
-        KaitoEntry::EnteredBeforeThisTurn => {
-            scenario.add_real_card(P0, "Kaito Shizuki", Zone::Battlefield, db)
-        }
-    };
-    let mut runner = scenario.build();
-    engine::game::rehydrate_game_from_card_db(runner.state_mut(), db);
-
-    if let KaitoEntry::CastFromHandThisTurn = entry {
-        let outcome = runner.cast(kaito).resolve();
-        assert!(
-            matches!(outcome.final_waiting_for(), WaitingFor::Priority { .. }),
-            "the Kaito cast must finish resolving, got {:?}",
-            outcome.final_waiting_for()
-        );
-        assert_eq!(outcome.zone_of(kaito), Zone::Battlefield);
-        assert_eq!(
-            runner.state().objects[&kaito].loyalty,
-            Some(3),
-            "Kaito must enter with his printed starting loyalty 3"
-        );
-        assert_eq!(
-            runner.state().objects[&kaito].entered_battlefield_turn,
-            Some(runner.state().turn_number),
-            "the real cast must record Kaito's battlefield entry on the current turn"
-        );
-    }
-
-    runner.advance_to_end_step();
-    if matches!(
-        runner.state().waiting_for,
-        WaitingFor::DeclareAttackers { .. }
-    ) {
-        runner
-            .declare_attackers(&[])
-            .expect("the empty attack declaration must be accepted");
-        runner.advance_to_end_step();
-    }
-    assert_eq!(
-        runner.state().phase,
-        Phase::End,
-        "the run must reach P0's end step (CR 513.1)"
-    );
-    // CR 603.3b + CR 513.1: the end-step triggers are put on the stack before
-    // the active player receives priority, so the stack state here discriminates
-    // the intervening-if (CR 603.4) before anything resolves: the false gate
-    // leaves the stack empty, the true one leaves exactly Kaito's trigger.
-    match entry {
-        KaitoEntry::EnteredBeforeThisTurn => assert!(
-            runner.state().stack.is_empty(),
-            "CR 603.4: the false intervening-if must put no trigger on the stack, got {:?}",
-            runner.stack_names()
-        ),
-        KaitoEntry::CastFromHandThisTurn => assert_eq!(
-            runner.state().stack.len(),
-            1,
-            "CR 603.4: Kaito's end-step trigger must be on the stack before resolution, got {:?}",
-            runner.stack_names()
-        ),
-    }
-    runner.advance_until_stack_empty();
-    (runner, kaito)
-}
-
-/// Positive: "At the beginning of your end step, if Kaito entered this turn, he
-/// phases out." CR 603.4 + CR 702.26b/702.26d: Kaito was cast from hand THIS
-/// turn, so at the end step the trigger fires and he is phased out — still on
-/// the battlefield zone-wise, but with phased-out status.
-#[test]
-fn kaito_shizuki_enters_this_turn_phases_out_at_his_end_step() {
-    let (runner, kaito) = kaito_reaching_end_step(KaitoEntry::CastFromHandThisTurn);
-
-    let kaito_object = runner.state().objects.get(&kaito).unwrap();
-    assert_eq!(
-        kaito_object.zone,
-        Zone::Battlefield,
-        "phasing out does not change zones (CR 702.26d)"
-    );
-    assert!(
-        matches!(kaito_object.phase_status, PhaseStatus::PhasedOut { .. }),
-        "Kaito must be phased out at his controller's end step (CR 702.26b)"
-    );
-    settle_at_end_step_priority(&runner);
-}
-
-/// Negative sibling: Kaito has been on the battlefield since a previous turn,
-/// so at the end step the intervening-if is false (CR 603.4): no trigger goes
-/// on the stack and he stays phased in (CR 603.4). Reach-guards: the end step
-/// really was reached, and `entered_battlefield_turn` — the field the
-/// `SourceEnteredThisTurn` condition arm reads
-/// (`conditions::eval_source_entered_this_turn`) — is not the current turn, so
-/// the condition was evaluated false, not skipped. The same test then runs the
-/// control (cast from hand this turn) and confirms that run DOES phase him
-/// out, so the negative can fail for the right reason.
-#[test]
-fn kaito_shizuki_entered_a_previous_turn_stays_phased_in_at_his_end_step() {
-    let (runner, kaito) = kaito_reaching_end_step(KaitoEntry::EnteredBeforeThisTurn);
-
-    let kaito_object = runner.state().objects.get(&kaito).unwrap();
-    assert_ne!(
-        kaito_object.entered_battlefield_turn,
-        Some(runner.state().turn_number),
-        "reach: Kaito's battlefield entry turn must not be the current turn, \
-         so the 'entered this turn' condition is false rather than untested"
-    );
-    assert_eq!(kaito_object.zone, Zone::Battlefield);
-    assert!(
-        matches!(kaito_object.phase_status, PhaseStatus::PhasedIn),
-        "Kaito must stay phased in when he did not enter this turn (CR 603.4)"
-    );
-    settle_at_end_step_priority(&runner);
-
-    // Control run: the same scenario with the condition true phases him out.
-    let (control, control_kaito) = kaito_reaching_end_step(KaitoEntry::CastFromHandThisTurn);
-    let control_object = control.state().objects.get(&control_kaito).unwrap();
-    assert!(
-        matches!(control_object.phase_status, PhaseStatus::PhasedOut { .. }),
-        "control: a Kaito that entered this turn must phase out at the end step"
-    );
 }
 
 // ---------------------------------------------------------------------------

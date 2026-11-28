@@ -3180,12 +3180,6 @@ pub fn normalize_card_name_refs_reporting(
         for len in (1..name_words.len()).rev() {
             let candidate = name_words[..len].join(" ");
             if candidate.len() >= 2 {
-                // CR 201.5c + CR 205.3j: a planeswalker's first name is also a
-                // planeswalker subtype ("Kaito" on Kaito Shizuki), so the subtype
-                // exclusion below must not hide it. The preserving replacer keeps a
-                // type-position occurrence ("a Kaito planeswalker") literal.
-                let is_planeswalker_name = len == 1
-                    && noncreature_subtype_set(&candidate) == Some(SubtypeSet::Planeswalker);
                 // Guard: Single-word candidates that are common English articles
                 // or determiners must not be treated as self-references.
                 // E.g., "The Twelfth Doctor" must not replace "The" in
@@ -3214,21 +3208,14 @@ pub fn normalize_card_name_refs_reporting(
                         // ("Search for Tomorrow"). Reject it so the word survives
                         // unmangled.
                         || is_rules_vocabulary_word(&lower_candidate)
-                        || (!is_planeswalker_name
-                            && (is_subtype_word(&lower_candidate)
-                                || parse_subtype(&lower_candidate)
-                                    .is_some_and(|(_, consumed)| consumed == lower_candidate.len())))
+                        || is_subtype_word(&lower_candidate)
+                        || parse_subtype(&lower_candidate)
+                            .is_some_and(|(_, consumed)| consumed == lower_candidate.len())
                     {
                         continue;
                     }
                 }
-                let replaced = if is_planeswalker_name {
-                    replace_all_words_case_sensitive_preserving_subtype_status_refs(
-                        &result, &candidate, "~",
-                    )
-                } else {
-                    replace_all_words_case_sensitive(&result, &candidate, "~")
-                };
+                let replaced = replace_all_words_case_sensitive(&result, &candidate, "~");
                 if replaced != result {
                     // Guard: Don't replace subtype references like "Sliver creatures"
                     // when "Sliver" is a prefix of the card name "Sliver Hivelord".
@@ -3616,32 +3603,6 @@ mod tests {
             ),
             "Manifest dread. A manifested permanent you control gets +1/+1."
         );
-    }
-
-    /// CR 201.5c + CR 205.3j: a comma-less planeswalker name whose Oracle text uses the
-    /// first name alone ("Kaito Shizuki" -> "Kaito") normalizes that subject to `~` even
-    /// though "Kaito" is also a planeswalker subtype; the type-position occurrence
-    /// ("a Kaito planeswalker") stays literal, and a creature-subtype first word
-    /// ("Merfolk Mistbinder") keeps its lord-effect guard.
-    #[test]
-    fn normalize_planeswalker_first_name_subject_keeps_type_reference_literal() {
-        // Production normalizes per Oracle line (the card's other lines carry a
-        // `~` from "this token", which would skip the whole-text fallback), so the
-        // trigger line is the input here.
-        let text = "At the beginning of your end step, if Kaito entered this turn, he phases out.\n[-7]: You get an emblem with \"Whenever a creature you control deals combat damage to a player, search your library for a blue or black creature card, put it onto the battlefield, then shuffle.\"";
-        assert_eq!(
-            normalize_card_name_refs(text, "Kaito Shizuki"),
-            "At the beginning of your end step, if ~ entered this turn, he phases out.\n[-7]: You get an emblem with \"Whenever a creature you control deals combat damage to a player, search your library for a blue or black creature card, put it onto the battlefield, then shuffle.\""
-        );
-        // Printed type-position reference (Gideon of the Trials' emblem): the same
-        // planeswalker-first-name path keeps "a Gideon planeswalker" literal.
-        let gideon = "[0]: You get an emblem with \"As long as you control a Gideon planeswalker, you can't lose the game and your opponents can't win the game.\"";
-        assert_eq!(
-            normalize_card_name_refs(gideon, "Gideon of the Trials"),
-            gideon
-        );
-        let lord = "Other Merfolk you control get +1/+1.";
-        assert_eq!(normalize_card_name_refs(lord, "Merfolk Mistbinder"), lord);
     }
 
     #[test]
