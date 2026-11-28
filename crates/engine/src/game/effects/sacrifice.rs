@@ -357,7 +357,7 @@ pub(crate) fn optional_sacrifice_is_infeasible(
 /// referent to one already-bound object. Every leg of a conjunction/disjunction
 /// must be a class so a referent anywhere in the tree keeps the option offered
 /// (failing open, never suppressing a legal sacrifice).
-fn sacrifice_filter_is_battlefield_population(filter: &TargetFilter) -> bool {
+pub(crate) fn sacrifice_filter_is_battlefield_population(filter: &TargetFilter) -> bool {
     match filter {
         TargetFilter::Any | TargetFilter::SelfRef | TargetFilter::Typed(_) => true,
         TargetFilter::Or { filters } | TargetFilter::And { filters } => filters
@@ -3226,6 +3226,113 @@ mod tests {
             "the If-you-do rider must run after a performed sacrifice"
         );
         assert!(!state.cost_payment_failed_flag);
+    }
+
+    /// "You may sacrifice it. When you do, you gain 1 life." as a chain the
+    /// resolver can drive: the root names `referent` through `ParentTarget`
+    /// (the anaphoric back-reference "it" prints as) and the `WhenYouDo` rider
+    /// is the CR 603.12 reflexive. The prefilled root context simulates an
+    /// accepted "may" prompt — that latch lives on the ability context, not on
+    /// `GameState`.
+    fn optional_sacrifice_when_you_do_chain(referent: ObjectId) -> ResolvedAbility {
+        let mut rider = ResolvedAbility::new(
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 1 },
+                player: TargetFilter::Controller,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        )
+        .condition(AbilityCondition::WhenYouDo);
+        rider.sub_link = SubAbilityLink::SequentialSibling;
+
+        let mut ability = make_sacrifice_ability(referent);
+        if let Effect::Sacrifice { target, .. } = &mut ability.effect {
+            *target = TargetFilter::ParentTarget;
+        }
+        ability.context.optional_effect_performed = true;
+        ability.sub_ability = Some(Box::new(rider));
+        ability
+    }
+
+    /// CR 608.2d + CR 603.12: a "When you do" reflexive must not trigger when
+    /// the named referent of an optional sacrifice is refused by a sacrifice
+    /// bar — the event the reflexive keys on never occurred (CR 701.21a: the
+    /// controller cannot sacrifice it).
+    #[test]
+    fn optional_sacrifice_when_you_do_does_not_fire_when_named_referent_is_barred() {
+        let mut state = GameState::new_two_player(42);
+        quark_cant_sacrifice_treasure(&mut state);
+        let treasure = artifact_permanent(&mut state, 1, "Animated Treasure", true);
+        let life_before = state.players[0].life;
+        let ability = optional_sacrifice_when_you_do_chain(treasure);
+        let mut events = Vec::new();
+
+        resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+
+        assert!(
+            state.battlefield.contains(&treasure),
+            "the barred referent must survive"
+        );
+        assert!(
+            state.deferred_triggers.is_empty() && state.stack.is_empty(),
+            "a refused sacrifice must create no When-you-do reflexives"
+        );
+        assert_eq!(
+            state.players[0].life, life_before,
+            "a When-you-do rider must not run off a refused sacrifice"
+        );
+        assert!(state.cost_payment_failed_flag);
+    }
+
+    /// Control for the test above: the same chain naming an unbarred artifact
+    /// sacrifices it, triggers the CR 603.12 reflexive, and the rider resolves.
+    #[test]
+    fn optional_sacrifice_when_you_do_fires_when_named_referent_is_not_barred() {
+        let mut state = GameState::new_two_player(42);
+        quark_cant_sacrifice_treasure(&mut state);
+        let sol_ring = artifact_permanent(&mut state, 1, "Sol Ring", false);
+        let life_before = state.players[0].life;
+        let ability = optional_sacrifice_when_you_do_chain(sol_ring);
+        let mut events = Vec::new();
+
+        resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+
+        assert!(
+            !state.battlefield.contains(&sol_ring),
+            "the unbarred referent must be sacrificed"
+        );
+        assert!(state.players[0].graveyard.contains(&sol_ring));
+        assert!(!state.cost_payment_failed_flag);
+        assert_eq!(
+            state.deferred_triggers.len(),
+            1,
+            "the performed sacrifice must create one reflexive trigger"
+        );
+
+        // CR 603.12: the reflexive is put on the stack after the parent's
+        // resolution and resolves on its own; drive it through priority so the
+        // life gain proves the trigger actually fired.
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+        assert!(
+            crate::game::triggers::drain_deferred_trigger_queue(&mut state, &mut events).is_none(),
+            "the target-less reflexive reaches the stack without a prompt"
+        );
+        assert_eq!(state.stack.len(), 1, "the reflexive must be on the stack");
+        let mut safety = 4;
+        while !state.stack.is_empty() && safety > 0 {
+            crate::game::engine::apply_as_current(&mut state, GameAction::PassPriority)
+                .expect("resolve the reflexive trigger through priority");
+            safety -= 1;
+        }
+        assert_eq!(
+            state.players[0].life,
+            life_before + 1,
+            "the When-you-do rider must run after a performed sacrifice"
+        );
     }
 
     /// CR 608.2d + CR 118.12: "You may sacrifice two nonland permanents. If you

@@ -35393,13 +35393,26 @@ pub(crate) fn evaluate_condition(
         //    zero cards ("discard your hand" with an empty hand) does not set the
         //    flag; its reflexive is suppressed by
         //    `when_you_do_mandatory_parent_did_nothing` instead (CR 603.12).
+        //
+        //    A named-referent optional sacrifice whose referent was refused
+        //    (CR 701.21a sacrifice bar, e.g. Quark barring an animated Treasure)
+        //    sets the flag the same way, so its "when you do" must not fire
+        //    either (CR 608.2d: the player could not choose that option).
         AbilityCondition::WhenYouDo => {
             let optional_action_not_taken =
                 ability.optional && !ability.context.optional_effect_performed;
-            let payment_failed = matches!(
+            // CR 608.2d + CR 701.21a: a refused sacrifice of a named referent
+            // is the action's non-occurrence, not a performed sacrifice.
+            let refused_named_referent_sacrifice = matches!(
+                &ability.effect,
+                Effect::Sacrifice { target, .. }
+                    if !sacrifice::sacrifice_filter_is_battlefield_population(target)
+            ) && ability.context.optional_effect_performed;
+            let payment_failed = (matches!(
                 ability.effect,
                 Effect::PayCost { .. } | Effect::Discard { .. } | Effect::DiscardCard { .. }
-            ) && state.cost_payment_failed_flag;
+            ) || refused_named_referent_sacrifice)
+                && state.cost_payment_failed_flag;
             !optional_action_not_taken && !payment_failed
         }
         // CR 601.2a + CR 707.10: "was cast (from [zone])" — check cast origin.
