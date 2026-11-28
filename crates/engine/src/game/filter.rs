@@ -10117,7 +10117,15 @@ fn spell_object_matches_property(
             ctx.spell_object_id
                 .and_then(|id| ctx.state.objects.get(&id))
                 .is_some_and(|spell| {
-                    let source = source_context_from_spell_filter(ctx);
+                    let source = match controller {
+                        ControllerRef::You | ControllerRef::Opponent => {
+                            SourceContext::for_controller(
+                                ctx.source_id,
+                                Some(ctx.source_controller),
+                            )
+                        }
+                        _ => source_context_from_spell_filter(ctx),
+                    };
                     owned_axis_admits(ctx.state, &source, controller, spell.owner)
                 })
         }),
