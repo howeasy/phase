@@ -1719,13 +1719,24 @@ pub(crate) fn record_face_dilemma_after_stack_placement(
     events: &mut Vec<crate::types::events::GameEvent>,
 ) {
     if let Some(player) = chooser {
-        super::effects::record_player_action_this_turn(
-            state,
-            player,
-            crate::types::events::PlayerActionKind::FaceDilemma,
-        );
+        record_face_dilemma_history(state, player);
         events.push(crate::types::events::GameEvent::FaceDilemmaPlaced { player_id: player });
     }
+}
+
+/// CR 700.17 (edition effective 2026-11-06) + CR 104.3a + CR 800.4a: write the
+/// per-turn history entry of a dilemma `chooser` already faced. The entry is
+/// committed once the announcement that faced it ends: when it reaches the
+/// stack ([`record_face_dilemma_after_stack_placement`]) or when its
+/// controller departs mid-announcement, which is not an undone action (CR 733.1)
+/// so the choice the surviving chooser made still occurred. Narration
+/// (`FaceDilemmaPlaced`) stays placement-only.
+pub(crate) fn record_face_dilemma_history(state: &mut GameState, chooser: PlayerId) {
+    super::effects::record_player_action_this_turn(
+        state,
+        chooser,
+        crate::types::events::PlayerActionKind::FaceDilemma,
+    );
 }
 
 /// Records chosen mode indices for NoRepeat constraint enforcement.

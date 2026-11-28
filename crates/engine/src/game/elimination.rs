@@ -51,6 +51,10 @@ fn abandon_pending_casts(
     departing_player: PlayerId,
     spell_ids: &[crate::types::identifiers::ObjectId],
 ) {
+    // The mode chooser latched by the abandoned announcement. Several owners
+    // can name the one announcement, so the history is written once, after the
+    // loop.
+    let mut dilemma_chooser = None;
     for owner in state.live_pending_cast_owners() {
         let Some(pending) = state.pending_cast_at(owner) else {
             continue;
@@ -62,6 +66,7 @@ fn abandon_pending_casts(
             continue;
         }
         let object_id = pending.object_id;
+        dilemma_chooser = dilemma_chooser.or(pending.ability.context.mode_chooser);
         // CR 800.4a + CR 701.68a: retire this cast's parked Blight placement
         // with the cast, even if the borrowed recipient survives the caster.
         let boundary = state
@@ -96,6 +101,13 @@ fn abandon_pending_casts(
         {
             state.spell_cast_reversal = None;
         }
+    }
+    // CR 700.17 (edition effective 2026-11-06) + CR 104.3a + CR 800.4a +
+    // CR 603.2: the departure is not an undone action (CR 733.1), so the
+    // dilemma a surviving chooser faced by choosing modes for the abandoned
+    // announcement (CR 700.2e) still occurred; placement never records it.
+    if let Some(chooser) = dilemma_chooser {
+        super::ability_utils::record_face_dilemma_history(state, chooser);
     }
 }
 

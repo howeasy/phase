@@ -31,7 +31,7 @@ use engine::types::events::PlayerActionKind;
 use engine::types::game_state::{ActionResult, CastPaymentMode, StackEntryKind, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::log::{GameLogEntry, LogSegment};
-use engine::types::mana::ManaColor;
+use engine::types::mana::{ManaColor, ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
 use engine::types::zones::Zone;
@@ -2526,4 +2526,295 @@ fn zero_modes_narrate_no_dilemma() {
         &mut log,
     );
     assert_eq!(log.faces_a_dilemma(P0), 1);
+}
+
+// ---------------------------------------------------------------------------
+// A caster who departs mid-announcement still owes the surviving mode
+// chooser's dilemma in the history (CR 700.17 edition effective 2026-11-06 +
+// CR 104.3a + CR 800.4a + CR 603.2). The departure is not an undone action
+// (CR 733.1), so the choice the surviving chooser made still occurred.
+// ---------------------------------------------------------------------------
+
+/// `add_real_card` stages a pre-existing permanent (not summoning-sick). Mark
+/// `id` as having entered this turn (CR 302.6) so a turn walk's
+/// declare-attackers step has no candidate and the engine auto-submits the
+/// empty declaration (CR 508.1a): the walk reaches the end step without an
+/// attack prompt.
+fn mark_entered_this_turn(runner: &mut GameRunner, id: ObjectId) {
+    let turn = runner.state().turn_number;
+    let object = runner.state_mut().objects.get_mut(&id).unwrap();
+    object.entered_battlefield_turn = Some(turn);
+    object.summoning_sick = true;
+}
+
+fn officers(runner: &GameRunner) -> usize {
+    runner
+        .state()
+        .objects
+        .values()
+        .filter(|object| object.zone == Zone::Battlefield && object.name == "Officer")
+        .count()
+}
+
+/// P0 (active) controls Seven of Nine and Captain Benjamin Sisko; P1 controls
+/// Leyline of Anticipation (so P1 may cast the sorcery on P0's turn), four
+/// Swamps and four black mana in the pool, and holds Fatal Lore. P1 holds priority with an empty stack when the board is returned.
+struct DepartingCaster {
+    runner: GameRunner,
+    lore: ObjectId,
+}
+
+fn departing_caster(db: &CardDatabase) -> DepartingCaster {
+    let mut scenario = GameScenario::new_n_player(3, 7);
+    scenario.at_phase(Phase::PreCombatMain);
+    for player in [P0, P1, P2] {
+        for index in 0..8 {
+            scenario.add_spell_to_library_top(
+                player,
+                &format!("Library {}-{index}", player.0),
+                false,
+            );
+        }
+    }
+    let seven = add_seven(&mut scenario, P0, db);
+    let sisko = scenario.add_real_card(P0, "Captain Benjamin Sisko", Zone::Battlefield, db);
+    scenario.add_real_card(P1, "Leyline of Anticipation", Zone::Battlefield, db);
+    // Fatal Lore {2}{B}{B}.
+    for _ in 0..4 {
+        scenario.add_basic_land(P1, ManaColor::Black);
+    }
+    let lore = scenario.add_real_card(P1, "Fatal Lore", Zone::Hand, db);
+    // The manual cast pays from the pool.
+    scenario.with_mana_pool(
+        P1,
+        vec![ManaUnit::new(ManaType::Black, ObjectId(0), false, vec![]); 4],
+    );
+    let mut runner = scenario.build();
+    mark_entered_this_turn(&mut runner, seven);
+    mark_entered_this_turn(&mut runner, sisko);
+    runner
+        .act(GameAction::PassPriority)
+        .expect("P0 passes priority");
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { player: P1 }
+        ),
+        "REACH: P1 holds priority with an empty stack: {:?}",
+        runner.state().waiting_for
+    );
+    assert!(runner.state().stack.is_empty());
+    DepartingCaster { runner, lore }
+}
+
+/// P1 casts Fatal Lore; P0, the opponent chooser, is asked for the mode.
+fn cast_lore_to_the_mode_prompt(runner: &mut GameRunner, lore: ObjectId, mode: CastPaymentMode) {
+    let card_id = runner.state().objects[&lore].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: lore,
+            card_id,
+            targets: vec![],
+            payment_mode: mode,
+        })
+        .expect("P1 casts Fatal Lore");
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::ModeChoice { player: P0, .. }
+        ),
+        "REACH: the opponent chooses the mode: {:?}",
+        runner.state().waiting_for
+    );
+}
+
+fn concede(runner: &mut GameRunner, player: PlayerId) {
+    runner
+        .act(GameAction::Concede { player_id: player })
+        .expect("the player concedes");
+    assert!(runner.state().players[player.0 as usize].is_eliminated);
+}
+
+fn only_the_announcement_is_on_the_stack(runner: &GameRunner, lore: ObjectId) {
+    let sources: Vec<ObjectId> = runner
+        .state()
+        .stack
+        .iter()
+        .map(|entry| entry.source_id)
+        .collect();
+    assert_eq!(
+        sources,
+        vec![lore],
+        "REACH: the stack holds only the announcement"
+    );
+}
+
+/// Sisko's end-step trigger resolves and creates `expected` Officers.
+fn end_step_officers(runner: &mut GameRunner, expected: usize) {
+    runner.advance_to_end_step();
+    assert_eq!(
+        (runner.state().active_player, runner.state().phase),
+        (P0, Phase::End),
+        "REACH: P0's end step"
+    );
+    drive(runner, Plan::default());
+    assert_eq!(officers(runner), expected);
+}
+
+/// F1-1 — P1 announces Fatal Lore, P0 chooses "You draw three cards" (faces a
+/// dilemma), P1 concedes while paying. The spell is gone (CR 800.4a), Seven of
+/// Nine drew exactly once, and P0's history still holds the dilemma it faced:
+/// Sisko reads it at P0's end step.
+#[test]
+fn a_caster_who_concedes_while_paying_leaves_the_choosers_dilemma_in_the_history() {
+    let Some(db) = shared_card_db() else { return };
+    let DepartingCaster {
+        mut runner, lore, ..
+    } = departing_caster(db);
+    let hand = hand_len(&runner, P0);
+    let mut log = Narration::default();
+    cast_lore_to_the_mode_prompt(&mut runner, lore, CastPaymentMode::Manual);
+    log.act(&mut runner, GameAction::SelectModes { indices: vec![0] })
+        .expect("P0 chooses the draw mode");
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::ManaPayment { .. }),
+        "REACH: the cast is parked at its payment: {:?}",
+        runner.state().waiting_for
+    );
+    assert_eq!(
+        dilemmas(&runner, P0),
+        0,
+        "the history is written at placement"
+    );
+    only_the_announcement_is_on_the_stack(&runner, lore);
+
+    concede(&mut runner, P1);
+    assert!(!runner.state().players[0].is_eliminated);
+    assert!(!runner.state().players[2].is_eliminated);
+    assert!(
+        runner.state().stack.iter().all(|e| e.source_id != lore),
+        "CR 800.4a: the abandoned spell is off the stack"
+    );
+    assert_eq!(
+        dilemmas(&runner, P0),
+        1,
+        "the dilemma P0 faced is not undone"
+    );
+    assert_eq!(log.faces_a_dilemma(P0), 0, "no placement, no narration");
+
+    drive(&mut runner, Plan::default());
+    assert_eq!(
+        hand_len(&runner, P0),
+        hand + 1,
+        "Seven drew exactly once; the abandoned mode never resolved"
+    );
+    assert_eq!(dilemmas(&runner, P0), 1, "recorded exactly once");
+    end_step_officers(&mut runner, 1);
+    assert_eq!(dilemmas(&runner, P0), 1);
+}
+
+/// F1-2 — guard: the caster concedes before the mode is chosen. No dilemma was
+/// faced, so nothing is recorded and Sisko makes nothing.
+#[test]
+fn a_caster_who_concedes_before_the_mode_is_chosen_records_no_dilemma() {
+    let Some(db) = shared_card_db() else { return };
+    let DepartingCaster {
+        mut runner, lore, ..
+    } = departing_caster(db);
+    let hand = hand_len(&runner, P0);
+    cast_lore_to_the_mode_prompt(&mut runner, lore, CastPaymentMode::Manual);
+    concede(&mut runner, P1);
+    drive(&mut runner, Plan::default());
+    assert_eq!(dilemmas(&runner, P0), 0);
+    assert_eq!(hand_len(&runner, P0), hand, "Seven never drew");
+    end_step_officers(&mut runner, 0);
+}
+
+/// F1-3 — guard on unchanged behavior: the chooser, not the caster, concedes
+/// at the payment prompt. The hook does not fire for a surviving caster, and
+/// the cast stays the caster's live announcement.
+#[test]
+fn a_chooser_who_concedes_at_the_payment_prompt_leaves_the_cast_with_its_caster() {
+    let Some(db) = shared_card_db() else { return };
+    let DepartingCaster {
+        mut runner, lore, ..
+    } = departing_caster(db);
+    cast_lore_to_the_mode_prompt(&mut runner, lore, CastPaymentMode::Manual);
+    runner
+        .act(GameAction::SelectModes { indices: vec![0] })
+        .expect("P0 chooses the draw mode");
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::ManaPayment { .. }),
+        "REACH: the cast is parked at its payment: {:?}",
+        runner.state().waiting_for
+    );
+    concede(&mut runner, P0);
+    assert!(!runner.state().players[1].is_eliminated);
+    assert!(
+        runner.state().stack.iter().any(|e| e.source_id == lore),
+        "the caster's announcement survives the chooser's departure"
+    );
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::ManaPayment { .. }),
+        "REACH: the payment is still the caster's: {:?}",
+        runner.state().waiting_for
+    );
+}
+
+/// F1-4 — double-record guard: the cast completes, THEN the caster concedes
+/// while the spell sits on the stack. Placement already recorded the dilemma
+/// once and the departure must not record it again.
+#[test]
+fn a_caster_who_concedes_after_placement_records_the_dilemma_once() {
+    let Some(db) = shared_card_db() else { return };
+    let DepartingCaster {
+        mut runner, lore, ..
+    } = departing_caster(db);
+    cast_lore_to_the_mode_prompt(&mut runner, lore, CastPaymentMode::Auto);
+    runner
+        .act(GameAction::SelectModes { indices: vec![0] })
+        .expect("P0 chooses the draw mode");
+    assert!(
+        runner.state().stack.iter().any(|e| e.source_id == lore),
+        "REACH: the spell is on the stack: {:?}",
+        runner.state().waiting_for
+    );
+    assert_eq!(dilemmas(&runner, P0), 1, "recorded at placement");
+    concede(&mut runner, P1);
+    assert_eq!(dilemmas(&runner, P0), 1, "the departure adds nothing");
+    drive(&mut runner, Plan::default());
+    assert_eq!(dilemmas(&runner, P0), 1);
+}
+
+/// F1-5 — a bystander (neither caster nor chooser) concedes while the cast is
+/// parked at its payment; the cast still completes and records exactly one
+/// dilemma.
+#[test]
+fn a_bystander_conceding_during_the_announcement_still_records_one_dilemma() {
+    let Some(db) = shared_card_db() else { return };
+    let DepartingCaster {
+        mut runner, lore, ..
+    } = departing_caster(db);
+    cast_lore_to_the_mode_prompt(&mut runner, lore, CastPaymentMode::Manual);
+    runner
+        .act(GameAction::SelectModes { indices: vec![0] })
+        .expect("P0 chooses the draw mode");
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::ManaPayment { .. }),
+        "REACH: the cast is parked at its payment: {:?}",
+        runner.state().waiting_for
+    );
+    concede(&mut runner, P2);
+    assert_eq!(dilemmas(&runner, P0), 0, "still announcing");
+    runner
+        .act(GameAction::PassPriority)
+        .expect("P1 finishes paying from the pool");
+    assert!(
+        runner.state().stack.iter().any(|e| e.source_id == lore),
+        "REACH: the spell was placed: {:?}",
+        runner.state().waiting_for
+    );
+    assert_eq!(dilemmas(&runner, P0), 1);
+    drive(&mut runner, Plan::default());
+    assert_eq!(dilemmas(&runner, P0), 1);
 }
