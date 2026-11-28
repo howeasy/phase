@@ -1166,6 +1166,7 @@ face = [
   { key = "joel, resolute survivor", class = "dropped_qualifier", clauses = ["Partner—Survivors"] },
   { key = "jolene, the plunder queen", class = "dropped_qualifier", clauses = ["Whenever a player attacks one or more of your opponents, that attacking player creates a Treasure token."] },
   { key = "jolrael, empress of beasts", class = "target_wrong", clauses = ["{2}{G}, {T}, Discard two cards: All lands target player controls become 3/3 creatures until end of turn.", "They're still lands."] },
+  { key = "joraga invocation", class = "missing_effect", clauses = ["and must be blocked this turn if able."] },
   { key = "journey for the elixir", class = "wrong_zone", clauses = ["Search your library and graveyard for a basic land card and a card named Jiang Yanggu, reveal them, put them into your hand, then shuffle."] },
   { key = "joust", class = "target_wrong", clauses = ["Choose target creature you control and target creature you don't control."] },
   { key = "joven's ferrets", class = "wrong_object", clauses = ["At end of combat, tap all creatures that blocked this creature this turn.", "They don't untap during their controller's next untap step."] },

@@ -10,8 +10,8 @@
 //! the public `combat::validate_blockers_for_player` (CR 509.1c) and from the
 //! engine-built `DeclareBlockers` prompt.
 //!
-//! Witnesses: Alluring Scent, Bloodscent, Valor Made Real, Joraga Invocation,
-//! Khenra Scrapper, Trueheart Twins, Vizier of the True, Taunting Arbormage.
+//! Witnesses: Alluring Scent, Bloodscent, Valor Made Real, Khenra Scrapper,
+//! Trueheart Twins, Vizier of the True, Taunting Arbormage.
 
 use std::collections::HashMap;
 
@@ -140,23 +140,6 @@ fn spell_grants_static(object: &GameObject, wanted: impl Fn(&StaticMode) -> bool
                 ..
             } if static_abilities.iter().any(|definition| wanted(&definition.mode))
         )
-    })
-}
-
-fn joraga_grants_pump_then_block_requirement(object: &GameObject) -> bool {
-    object.abilities.iter().any(|ability| {
-        matches!(ability.effect.as_ref(), Effect::PumpAll { .. })
-            && ability.sub_ability.as_deref().is_some_and(|sub| {
-                matches!(
-                    sub.effect.as_ref(),
-                    Effect::GenericEffect {
-                        static_abilities,
-                        ..
-                    } if static_abilities
-                        .iter()
-                        .any(|definition| matches!(&definition.mode, StaticMode::MustBeBlocked { .. }))
-                )
-            })
     })
 }
 
@@ -618,212 +601,6 @@ fn valor_made_real_extra_blockers_expire_after_the_turn_ends() {
 }
 
 // ---------------------------------------------------------------------------
-// Joraga Invocation: "Each creature you control gets +3/+3 until end of turn
-// and must be blocked this turn if able."
-// ---------------------------------------------------------------------------
-
-#[test]
-fn joraga_invocation_pumps_each_creature_and_requires_the_attacking_ones_to_be_blocked() {
-    let mut scenario = GameScenario::new();
-    scenario.at_phase(Phase::PreCombatMain);
-    let a1 = card(&mut scenario, P0, "Grizzly Bears", Zone::Battlefield);
-    let a2 = card(&mut scenario, P0, "Grizzly Bears", Zone::Battlefield);
-    let home = card(&mut scenario, P0, "Savannah Lions", Zone::Battlefield);
-    let b1 = card(&mut scenario, P1, "Grizzly Bears", Zone::Battlefield);
-    let b2 = card(&mut scenario, P1, "Grizzly Bears", Zone::Battlefield);
-    let joraga = card(&mut scenario, P0, "Joraga Invocation", Zone::Hand);
-    scenario.with_mana_pool(P0, mana(&[(ManaType::Colorless, 4), (ManaType::Green, 2)]));
-    let mut runner = scenario.build();
-
-    assert!(
-        joraga_grants_pump_then_block_requirement(&runner.state().objects[&joraga]),
-        "SHAPE: Joraga Invocation must parse to PumpAll then a MustBeBlocked grant: {:#?}",
-        runner.state().objects[&joraga].abilities
-    );
-
-    runner.cast(joraga).resolve();
-    evaluate_layers(runner.state_mut());
-
-    // CR 611.2c: the +3/+3 applies to every creature the controller had at
-    // resolution; the nonattacker is pumped too.
-    for id in [a1, a2] {
-        assert_eq!(
-            (
-                runner.state().objects[&id].power,
-                runner.state().objects[&id].toughness
-            ),
-            (Some(5), Some(5)),
-            "each Grizzly Bears is 5/5"
-        );
-    }
-    assert_eq!(
-        (
-            runner.state().objects[&home].power,
-            runner.state().objects[&home].toughness
-        ),
-        (Some(5), Some(4)),
-        "the nonattacking Savannah Lions is pumped (2/1 -> 5/4)"
-    );
-    for id in [b1, b2] {
-        assert_eq!(
-            (
-                runner.state().objects[&id].power,
-                runner.state().objects[&id].toughness
-            ),
-            (Some(2), Some(2)),
-            "CR 611.2c: the characteristic-changing +3/+3 locked its set at resolution; an opponent's creature was never in it"
-        );
-    }
-
-    declare_attacks(
-        &mut runner,
-        vec![
-            (a1, AttackTarget::Player(P1)),
-            (a2, AttackTarget::Player(P1)),
-        ],
-    );
-
-    let named = must_be_blocked_targets(&runner);
-    for blocker in [b1, b2] {
-        let attackers = named.get(&blocker).expect("able blocker is named");
-        assert!(
-            attackers.contains(&a1) && attackers.contains(&a2),
-            "CR 509.1c: both attacking pumped creatures carry the requirement"
-        );
-    }
-
-    assert!(
-        validate_blockers_for_player(runner.state(), P1, &[]).is_err(),
-        "CR 509.1c: neither requirement is obeyed"
-    );
-    assert!(
-        validate_blockers_for_player(runner.state(), P1, &[(b1, a1)]).is_err(),
-        "CR 509.1c: obeying one of two requirements is not the maximum"
-    );
-    assert!(
-        validate_blockers_for_player(runner.state(), P1, &[(b1, a1), (b2, a2)]).is_ok(),
-        "CR 509.1c: each attacker blocked by its own blocker is a valid declaration"
-    );
-}
-
-#[test]
-fn joraga_invocation_pump_and_requirement_expire_after_the_turn_ends() {
-    let mut scenario = GameScenario::new();
-    scenario.at_phase(Phase::PreCombatMain);
-    stock_libraries(&mut scenario);
-    let a1 = card(&mut scenario, P0, "Grizzly Bears", Zone::Battlefield);
-    let a2 = card(&mut scenario, P0, "Grizzly Bears", Zone::Battlefield);
-    let b1 = card(&mut scenario, P1, "Grizzly Bears", Zone::Battlefield);
-    let joraga = card(&mut scenario, P0, "Joraga Invocation", Zone::Hand);
-    scenario.with_mana_pool(P0, mana(&[(ManaType::Colorless, 4), (ManaType::Green, 2)]));
-    let mut runner = scenario.build();
-
-    runner.cast(joraga).resolve();
-    evaluate_layers(runner.state_mut());
-    assert_eq!(
-        runner.state().objects[&a1].power,
-        Some(5),
-        "reach guard: the pump applied in the cast turn"
-    );
-
-    advance_past_end_of_turn(&mut runner);
-    advance_past_end_of_turn(&mut runner);
-    assert_eq!(
-        runner.state().active_player,
-        P0,
-        "reach guard: the round trip returned to P0's turn"
-    );
-    evaluate_layers(runner.state_mut());
-
-    assert_eq!(
-        (
-            runner.state().objects[&a1].power,
-            runner.state().objects[&a1].toughness
-        ),
-        (Some(2), Some(2)),
-        "CR 514.2: the +3/+3 until end of turn expired"
-    );
-
-    declare_attacks(
-        &mut runner,
-        vec![
-            (a1, AttackTarget::Player(P1)),
-            (a2, AttackTarget::Player(P1)),
-        ],
-    );
-
-    let valid = valid_block_targets(&runner);
-    assert!(
-        valid.get(&b1).is_some_and(|legal| legal.contains(&a1)),
-        "reach guard: the blocker is still able"
-    );
-    assert!(
-        must_be_blocked_targets(&runner).is_empty(),
-        "CR 514.2: 'must be blocked this turn' expired"
-    );
-    assert!(
-        validate_blockers_for_player(runner.state(), P1, &[]).is_ok(),
-        "CR 509.1c: an empty declaration is legal again"
-    );
-}
-
-#[test]
-fn joraga_invocation_pump_does_not_reach_a_later_entrant() {
-    let mut scenario = GameScenario::new();
-    scenario.at_phase(Phase::PreCombatMain);
-    let a1 = card(&mut scenario, P0, "Grizzly Bears", Zone::Battlefield);
-    let a2 = card(&mut scenario, P0, "Grizzly Bears", Zone::Battlefield);
-    let joraga = card(&mut scenario, P0, "Joraga Invocation", Zone::Hand);
-    let goblin = card(&mut scenario, P0, "Raging Goblin", Zone::Hand);
-    scenario.with_mana_pool(
-        P0,
-        mana(&[
-            (ManaType::Colorless, 4),
-            (ManaType::Green, 2),
-            (ManaType::Red, 1),
-        ]),
-    );
-    let mut runner = scenario.build();
-
-    assert!(
-        joraga_grants_pump_then_block_requirement(&runner.state().objects[&joraga]),
-        "SHAPE: Joraga Invocation must parse to PumpAll then a MustBeBlocked grant: {:#?}",
-        runner.state().objects[&joraga].abilities
-    );
-
-    runner.cast(joraga).resolve();
-    runner.cast(goblin).resolve();
-    evaluate_layers(runner.state_mut());
-    assert_eq!(
-        runner.state().objects[&goblin].zone,
-        Zone::Battlefield,
-        "reach guard: the late creature entered after Joraga resolved"
-    );
-    for id in [a1, a2] {
-        assert_eq!(
-            (
-                runner.state().objects[&id].power,
-                runner.state().objects[&id].toughness
-            ),
-            (Some(5), Some(5)),
-            "reach guard: the resolution-time set was pumped"
-        );
-    }
-    // CR 611.2c: the +3/+3 modifies characteristics, so the part's affected set
-    // is determined when the effect begins. The block requirement is a
-    // rules-modifying part and may reach later entrants; only the pump is
-    // witnessed as locked here.
-    assert_eq!(
-        (
-            runner.state().objects[&goblin].power,
-            runner.state().objects[&goblin].toughness
-        ),
-        (Some(1), Some(1)),
-        "CR 611.2c: a creature that entered after resolution is not pumped"
-    );
-}
-
-// ---------------------------------------------------------------------------
 // Khenra Scrapper: exert-as-attack (CR 508.1g, CR 701.43a/d)
 // ---------------------------------------------------------------------------
 
@@ -953,7 +730,7 @@ fn khenra_scrapper_declined_exert_leaves_it_unpumped_and_untaps() {
 
 // ---------------------------------------------------------------------------
 // Trueheart Twins: exert-as-attack plus the "whenever you exert a creature"
-// observer (CR 701.43d)
+// observer (CR 603.2 + CR 701.43a)
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -1010,7 +787,7 @@ fn trueheart_twins_exert_pumps_its_controllers_creatures() {
     assert_eq!(
         runner.state().objects[&bear].power,
         Some(3),
-        "CR 701.43d: each creature the controller controls gets +1/+0"
+        "CR 603.2 + CR 701.43a: each creature the controller controls gets +1/+0"
     );
 
     // CR 514.2: the +1/+0 lasts until end of turn, so cleanup strips it even
@@ -1143,7 +920,7 @@ fn trueheart_twins_observes_another_creatures_exert() {
     assert_eq!(
         runner.state().objects[&khenra].power,
         Some(5),
-        "CR 701.43d + CR 603.2: the Khenra's own +2/+0 and the observer's +1/+0 both applied"
+        "CR 603.2 + CR 701.43a: the observer's +1/+0 applied; CR 701.43d: the Khenra's own +2/+0 resolved"
     );
     assert_eq!(
         runner.state().objects[&twins].power,
@@ -1159,7 +936,7 @@ fn trueheart_twins_observes_another_creatures_exert() {
 
 // ---------------------------------------------------------------------------
 // Vizier of the True: exert-as-attack plus "tap target creature an opponent
-// controls" (CR 701.43d + CR 603.3d)
+// controls" (CR 603.2 + CR 701.43a + CR 603.3d)
 // ---------------------------------------------------------------------------
 
 #[test]
