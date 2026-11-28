@@ -33,12 +33,12 @@ use engine::types::identifiers::{CardId, ObjectId};
 use engine::types::interaction::{
     AmountAssignment, InteractionActionCode, InteractionAvailability, InteractionChoiceId,
     InteractionManaAbilityActivationScope, InteractionManaColor, InteractionManaRestriction,
-    InteractionOpportunityResponse, InteractionOutcomeCode,
-    InteractionPresentationSurface, InteractionPreviewRequest, InteractionPreviewStatus,
-    InteractionReasonCode, InteractionResponse, InteractionResponseSpec, InteractionRoleCode,
-    InteractionSessionId, InteractionShortcutCountSpec, InteractionShortcutDecision,
-    InteractionShortcutPin, InteractionShortcutPoint, InteractionShortcutPointKind,
-    InteractionShortcutPreview, InteractionShortcutPreviewEntry, InteractionShortcutPreviewFamily,
+    InteractionOpportunityResponse, InteractionOutcomeCode, InteractionPresentationSurface,
+    InteractionPreviewRequest, InteractionPreviewStatus, InteractionReasonCode,
+    InteractionResponse, InteractionResponseSpec, InteractionRoleCode, InteractionSessionId,
+    InteractionShortcutCountSpec, InteractionShortcutDecision, InteractionShortcutPin,
+    InteractionShortcutPoint, InteractionShortcutPointKind, InteractionShortcutPreview,
+    InteractionShortcutPreviewEntry, InteractionShortcutPreviewFamily,
     InteractionShortcutResponseCode, InteractionSubmission, PreviewRequestId,
     MAX_INTERACTION_LIST_LEN, MAX_SHORTCUT_PREVIEW_ELEMENTS,
 };
