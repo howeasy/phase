@@ -571,6 +571,11 @@ export const PermanentCard = memo(function PermanentCard({
   const seenAttack = useRef<{ generation: number; committed: boolean } | null>(null);
 
   useLayoutEffect(() => {
+    // A collapsed card plays for the members it stands in for: spend theirs too,
+    // so expanding the group later does not play them late.
+    for (const id of coveredIds ?? []) {
+      if (id !== objectId) claimDeclaredLunge(id);
+    }
     const committed = committedAttackerIds.has(objectId);
     const seen = seenAttack.current;
     seenAttack.current = { generation: sessionGeneration, committed };
@@ -618,7 +623,7 @@ export const PermanentCard = memo(function PermanentCard({
       ease: hanging ? LUNGE_HANG_EASE : "easeInOut",
       durationMs: band.durationMs * Math.min(multiplier, 1),
     });
-  }, [committedAttackerIds, objectId, obj, isCompactHeight, playerId, reduceMotion, sessionGeneration]);
+  }, [committedAttackerIds, coveredIds, objectId, obj, isCompactHeight, playerId, reduceMotion, sessionGeneration]);
 
   // The lunge is a finite keyframe run; after it, y is the resting slide again.
   useEffect(() => {

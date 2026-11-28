@@ -340,6 +340,26 @@ describe("PermanentCard committed-attacker lunge", () => {
     expect(lastCard().animate?.y).toBe(ATTACK_SLIDE);
   });
 
+  it("does not replay a hidden member when its collapsed group expands", () => {
+    const stoodInFor = 2;
+    useGameStore.setState({
+      events: [
+        { type: "AttackersDeclared", data: { attacker_ids: [stoodInFor, OBJECT], defending_player: 1 } },
+      ],
+    });
+    // The collapsed group renders one representative covering both members.
+    const collapsed = render(
+      <BoardInteractionContext.Provider value={boardValue([stoodInFor, OBJECT])}>
+        <PermanentCard objectId={stoodInFor} coveredIds={[stoodInFor, OBJECT]} />
+      </BoardInteractionContext.Provider>,
+    );
+    collapsed.unmount();
+
+    render(view([stoodInFor, OBJECT]));
+
+    expect(lastCard().animate?.y).toBe(ATTACK_SLIDE);
+  });
+
   it("does not lunge when a new session restores an attack", () => {
     const { rerender } = render(view([]));
 
