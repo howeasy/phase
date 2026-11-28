@@ -25195,8 +25195,8 @@ mod tests {
         ));
     }
 
-    // Shape-only: nearest printed card is Savvy Trader. "Your hand" is the
-    // negation of "in hand AND owned by the controller" (De Morgan:
+    // Shape-only: nearest printed card is Savvy Trader. "Anywhere other than
+    // your hand" is the negation of "in hand AND owned by the controller" (De Morgan:
     // AnyOf[Not(InZone(Hand)), Not(Owned(You))]). Keep the same caster for
     // both hands so using the caster instead of the owner fails the test.
     #[test]
