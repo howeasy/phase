@@ -599,8 +599,8 @@ pub fn exiled_by_source_holds(
 /// CR 607.2a + CR 400.7 + CR 607.5: the cards of one "cards exiled with ~" pile, materialized
 /// once for a whole zone scan.
 ///
-/// Maintainer review item: pile membership was evaluated per candidate and each evaluation
-/// scanned the flat link store (O(candidates x links)). The pile is now read once per zone scan
+/// A per-candidate membership probe scans the flat link store (O(candidates x links)); the
+/// pile is instead read once per zone scan
 /// (`filter::with_scan_linked_pile`) from the same admission rule (`pile_entries` /
 /// `linked_exile_cards_for_source`), so a scan reads the store once whatever the candidate
 /// count; a candidate whose context is not served by the view (a different source or trigger)

@@ -449,8 +449,8 @@ pub struct LinkedAbilitySource {
 
 /// CR 607.1 + CR 607.5 + CR 613.1f: known provenance of a linked exile.
 /// `Granted` is foreign to every characteristic pair and is never mirrored
-/// to an emblem. The grant's effect identity is not tracked (CR 607.5), nor
-/// are self-grants treated as printed (CR 607.1a). A tracked exile from a runtime
+/// to an emblem. The grant's effect identity is not tracked (CR 607.5), and this
+/// implementation does not model the printed self-grant exception of CR 607.1a. A tracked exile from a runtime
 /// slot classified as granted (such as equip or cycling) also records `Granted`.
 ///
 /// `PartialEq`/`Eq` exist only because the containing link types derive `Eq`;
