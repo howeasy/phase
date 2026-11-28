@@ -75013,7 +75013,7 @@ fn assimilate_a_creature_card_exiled_with_it_lowers_to_linked_exile_pick() {
     ));
 
     // The "If you can't" fallback: exile up to one target creature, gated on the
-    // assimilate having moved nothing.
+    // assimilate's card arriving on the battlefield (CR 614.6).
     let mut node = Some(execute);
     let mut fallback = None;
     while let Some(def) = node {
@@ -75075,6 +75075,88 @@ fn assimilate_a_creature_card_exiled_with_it_lowers_to_linked_exile_pick() {
     );
 }
 
+/// CR 608.2c + CR 614.6: the linked-exile `assimilate`'s "If you can't" rider
+/// must read the BATTLEFIELD arrival, not merely "some zone change happened".
+/// A replacement that redirects the would-be entry (Containment Priest exiles
+/// it instead) still records a `ZoneChanged` for the card (Exile → Exile), so
+/// the generic destination-less guard would report success and skip the printed
+/// fallback even though the permanent never entered. The rider is rewritten to a
+/// `Battlefield`-bound ledger read; a non-assimilate `ChangeZone` antecedent
+/// keeps the destination-less guard, whose "could not be performed" reading is
+/// the right one there.
+#[test]
+fn assimilate_if_you_cant_reads_the_battlefield_arrival() {
+    let def = parse_effect_chain(
+        "assimilate a creature card exiled with it. If you can't, exile up to one target creature.",
+        AbilityKind::Spell,
+    );
+    assert!(
+        matches!(
+            &*def.effect,
+            Effect::ChangeZone {
+                origin: Some(Zone::Exile),
+                destination: Zone::Battlefield,
+                target,
+                ..
+            } if target.references_exiled_by_source()
+        ),
+        "reach-guard: the antecedent is the linked-exile assimilate move: {:#?}",
+        def.effect
+    );
+    let rider = std::iter::successors(Some(&def), |node| node.sub_ability.as_deref())
+        .find(|node| {
+            matches!(
+                &*node.effect,
+                Effect::ChangeZone {
+                    destination: Zone::Exile,
+                    ..
+                }
+            )
+        })
+        .expect("the If-you-can't fallback exile is chained");
+    assert_eq!(
+        rider.condition,
+        Some(AbilityCondition::Not {
+            condition: Box::new(AbilityCondition::ZoneChangedThisWay {
+                filter: TargetFilter::Any,
+                destination: Some(Zone::Battlefield),
+            }),
+        }),
+        "the rider must bind the assimilate's battlefield arrival"
+    );
+
+    // Control: a non-assimilate ChangeZone antecedent keeps the generic
+    // destination-less guard — the rewrite is strictly the linked-exile shape.
+    let control = parse_effect_chain(
+        "return target creature card from your graveyard to the battlefield. If you can't, draw a card.",
+        AbilityKind::Spell,
+    );
+    assert!(
+        matches!(
+            &*control.effect,
+            Effect::ChangeZone {
+                destination: Zone::Battlefield,
+                ..
+            }
+        ),
+        "reach-guard: the control antecedent is a ChangeZone: {:#?}",
+        control.effect
+    );
+    let control_rider = std::iter::successors(Some(&control), |node| node.sub_ability.as_deref())
+        .find(|node| matches!(&*node.effect, Effect::Draw { .. }))
+        .expect("the control rider is chained to the return");
+    assert_eq!(
+        control_rider.condition,
+        Some(AbilityCondition::Not {
+            condition: Box::new(AbilityCondition::ZoneChangedThisWay {
+                filter: TargetFilter::Any,
+                destination: None,
+            }),
+        }),
+        "a non-assimilate ChangeZone antecedent keeps the generic guard"
+    );
+}
+
 /// CR 608.2c + CR 611.2a: the `CastFromZone` of an ability chain, if any.
 fn cast_from_zone_in_chain(ability: &AbilityDefinition) -> Option<&AbilityDefinition> {
     if matches!(*ability.effect, Effect::CastFromZone { .. }) {
@@ -75086,14 +75168,18 @@ fn cast_from_zone_in_chain(ability: &AbilityDefinition) -> Option<&AbilityDefini
         .and_then(cast_from_zone_in_chain)
 }
 
-/// CR 608.2c + CR 611.2a + CR 607.2a: "until end of turn, you may cast a [creature]
-/// spell from among cards exiled with [this object]" prints a cap of one cast over
-/// a persistent linked pile and states a duration, so its grant shares one budget
-/// (`SharedSingleCast`) and its "may" stays inside the grant rather than becoming
-/// an accept/decline prompt. A plural clause, or one stating no duration
-/// (Jeleva, Nephalia's Scourge), keeps the per-object permission.
+/// CR 608.2c + CR 611.2a + CR 607.2a: a NORMAL-COST grant of "until end of turn,
+/// you may cast a [creature] spell from among cards exiled with [this object]"
+/// prints a cap of one cast over a persistent linked pile and states a duration,
+/// so its grant shares one budget (`SharedSingleCast`) and its "may" stays inside
+/// the grant rather than becoming an accept/decline prompt (Serpent's Soul-Jar).
+/// A FREE grant ("without paying its mana cost") keeps the per-object permission,
+/// unchanged from the base: the engine cannot elect between it and a pile card's
+/// own cast-from-exile permission (ticket 370), so its printed cap stays
+/// unenforced. A plural clause, or one stating no duration (Jeleva, Nephalia's
+/// Scourge), also keeps the per-object permission.
 #[test]
-fn cast_a_spell_from_linked_exile_under_a_duration_shares_one_budget() {
+fn a_normal_cost_spell_from_linked_exile_under_a_duration_shares_one_budget() {
     let window = |def: &AbilityDefinition| {
         let found = cast_from_zone_in_chain(def).expect("a CastFromZone in the chain");
         let Effect::CastFromZone { driver, .. } = &*found.effect else {
@@ -75105,7 +75191,11 @@ fn cast_a_spell_from_linked_exile_under_a_duration_shares_one_budget() {
         budget: LingeringCastBudget::SharedSingleCast,
     };
 
-    // Court of Locthwain: the third sentence, behind the monarch condition.
+    // Court of Locthwain: the third sentence, behind the monarch condition. It is
+    // FREE, so it keeps the per-object permission unchanged from the base even
+    // though it states a duration: only a normal-cost grant is promoted to the
+    // shared budget (a free grant cannot be capped without the player election of
+    // ticket 370).
     let court = parse_oracle_text(
         "When this enchantment enters, you become the monarch.\n\
          At the beginning of your upkeep, exile the top card of target opponent's library. You may \
@@ -75124,13 +75214,21 @@ fn cast_a_spell_from_linked_exile_under_a_duration_shares_one_budget() {
         .find(|execute| cast_from_zone_in_chain(execute).is_some())
         .map(window)
         .expect("Court's upkeep trigger casts from linked exile");
-    assert_eq!(driver, shared);
+    assert_eq!(
+        driver,
+        CastFromZoneDriver::PER_OBJECT_LINGERING,
+        "a free grant is not budgeted, unchanged from the base"
+    );
     assert!(
         !optional,
         "the grant's own accept lives in the cast, not a prompt"
     );
 
-    // Idol of Endurance: the activated form, free.
+    // Idol of Endurance: the activated form, free. Per-object as on the base: a
+    // FREE grant is deliberately NOT budgeted — the engine cannot offer the
+    // election between the grant and a pile card's own cast-from-exile permission
+    // (ticket 370), so its printed cap stays unenforced, unchanged from the base.
+    // This pins the pre-existing behaviour, not its rules correctness.
     let idol = parse_oracle_text(
         "When this artifact enters, exile all creature cards with mana value 3 or less from \
          your graveyard until this artifact leaves the battlefield.\n\
@@ -75146,9 +75244,13 @@ fn cast_a_spell_from_linked_exile_under_a_duration_shares_one_budget() {
         .iter()
         .find(|ability| cast_from_zone_in_chain(ability).is_some())
         .expect("Idol's activated ability casts from linked exile");
-    assert_eq!(window(def), (shared, false));
+    assert_eq!(
+        window(def),
+        (CastFromZoneDriver::PER_OBJECT_LINGERING, false)
+    );
 
-    // Serpent's Soul-Jar: the paid form.
+    // Serpent's Soul-Jar: the paid, normal-cost form — the one shape promoted to
+    // the shared budget.
     let jar = parse_oracle_text(
         "Whenever an Elf you control dies, exile it.\n\
          {T}, Pay 2 life: Until end of turn, you may cast a creature spell from among cards \

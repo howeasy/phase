@@ -63655,9 +63655,9 @@ fn grant_digest_covers_the_enters_tapped_rider() {
 
 /// CR 608.2c + CR 611.2a: a cast carrying no elected object-permission index
 /// (a static `CastingVariant::ExilePermission` cast, which deliberately elects
-/// none) spends no shared `ExileWithAltCost` budget (Idol of Endurance,
-/// Serpent's Soul-Jar), because the legacy first-compatible scan
-/// could otherwise charge an unrelated grant the cast did not use.
+/// none) spends no shared `ExileWithAltCost` budget (Serpent's Soul-Jar),
+/// because the legacy first-compatible scan could otherwise charge an unrelated
+/// grant the cast did not use.
 #[test]
 fn shared_exile_alt_cost_budget_is_spent_only_by_the_elected_permission() {
     let mut state = setup_game_at_main_phase();
@@ -63698,6 +63698,94 @@ fn shared_exile_alt_cost_budget_is_spent_only_by_the_elected_permission() {
         ),
         Some(TrackedSetId(7)),
         "the elected permission spends its own budget"
+    );
+}
+
+/// CR 604.6 + CR 113.6f + CR 608.2c: a pile card whose own text permits casting
+/// it from exile (Eternal Scourge) is exempt from the shared budget. The engine
+/// auto-elects the pile grant and cannot distinguish that route from the card's
+/// own permission, so charging the grant would spend the pile's one cast on a
+/// cast the own permission also authorized. The cast spends nothing and the
+/// grant stays available for the rest of the pile — main's observable
+/// behaviour (ticket 370), not a rules-ideal reading.
+#[test]
+fn shared_exile_alt_cost_budget_is_not_spent_by_an_own_exile_permission_card() {
+    use crate::types::ability::ExileGrantCostProvenance::NormalCost;
+
+    let mut state = setup_game_at_main_phase();
+    let player = PlayerId(0);
+    let exiled = add_exiled_card(&mut state, player, "Eternal Scourge");
+    state
+        .objects
+        .get_mut(&exiled)
+        .unwrap()
+        .casting_permissions
+        .push(CastingPermission::ExileWithAltCost {
+            source_id: None,
+            cost_provenance: NormalCost,
+            cost: ManaCost::Cost {
+                shards: vec![],
+                generic: 3,
+            },
+            cast_transformed: false,
+            constraint: None,
+            granted_to: Some(player),
+            resolution_cleanup: None,
+            duration: None,
+            graveyard_replacement: None,
+            mana_spend_permission: None,
+            enters_with_counter: None,
+            enters_with_modifications: Default::default(),
+            cast_cost_modifier: None,
+            single_use_group: Some(TrackedSetId(7)),
+        });
+
+    assert_eq!(
+        selected_exile_alt_cost_permission_single_use_group(
+            &state,
+            exiled,
+            player,
+            Some(CastingPermissionIndex(0)),
+        ),
+        Some(TrackedSetId(7)),
+        "reach guard: without the own permission the elected grant is charged"
+    );
+
+    state
+        .objects
+        .get_mut(&exiled)
+        .unwrap()
+        .static_definitions
+        .push(
+            StaticDefinition::new(StaticMode::GraveyardCastPermission {
+                frequency: CastFrequency::Unlimited,
+                play_mode: CardPlayMode::Cast,
+                graveyard_destination_replacement: None,
+                extra_cost: None,
+                enters_with_counter: None,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                required_cast_keyword: None,
+                pool: crate::types::statics::GraveyardPermissionPool::OwnGraveyard,
+                cast_limit: crate::types::statics::PermissionCastLimit::Unlimited,
+                mana_spend_permission: None,
+                enters_modifications: Default::default(),
+            })
+            .affected(TargetFilter::SelfRef)
+            .active_zones(vec![Zone::Exile]),
+        );
+    assert!(
+        own_exile_cast_permission(&state, &state.objects[&exiled], player),
+        "reach guard: the fixture carries a functioning own exile permission"
+    );
+    assert_eq!(
+        selected_exile_alt_cost_permission_single_use_group(
+            &state,
+            exiled,
+            player,
+            Some(CastingPermissionIndex(0)),
+        ),
+        None,
+        "the own-permission card's cast spends no shared budget, leaving the grant for the pile"
     );
 }
 

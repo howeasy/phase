@@ -252,6 +252,83 @@ fn borg_cube_exiles_on_entry_then_assimilates_on_attack() {
     assert_eq!(runner.state().objects[&cube].zone, Zone::Battlefield);
 }
 
+const CONTAINMENT_PRIEST: &str =
+    "Flash\nIf a nontoken creature would enter and it wasn't cast, exile it instead.";
+
+/// CR 614.6 + CR 608.2c: Containment Priest replaces the assimilate's would-be
+/// battlefield entry with an exile. The card never arrives, so Borg Cube's
+/// "If you can't" fallback must still run — even though the redirected move is
+/// recorded as a `ZoneChanged` event for the same card. Without binding the
+/// rider to the battlefield arrival, that event reads as a successful
+/// assimilation and the fallback is skipped.
+#[test]
+fn borg_cube_assimilate_replaced_by_containment_priest_runs_the_fallback() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario
+        .add_creature(P0, "Containment Priest", 2, 2)
+        .with_subtypes(vec!["Human", "Cleric"])
+        .from_oracle_text_with_keywords(&["Flash"], CONTAINMENT_PRIEST);
+    let linked_bear = scenario
+        .add_creature(P1, "Grizzly Bears", 2, 2)
+        .with_subtypes(vec!["Bear"])
+        .id();
+    let fallback_target = scenario
+        .add_creature(P1, "Runeclaw Bear", 2, 2)
+        .with_subtypes(vec!["Bear"])
+        .id();
+    fund_borg_cube(&mut scenario);
+    let cube = borg_cube_in_hand(&mut scenario);
+    let mut runner = scenario.build();
+    seed_creature_types(&mut runner);
+
+    // The entry resolves with an empty linked pile: the fallback exiles Grizzly
+    // Bears and links it to Borg Cube. (Containment Priest replaces only
+    // battlefield entries, so the exile itself is unaffected.)
+    runner.cast(cube).commit();
+    assert!(
+        resolve_with_trigger_target(&mut runner, Some(linked_bear)),
+        "the enters trigger must ask for its up-to-one target"
+    );
+    assert_eq!(runner.state().objects[&linked_bear].zone, Zone::Exile);
+    assert!(is_linked_to(&runner, linked_bear, cube));
+
+    // Station Borg Cube to 12 so it is a creature and may attack this turn.
+    {
+        let state = runner.state_mut();
+        let obj = state.objects.get_mut(&cube).unwrap();
+        obj.counters
+            .insert(CounterType::Generic("charge".to_string()), 12);
+        obj.summoning_sick = false;
+    }
+    relayer(&mut runner);
+    runner.advance_to_combat();
+    runner
+        .declare_attackers(&[(cube, AttackTarget::Player(P1))])
+        .expect("declare Borg Cube as attacker");
+
+    // The attack trigger assimilates Grizzly Bears; the Priest replaces the
+    // entry with exile, so "If you can't" holds and the fallback exiles the
+    // target.
+    resolve_with_trigger_target(&mut runner, Some(fallback_target));
+
+    assert_eq!(
+        runner.state().objects[&linked_bear].zone,
+        Zone::Exile,
+        "CR 614.6: the replaced entry never happens — the Bears never arrive"
+    );
+    assert_eq!(
+        runner.state().objects[&fallback_target].zone,
+        Zone::Exile,
+        "the assimilate put no permanent onto the battlefield, so the fallback runs"
+    );
+    assert!(
+        is_linked_to(&runner, fallback_target, cube),
+        "the fallback exile links its card to Borg Cube: {:?}",
+        runner.state().exile_links
+    );
+}
+
 /// "Up to one": with no linked card the fallback may choose no target, and
 /// then nothing is exiled.
 #[test]

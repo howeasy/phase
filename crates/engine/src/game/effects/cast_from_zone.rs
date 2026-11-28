@@ -3137,14 +3137,15 @@ fn record_lingering_permissions(
     // which a later `TrackedSet { id: 0 }` anaphor in the same chain would
     // mis-bind to.
     //
-    // A grant that casts without paying carries no shared budget: the engine
-    // offers no player election between it and a pile card's own "you may cast
+    // A grant that casts without paying carries no shared budget. The parser
+    // stamps `SharedSingleCast` only on a normal-cost grant (Serpent's Soul-Jar),
+    // so the `!without_paying` guard below is defensive: the engine offers no
+    // player election between a free grant and a pile card's own "you may cast
     // this card from exile" permission (Eternal Scourge), so the cast elects the
     // free grant's slot, and charging a shared group there would strip the rest
-    // of the pile. Left unbudgeted, the free grant keeps the base behaviour:
-    // every card in the pile stays castable through it. Only a normal-cost grant
-    // (Serpent's Soul-Jar), whose route costs the same as the card's own, holds
-    // the shared single cast. The `ExileWithAltAbilityCost` form (Nashi)
+    // of the pile. Left unbudgeted, the free grant keeps the base behaviour —
+    // every card in the pile stays castable through it, a known rules deviation
+    // from CR 608.2c (ticket 370). The `ExileWithAltAbilityCost` form (Nashi)
     // stores no group: its permission carries no budget field.
     let single_use_group = match driver {
         crate::types::ability::CastFromZoneDriver::LingeringPermission {

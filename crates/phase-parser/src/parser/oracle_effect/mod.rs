@@ -1135,8 +1135,8 @@ fn if_you_do_look_anchor(clauses: &[ClauseIr], condition: &AbilityCondition) -> 
         .map(|clause| clause.parsed.effect.clone())
 }
 
-/// CR 608.2c + CR 708.7 + CR 118.1: Reinterpret a generic "if you can't" rider
-/// for a preceding effect that performs no zone change.
+/// CR 608.2c + CR 614.6 + CR 708.7 + CR 118.1: Reinterpret a generic "if you
+/// can't" rider when the antecedent's ledger entry does not answer the rider.
 ///
 /// `try_nom_condition_as_ability_condition` lowers "if you can't" to
 /// `Not { ZoneChangedThisWay { Any } }` — the right proxy for the common
@@ -1157,6 +1157,21 @@ fn if_you_do_look_anchor(clauses: &[ClauseIr], condition: &AbilityCondition) -> 
 /// For both, the zone-change ledger stays empty and `Not { ZoneChangedThisWay }`
 /// would be true even after the instruction SUCCEEDED — firing the rider every
 /// time regardless of affordability.
+///
+/// A third class needs the same guard repaired for the opposite reason: the
+/// linked-exile `assimilate` expansion ("put it onto the battlefield … It's a
+/// Borg artifact creature", CR 607.2a). Its success IS a zone change, but the
+/// rider's word "can't" means "the card did not arrive on the battlefield".
+/// When a replacement sends the would-be entry elsewhere (Containment Priest:
+/// "exile it instead"), the redirected move is still recorded as a `ZoneChanged`
+/// event for the same card, so the destination-less generic guard would read the
+/// move as a successful assimilation and skip the printed fallback. CR 614.6:
+/// the replaced entry never happens. The rider is therefore rewritten to
+/// `Not { ZoneChangedThisWay { filter: Any, destination: Some(Battlefield) } }`,
+/// which only an actual arrival satisfies. This branch is strictly the shape
+/// `parse_assimilate_target` emits (`origin: Some(Exile)` plus an
+/// `ExiledBySource` target); every other `ChangeZone` antecedent — a search's
+/// put onto the battlefield, a graveyard return — keeps the generic lowering.
 ///
 /// The correct general signal for "the preceding instruction couldn't be
 /// performed" is `Not { OptionalEffectPerformed }`: a mandatory parent whose
@@ -1195,6 +1210,36 @@ fn rewrite_cant_rider_for_non_zone_change_parent(
     if prev_is_ledger_invisible {
         return Some(AbilityCondition::Not {
             condition: Box::new(AbilityCondition::effect_performed()),
+        });
+    }
+    // CR 608.2c + CR 614.6: the linked-exile assimilate promises a BATTLEFIELD
+    // arrival; a replacement can redirect the entry (Containment Priest exiles
+    // it instead) and the redirected move still records a `ZoneChanged` for the
+    // same card. Reading that event as success would skip the printed fallback,
+    // so the guard names the arrival the instruction promised. Strictly the
+    // `parse_assimilate_target` shape — every other ChangeZone antecedent keeps
+    // the generic destination-less guard.
+    let prev_is_assimilate = clauses
+        .iter()
+        .rev()
+        .find(|clause| !matches!(clause.disposition, ClauseDisposition::Continue { .. }))
+        .is_some_and(|clause| {
+            matches!(
+                &clause.parsed.effect,
+                Effect::ChangeZone {
+                    origin: Some(Zone::Exile),
+                    destination: Zone::Battlefield,
+                    target,
+                    ..
+                } if target.references_exiled_by_source()
+            )
+        });
+    if prev_is_assimilate {
+        return Some(AbilityCondition::Not {
+            condition: Box::new(AbilityCondition::ZoneChangedThisWay {
+                filter: TargetFilter::Any,
+                destination: Some(Zone::Battlefield),
+            }),
         });
     }
     condition
@@ -41396,11 +41441,18 @@ fn try_parse_cast_effect(lower: &str, ctx: &ParseContext) -> Option<Effect> {
     //
     // CR 608.2c + CR 611.2a: the pool here is a PERSISTENT per-source exile link that
     // grows across resolutions, and the printed "a spell" bounds each ACTIVATION
-    // rather than the set. A cap of exactly one cast under a STATED duration (Court
-    // of Locthwain, Idol of Endurance, Serpent's Soul-Jar) is read below and lowers
-    // to a lingering permission with `SharedSingleCast`: the per-object
-    // permissions that one resolution writes share one budget
-    // (`ExileWithAltCost::single_use_group`).
+    // rather than the set. A NORMAL-COST grant with a cap of exactly one cast under
+    // a STATED duration (Serpent's Soul-Jar) is read below and lowers to a lingering
+    // permission with `SharedSingleCast`: the per-object permissions that one
+    // resolution writes share one budget (`ExileWithAltCost::single_use_group`).
+    //
+    // A FREE grant ("without paying its mana cost" — Idol of Endurance, Court of
+    // Locthwain) deliberately does NOT take that budget: it stays the per-object
+    // permission it was on the base commit, unchanged. The engine offers no player
+    // election between the free grant and a pile card's own cast-from-exile
+    // permission (ticket 370), so charging a shared group would strip the rest of
+    // the pile; the printed cap therefore stays unenforced, a known rules deviation
+    // from CR 608.2c's "a spell" = one cast, exactly as on the base.
     //
     // KNOWN RESIDUAL (pre-existing, deliberately NOT closed here): the singular
     // members that state NO duration (Jeleva, Kylox's Voltstrider, Kaho, Tasha,
@@ -41436,13 +41488,18 @@ fn try_parse_cast_effect(lower: &str, ctx: &ParseContext) -> Option<Effect> {
             }
             _ => TargetFilter::ExiledBySource,
         };
-        // CR 608.2c + CR 611.2a: a printed cap of exactly one cast ("you may cast A
-        // spell from among cards exiled with ~") under a STATED duration ("until
-        // end of turn" — Idol of Endurance, Serpent's Soul-Jar)
-        // bounds the whole grant, so the permissions it writes share one budget
-        // (`SharedSingleCast`, chosen through the pairing authority). Every
-        // other shape keeps the per-object permission; see the residual above.
+        // CR 608.2c + CR 611.2a: a NORMAL-COST grant whose printed cap is exactly
+        // one cast ("you may cast A spell from among cards exiled with ~") under a
+        // STATED duration ("until end of turn" — Serpent's Soul-Jar) bounds the
+        // whole grant, so the permissions it writes share one budget
+        // (`SharedSingleCast`, chosen through the pairing authority). A FREE grant
+        // ("without paying its mana cost" — Idol of Endurance, Court of Locthwain)
+        // stays per-object, unchanged from the base: the engine cannot elect
+        // between it and a pile card's own cast-from-exile permission (ticket 370),
+        // and a shared group would strip the rest of the pile. Every other shape
+        // keeps the per-object permission; see the residual above.
         let driver = if mode == CardPlayMode::Cast
+            && !without_paying
             && (ctx.stated_clause_duration.is_some() || clause_states_a_duration(rest))
         {
             from_among_batch_bounds(rest)

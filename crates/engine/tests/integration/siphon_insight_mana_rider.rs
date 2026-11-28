@@ -26,9 +26,9 @@
 //! Where the conjunct stays inside the grant's own sentence, the inline
 //! recognizers gained the objects they were missing ("… to cast it", the
 //! comma before "and mana of any …") — the sentence in Court of Locthwain's text (#8481),
-//! which used to be swallowed by the catch-all with the grant. Court itself is reported
-//! unsupported (`SHARED_BUDGET_PILE_ELECTION_GAP`); its text is used here only as the
-//! recognizer's input.
+//! which used to be swallowed by the catch-all with the grant. Court's free pile grant
+//! parses per-object, unchanged from main (ticket 370), so no test here claims its cap;
+//! its text is used only as the recognizer's input.
 //! The tests here drive the real resolution (`GameScenario` / `GameRunner` /
 //! `GameAction`) end to end: no optional prompt, the recorded permission
 //! carries the concession, and the granted card is actually cast with
@@ -61,8 +61,10 @@ When this creature dies, reveal the top card of your library. You may put that c
 if it's a permanent card with mana value 3 or less. Otherwise, put that card into your hand.";
 
 /// Court of Locthwain's printed text, used only for its inline "and mana of any
-/// type can be spent to cast it" conjunct. The card is reported unsupported
-/// (`SHARED_BUDGET_PILE_ELECTION_GAP`); no test here claims it works.
+/// type can be spent to cast it" conjunct. The card's free pile grant parses
+/// per-object, unchanged from main (ticket 370), so
+/// `SHARED_BUDGET_PILE_ELECTION_GAP` does not fire for it; no test here claims
+/// the free cast over the pile works.
 const INLINE_CONJUNCT_ORACLE: &str = "When this enchantment enters, you become the monarch.\n\
 At the beginning of your upkeep, exile the top card of target opponent's library. You may play that \
 card for as long as it remains exiled, and mana of any type can be spent to cast it. If you're the \
@@ -357,14 +359,13 @@ fn bloodsoaked_insights_any_type_rider_is_scoped_to_the_exiled_cards() {
 
 /// The inline conjunct "You may play that card for as long as it remains
 /// exiled, and mana of any type can be spent to cast it." (CR 609.4b), fed with
-/// Court of Locthwain's printed text. Court of Locthwain is reported unsupported
-/// (`SHARED_BUDGET_PILE_ELECTION_GAP`, witnessed in
-/// `shared_budget_pile_election_gap.rs`): this test pins only the parser's
-/// inline-conjunct recognizer and the permission recorded on the play grant
-/// through P0's own upkeep trigger, not the card. The free cast over the pile and
-/// the monarch condition are not exercised and nothing here promises their
-/// outcome. Pre-fix the whole sentence was captured by the catch-all static and no
-/// permission existed at all.
+/// Court of Locthwain's printed text. Its free pile grant parses per-object,
+/// unchanged from main (ticket 370), so `SHARED_BUDGET_PILE_ELECTION_GAP` does
+/// not fire for it: this test pins only the parser's inline-conjunct recognizer
+/// and the permission recorded on the play grant through P0's own upkeep trigger,
+/// not the card. The free cast over the pile and the monarch condition are not
+/// exercised and nothing here promises their outcome. Pre-fix the whole sentence
+/// was captured by the catch-all static and no permission existed at all.
 #[test]
 fn inline_any_type_conjunct_records_the_concession_on_the_play_grant() {
     let mut scenario = GameScenario::new_n_player(2, 42);

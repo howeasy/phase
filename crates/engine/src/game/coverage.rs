@@ -8898,19 +8898,26 @@ fn check_shared_source_graveyard_slot(face: &CardFace, missing: &mut Vec<String>
 ///
 /// CR 601.2b + CR 118.9a: the player announces which method of casting a spell
 /// uses (the free permission versus the ordinary one), and only one alternative
-/// cost applies to a spell. Court of Locthwain is the printed example: "You may
+/// cost applies to a spell. Court of Locthwain prints the shape: "You may
 /// play that card for as long as it remains exiled, and mana of any type can be
 /// spent to cast it. If you're the monarch, until end of turn, you may cast a
 /// spell from among cards exiled with this enchantment without paying its mana
 /// cost" puts two routes over one pile, so paying for one card and then casting
 /// another free is a legal sequence. `GameAction::CastSpell` carries no
 /// permission selector, so the free-first election
-/// (`casting::selected_object_cast_permission_index`, `actions.rs`) spends the
+/// (`casting::selected_object_cast_permission_index`, `actions.rs`) would spend a
 /// shared budget before the player can pay the ordinary cost, and that sequence
-/// is lost. The face fails closed until the engine can offer the election
-/// (ticket 370). Keyed on the typed shape, not on a card: a face whose only
-/// pile route is the shared-budget cast (Idol of Endurance, Serpent's Soul-Jar)
-/// has nothing to elect and stays supported.
+/// is lost. A face with that typed shape fails closed until the engine can offer
+/// the election (ticket 370).
+///
+/// No printed face currently writes a shared-budget FREE cast: the parser stamps
+/// `SharedSingleCast` only on a normal-cost grant, and a free grant keeps the
+/// per-object permission unchanged from the base (Court of Locthwain and Idol of
+/// Endurance included). The check is keyed on the typed shape rather than on a
+/// card, so it remains a guard for any future card whose free pile cast is
+/// stamped with the shared budget. A face whose only pile route is a
+/// shared-budget cast (Serpent's Soul-Jar, normal cost) has nothing to elect and
+/// stays supported.
 pub const SHARED_BUDGET_PILE_ELECTION_GAP: &str = "LingeringPermission:shared_budget_pile_election";
 
 fn push_shared_budget_pile_election_gap(missing: &mut Vec<String>) {

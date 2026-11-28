@@ -7,7 +7,20 @@
 //!
 //! A FREE grant (Idol of Endurance, "without paying its mana cost") carries no
 //! shared budget: every card in its pile stays castable through the grant after
-//! the first cast.
+//! the first cast. This is UNCHANGED FROM MAIN, not a rules-correct cap: the
+//! engine cannot offer the player election between the free grant and a pile
+//! card's own cast-from-exile permission (ticket 370), so charging a shared
+//! group there would strip the rest of the pile. The printed cap of one cast
+//! (CR 608.2c: "a spell" is one cast) therefore stays unenforced for a free
+//! grant. These witnesses pin main's observable behaviour, not its correctness.
+//!
+//! A NORMAL-COST grant gets the same carve-out for the pile card that carries
+//! its own "you may cast this card from exile" permission (Eternal Scourge):
+//! the engine cannot distinguish a Jar cast of that card from its own
+//! permission (ticket 370), so the cast spends none of the shared budget and
+//! the grant stays available for the rest of the pile. A Jar cast of the
+//! Scourge followed by one of Grizzly Bears therefore both happen, exactly as
+//! on main. Pinned as main-compatible, not as rules-ideal.
 //!
 //! Oracle (verbatim, MTGJSON 5.3.0+20261115):
 //!   Idol of Endurance {2}{W}, Artifact: "When this artifact enters, exile all
@@ -86,10 +99,12 @@ fn tapped_count(runner: &GameRunner, lands: &[ObjectId]) -> usize {
 }
 
 /// Idol of Endurance exiles two creature cards from its controller's graveyard
-/// when it enters; its free activation grant is unbudgeted as on the base, so
-/// every card in the pile is castable for free, before and after the first cast.
+/// when it enters; its free activation grant is per-object and uncapped,
+/// unchanged from main, so every card in the pile is castable for free before
+/// and after the first cast. Witness, not a correctness claim: see the module
+/// doc (ticket 370).
 #[test]
-fn idol_of_endurance_free_grant_leaves_every_pile_card_castable() {
+fn idol_of_endurance_free_grant_is_per_object_unchanged_from_main() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     let bear = |scenario: &mut GameScenario, name: &str| {
@@ -140,7 +155,7 @@ fn idol_of_endurance_free_grant_leaves_every_pile_card_castable() {
     assert_eq!(tapped_count(&runner, &lands), spent + 2, "the cast is free");
     assert!(
         cast_is_offered(&runner, first),
-        "the free grant is unbudgeted: the other card is still offered"
+        "unchanged from main: the free per-object grant is not capped, so the other card is still offered"
     );
     assert_eq!(runner.state().objects[&first].zone, Zone::Exile);
 
@@ -159,12 +174,13 @@ fn idol_of_endurance_free_grant_leaves_every_pile_card_castable() {
     );
 }
 
-/// Two activations of the Idol before any cast: the free grant is unbudgeted,
-/// so both pile cards stay castable for free (the second activation adds no
-/// second cap). Voltaic Key's printed "{1}, {T}: Untap target artifact." is
-/// what frees the Idol for the second activation.
+/// Two activations of the Idol before any cast: each free grant is per-object
+/// and uncapped, unchanged from main, so both pile cards stay castable for free
+/// (the second activation adds no second cap). Voltaic Key's printed
+/// "{1}, {T}: Untap target artifact." is what frees the Idol for the second
+/// activation. Witness, not a correctness claim (ticket 370).
 #[test]
-fn idol_of_endurance_two_activations_leave_the_free_grant_unbudgeted() {
+fn idol_of_endurance_two_activations_leave_the_free_grant_uncapped_as_on_main() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     let bear = |scenario: &mut GameScenario, name: &str| {
@@ -209,7 +225,7 @@ fn idol_of_endurance_two_activations_leave_the_free_grant_unbudgeted() {
     assert_eq!(runner.state().objects[&second].zone, Zone::Battlefield);
     assert!(
         cast_is_offered(&runner, first),
-        "the free grant is unbudgeted: the other card is still offered"
+        "unchanged from main: the free per-object grant is not capped, so the other card is still offered"
     );
     cast_to_resolution(&mut runner, first);
     assert_eq!(runner.state().objects[&first].zone, Zone::Battlefield);
@@ -254,10 +270,11 @@ fn idol_scourge_pile() -> (GameRunner, ObjectId, ObjectId, ObjectId, Vec<ObjectI
 
 /// Eternal Scourge's own "you may cast this card from exile" permission and the
 /// Idol's free grant both authorize the same card. Casting the Scourge free
-/// through the grant spends no shared budget (the free grant is unbudgeted), so
-/// the other pile card stays castable for free.
+/// through the grant spends no shared budget (the free grant is per-object and
+/// uncapped, unchanged from main), so the other pile card stays castable for
+/// free. Witness, not a correctness claim (ticket 370).
 #[test]
-fn idol_of_endurance_free_cast_spends_no_shared_slot_on_the_own_route_card() {
+fn idol_of_endurance_free_cast_spends_no_shared_slot_unchanged_from_main() {
     let (mut runner, idol, scourge, bears, lands) = idol_scourge_pile();
     let spent = tapped_count(&runner, &lands);
     assert_eq!(spent, 3, "{{2}}{{W}} paid the Idol");
@@ -275,7 +292,7 @@ fn idol_of_endurance_free_cast_spends_no_shared_slot_on_the_own_route_card() {
     );
     assert!(
         cast_is_offered(&runner, bears),
-        "the free grant is unbudgeted: the Bears stay offered after the Scourge's cast"
+        "unchanged from main: the free per-object grant is not capped, so the Bears stay offered after the Scourge's cast"
     );
     cast_to_resolution(&mut runner, bears);
     assert_eq!(runner.state().objects[&bears].zone, Zone::Battlefield);
@@ -287,10 +304,11 @@ fn idol_of_endurance_free_cast_spends_no_shared_slot_on_the_own_route_card() {
 }
 
 /// Casting the Bears first leaves the Scourge castable for free: the free grant
-/// is unbudgeted, so it survives the first cast, and the Scourge's own route
-/// remains as well.
+/// is per-object and uncapped, unchanged from main, so it survives the first
+/// cast, and the Scourge's own route remains as well. Witness, not a correctness
+/// claim (ticket 370).
 #[test]
-fn idol_of_endurance_free_cast_of_one_pile_card_keeps_the_own_route_card_castable() {
+fn idol_of_endurance_bears_first_keeps_the_scourge_castable_unchanged_from_main() {
     let (mut runner, idol, scourge, bears, lands) = idol_scourge_pile();
     let spent = tapped_count(&runner, &lands);
     runner.activate(idol, 0).resolve();
@@ -453,6 +471,116 @@ fn soul_jar_normal_cost_grant_spends_its_budget_leaving_only_the_own_route() {
     assert!(
         cast_is_offered(&runner, scourge),
         "the Scourge's own 'you may cast this card from exile' route still offers it"
+    );
+}
+
+/// Serpent's Soul-Jar on the battlefield with Eternal Scourge (own
+/// "you may cast this card from exile" permission) and Grizzly Bears exiled
+/// with it. Returns the runner, the Jar, the two pile cards, and six green
+/// lands.
+fn soul_jar_scourge_pile() -> (GameRunner, ObjectId, ObjectId, ObjectId, Vec<ObjectId>) {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let jar = scenario
+        .add_artifact_from_oracle(P0, "Serpent's Soul-Jar", SERPENTS_SOUL_JAR)
+        .with_mana_cost(cost(&[ManaCostShard::Black], 2))
+        .id();
+    let scourge = scenario
+        .add_creature_to_exile(P0, "Eternal Scourge", 3, 3)
+        .with_subtypes(vec!["Eldrazi", "Horror"])
+        .with_mana_cost(cost(&[], 3))
+        .from_oracle_text(ETERNAL_SCOURGE)
+        .id();
+    let bears = scenario
+        .add_creature_to_exile(P0, "Grizzly Bears", 2, 2)
+        .with_subtypes(vec!["Bear"])
+        .with_mana_cost(cost(&[ManaCostShard::Green], 1))
+        .id();
+    let forests: Vec<ObjectId> = (0..6)
+        .map(|_| scenario.add_basic_land(P0, ManaColor::Green))
+        .collect();
+    let mut runner = scenario.build();
+    for card in [scourge, bears] {
+        runner.state_mut().exile_links.push(ExileLink {
+            exiled_id: card,
+            source_id: jar,
+            kind: ExileLinkKind::TrackedBySource,
+            supplier: None,
+        });
+    }
+    (runner, jar, scourge, bears, forests)
+}
+
+/// Serpent's Soul-Jar's normal-cost grant is shared, but the own-permission
+/// carve-out matches main: the engine auto-elects the Jar grant for Eternal
+/// Scourge and cannot distinguish that cast from the Scourge's own
+/// "you may cast this card from exile" route, so the cast spends no shared
+/// budget and the same Jar activation still authorizes Grizzly Bears. A Jar
+/// cast of the Scourge plus a Jar cast of the Bears is therefore exactly main's
+/// two-cast outcome — a compatibility witness (ticket 370), not a rules-ideal
+/// reading.
+#[test]
+fn soul_jar_scourge_first_keeps_the_bears_castable_through_the_grant() {
+    let (mut runner, jar, scourge, bears, forests) = soul_jar_scourge_pile();
+    runner.activate(jar, 0).resolve();
+    assert!(cast_is_offered(&runner, scourge));
+    assert!(cast_is_offered(&runner, bears));
+
+    cast_to_resolution(&mut runner, scourge);
+    assert_eq!(runner.state().objects[&scourge].zone, Zone::Battlefield);
+    assert_eq!(tapped_count(&runner, &forests), 3, "the Scourge's {{3}}");
+    assert!(
+        runner.state().exile_play_single_use_consumed.is_empty(),
+        "the carve-out spends no shared budget for the own-permission card"
+    );
+    assert!(
+        cast_is_offered(&runner, bears),
+        "same as main: the Jar activation still authorizes the rest of the pile"
+    );
+
+    cast_to_resolution(&mut runner, bears);
+    assert_eq!(runner.state().objects[&bears].zone, Zone::Battlefield);
+    assert_eq!(
+        tapped_count(&runner, &forests),
+        5,
+        "the Bears' printed {{1}}{{G}} is paid through the grant"
+    );
+    assert_eq!(
+        runner.state().exile_play_single_use_consumed.len(),
+        1,
+        "the Bears' cast is the one cast the grant allows"
+    );
+}
+
+/// The control: a Bears cast first is unambiguously the Jar's grant, so it
+/// spends the shared budget; Eternal Scourge stays castable through its own
+/// "you may cast this card from exile" route and is cast for its printed {3}.
+/// The two casts (Bears through the grant, Scourge through its own route) are
+/// main's observable behaviour (ticket 370), not a rules-ideal claim.
+#[test]
+fn soul_jar_bears_first_spends_the_grant_but_the_scourge_keeps_its_own_route() {
+    let (mut runner, jar, scourge, bears, forests) = soul_jar_scourge_pile();
+    runner.activate(jar, 0).resolve();
+
+    cast_to_resolution(&mut runner, bears);
+    assert_eq!(runner.state().objects[&bears].zone, Zone::Battlefield);
+    assert_eq!(tapped_count(&runner, &forests), 2, "the Bears' {{1}}{{G}}");
+    assert_eq!(
+        runner.state().exile_play_single_use_consumed.len(),
+        1,
+        "the Bears' cast spends the Jar's one cast"
+    );
+    assert!(
+        cast_is_offered(&runner, scourge),
+        "the Scourge's own route still offers it"
+    );
+
+    cast_to_resolution(&mut runner, scourge);
+    assert_eq!(runner.state().objects[&scourge].zone, Zone::Battlefield);
+    assert_eq!(
+        tapped_count(&runner, &forests),
+        5,
+        "the Scourge pays its own printed {{3}}"
     );
 }
 

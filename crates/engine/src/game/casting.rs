@@ -5164,6 +5164,15 @@ pub(super) fn selected_exile_alt_cost_permission_graveyard_replacement(
 /// first-compatible lookup cannot authorize spending a group. A rider cast
 /// that elects no cost slot passes the index from
 /// `selected_rider_zone_authority_permission_index` instead.
+///
+/// CR 604.6 + CR 113.6f: a card carrying its own "you may cast this card from
+/// exile" permission (Eternal Scourge) is exempt. `GameAction::CastSpell`
+/// carries no grant selector, so the engine auto-elects the pile grant and
+/// cannot distinguish that route from the card's own permission; charging the
+/// grant would spend the pile's one shared cast on a cast the own permission
+/// also authorized, stripping the rest of the pile. Its cast therefore spends
+/// no shared budget and the grant stays available for the rest of the pile —
+/// main's observable behaviour (ticket 370), not the rules-ideal reading.
 pub(super) fn selected_exile_alt_cost_permission_single_use_group(
     state: &GameState,
     object_id: ObjectId,
@@ -5172,6 +5181,9 @@ pub(super) fn selected_exile_alt_cost_permission_single_use_group(
 ) -> Option<TrackedSetId> {
     let index = casting_permission_index?;
     let obj = state.objects.get(&object_id)?;
+    if own_exile_cast_permission(state, obj, player) {
+        return None;
+    }
     let permission = selected_exile_alt_cost_permission(state, obj, player, Some(index))?;
     match permission {
         crate::types::ability::CastingPermission::ExileWithAltCost {
