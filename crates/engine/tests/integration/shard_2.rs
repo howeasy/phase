@@ -242,6 +242,7 @@ mod census_release_batch_8;
 mod census_release_batch_9;
 mod census_release_implicit_you_gain_draw;
 mod census_release_next_cast;
+mod census_release_untap_controller;
 mod chain_of_smog_copy;
 mod chain_root_target_suspension;
 mod chains_of_mephistopheles_discard_draw_or_mill;
