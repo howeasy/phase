@@ -21476,9 +21476,10 @@ fn conjunct_steps_are_infeasible(
 /// object can no longer move, an untargeted "it" whose inferred referent is a
 /// source the ability can no longer find (CR 400.7), a resolution-time zone pick
 /// with no eligible object, a reveal of a library top that would reveal no card,
-/// a blight with no creature that can take the counters, an unbound linked-exile
-/// referent ("the exiled card") with no card in exile, or a conjoined step that
-/// can't be performed in full
+/// a blight with no creature that can take the counters, a sacrifice with no
+/// legal candidate permanent (CR 701.21a), an unbound linked-exile referent
+/// ("the exiled card") with no card in exile, or a conjoined step that can't be
+/// performed in full
 /// ([`optional_conjunction_is_infeasible`]). Suppressing the prompt lets the
 /// effect resolve as its defined no-op instead.
 fn optional_effect_is_infeasible(state: &GameState, ability: &ResolvedAbility) -> bool {
@@ -21565,6 +21566,11 @@ fn optional_instruction_is_infeasible(state: &GameState, ability: &ResolvedAbili
             let effective = hydrate_event_context_targets(state, ability);
             blight::optional_blight_is_infeasible(state, effective.as_ref())
         }
+        // CR 608.2d + CR 701.21a: "you may sacrifice <X>" with no legal candidate
+        // is an impossible option — accepting would sacrifice nothing while the
+        // "When you do" rider still fires (Cornered Crook with only a Treasure
+        // token Quark bars). Suppress the prompt so it resolves as the no-op.
+        Effect::Sacrifice { .. } => sacrifice::optional_sacrifice_is_infeasible(state, ability),
         // CR 608.2d + CR 122.1: an optional exact counter-removal selection
         // cannot be accepted unless every required permanent is selectable.
         Effect::ChooseObjectsIntoTrackedSet { .. } => {

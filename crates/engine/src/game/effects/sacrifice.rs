@@ -226,6 +226,111 @@ pub(crate) fn can_sacrifice_for_ability(
         && !crate::game::static_abilities::object_cant_be_sacrificed_by(state, player, object_id)
 }
 
+/// CR 608.2d + CR 701.21a: Whether a "you may sacrifice <filter>" option has no
+/// legal permanent to sacrifice, so its up-front "you may" prompt must not open
+/// and the instruction resolves as the no-op it would be anyway.
+///
+/// Mirrors [`resolve`]: the same tracked-set sentinel binding, the same
+/// `ScopedPlayer` rebinding, and the same chooser derivation
+/// ([`resolve_sacrifice_scope`], with `resolve`'s controller fallback), so the
+/// pool judged here is exactly the resolver's candidate pool. Accepting an
+/// illegal option would sacrifice nothing while the "When you do" rider still
+/// fires (Cornered Crook with only a Treasure token Quark bars, CR 701.21a).
+///
+/// The candidate pool is consulted only for filters whose subject is a class of
+/// battlefield permanents. Referent filters (`TriggeringSource`, `ParentTarget`,
+/// `CostPaidObject`, …) name one bound object and are resolved by
+/// [`resolve`]'s targeted path, not the pool; enumerating the battlefield under
+/// them matches nothing, so treating an empty pool as infeasible would suppress
+/// a sacrifice the resolver would perform (Foot Chopper, Ogre-Head Helm).
+pub(crate) fn optional_sacrifice_is_infeasible(
+    state: &GameState,
+    ability: &ResolvedAbility,
+) -> bool {
+    let Effect::Sacrifice { target, .. } = &ability.effect else {
+        return false;
+    };
+    // CR 608.2c: bind the parser's "most recent set" sentinel exactly as
+    // `resolve` does before deriving the eligible pool.
+    let filter = crate::game::targeting::resolve_tracked_set_sentinel(state, target.clone());
+    // CR 608.2b + CR 400.7: the two early completions in `resolve` that make the
+    // effect a hard no-op — an authoritatively empty parent binding, and a
+    // self-reference whose source has left and re-entered (a new object).
+    if matches!(filter, TargetFilter::ParentTarget) && ability.has_authoritative_empty_binding() {
+        return true;
+    }
+    if matches!(filter, TargetFilter::SelfRef) && !ability.self_ref_is_current(state) {
+        return true;
+    }
+    // CR 400.7 + CR 603.7c: `resolve` returns before the pool when every pinned
+    // object referent became a new object.
+    if ability.pinned_object_targets_all_stale(state) {
+        return true;
+    }
+    if !sacrifice_filter_is_battlefield_population(&filter) {
+        return false;
+    }
+    // CR 115.1: `resolve` takes its targeted path whenever the chain still
+    // carries a live object target on the battlefield; that path sacrifices the
+    // inherited object directly and never consults the pool.
+    for target in ability.live_object_targets(state) {
+        let TargetRef::Object(id) = target else {
+            continue;
+        };
+        if state
+            .objects
+            .get(&id)
+            .is_some_and(|obj| obj.zone == Zone::Battlefield)
+        {
+            return false;
+        }
+    }
+    // CR 608.2c: the resolver rebinds a `ScopedPlayer` sacrifice to the player
+    // named by the triggering event before deriving the chooser.
+    let scoped_ability;
+    let ability = if matches!(
+        sacrifice_controller_scope(&filter),
+        Some(ControllerRef::ScopedPlayer)
+    ) {
+        if let Some(player) = trigger_event_scoped_player(state, ability) {
+            scoped_ability = {
+                let mut scoped = ability.clone();
+                scoped.set_scoped_player_recursive(player);
+                scoped
+            };
+            &scoped_ability
+        } else {
+            ability
+        }
+    } else {
+        ability
+    };
+    // CR 701.21a: `resolve` asks exactly this chooser (its `affected[0]`),
+    // falling back to the ability controller when no scope resolves.
+    let chooser = resolve_sacrifice_scope(state, ability, &filter)
+        .first()
+        .copied()
+        .unwrap_or(ability.controller);
+    let first_candidate = sacrifice_candidates(state, ability, &filter, chooser).next();
+    first_candidate.is_none()
+}
+
+/// CR 608.2d: True when `filter`'s subject is a class of permanents on the
+/// battlefield — the shape [`sacrifice_candidates`] enumerates — rather than a
+/// referent to one already-bound object. Every leg of a conjunction/disjunction
+/// must be a class so a referent anywhere in the tree keeps the option offered
+/// (failing open, never suppressing a legal sacrifice).
+fn sacrifice_filter_is_battlefield_population(filter: &TargetFilter) -> bool {
+    match filter {
+        TargetFilter::Any | TargetFilter::SelfRef | TargetFilter::Typed(_) => true,
+        TargetFilter::Or { filters } | TargetFilter::And { filters } => filters
+            .iter()
+            .all(sacrifice_filter_is_battlefield_population),
+        TargetFilter::Not { filter } => sacrifice_filter_is_battlefield_population(filter),
+        _ => false,
+    }
+}
+
 /// CR 701.21a: To sacrifice a permanent, its controller moves it to its owner's graveyard.
 pub fn resolve(
     state: &mut GameState,

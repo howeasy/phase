@@ -15,12 +15,13 @@ use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::scenario_db::GameScenarioDbExt;
 use engine::types::ability::{AbilityDefinition, Effect};
 use engine::types::actions::GameAction;
-use engine::types::game_state::{CastPaymentMode, WaitingFor};
+use engine::types::game_state::{CastPaymentMode, StackEntryKind, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::statics::StaticMode;
 use engine::types::zones::Zone;
+use engine::types::TargetRef;
 
 fn contains_unimplemented(def: &AbilityDefinition) -> bool {
     matches!(def.effect.as_ref(), Effect::Unimplemented { .. })
@@ -792,4 +793,156 @@ fn forage_sacrifices_the_ordinary_food_never_the_barred_treasure() {
     assert_eq!(runner.state().objects[&food].zone, Zone::Graveyard);
     assert!(on_battlefield(&runner, treasure));
     assert_eq!(plus_one_counters(&runner, corpseberry), 1);
+}
+
+/// Cornered Crook — "When this creature enters, you may sacrifice an artifact.
+/// When you do, this creature deals 3 damage to any target." — cast from hand
+/// so its enters trigger goes through the production trigger pipeline. Quark's
+/// upkeep trigger makes the Treasure token for real; with `ordinary_artifact` a
+/// nontoken Sol Ring joins it. Returns the runner at P0's precombat main, with
+/// `{4}{R}` seeded in an otherwise empty pool (CR 500.5: the pool drains at each
+/// step and phase end).
+fn crook_board(ordinary_artifact: bool) -> (GameRunner, ObjectId, ObjectId, Option<ObjectId>) {
+    let db = shared_card_db().expect("integration card fixture must load");
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::Untap);
+    let quark = scenario.add_real_card(P0, "Quark, Humble Proprietor", Zone::Battlefield, db);
+    let sol_ring =
+        ordinary_artifact.then(|| scenario.add_real_card(P0, "Sol Ring", Zone::Battlefield, db));
+    let crook = scenario.add_real_card(P0, "Cornered Crook", Zone::Hand, db);
+    scenario.with_library_top(P0, &["Island"]);
+    let mut runner = scenario.build();
+    assert_quark_prohibition(&runner, quark);
+    runner.advance_to_upkeep();
+    runner.advance_until_stack_empty();
+    let treasure = treasure_token(&runner);
+    runner.advance_to_phase(Phase::PreCombatMain);
+    for _ in 0..5 {
+        runner.state_mut().players[0].mana_pool.add(ManaUnit::new(
+            ManaType::Red,
+            ObjectId(0),
+            false,
+            vec![],
+        ));
+    }
+    (runner, crook, treasure, sol_ring)
+}
+
+/// CR 603.6a: cast Cornered Crook and resolve the creature spell, leaving its
+/// enters trigger on the stack (reach guard: the printed trigger, not a
+/// synthetic stand-in).
+fn cast_crook_into_etb(runner: &mut GameRunner, crook: ObjectId) {
+    runner.cast(crook).commit();
+    runner.pass_both_players();
+    let stack = &runner.state().stack;
+    assert_eq!(
+        stack.len(),
+        1,
+        "the enters trigger is on the stack: {stack:?}"
+    );
+    assert!(
+        matches!(
+            &stack[0].kind,
+            StackEntryKind::TriggeredAbility { source_id, ability, .. }
+                if *source_id == crook && matches!(ability.effect, Effect::Sacrifice { .. })
+        ),
+        "Cornered Crook's optional sacrifice trigger is on the stack: {:?}",
+        stack[0]
+    );
+}
+
+/// Passes priority while the stack drains and returns the first interactive
+/// prompt the engine parks on (`None` once the stack is empty at a priority
+/// window). Deliberately does not answer any prompt.
+fn drive_until_interactive_prompt(runner: &mut GameRunner) -> Option<WaitingFor> {
+    for _ in 0..40 {
+        match runner.state().waiting_for.clone() {
+            WaitingFor::OrderTriggers { .. } => {
+                engine::game::triggers::drain_order_triggers_with_identity(runner.state_mut());
+            }
+            WaitingFor::Priority { .. } if runner.state().stack.is_empty() => return None,
+            WaitingFor::Priority { .. } => {
+                runner
+                    .act(GameAction::PassPriority)
+                    .expect("priority passes");
+            }
+            other => return Some(other),
+        }
+    }
+    panic!("Cornered Crook's enters trigger never settled");
+}
+
+/// CR 608.2d + CR 701.21a: the only artifact is Quark's Treasure token, which
+/// "You can't sacrifice Treasure tokens" bars from being a legal candidate, so
+/// "you may sacrifice an artifact" is an impossible option: no prompt opens, no
+/// reflexive target is asked for, nothing is sacrificed and no damage is dealt.
+#[test]
+fn cornered_crook_offers_no_sacrifice_when_the_only_artifact_is_a_quark_barred_treasure() {
+    let (mut runner, crook, treasure, _) = crook_board(false);
+    cast_crook_into_etb(&mut runner, crook);
+    assert!(
+        drive_until_interactive_prompt(&mut runner).is_none(),
+        "no optional-sacrifice or target prompt opens when no artifact can be sacrificed, got {:?}",
+        runner.state().waiting_for
+    );
+    assert!(on_battlefield(&runner, treasure), "nothing was sacrificed");
+    assert!(on_battlefield(&runner, crook));
+    assert_eq!(runner.state().players[1].life, 20, "no damage is dealt");
+    assert!(runner.state().stack.is_empty());
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+}
+
+/// CR 608.2d + CR 701.21a: an ordinary non-Treasure artifact restores the
+/// option. The prompt opens; accepting sacrifices the Sol Ring (the single
+/// legal candidate, so no further choice) and the Treasure token stays; the
+/// reflexive "When you do" trigger then deals 3 damage to the chosen target.
+#[test]
+fn cornered_crook_sacrifices_the_ordinary_artifact_never_the_barred_treasure() {
+    let (mut runner, crook, treasure, sol_ring) = crook_board(true);
+    let sol_ring = sol_ring.expect("ordinary artifact fixture");
+    cast_crook_into_etb(&mut runner, crook);
+    let prompt = drive_until_interactive_prompt(&mut runner);
+    assert!(
+        matches!(prompt, Some(WaitingFor::OptionalEffectChoice { player, .. }) if player == P0),
+        "an ordinary artifact makes the sacrifice offer performable, got {prompt:?}"
+    );
+    runner
+        .act(GameAction::DecideOptionalEffect { accept: true })
+        .expect("accept the sacrifice");
+    assert!(
+        !matches!(
+            runner.state().waiting_for,
+            WaitingFor::EffectZoneChoice { .. }
+        ),
+        "the barred Treasure is not a candidate, so there is nothing to choose between"
+    );
+    assert_eq!(
+        runner.state().objects[&sol_ring].zone,
+        Zone::Graveyard,
+        "the ordinary artifact is the one sacrificed"
+    );
+    assert!(on_battlefield(&runner, treasure), "the Treasure is kept");
+    let WaitingFor::TriggerTargetSelection { player, .. } = runner.state().waiting_for.clone()
+    else {
+        panic!(
+            "the reflexive trigger asks for its target, got {:?}",
+            runner.state().waiting_for
+        );
+    };
+    assert_eq!(player, P0);
+    runner
+        .act(GameAction::ChooseTarget {
+            target: Some(TargetRef::Player(P1)),
+        })
+        .expect("the reflexive trigger targets P1");
+    runner.advance_until_stack_empty();
+    assert_eq!(
+        runner.state().players[1].life,
+        17,
+        "Cornered Crook's reflexive trigger deals 3 damage"
+    );
+    assert!(on_battlefield(&runner, treasure));
 }

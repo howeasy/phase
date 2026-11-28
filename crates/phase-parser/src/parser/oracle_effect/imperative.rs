@@ -22012,6 +22012,13 @@ mod tests {
     /// beneath it. The binding is the clause's own: it holds with no
     /// "counter of that kind" instruction anywhere after it, which a
     /// neighbour-shape inference could not produce.
+    ///
+    /// Both inputs are synthetic controls, not printed Oracle text: the first
+    /// appends an unrelated sentence to the clause and the second is the clause
+    /// alone. The nearest printed cards are Dathon, His Heart Open ("choose a
+    /// counter on target enchantment you control. Put another counter of that
+    /// kind on it") and Animation Module, whose full printed text is witnessed
+    /// in `oracle_tests.rs`.
     #[test]
     fn choose_counter_on_declared_target_binds_its_own_kind_choice() {
         use crate::parser::oracle_effect::parse_effect_chain;
