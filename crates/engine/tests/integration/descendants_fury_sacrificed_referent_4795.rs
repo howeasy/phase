@@ -53,8 +53,10 @@
 
 use super::rules::{run_combat, GameScenario, Phase, P0, P1};
 use crate::support::shared_card_db;
-use engine::game::game_object::GameObject;
+use engine::game::effects::attach;
+use engine::game::game_object::{AttachTarget, GameObject};
 use engine::game::scenario_db::GameScenarioDbExt;
+use engine::types::ability::{Effect, TargetFilter};
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
 use engine::types::game_state::{StackEntryKind, WaitingFor};
@@ -387,7 +389,7 @@ fn descendants_fury_quark_barred_lone_damage_source_gets_no_offer() {
         .id();
 
     let mut runner = scenario.build();
-    // CR 111.10b: Quark's prohibition names Treasure TOKENS.
+    // CR 111.10a: Quark's prohibition names Treasure TOKENS.
     runner
         .state_mut()
         .objects
@@ -517,6 +519,198 @@ fn descendants_fury_quark_barred_treasure_with_legal_second_attacker_still_offer
         s.objects[&lib_goblin].zone,
         Zone::Battlefield,
         "the accepted sacrifice runs the If-you-do reveal, which battlefields the shared-type Goblin"
+    );
+    assert!(s.stack.is_empty());
+}
+
+/// Use the third printed ability of Foot Chopper (Scryfall TMC #17):
+/// "Whenever equipped creature deals combat damage to a player, you may
+/// sacrifice it. If you do, draw cards equal to its power."
+const FOOT_CHOPPER_TRIGGER: &str =
+    "Whenever equipped creature deals combat damage to a player, you may sacrifice it. If you do, draw cards equal to its power.";
+
+/// Reach guard shared by the Foot Chopper tests: the printed trigger must lower
+/// the bare "it" to the TRIGGERING SOURCE (the equipped creature that dealt the
+/// damage), not to a self-reference or a battlefield class. This is the shape the
+/// up-front "you may" feasibility gate (`optional_sacrifice_is_infeasible`) now
+/// judges through `resolved_targets` (CR 608.2d + CR 608.2k).
+fn assert_foot_chopper_binds_triggering_source(
+    runner: &super::rules::GameRunner,
+    chopper: ObjectId,
+) {
+    let object = &runner.state().objects[&chopper];
+    let trigger = object
+        .trigger_definitions
+        .first()
+        .expect("Foot Chopper must carry its combat-damage trigger");
+    let execute = trigger
+        .definition
+        .execute
+        .as_deref()
+        .expect("Foot Chopper's trigger must carry an execute ability");
+    assert!(
+        execute.optional,
+        "the printed 'you may sacrifice it' must lower to an optional execute: {execute:?}"
+    );
+    assert!(
+        matches!(
+            execute.effect.as_ref(),
+            Effect::Sacrifice {
+                target: TargetFilter::TriggeringSource,
+                ..
+            }
+        ),
+        "the bare 'it' must bind the equipped damage dealer (TriggeringSource), got {:?}",
+        execute.effect
+    );
+}
+
+/// CR 608.2d + CR 701.21a: Quark, Humble Proprietor bars sacrificing Treasure
+/// TOKENS. A Treasure animated into an artifact creature and equipped with Foot
+/// Chopper is the trigger's bound referent ("equipped creature deals combat
+/// damage … you may sacrifice it") and the chooser is barred from sacrificing
+/// it, so the option is impossible: the "you may" prompt must not open and the
+/// gated draw must not run.
+#[test]
+fn foot_chopper_quark_barred_equipped_treasure_gets_no_sacrifice_offer() {
+    let db = shared_card_db().expect("integration card fixture must load");
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    // Enough library for a power-2 draw, so a wrongly-run rider is observable.
+    scenario.with_library_top(P0, &["Island", "Island", "Island"]);
+    scenario.add_real_card(P0, "Quark, Humble Proprietor", Zone::Battlefield, db);
+    let chopper = scenario
+        .add_artifact_from_oracle(P0, "Foot Chopper", FOOT_CHOPPER_TRIGGER)
+        .with_subtypes(vec!["Equipment"])
+        .id();
+    let treasure = scenario
+        .add_creature_from_oracle(
+            P0,
+            "Treasure",
+            2,
+            2,
+            "{T}, Sacrifice this artifact: Add one mana of any color.",
+        )
+        .with_subtypes(vec!["Treasure"])
+        .as_artifact_creature()
+        .id();
+
+    let mut runner = scenario.build();
+    // CR 111.10a: Quark's prohibition names Treasure TOKENS.
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&treasure)
+        .unwrap()
+        .is_token = true;
+    // CR 701.3a: `attach_to` returns the OLD host (None on a first attach), not a
+    // success flag, so assert the resulting host instead of the return value.
+    let _ = attach::attach_to(runner.state_mut(), chopper, treasure);
+    assert_eq!(
+        runner.state().objects[&chopper].attached_to,
+        Some(AttachTarget::Object(treasure)),
+        "the Foot Chopper must attach to the animated Treasure"
+    );
+    assert_foot_chopper_binds_triggering_source(&runner, chopper);
+
+    let p1_before = runner.life(P1);
+    let hand_before = runner.state().players[0].hand.len();
+    run_combat(&mut runner, vec![treasure], vec![]);
+
+    // Reach guards: the equipped Treasure dealt combat damage, so the printed
+    // trigger is on the stack for the event.
+    assert!(
+        runner.life(P1) < p1_before,
+        "the animated Treasure must deal combat damage to P1"
+    );
+    assert!(
+        runner.state().stack.iter().any(|entry| matches!(
+            &entry.kind,
+            StackEntryKind::TriggeredAbility { source_id, .. } if *source_id == chopper
+        )),
+        "Foot Chopper's combat-damage trigger must be on the stack: {:?}",
+        runner.state().stack
+    );
+
+    assert!(
+        drive_until_sacrifice_prompt(&mut runner).is_none(),
+        "the Quark-barred Treasure is the bound referent, so no optional-sacrifice \
+         prompt may open; got {:?}",
+        runner.state().waiting_for
+    );
+
+    let s = runner.state();
+    assert_eq!(
+        s.objects[&treasure].zone,
+        Zone::Battlefield,
+        "the Quark-barred animated Treasure must survive — nothing was sacrificed"
+    );
+    assert_eq!(
+        s.players[0].hand.len(),
+        hand_before,
+        "the suppressed option must not run the If-you-do draw"
+    );
+    assert!(
+        s.players[0].graveyard.is_empty(),
+        "no sacrifice (and therefore no sacrifice payoff) may happen"
+    );
+    assert!(s.stack.is_empty());
+}
+
+/// Control for the test above: an unbarred equipped creature is a legal
+/// sacrifice for the chooser, so the same gate must leave the prompt open;
+/// accepting sacrifices it and the If-you-do rider draws cards equal to its
+/// power (2).
+#[test]
+fn foot_chopper_unbarred_equipped_creature_still_offers_and_draws() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_library_top(P0, &["Island", "Island", "Island"]);
+    let chopper = scenario
+        .add_artifact_from_oracle(P0, "Foot Chopper", FOOT_CHOPPER_TRIGGER)
+        .with_subtypes(vec!["Equipment"])
+        .id();
+    let attacker = scenario.add_creature(P0, "Goblin Attacker", 2, 2).id();
+
+    let mut runner = scenario.build();
+    // CR 701.3a: `attach_to` returns the OLD host (None on a first attach), not a
+    // success flag, so assert the resulting host instead of the return value.
+    let _ = attach::attach_to(runner.state_mut(), chopper, attacker);
+    assert_eq!(
+        runner.state().objects[&chopper].attached_to,
+        Some(AttachTarget::Object(attacker)),
+        "the Foot Chopper must attach to the attacker"
+    );
+    assert_foot_chopper_binds_triggering_source(&runner, chopper);
+    let hand_before = runner.state().players[0].hand.len();
+
+    run_combat(&mut runner, vec![attacker], vec![]);
+    assert!(
+        runner.state().stack.iter().any(|entry| matches!(
+            &entry.kind,
+            StackEntryKind::TriggeredAbility { source_id, .. } if *source_id == chopper
+        )),
+        "Foot Chopper's combat-damage trigger must be on the stack: {:?}",
+        runner.state().stack
+    );
+
+    let prompt = drive_until_sacrifice_prompt(&mut runner);
+    assert!(
+        matches!(prompt, Some(WaitingFor::OptionalEffectChoice { player, .. }) if player == P0),
+        "an unbarred equipped creature keeps the sacrifice offer performable, got {prompt:?}"
+    );
+    resolve_trigger(&mut runner, |_| unreachable!("single referent fast-paths"));
+
+    let s = runner.state();
+    assert_eq!(
+        s.objects[&attacker].zone,
+        Zone::Graveyard,
+        "accepting the offer must sacrifice the equipped creature"
+    );
+    assert_eq!(
+        s.players[0].hand.len(),
+        hand_before + 2,
+        "the If-you-do rider must draw cards equal to the sacrificed creature's power (2)"
     );
     assert!(s.stack.is_empty());
 }

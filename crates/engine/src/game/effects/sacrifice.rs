@@ -250,11 +250,20 @@ pub(crate) fn can_sacrifice_for_ability(
 /// can enumerate correctly: classes of battlefield permanents (`Any`, `Typed`,
 /// `SelfRef`) and a `SpecificObject` bound by a tracked-set / combat-damage
 /// anaphor (CR 510.2), which the pool admits by identity. The remaining referent
-/// filters (`TriggeringSource`, `ParentTarget`, `CostPaidObject`, …) name one
-/// bound object and are resolved by [`resolve`]'s targeted path, not the pool;
-/// enumerating the battlefield under them matches nothing, so treating an empty
-/// pool as infeasible would suppress a sacrifice the resolver would perform
-/// (Foot Chopper, Ogre-Head Helm).
+/// filters (`ParentTarget`, `CostPaidObject`, …) name one bound object and are
+/// resolved by [`resolve`]'s targeted path, not the pool; enumerating the
+/// battlefield under them matches nothing, so treating an empty pool as
+/// infeasible would suppress a sacrifice the resolver would perform (Ogre-Head
+/// Helm). Those keep failing open.
+///
+/// CR 608.2d + CR 608.2k: `TriggeringSource` is the one referent this gate can
+/// judge without the pool. `resolve` takes the event-context object directly
+/// ("equipped creature deals combat damage … you may sacrifice it"), so when
+/// that object is on the battlefield under the chooser's control the option is
+/// impossible exactly when the sacrifice bar refuses it (Foot Chopper under
+/// Quark, Humble Proprietor). Every other resolution of the referent —
+/// nothing, a non-battlefield object, or a different controller — keeps the
+/// fail-open behavior.
 pub(crate) fn optional_sacrifice_is_infeasible(
     state: &GameState,
     ability: &ResolvedAbility,
@@ -280,7 +289,37 @@ pub(crate) fn optional_sacrifice_is_infeasible(
         return true;
     }
     if !sacrifice_filter_is_battlefield_population(&filter) {
-        return false;
+        // CR 608.2d + CR 608.2k: a non-population referent this resolver takes
+        // from event context ("you may sacrifice it" on a combat-damage
+        // trigger — Foot Chopper's equipped creature) names exactly one bound
+        // object. `resolve` sacrifices that referent directly rather than
+        // consulting the pool, so the option is impossible exactly when the
+        // bar stops the chooser from sacrificing it. Other referents stay
+        // fail-open: a pool built for them matches nothing, and their resolver
+        // path has its own guards.
+        // `resolve` reads the event-context referent only when the chain
+        // carries no chosen targets; with chosen targets it sacrifices those
+        // instead, so leave that shape fail-open here too.
+        if !matches!(filter, TargetFilter::TriggeringSource) || !ability.targets.is_empty() {
+            return false;
+        }
+        let chooser = resolve_sacrifice_scope(state, ability, &filter)
+            .first()
+            .copied()
+            .unwrap_or(ability.controller);
+        return crate::game::targeting::resolved_targets(ability, &filter, state)
+            .into_iter()
+            .find_map(|target| match target {
+                TargetRef::Object(id) => Some(id),
+                TargetRef::Player(_) => None,
+            })
+            .filter(|id| {
+                state
+                    .objects
+                    .get(id)
+                    .is_some_and(|obj| obj.zone == Zone::Battlefield && obj.controller == chooser)
+            })
+            .is_some_and(|id| !can_sacrifice_for_ability(state, ability, id, chooser));
     }
     // CR 115.1: `resolve` takes its targeted path whenever the chain still
     // carries a live object target on the battlefield; that path sacrifices the
@@ -375,8 +414,10 @@ pub(crate) fn optional_sacrifice_is_infeasible(
 /// Other referents (`TriggeringSource`, `ParentTarget`, `CostPaidObject`, …)
 /// stay `false`: `resolve` handles them through its targeted path, and a pool
 /// built for them matches nothing, so treating the empty pool as infeasible
-/// would suppress a sacrifice the resolver would perform (Foot Chopper,
-/// Ogre-Head Helm) — those keep failing open.
+/// would suppress a sacrifice the resolver would perform (Ogre-Head Helm).
+/// The optional-offer gate judges `TriggeringSource` separately through
+/// [`crate::game::targeting::resolved_targets`] instead of widening this
+/// pool-enumerability predicate.
 pub(crate) fn sacrifice_filter_is_battlefield_population(filter: &TargetFilter) -> bool {
     match filter {
         TargetFilter::Any
