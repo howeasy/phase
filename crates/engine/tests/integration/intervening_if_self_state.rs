@@ -3,15 +3,15 @@
 //! end to end through the production pipeline (`add_real_card` printed cards +
 //! `GameRunner` real player actions): a single-state gate fires only when the
 //! printed condition holds, and a compound attachment-state gate stays
-//! unparsed so it never fires.
+//! unparsed, so its unsupported effect creates no token.
 //!
 //! Cards (verbatim Oracle text, from client/public/card-data.json):
 //!   - Krond the Dawn-Clad: "Whenever Krond attacks, if it's enchanted, exile
 //!     target permanent."
 //!   - Warchanter Skald: "Whenever this creature becomes tapped, if it's
 //!     enchanted or equipped, create a 2/1 red Dwarf Berserker creature token."
-//!     Its compound gate is deliberately not parsed (CR 603.4), so the trigger
-//!     stays Unimplemented and never creates a token.
+//!     Its compound gate is deliberately not parsed (CR 603.4), so the trigger's
+//!     unsupported effect creates no token.
 //!   - Kaito Shizuki: "At the beginning of your end step, if Kaito entered
 //!     this turn, he phases out."
 //!
@@ -334,6 +334,138 @@ fn krond_equipped_attacker_is_not_enchanted_and_exiles_nothing() {
     );
 }
 
+/// Response sibling: the intervening "if" is rechecked at resolution time
+/// (CR 603.4), not only at the trigger event. Krond attacks enchanted by
+/// Rancor and the trigger asks for its exile target (the opponent's bear);
+/// while that trigger waits on the stack P0 casts Disenchant on Rancor. At
+/// resolution Krond is no longer enchanted (CR 303.4b), so the recheck fails
+/// and the bear is not exiled. Reach: the trigger is still on the stack when
+/// Disenchant is cast, and Disenchant really destroyed Rancor — which then
+/// returns to its owner's hand from its own printed graveyard trigger.
+#[test]
+fn krond_loses_its_aura_in_response_and_exiles_nothing() {
+    let db = load_db();
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let krond = scenario.add_real_card(P0, "Krond the Dawn-Clad", Zone::Battlefield, db);
+    let rancor = scenario.add_real_card(P0, "Rancor", Zone::Hand, db);
+    let bear = scenario.add_real_card(P1, "Grizzly Bears", Zone::Battlefield, db);
+    let disenchant = scenario.add_real_card(P0, "Disenchant", Zone::Hand, db);
+    // Rancor is {G}; Disenchant is {1}{W}. Only Rancor's mana is seeded: the
+    // pool empties when the precombat main phase ends (CR 106.4), long before
+    // Disenchant is cast in combat, so its cost is paid there by auto-tapping
+    // two untapped Plains (CR 106.4 / CR 601.2g).
+    scenario.with_mana_pool(P0, vec![one_mana(ManaType::Green)]);
+    let plains = [
+        scenario.add_basic_land(P0, ManaColor::White),
+        scenario.add_basic_land(P0, ManaColor::White),
+    ];
+    let mut runner = scenario.build();
+    engine::game::rehydrate_game_from_card_db(runner.state_mut(), db);
+
+    let outcome = runner.cast(rancor).target_object(krond).resolve();
+    assert!(
+        matches!(outcome.final_waiting_for(), WaitingFor::Priority { .. }),
+        "Rancor must finish resolving, got {:?}",
+        outcome.final_waiting_for()
+    );
+    assert_eq!(
+        runner.state().objects[&rancor]
+            .attached_to
+            .and_then(|target| target.as_object()),
+        Some(krond),
+        "reach: Rancor must be attached to Krond, so Krond is enchanted (CR 303.4b)"
+    );
+
+    runner.advance_to_combat();
+    runner
+        .declare_attackers(&[(krond, AttackTarget::Player(P1))])
+        .expect("Krond must be declarable as an attacker");
+
+    // CR 603.4: the condition held at the trigger event, so the trigger asks
+    // for its exile target. Choose the opponent's bear.
+    let WaitingFor::TriggerTargetSelection { player, .. } = runner.state().waiting_for.clone()
+    else {
+        panic!(
+            "expected Krond's exile target prompt, got {:?}",
+            runner.state().waiting_for
+        );
+    };
+    assert_eq!(player, P0, "Krond's controller chooses the exile target");
+    runner
+        .act(GameAction::ChooseTarget {
+            target: Some(TargetRef::Object(bear)),
+        })
+        .expect("choosing the opponent's permanent must be accepted");
+
+    assert_eq!(
+        runner.state().stack.len(),
+        1,
+        "reach: the trigger must be on the stack once its target is chosen, got {:?}",
+        runner.stack_names()
+    );
+
+    // Cast Disenchant on Rancor while the trigger waits (CR 603.4 window).
+    let committed = runner.cast(disenchant).target_object(rancor).commit();
+    // Reach: the phase change already emptied the pool (CR 106.4), so the only
+    // way {1}{W} could be paid is the auto-tap of both Plains (CR 601.2g).
+    assert!(
+        plains
+            .iter()
+            .all(|land| committed.state().objects[land].tapped),
+        "reach: paying Disenchant must have auto-tapped both Plains"
+    );
+    assert_eq!(
+        committed.state().stack.len(),
+        2,
+        "reach: Krond's trigger must still be on the stack when Disenchant is cast, got {:?}",
+        committed
+            .state()
+            .stack
+            .iter()
+            .map(|entry| entry.source_id)
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        committed
+            .state()
+            .stack
+            .iter()
+            .any(|entry| entry.source_id == krond),
+        "reach: the waiting trigger is Krond's"
+    );
+    committed.resolve();
+
+    // Rancor's own printed ability returns it to hand when it is put into a
+    // graveyard from the battlefield, so the reach evidence that Disenchant
+    // destroyed it is that it left the battlefield for its owner's hand.
+    assert_eq!(
+        runner.state().objects[&rancor].zone,
+        Zone::Hand,
+        "reach: Disenchant must have destroyed Rancor, whose graveyard trigger \
+         returned it to hand"
+    );
+    assert_eq!(
+        runner.state().objects[&rancor].attached_to,
+        None,
+        "reach: the destroyed Aura is no longer attached to Krond"
+    );
+    assert_eq!(
+        runner.state().objects[&bear].zone,
+        Zone::Battlefield,
+        "CR 603.4: the resolution-time recheck must fail once Krond is no longer enchanted"
+    );
+    assert!(
+        runner
+            .state()
+            .objects
+            .values()
+            .all(|object| object.zone != Zone::Exile),
+        "the exile zone must be empty"
+    );
+    settle_at_declare_attackers_priority(&runner);
+}
+
 // ---------------------------------------------------------------------------
 // Warchanter Skald (compound attachment-state gate deliberately unparsed)
 // ---------------------------------------------------------------------------
@@ -491,6 +623,23 @@ fn kaito_reaching_end_step(entry: KaitoEntry) -> (GameRunner, ObjectId) {
         Phase::End,
         "the run must reach P0's end step (CR 513.1)"
     );
+    // CR 603.3b + CR 513.1: the end-step triggers are put on the stack before
+    // the active player receives priority, so the stack state here discriminates
+    // the intervening-if (CR 603.4) before anything resolves: the false gate
+    // leaves the stack empty, the true one leaves exactly Kaito's trigger.
+    match entry {
+        KaitoEntry::EnteredBeforeThisTurn => assert!(
+            runner.state().stack.is_empty(),
+            "CR 603.4: the false intervening-if must put no trigger on the stack, got {:?}",
+            runner.stack_names()
+        ),
+        KaitoEntry::CastFromHandThisTurn => assert_eq!(
+            runner.state().stack.len(),
+            1,
+            "CR 603.4: Kaito's end-step trigger must be on the stack before resolution, got {:?}",
+            runner.stack_names()
+        ),
+    }
     runner.advance_until_stack_empty();
     (runner, kaito)
 }

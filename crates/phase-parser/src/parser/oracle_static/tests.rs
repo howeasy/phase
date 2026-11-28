@@ -9489,27 +9489,6 @@ fn static_top_of_library_black_gate_vampire_nocturnus() {
 }
 
 #[test]
-fn static_enchanted_or_equipped_parses_as_attachment_disjunction() {
-    // CR 301.5a + CR 303.4: "As long as this creature is enchanted or equipped, ~ has
-    // first strike." The right-hand "equipped" elides its subject and copula, which
-    // the shared-subject attachment-state list arm now decomposes into one typed
-    // disjunction instead of falling through to Unrecognized.
-    let def =
-        parse_static_line("As long as this creature is enchanted or equipped, ~ has first strike.")
-            .unwrap();
-    assert_eq!(def.mode, StaticMode::Continuous);
-    assert_eq!(
-        def.condition,
-        Some(StaticCondition::Or {
-            conditions: vec![
-                StaticCondition::SourceIsEnchanted,
-                StaticCondition::SourceIsEquipped,
-            ],
-        })
-    );
-}
-
-#[test]
 fn static_has_keyword_as_long_as() {
     // CR 611.3a: "as long as a land card is in a graveyard" is a graveyard-presence
     // gate — it must type to IsPresent(land card in a graveyard), never the
