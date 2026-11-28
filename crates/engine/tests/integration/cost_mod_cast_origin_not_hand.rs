@@ -28,7 +28,7 @@ use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::scenario_db::GameScenarioDbExt;
 use engine::game::triggers::drain_order_triggers_with_identity;
 use engine::types::ability::{CastingPermission, Duration, Effect, TargetRef};
-use engine::types::actions::GameAction;
+use engine::types::actions::{CastChoice, GameAction};
 use engine::types::game_state::{CastPaymentMode, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::keywords::Keyword;
@@ -123,13 +123,18 @@ fn assert_settled(r: &GameRunner, player: PlayerId, what: &str) {
 /// the witness did not declare.
 fn pass_until_stack_empty(r: &mut GameRunner, what: &str) {
     for _ in 0..40 {
+        // CR 603.3b: drain the per-controller ordering prompt with identity
+        // BEFORE the stack-empty check — the prompt can surface mid-resolution
+        // with an empty stack while triggers wait to be dispatched. Same order
+        // as `GameRunner::advance_until_stack_empty`.
+        if matches!(r.state().waiting_for, WaitingFor::OrderTriggers { .. }) {
+            drain_order_triggers_with_identity(r.state_mut());
+            continue;
+        }
         if r.state().stack.is_empty() {
             return;
         }
         match r.state().waiting_for.clone() {
-            WaitingFor::OrderTriggers { .. } => {
-                drain_order_triggers_with_identity(r.state_mut());
-            }
             WaitingFor::Priority { .. } => {
                 r.act(GameAction::PassPriority)
                     .unwrap_or_else(|e| panic!("{what}: passing priority was rejected: {e:?}"));
@@ -1739,4 +1744,117 @@ fn advanced_reconstruction_levels_1_and_2_charge_the_full_exiled_cost() {
     );
     assert_eq!(r.life(P1), 18, "no further cards left the graveyard");
     assert_settled(&r, P0, "Advanced Reconstruction level 2");
+}
+
+// ===== Savvy Trader: a cast from outside the game (Garth One-Eye) =====
+
+/// Activate `garth`'s {T} ability and let it resolve up to the card-name prompt.
+fn activate_to_the_prompt(r: &mut GameRunner, garth: ObjectId) {
+    r.act(GameAction::ActivateAbility {
+        source_id: garth,
+        ability_index: 0,
+        payment_mode: CastPaymentMode::Auto,
+    })
+    .expect("the tap ability is activatable");
+    r.resolve_top();
+}
+
+/// Answer Garth's "choose a card name" prompt with a printed domain name.
+fn garth_choose(r: &mut GameRunner, garth: ObjectId, name: &str) {
+    activate_to_the_prompt(r, garth);
+    r.act(GameAction::ChooseOption {
+        choice: name.to_string(),
+    })
+    .expect("a printed name is a legal answer");
+}
+
+/// Answer every prompt of an accepted copy cast: accept the offer, announce X,
+/// pick the target, pay from the pool.
+fn drive_copy_cast(r: &mut GameRunner, x: u32, target: Option<TargetRef>) {
+    for _ in 0..24 {
+        let action = match &r.state().waiting_for {
+            WaitingFor::OptionalEffectChoice { .. } => {
+                GameAction::DecideOptionalEffect { accept: true }
+            }
+            WaitingFor::CastOffer { .. } => GameAction::GraveyardPaidCastChoice {
+                choice: CastChoice::Cast,
+            },
+            WaitingFor::ChooseXValue { .. } => GameAction::ChooseX { value: x },
+            WaitingFor::TargetSelection { .. } => GameAction::ChooseTarget {
+                target: target.clone(),
+            },
+            WaitingFor::ManaPayment { .. } => GameAction::PassPriority,
+            _ => return,
+        };
+        r.act(action).expect("the copy cast proceeds");
+    }
+}
+
+/// P0's Garth One-Eye (with Savvy Trader when asked) against P1's Black Lotus,
+/// with exactly two white mana units in P0's pool.
+fn garth_disenchant_copy_scenario(with_savvy_trader: bool) -> (GameRunner, ObjectId, ObjectId) {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_mana_pool(P0, units("WW"));
+    let garth = scenario.add_real_card(P0, "Garth One-Eye", Zone::Battlefield, db());
+    if with_savvy_trader {
+        // P0's graveyard is empty, so the enters trigger has no legal target
+        // even if setup were to put it on the stack.
+        scenario.add_real_card(P0, "Savvy Trader", Zone::Battlefield, db());
+    }
+    let lotus = scenario.add_real_card(P1, "Black Lotus", Zone::Battlefield, db());
+    let mut r = scenario.build();
+    engine::game::rehydrate_game_from_card_db(r.state_mut(), db());
+    (r, garth, lotus)
+}
+
+/// Savvy Trader ({3}{G}): "Spells you cast from anywhere other than your hand
+/// cost {1} less to cast."
+///
+/// CR 707.13 + CR 400.11: Garth One-Eye creates a copy of a card named from its
+/// closed domain, and outside the game is not a zone, so the staged copy's cast
+/// is from outside the game — never from the exile zone it is staged in.
+/// CR 601.2f: Savvy Trader's {1} reduction enters the total cost of that cast,
+/// so the Disenchant copy's {1}{W} becomes {W} and a pool of exactly two white
+/// units keeps one. The control scenario without the Trader pays the full
+/// {1}{W} from the same pool.
+#[test]
+fn savvy_trader_reduces_garths_copy_cast_from_outside_the_game() {
+    for (with_savvy_trader, remaining_after_payment) in [(true, 1), (false, 0)] {
+        let label = if with_savvy_trader {
+            "with Savvy Trader"
+        } else {
+            "control without Savvy Trader"
+        };
+        let (mut r, garth, lotus) = garth_disenchant_copy_scenario(with_savvy_trader);
+        garth_choose(&mut r, garth, "Disenchant");
+        let copy = r
+            .state()
+            .last_created_token_ids
+            .first()
+            .copied()
+            .expect("the choose-and-copy resolution created the copy");
+        assert!(
+            r.state().objects[&copy].created_outside_game,
+            "{label}: CR 707.13 + CR 400.11: the copy is created outside the game"
+        );
+        drive_copy_cast(&mut r, 0, Some(TargetRef::Object(lotus)));
+        assert!(
+            r.stack_names().iter().any(|name| name == "Disenchant"),
+            "{label}: the Disenchant copy is on the stack: {:?} / {:?}",
+            r.stack_names(),
+            r.state().waiting_for
+        );
+        assert_eq!(
+            pool_size(&r, P0),
+            remaining_after_payment,
+            "{label}: the copy cast paid {{W}} from the {{W}}{{W}} pool when Savvy Trader reduces it, and the full {{1}}{{W}} without it"
+        );
+        pass_until_stack_empty(&mut r, label);
+        assert_eq!(
+            zone_of(&r, lotus),
+            Zone::Graveyard,
+            "{label}: the Disenchant copy destroyed the targeted artifact"
+        );
+    }
 }

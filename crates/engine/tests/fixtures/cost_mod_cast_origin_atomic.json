@@ -94,6 +94,77 @@
         ]
       }
     ],
+    "Black Lotus": [
+      {
+        "colorIdentity": [],
+        "colors": [],
+        "convertedManaCost": 0.0,
+        "identifiers": {
+          "scryfallOracleId": "o-black-lotus"
+        },
+        "layout": "normal",
+        "manaCost": "{0}",
+        "manaValue": 0.0,
+        "name": "Black Lotus",
+        "subtypes": [],
+        "supertypes": [],
+        "text": "{T}, Sacrifice this artifact: Add three mana of any one color.",
+        "type": "Artifact",
+        "types": [
+          "Artifact"
+        ]
+      }
+    ],
+    "Braingeyser": [
+      {
+        "colorIdentity": [
+          "U"
+        ],
+        "colors": [
+          "U"
+        ],
+        "convertedManaCost": 2.0,
+        "identifiers": {
+          "scryfallOracleId": "o-braingeyser"
+        },
+        "layout": "normal",
+        "manaCost": "{X}{U}{U}",
+        "manaValue": 2.0,
+        "name": "Braingeyser",
+        "subtypes": [],
+        "supertypes": [],
+        "text": "Target player draws X cards.",
+        "type": "Sorcery",
+        "types": [
+          "Sorcery"
+        ]
+      }
+    ],
+    "Disenchant": [
+      {
+        "colorIdentity": [
+          "W"
+        ],
+        "colors": [
+          "W"
+        ],
+        "convertedManaCost": 2.0,
+        "identifiers": {
+          "scryfallOracleId": "o-disenchant"
+        },
+        "layout": "normal",
+        "manaCost": "{1}{W}",
+        "manaValue": 2.0,
+        "name": "Disenchant",
+        "subtypes": [],
+        "supertypes": [],
+        "text": "Destroy target artifact or enchantment.",
+        "type": "Instant",
+        "types": [
+          "Instant"
+        ]
+      }
+    ],
     "Divination": [
       {
         "colorIdentity": [
@@ -600,6 +671,46 @@
         "type": "Enchantment — Class",
         "types": [
           "Enchantment"
+        ]
+      }
+    ],
+    "Garth One-Eye": [
+      {
+        "colorIdentity": [
+          "W",
+          "U",
+          "B",
+          "R",
+          "G"
+        ],
+        "colors": [
+          "W",
+          "U",
+          "B",
+          "R",
+          "G"
+        ],
+        "convertedManaCost": 5.0,
+        "identifiers": {
+          "scryfallOracleId": "o-garth-one-eye"
+        },
+        "layout": "normal",
+        "manaCost": "{W}{U}{B}{R}{G}",
+        "manaValue": 5.0,
+        "name": "Garth One-Eye",
+        "power": "5",
+        "subtypes": [
+          "Human",
+          "Wizard"
+        ],
+        "supertypes": [
+          "Legendary"
+        ],
+        "text": "{T}: Choose a card name that hasn't been chosen from among Disenchant, Braingeyser, Terror, Shivan Dragon, Regrowth, and Black Lotus. Create a copy of the card with the chosen name. You may cast the copy. (You still pay its costs.)",
+        "toughness": "5",
+        "type": "Legendary Creature — Human Wizard",
+        "types": [
+          "Creature"
         ]
       }
     ],
@@ -1557,6 +1668,31 @@
         ]
       }
     ],
+    "Regrowth": [
+      {
+        "colorIdentity": [
+          "G"
+        ],
+        "colors": [
+          "G"
+        ],
+        "convertedManaCost": 2.0,
+        "identifiers": {
+          "scryfallOracleId": "o-regrowth"
+        },
+        "layout": "normal",
+        "manaCost": "{1}{G}",
+        "manaValue": 2.0,
+        "name": "Regrowth",
+        "subtypes": [],
+        "supertypes": [],
+        "text": "Return target card from your graveyard to your hand.",
+        "type": "Sorcery",
+        "types": [
+          "Sorcery"
+        ]
+      }
+    ],
     "Sage of the Beyond": [
       {
         "colorIdentity": [
@@ -1644,6 +1780,35 @@
         ]
       }
     ],
+    "Shivan Dragon": [
+      {
+        "colorIdentity": [
+          "R"
+        ],
+        "colors": [
+          "R"
+        ],
+        "convertedManaCost": 6.0,
+        "identifiers": {
+          "scryfallOracleId": "o-shivan-dragon"
+        },
+        "layout": "normal",
+        "manaCost": "{4}{R}{R}",
+        "manaValue": 6.0,
+        "name": "Shivan Dragon",
+        "power": "5",
+        "subtypes": [
+          "Dragon"
+        ],
+        "supertypes": [],
+        "text": "Flying\n{R}: This creature gets +1/+0 until end of turn.",
+        "toughness": "5",
+        "type": "Creature — Dragon",
+        "types": [
+          "Creature"
+        ]
+      }
+    ],
     "Silent-Blade Oni": [
       {
         "colorIdentity": [
@@ -1691,6 +1856,31 @@
         "type": "Creature — Demon Ninja",
         "types": [
           "Creature"
+        ]
+      }
+    ],
+    "Terror": [
+      {
+        "colorIdentity": [
+          "B"
+        ],
+        "colors": [
+          "B"
+        ],
+        "convertedManaCost": 2.0,
+        "identifiers": {
+          "scryfallOracleId": "o-terror"
+        },
+        "layout": "normal",
+        "manaCost": "{1}{B}",
+        "manaValue": 2.0,
+        "name": "Terror",
+        "subtypes": [],
+        "supertypes": [],
+        "text": "Destroy target nonartifact, nonblack creature. It can't be regenerated.",
+        "type": "Instant",
+        "types": [
+          "Instant"
         ]
       }
     ],
