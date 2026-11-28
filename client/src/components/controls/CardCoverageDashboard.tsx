@@ -7,6 +7,7 @@ import { useCardImage } from "../../hooks/useCardImage";
 import { useSetList, type SetMeta } from "../../hooks/useSetList";
 import { FORMAT_REGISTRY } from "../../data/formatRegistry";
 import { scryfallLegalityKey } from "../../services/scryfall";
+import type { GapDetail } from "../../services/deckCompatibility";
 import { SelectField } from "../ui/SelectField";
 import { copyText } from "../../services/copyText";
 import { getCardImageSrcSetProps } from "../card/cardImageSrcSet.ts";
@@ -26,11 +27,6 @@ interface ParsedItem {
   supported: boolean;
   details?: [string, string][];
   children?: ParsedItem[];
-}
-
-interface GapDetail {
-  handler: string;
-  source_text?: string;
 }
 
 interface CardCoverageResult {

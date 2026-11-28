@@ -8624,7 +8624,8 @@ fn clause_from_lines<'a>(lines: impl Iterator<Item = &'a str>) -> Option<String>
 /// The text that says what a gap with no recorded source fragment concerns, most
 /// specific first: the engine's plain-English explanation for the deck-only
 /// entry-projection labels (they name no printed clause); the printed lines a
-/// silent drop left uncovered; the phrase or feature its own diagnosis names;
+/// silent drop left uncovered, unless one of them is a die-result table row
+/// (naming it would show a false reason); the phrase or feature its own diagnosis names;
 /// the printed line holding the text in its handler's argument
 /// (`Static:Unrecognized(...)`) or its label (`Keyword:X`); and last the
 /// handler itself, so the text is never empty.
@@ -8635,9 +8636,15 @@ fn blank_gap_text(gap: &GapDetail, lines: &[String], dropped: &[&str]) -> String
         return "As this permanent enters, the engine cannot yet apply all the changes its own static abilities make to its characteristics, so an entry consumer may see unprojected values (CR 614.12)".to_string();
     }
     if gap.handler == ENTRY_CONSUMER_GAP {
-        return "This permanent's entry replacement or enters-with-counters static reads a characteristic of an entering permanent that the entrant's own static abilities write but the engine's entry projection does not apply, so the read may see an unprojected value (CR 614.12)".to_string();
+        return "This permanent's entry replacement or enters-with-counters static reads a characteristic of an entering permanent (such as power or toughness) that the engine's entry projection does not yet apply, so an entrant's own static abilities may change it unseen (CR 614.12)".to_string();
     }
-    if gap.handler.starts_with("SilentDrop:") && !dropped.is_empty() {
+    // A die-result table row is reported uncovered even when the parser
+    // attributed it in the wrong order, so naming it would show a false reason;
+    // leave it to the fallbacks below, which name the handler instead.
+    if gap.handler.starts_with("SilentDrop:")
+        && !dropped.is_empty()
+        && !dropped.iter().any(|line| line.contains(" | "))
+    {
         return dropped.join(" / ");
     }
     if let Some(phrase) = gap.diagnoses.iter().find_map(GapDiagnosis::phrase) {
@@ -29924,6 +29931,18 @@ mod blank_gap_text_tests {
     fn silent_drop_names_the_uncovered_lines() {
         let text = blank_gap_text(&gap("SilentDrop:1_of_2", vec![]), &lines(), &["Flying"]);
         assert_eq!(text, "Flying");
+    }
+
+    #[test]
+    fn silent_drop_does_not_name_a_die_result_table_row() {
+        // A table row the parser did handle in the wrong order reads uncovered,
+        // but naming it would claim a clause is unhandled when it is not.
+        let text = blank_gap_text(
+            &gap("SilentDrop:1_of_2", vec![]),
+            &lines(),
+            &["9 or less | Put those cards into your hand, then shuffle."],
+        );
+        assert_eq!(text, "No engine handler for SilentDrop:1_of_2");
     }
 
     #[test]

@@ -928,6 +928,13 @@ fn deck_compatibility_gap_details_name_every_gap_source() {
                 "{name}: {} publishes blank source text",
                 gap.handler
             );
+            if name == "Druid of the Emerald Grove" {
+                assert!(
+                    !text.contains("9 or less"),
+                    "{name}: the die-table row the parser did handle must not be named \
+                     as the dropped clause: {text}"
+                );
+            }
         }
     }
     let hinder = coverage
