@@ -36,6 +36,10 @@ const MURDER: &str = "Destroy target creature.";
 
 const VOLTAIC_KEY: &str = "{1}, {T}: Untap target artifact.";
 
+const ETERNAL_SCOURGE: &str = "You may cast this card from exile.\n\
+     When this creature becomes the target of a spell or ability an opponent controls, exile this \
+     creature.";
+
 fn cost(shards: &[ManaCostShard], generic: u32) -> ManaCost {
     ManaCost::Cost {
         shards: shards.to_vec(),
@@ -141,6 +145,145 @@ fn idol_of_endurance_grants_one_free_creature_cast_across_its_pile() {
             runner.state().waiting_for,
             engine::types::game_state::WaitingFor::Priority { .. }
         ) && runner.state().stack.is_empty()
+    );
+}
+
+/// A cast Idol of Endurance with Eternal Scourge and Grizzly Bears exiled by
+/// its entry trigger. `land_count` white lands are untapped at the start.
+struct IdolScourgePile {
+    runner: GameRunner,
+    idol: ObjectId,
+    scourge: ObjectId,
+    bears: ObjectId,
+    lands: Vec<ObjectId>,
+}
+
+fn idol_scourge_pile(land_count: usize) -> IdolScourgePile {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let scourge = scenario
+        .add_creature_to_graveyard(P0, "Eternal Scourge", 3, 3)
+        .from_oracle_text(ETERNAL_SCOURGE)
+        .with_subtypes(vec!["Eldrazi", "Horror"])
+        .with_mana_cost(cost(&[], 3))
+        .id();
+    let bears = scenario
+        .add_creature_to_graveyard(P0, "Grizzly Bears", 2, 2)
+        .with_subtypes(vec!["Bear"])
+        .with_mana_cost(cost(&[ManaCostShard::Green], 1))
+        .id();
+    let idol = scenario
+        .add_artifact_to_hand_from_oracle(P0, "Idol of Endurance", IDOL_OF_ENDURANCE)
+        .with_mana_cost(cost(&[ManaCostShard::White], 2))
+        .id();
+    let lands: Vec<ObjectId> = (0..land_count)
+        .map(|_| scenario.add_basic_land(P0, ManaColor::White))
+        .collect();
+    let mut runner = scenario.build();
+    runner.cast(idol).resolve();
+    for (card, mana_value) in [(scourge, 3), (bears, 2)] {
+        assert_eq!(
+            runner.state().objects[&card].zone,
+            Zone::Exile,
+            "{card:?} is exiled with the Idol"
+        );
+        assert_eq!(
+            runner.state().objects[&card].mana_cost.mana_value(),
+            mana_value,
+            "fixture guard: the Idol exiles creature cards with mana value 3 or less"
+        );
+        assert!(
+            runner
+                .state()
+                .exile_links
+                .iter()
+                .any(|link: &ExileLink| link.exiled_id == card && link.source_id == idol),
+            "{card:?} is linked to the Idol"
+        );
+    }
+    IdolScourgePile {
+        runner,
+        idol,
+        scourge,
+        bears,
+        lands,
+    }
+}
+
+/// CR 608.2c + CR 611.2a: Eternal Scourge's own "You may cast this card from
+/// exile" is a different route than the Idol's grant, so casting it does not
+/// spend the grant's one free creature cast: Grizzly Bears stays castable free.
+#[test]
+fn idol_of_endurance_grant_survives_a_cast_the_card_could_make_itself() {
+    let IdolScourgePile {
+        mut runner,
+        idol,
+        scourge,
+        bears,
+        lands,
+    } = idol_scourge_pile(5);
+    let spent = tapped_count(&runner, &lands);
+    assert_eq!(spent, 3, "{{2}}{{W}} paid the Idol");
+
+    runner.activate(idol, 0).resolve();
+    let after_activation = tapped_count(&runner, &lands);
+    assert_eq!(after_activation, spent + 2, "{{1}}{{W}} paid");
+    assert!(cast_is_offered(&runner, scourge));
+    assert!(cast_is_offered(&runner, bears));
+
+    cast_to_resolution(&mut runner, scourge);
+    assert_eq!(runner.state().objects[&scourge].zone, Zone::Battlefield);
+    assert_eq!(
+        tapped_count(&runner, &lands),
+        after_activation,
+        "the Scourge cast is free"
+    );
+    assert!(
+        cast_is_offered(&runner, bears),
+        "the grant's one cast remains available for the Bears"
+    );
+    cast_to_resolution(&mut runner, bears);
+    assert_eq!(runner.state().objects[&bears].zone, Zone::Battlefield);
+    assert_eq!(
+        tapped_count(&runner, &lands),
+        after_activation,
+        "the Bears cast is free too"
+    );
+}
+
+/// CR 608.2c + CR 611.2a: Grizzly Bears has no permission of its own, so
+/// casting it spends the Idol's one free cast. Eternal Scourge stays castable
+/// on the card's own route, paying its printed cost.
+#[test]
+fn idol_of_endurance_grant_spent_by_the_bears_leaves_the_scourges_own_route() {
+    let IdolScourgePile {
+        mut runner,
+        idol,
+        scourge,
+        bears,
+        lands,
+    } = idol_scourge_pile(8);
+    runner.activate(idol, 0).resolve();
+    let spent = tapped_count(&runner, &lands);
+    assert_eq!(spent, 5, "the Idol cast and its activation");
+
+    cast_to_resolution(&mut runner, bears);
+    assert_eq!(runner.state().objects[&bears].zone, Zone::Battlefield);
+    assert_eq!(
+        tapped_count(&runner, &lands),
+        spent,
+        "the Bears cast through the grant is free"
+    );
+    assert!(
+        cast_is_offered(&runner, scourge),
+        "the Scourge's own permission is a separate route"
+    );
+    cast_to_resolution(&mut runner, scourge);
+    assert_eq!(runner.state().objects[&scourge].zone, Zone::Battlefield);
+    assert_eq!(
+        tapped_count(&runner, &lands),
+        spent + 3,
+        "the Scourge pays its own {{3}}"
     );
 }
 

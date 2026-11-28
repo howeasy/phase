@@ -5164,6 +5164,11 @@ pub(super) fn selected_exile_alt_cost_permission_graveyard_replacement(
 /// first-compatible lookup cannot authorize spending a group. A rider cast
 /// that elects no cost slot passes the index from
 /// `selected_rider_zone_authority_permission_index` instead.
+///
+/// A card with its own static permission to be cast from exile is a different
+/// route than the grant: the engine offers no separate paid route for that
+/// card, so such a cast does not spend the grant's shared budget (CR 601.2b /
+/// CR 118.9a), and the grant stays available for the rest of its pile.
 pub(super) fn selected_exile_alt_cost_permission_single_use_group(
     state: &GameState,
     object_id: ObjectId,
@@ -5172,6 +5177,9 @@ pub(super) fn selected_exile_alt_cost_permission_single_use_group(
 ) -> Option<TrackedSetId> {
     let index = casting_permission_index?;
     let obj = state.objects.get(&object_id)?;
+    if own_exile_cast_permission(state, obj, player) {
+        return None;
+    }
     let permission = selected_exile_alt_cost_permission(state, obj, player, Some(index))?;
     match permission {
         crate::types::ability::CastingPermission::ExileWithAltCost {
