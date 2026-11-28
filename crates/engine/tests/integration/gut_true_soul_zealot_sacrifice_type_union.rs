@@ -218,6 +218,7 @@ fn declining_gut_sacrifice_skips_its_token() {
     );
 }
 
+/// CR 608.2d: an option with no legal sacrifice is never offered.
 #[test]
 fn gut_without_eligible_payment_cannot_create_a_skeleton() {
     let mut scenario = GameScenario::new();
@@ -227,9 +228,11 @@ fn gut_without_eligible_payment_cannot_create_a_skeleton() {
         .id();
     let mut runner = scenario.build();
     declare_attack(&mut runner, gut);
-    decide_gut(&mut runner, gut, true);
     settle(&mut runner);
-    assert!(skeletons(&runner).is_empty(), "no payment means no token");
+    assert!(
+        skeletons(&runner).is_empty(),
+        "no legal sacrifice means no prompt and no token"
+    );
     assert_eq!(runner.state().objects[&gut].zone, Zone::Battlefield);
 }
 

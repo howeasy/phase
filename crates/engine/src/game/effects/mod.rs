@@ -13226,6 +13226,7 @@ fn static_mode_reads_filter_population(
             CostPaymentProhibition::Sacrifice { filter } => has_filter(filter),
             CostPaymentProhibition::PayLife => false,
         },
+        StaticMode::CantSacrifice { filter, who: _ } => has_filter(filter),
         StaticMode::PlayerProtection(inner0) => has_protection(inner0),
         StaticMode::MustAttackDefender { defender } => match defender {
             RequiredDefender::Matching { filter } => has_player(filter),
@@ -21492,9 +21493,10 @@ fn conjunct_steps_are_infeasible(
 /// object can no longer move, an untargeted "it" whose inferred referent is a
 /// source the ability can no longer find (CR 400.7), a resolution-time zone pick
 /// with no eligible object, a reveal of a library top that would reveal no card,
-/// a blight with no creature that can take the counters, an unbound linked-exile
-/// referent ("the exiled card") with no card in exile, or a conjoined step that
-/// can't be performed in full
+/// a blight with no creature that can take the counters, a sacrifice with no
+/// legal candidate permanent (CR 701.21a), an unbound linked-exile referent
+/// ("the exiled card") with no card in exile, or a conjoined step that can't be
+/// performed in full
 /// ([`optional_conjunction_is_infeasible`]). Suppressing the prompt lets the
 /// effect resolve as its defined no-op instead.
 fn optional_effect_is_infeasible(state: &GameState, ability: &ResolvedAbility) -> bool {
@@ -21581,6 +21583,11 @@ fn optional_instruction_is_infeasible(state: &GameState, ability: &ResolvedAbili
             let effective = hydrate_event_context_targets(state, ability);
             blight::optional_blight_is_infeasible(state, effective.as_ref())
         }
+        // CR 608.2d + CR 701.21a: "you may sacrifice <X>" with no legal candidate
+        // is an impossible option — accepting would sacrifice nothing while the
+        // "When you do" rider still fires (Cornered Crook with only a Treasure
+        // token Quark bars). Suppress the prompt so it resolves as the no-op.
+        Effect::Sacrifice { .. } => sacrifice::optional_sacrifice_is_infeasible(state, ability),
         // CR 608.2d + CR 122.1: an optional exact counter-removal selection
         // cannot be accepted unless every required permanent is selectable.
         Effect::ChooseObjectsIntoTrackedSet { .. } => {
@@ -29659,6 +29666,18 @@ fn resolve_chain_body(
             // read an action that never happened.
             | Effect::CollectEvidence { .. }
     );
+    // CR 608.2d + CR 118.12: an optional sacrifice with no legal full selection
+    // is a declined option. Falling through would let the resolver sacrifice the
+    // short pool and run the "If you do" rider on a cost never paid in full
+    // ("you may sacrifice two Blood tokens" with one Blood on the battlefield).
+    // CR 608.2d + CR 101.4: an "any player may" sacrifice is judged per seat by
+    // the APNAP fan-out below, which binds each seat's own pool
+    // (`opponent_may_selection_pool`). This probe reads only the ability
+    // controller's pool, so it must not decline the whole fan-out on that
+    // single-seat answer (Prowling Pangolin: P0's lone creature must not hide
+    // P1's three).
+    let auto_decline_short_sacrifice =
+        ability.optional_for.is_none() && matches!(&ability.effect, Effect::Sacrifice { .. });
     // CR 608.2d + CR 603.5: an optional instruction on a source's host with no
     // live host is likewise a declined option ("you may have that player gain
     // control of equipped creature. If you do, untap it." — no rider runs).
@@ -29668,6 +29687,7 @@ fn resolve_chain_body(
     // its "If you do" rider stays gated.
     if optional_is_infeasible
         && (auto_decline_infeasible_optional
+            || auto_decline_short_sacrifice
             || host_effect_impossible
             || optional_infeasibility == Some(OptionalInfeasibility::Conjunction))
     {
@@ -35529,13 +35549,29 @@ pub(crate) fn evaluate_condition(
         //    zero cards ("discard your hand" with an empty hand) does not set the
         //    flag; its reflexive is suppressed by
         //    `when_you_do_mandatory_parent_did_nothing` instead (CR 603.12).
+        //
+        //    A named-referent optional sacrifice whose referent was refused
+        //    (CR 701.21a sacrifice bar, e.g. Quark barring an animated Treasure)
+        //    sets the flag the same way, so its "when you do" must not fire
+        //    either (CR 608.2d: the player could not choose that option).
         AbilityCondition::WhenYouDo => {
             let optional_action_not_taken =
                 ability.optional && !ability.context.optional_effect_performed;
-            let payment_failed = matches!(
+            // CR 608.2d + CR 701.21a: a refused sacrifice of a named referent
+            // is the action's non-occurrence, not a performed sacrifice. This is
+            // the REFERENT axis, not pool-enumerability: a `SpecificObject` is
+            // enumerable by the candidate pool but is still one bound object
+            // whose refusal means the instruction did not happen.
+            let refused_named_referent_sacrifice = matches!(
+                &ability.effect,
+                Effect::Sacrifice { target, .. }
+                    if sacrifice::sacrifice_filter_names_bound_object(target)
+            ) && ability.context.optional_effect_performed;
+            let payment_failed = (matches!(
                 ability.effect,
                 Effect::PayCost { .. } | Effect::Discard { .. } | Effect::DiscardCard { .. }
-            ) && state.cost_payment_failed_flag;
+            ) || refused_named_referent_sacrifice)
+                && state.cost_payment_failed_flag;
             !optional_action_not_taken && !payment_failed
         }
         // CR 601.2a + CR 707.10: "was cast (from [zone])" — check cast origin.
@@ -63229,7 +63265,7 @@ mod tests {
                     replacement_row(replacement)
                 })),
             ),
-            // The 13 filter-bearing `StaticMode` variants.
+            // The 14 filter-bearing `StaticMode` variants.
             (
                 "StaticMode::CantBeActivated",
                 effect_row(Box::new(move |source_filter| {
@@ -63296,6 +63332,15 @@ mod tests {
                         source_filter,
                         trigger_source_filter: None,
                         events: vec![],
+                    })
+                })),
+            ),
+            (
+                "StaticMode::CantSacrifice",
+                effect_row(Box::new(move |filter| {
+                    with_mode(StaticMode::CantSacrifice {
+                        who: ProhibitionScope::AllPlayers,
+                        filter,
                     })
                 })),
             ),

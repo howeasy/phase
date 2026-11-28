@@ -6020,7 +6020,9 @@ fn validate_deferred_spell_sacrifices_at_commit(
                 "Deferred sacrifice permanent cannot be sacrificed as a cost".to_string(),
             ));
         }
-        if super::static_abilities::player_cant_sacrifice_as_cost(state, player, id) {
+        // CR 118.3: the general bar was evaluated by object_cant_be_sacrificed_by;
+        // only the CantPayCost half runs here.
+        if super::static_abilities::player_cant_pay_sacrifice_cost(state, player, id) {
             return Err(EngineError::ActionNotAllowed(
                 "Deferred sacrifice permanent cannot be sacrificed as a cost".to_string(),
             ));

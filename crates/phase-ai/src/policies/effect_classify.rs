@@ -2646,6 +2646,9 @@ fn quoted_static_rides_a_trick(definition: &StaticDefinition) -> bool {
         | StaticMode::CantBeTargeted { .. }
         | StaticMode::CantBeCast { .. }
         | StaticMode::CantBeActivated { .. }
+        // A sacrifice prohibition is not decided as attackers or blockers are
+        // declared (CR 508.1).
+        | StaticMode::CantSacrifice { .. }
         | StaticMode::CantSearchLibrary { .. }
         | StaticMode::RestrictLibrarySearchToTop { .. }
         | StaticMode::ControlPlayersDuringOwnLibrarySearch { .. }

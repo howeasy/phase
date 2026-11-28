@@ -109,6 +109,11 @@ pub(crate) fn is_data_carrying_static(mode: &StaticMode) -> bool {
             | StaticMode::ImposeAdditionalCost { .. }
             | StaticMode::DefilerCostReduction { .. }
             | StaticMode::CantPayCost { .. }
+            // CR 701.21a: CantSacrifice carries `who` + the per-permanent
+            // `filter` (Quark, Humble Proprietor). Runtime enforcement is
+            // static_abilities.rs::player_cant_sacrifice, consulted by the
+            // sacrifice-effect choice and the sacrifice-cost authority.
+            | StaticMode::CantSacrifice { .. }
             | StaticMode::CantBeTargeted { .. }
             | StaticMode::CantBeCast { .. }
             // CR 601.3 + CR 109.5: CantCastFrom carries `who`; the prohibited-zone
@@ -29007,6 +29012,157 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
             "CantHaveKeyword(Flying) should be covered by is_data_carrying_static()"
         );
     }
+
+    /// CR 701.21a: a player-scoped "can't sacrifice <filter>" static parses to
+    /// `CantSacrifice` and is covered by `is_data_carrying_static()` (Quark,
+    /// Humble Proprietor: "You can't sacrifice Treasure tokens.").
+    #[test]
+    fn cant_sacrifice_static_has_no_coverage_gap() {
+        let face = counter_rider_face(
+            "Quark, Humble Proprietor",
+            "You can't sacrifice Treasure tokens.",
+            &[],
+            &["Creature"],
+        );
+        assert!(
+            face.static_abilities
+                .iter()
+                .any(|s| matches!(s.mode, StaticMode::CantSacrifice { .. })),
+            "REACH: the line parses to a CantSacrifice static: {:?}",
+            face.static_abilities
+        );
+        assert!(
+            card_face_gaps(&face).is_empty(),
+            "CantSacrifice should be covered by is_data_carrying_static(): {:?}",
+            card_face_gaps(&face)
+        );
+    }
+
+    /// CR 614.1a + CR 614.6: Dr. McCoy's "would be destroyed, instead remove all
+    /// +1/+1 counters from it and all damage already dealt to it is healed" is a
+    /// destroy-instead substitution. The staged Destroy batch exists, but this
+    /// substitution's counter-removal and damage-healing riders are not
+    /// supported, so the line must stay honestly unsupported: half-parsing it into a `Destroy`
+    /// replacement with an `execute` body would let the destruction proceed after
+    /// the counters came off (CR 614.6: a replaced event never happens).
+    #[test]
+    fn dr_mccoy_destroy_instead_replacement_stays_a_coverage_gap() {
+        let face = counter_rider_face(
+            "Dr. McCoy, Surly Surgeon",
+            "When Dr. McCoy enters, put a +1/+1 counter on another target creature you control.\nIf another creature you control with a +1/+1 counter on it would be destroyed, instead remove all +1/+1 counters from it and all damage already dealt to it is healed.",
+            &[],
+            &["Creature"],
+        );
+        // REACH: the enters trigger lowers, so the gap below is the destroy-instead
+        // line and not a card-wide parse failure.
+        assert!(
+            !face.triggers.is_empty(),
+            "REACH: the enters trigger parses: {:?}",
+            face.triggers
+        );
+        assert!(
+            !face.replacements.iter().any(|replacement| {
+                replacement.event == ReplacementEvent::Destroy && replacement.execute.is_some()
+            }),
+            "the destroy-instead line must not be half-parsed into a Destroy \
+             replacement with an execute body: {:?}",
+            face.replacements
+        );
+        let gaps = card_face_gaps(&face);
+        assert!(
+            !gaps.is_empty(),
+            "the destroy-instead line must stay an honest coverage gap"
+        );
+        let coverage = card_face_coverage(&face);
+        assert!(
+            coverage.gaps.iter().any(|gap| {
+                gap.handler.starts_with("Effect:")
+                    && gap.source_text.as_deref().is_some_and(|text| {
+                        text.contains("instead remove all +1/+1 counters from it")
+                    })
+            }),
+            "an Effect: gap must name the destroy-instead line, got {:?}",
+            coverage.gaps
+        );
+    }
+
+    /// The census is the printed record that Crackling Emergence's destroy-instead
+    /// Aura substitution cannot be delivered by the staged Destroy batch yet, so
+    /// the row must keep saying so: `MissingEffect`. The parser already
+    /// half-lowers the clause into a `Destroy` replacement with an execute body
+    /// (CR 614.1a), which is why the census marker — not the parser alone — is
+    /// what keeps the export face unsupported.
+    #[test]
+    fn crackling_emergence_census_row_stays_marked() {
+        let entry = ConfirmedMisparses::committed()
+            .get("crackling emergence")
+            .expect("the committed census carries Crackling Emergence");
+        assert_eq!(
+            entry.class,
+            MisparseClass::MissingEffect,
+            "the census row must keep its missing-effect class: {entry:?}"
+        );
+        assert!(
+            entry
+                .clauses
+                .iter()
+                .any(|clause| clause.contains("would be destroyed, instead sacrifice this Aura")),
+            "the census row must keep the unparsed destroy-instead clause: {:?}",
+            entry.clauses
+        );
+
+        // Live-parser witness. This is the printed Oracle text (Scryfall); the
+        // export carries "this Aura", which the parser normalizes to `~`.
+        // `counter_rider_face` has no subtype slot, so Aura enters only through
+        // the printed `Enchant` keyword.
+        let mut face = counter_rider_face(
+            "Crackling Emergence",
+            "Enchant land you control\nEnchanted land is a 3/3 red Spirit creature with haste. It's still a land.\nIf enchanted land would be destroyed, instead sacrifice this Aura and that land gains indestructible until end of turn.",
+            &["Enchant"],
+            &["Enchantment"],
+        );
+        // REACH: the destroy-instead sentence reaches the replacement parser.
+        let destroy = face
+            .replacements
+            .iter()
+            .find(|replacement| replacement.event == ReplacementEvent::Destroy)
+            .unwrap_or_else(|| {
+                panic!(
+                    "the destroy-instead clause must parse to a Destroy replacement: {:?}",
+                    face.replacements
+                )
+            });
+        // The parser half-lowers the clause: the execute body exists even though
+        // the staged Destroy batch cannot deliver its sacrifice-and-grant rider,
+        // so the parse tree alone reports this face as supported.
+        assert!(
+            destroy.execute.is_some(),
+            "the destroy-instead clause is half-lowered into an execute body: {destroy:?}"
+        );
+        // The census marker is therefore load-bearing: stamping it, as the export
+        // does, turns that silent half-lowering into the honest clause-level gap.
+        face.metadata.confirmed_misparse = Some(entry.class);
+        assert!(
+            card_face_gaps(&face)
+                .iter()
+                .any(|gap| gap == entry.class.handler()),
+            "the marked face reports Misparse:missing_effect: {:?}",
+            card_face_gaps(&face)
+        );
+        let mut details = public_gap_details(&card_face_coverage(&face).gaps);
+        attach_misparse_clauses("crackling emergence", &face, &mut details);
+        assert!(
+            details.iter().any(|gap| {
+                gap.handler == entry.class.handler()
+                    && gap
+                        .source_text
+                        .as_deref()
+                        .is_some_and(|text| text.contains("instead sacrifice this Aura"))
+            }),
+            "the census gap must name the destroy-instead clause: {details:?}"
+        );
+    }
+
     /// The `fmt_quantity_ref` `PreviousEffectAmount` arms are ORDER-DEPENDENT:
     /// the `(_, Sum)` arm must stay first so every Excess-channel corpus card
     /// (all of which are `Sum`) keeps rendering the pre-change string. Nothing

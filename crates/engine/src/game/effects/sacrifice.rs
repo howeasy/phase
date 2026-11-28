@@ -1,3 +1,4 @@
+use crate::game::filter::{matches_target_filter, FilterContext};
 use crate::game::quantity::resolve_quantity_with_targets;
 use crate::types::ability::{
     ControllerRef, Effect, EffectError, EffectKind, EffectResolutionResult, QuantityExpr,
@@ -169,6 +170,46 @@ fn sacrifice_cause_muzzled(
     )
 }
 
+/// CR 701.21a + CR 608.2d: The permanents the sacrifice resolver may offer
+/// `chooser` for `ability` under `filter`.
+///
+/// This is the single candidate pool: the resolver collects it to build its
+/// `WaitingFor` options, and effect-eligibility probes (e.g. forage's Food
+/// mode) use it to decide whether a sacrifice is possible at all, so a mode is
+/// never offered when the resolver would reject every candidate.
+pub(crate) fn sacrifice_candidates<'a>(
+    state: &'a GameState,
+    ability: &'a ResolvedAbility,
+    filter: &'a TargetFilter,
+    chooser: PlayerId,
+) -> impl Iterator<Item = ObjectId> + 'a {
+    // CR 107.3a + CR 601.2b: ability-context filter evaluation.
+    let ctx = FilterContext::from_ability(ability);
+    state.battlefield.iter().copied().filter(move |id| {
+        // CR 614.13a/b: restrict to objects present before the devourer co-entry
+        // began; vacuous when None. (Pool is built from LIVE battlefield, so an
+        // object an earlier co-entering devourer already sacrificed is excluded by
+        // the live basis, and the devourers themselves by the snapshot.)
+        state
+            .active_devour_eligible_snapshot()
+            .is_none_or(|snapshot| snapshot.contains(id))
+            && state.objects.get(id).is_some_and(|obj| {
+                obj.controller == chooser
+                    && !obj.is_emblem
+                    && matches_target_filter(state, *id, filter, &ctx)
+                    // CR 608.2d: a resolving player can't choose an
+                    // illegal option — a permanent its chooser is
+                    // barred from sacrificing (Call for Aid's
+                    // installer bar, an object-wide grant) or that
+                    // this ability is barred from making them
+                    // sacrifice is not a legal candidate. Offering it
+                    // lets the chooser name it and evade a mandatory
+                    // sacrifice while keeping a legal victim.
+                    && can_sacrifice_for_ability(state, ability, *id, chooser)
+            })
+    })
+}
+
 /// CR 701.21a + CR 609.3: Whether `player` choosing `object_id` for `ability`'s
 /// sacrifice would actually sacrifice it. Reads every refusal between the
 /// resolver and `sacrifice_permanent`, so an offered option is one that can be
@@ -183,6 +224,235 @@ pub(crate) fn can_sacrifice_for_ability(
     // selection, cost guards and execution (`object_cant_be_sacrificed_by`).
     !sacrifice_cause_muzzled(state, ability, object_id, player)
         && !crate::game::static_abilities::object_cant_be_sacrificed_by(state, player, object_id)
+}
+
+/// CR 608.2d + CR 701.21a: Whether a "you may sacrifice <filter>" option has no
+/// legal permanent to sacrifice, so its up-front "you may" prompt must not open
+/// and the instruction resolves as the no-op it would be anyway.
+///
+/// Mirrors [`resolve`]: the same tracked-set sentinel binding, the same
+/// `ScopedPlayer` rebinding, and the same chooser derivation
+/// ([`resolve_sacrifice_scope`], with `resolve`'s controller fallback), so the
+/// pool judged here is exactly the resolver's candidate pool. Accepting an
+/// illegal option would sacrifice nothing while the "When you do" rider still
+/// fires (Cornered Crook with only a Treasure token Quark bars, CR 701.21a).
+///
+/// CR 608.2d: a mandatory exact count is also infeasible when the pool holds
+/// FEWER permanents than the resolved count — "you may sacrifice three nonland
+/// permanents" cannot be paid with a two-permanent partial sacrifice, so its
+/// "If you do" reward must not follow (mirrors `discard.rs`'s
+/// `optional_discard_is_infeasible`). The count is resolved exactly as
+/// [`resolve`] resolves it (peel `UpTo`, clamp non-negative). An "up to N"
+/// count or a count that resolves to zero keeps the pre-existing rule:
+/// infeasible only when the pool is empty.
+///
+/// The candidate pool is consulted only for filters [`sacrifice_candidates`]
+/// can enumerate correctly: classes of battlefield permanents (`Any`, `Typed`,
+/// `SelfRef`) and a `SpecificObject` bound by a tracked-set / combat-damage
+/// anaphor (CR 510.2), which the pool admits by identity. The remaining referent
+/// filters (`ParentTarget`, `CostPaidObject`, …) name one bound object and are
+/// resolved by [`resolve`]'s targeted path, not the pool; enumerating the
+/// battlefield under them matches nothing, so treating an empty pool as
+/// infeasible would suppress a sacrifice the resolver would perform (Ogre-Head
+/// Helm). Those keep failing open.
+///
+/// CR 608.2d + CR 608.2k: `TriggeringSource` is the one referent this gate can
+/// judge without the pool. `resolve` takes the event-context object directly
+/// ("equipped creature deals combat damage … you may sacrifice it"), so when
+/// that object is on the battlefield under the chooser's control the option is
+/// impossible exactly when the sacrifice bar refuses it (Foot Chopper under
+/// Quark, Humble Proprietor). Every other resolution of the referent —
+/// nothing, a non-battlefield object, or a different controller — keeps the
+/// fail-open behavior.
+pub(crate) fn optional_sacrifice_is_infeasible(
+    state: &GameState,
+    ability: &ResolvedAbility,
+) -> bool {
+    let Effect::Sacrifice { target, .. } = &ability.effect else {
+        return false;
+    };
+    // CR 608.2c: bind the parser's "most recent set" sentinel exactly as
+    // `resolve` does before deriving the eligible pool.
+    let filter = crate::game::targeting::resolve_tracked_set_sentinel(state, target.clone());
+    // CR 608.2b + CR 400.7: the two early completions in `resolve` that make the
+    // effect a hard no-op — an authoritatively empty parent binding, and a
+    // self-reference whose source has left and re-entered (a new object).
+    if matches!(filter, TargetFilter::ParentTarget) && ability.has_authoritative_empty_binding() {
+        return true;
+    }
+    if matches!(filter, TargetFilter::SelfRef) && !ability.self_ref_is_current(state) {
+        return true;
+    }
+    // CR 400.7 + CR 603.7c: `resolve` returns before the pool when every pinned
+    // object referent became a new object.
+    if ability.pinned_object_targets_all_stale(state) {
+        return true;
+    }
+    if !sacrifice_filter_is_battlefield_population(&filter) {
+        // CR 608.2d + CR 608.2k: a non-population referent this resolver takes
+        // from event context ("you may sacrifice it" on a combat-damage
+        // trigger — Foot Chopper's equipped creature) names exactly one bound
+        // object. `resolve` sacrifices that referent directly rather than
+        // consulting the pool, so the option is impossible exactly when the
+        // bar stops the chooser from sacrificing it. Other referents stay
+        // fail-open: a pool built for them matches nothing, and their resolver
+        // path has its own guards.
+        // `resolve` reads the event-context referent only when the chain
+        // carries no chosen targets; with chosen targets it sacrifices those
+        // instead, so leave that shape fail-open here too.
+        if !matches!(filter, TargetFilter::TriggeringSource) || !ability.targets.is_empty() {
+            return false;
+        }
+        let chooser = resolve_sacrifice_scope(state, ability, &filter)
+            .first()
+            .copied()
+            .unwrap_or(ability.controller);
+        return crate::game::targeting::resolved_targets(ability, &filter, state)
+            .into_iter()
+            .find_map(|target| match target {
+                TargetRef::Object(id) => Some(id),
+                TargetRef::Player(_) => None,
+            })
+            .filter(|id| {
+                state
+                    .objects
+                    .get(id)
+                    .is_some_and(|obj| obj.zone == Zone::Battlefield && obj.controller == chooser)
+            })
+            .is_some_and(|id| !can_sacrifice_for_ability(state, ability, id, chooser));
+    }
+    // CR 115.1: `resolve` takes its targeted path whenever the chain still
+    // carries a live object target on the battlefield; that path sacrifices the
+    // inherited object directly and never consults the pool.
+    for target in ability.live_object_targets(state) {
+        let TargetRef::Object(id) = target else {
+            continue;
+        };
+        if state
+            .objects
+            .get(&id)
+            .is_some_and(|obj| obj.zone == Zone::Battlefield)
+        {
+            return false;
+        }
+    }
+    // CR 608.2c: the resolver rebinds a `ScopedPlayer` sacrifice to the player
+    // named by the triggering event before deriving the chooser.
+    let scoped_ability;
+    let ability = if matches!(
+        sacrifice_controller_scope(&filter),
+        Some(ControllerRef::ScopedPlayer)
+    ) {
+        if let Some(player) = trigger_event_scoped_player(state, ability) {
+            scoped_ability = {
+                let mut scoped = ability.clone();
+                scoped.set_scoped_player_recursive(player);
+                scoped
+            };
+            &scoped_ability
+        } else {
+            ability
+        }
+    } else {
+        ability
+    };
+    // CR 701.21a: `resolve` asks exactly this chooser (its `affected[0]`),
+    // falling back to the ability controller when no scope resolves.
+    let chooser = resolve_sacrifice_scope(state, ability, &filter)
+        .first()
+        .copied()
+        .unwrap_or(ability.controller);
+    // CR 608.2d: resolve the required count exactly as [`resolve`]
+    // does before judging the pool, so an exact "sacrifice N" is infeasible
+    // when N legal candidates do not exist. `EntireReferent` (no count) keeps
+    // the pre-existing empty-pool rule.
+    let Effect::Sacrifice { count, .. } = &ability.effect else {
+        return false;
+    };
+    let required = count.count_expr().map(|expression| {
+        let (count_expr, up_to) = expression.peel_up_to();
+        (
+            resolve_quantity_with_targets(state, count_expr, ability).max(0) as usize,
+            up_to,
+        )
+    });
+    // CR 608.2d: an exact instruction can only be carried out in full, so a
+    // short pool makes the option impossible. An "up to N" count or a count
+    // that resolves to zero keeps the pre-existing rule: infeasible only when
+    // the pool is empty.
+    let (bound, exact) = match required {
+        Some((count, false)) if count > 0 => (count, true),
+        _ => (1, false),
+    };
+    let available = sacrifice_candidates(state, ability, &filter, chooser)
+        .take(bound)
+        .count();
+    if exact {
+        available < bound
+    } else {
+        available == 0
+    }
+}
+
+/// CR 608.2d: True when a pool built by [`sacrifice_candidates`] is the right
+/// answer for `filter`, so an empty pool means "no legal sacrifice" rather than
+/// an enumeration mismatch. Every leg of a conjunction/disjunction must
+/// qualify, and a `Not` inherits its operand's shape. This is the
+/// pool-enumerability axis; [`sacrifice_filter_names_bound_object`] answers the
+/// distinct referent-vs-class question.
+///
+/// * `Any` / `SelfRef` / `Typed` name a class of battlefield permanents.
+/// * `SpecificObject` names one already-bound object. [`sacrifice_candidates`]
+///   still walks the live battlefield and admits that object by identity, plus
+///   the chooser's control and [`can_sacrifice_for_ability`], which is exactly
+///   the pool `resolve` consults for the tracked-set / combat-damage anaphor
+///   CR 510.2 feeds it (Descendants' Fury's "one of them" binds to a
+///   `SpecificObject`, or an `Or` of them, from the damage event's source set).
+///   A bound object its chooser is barred from sacrificing must therefore read
+///   as infeasible instead of offering a dead option.
+///
+/// Other referents (`TriggeringSource`, `ParentTarget`, `CostPaidObject`, …)
+/// stay `false`: `resolve` handles them through its targeted path, and a pool
+/// built for them matches nothing, so treating the empty pool as infeasible
+/// would suppress a sacrifice the resolver would perform (Ogre-Head Helm).
+/// The optional-offer gate judges `TriggeringSource` separately through
+/// [`crate::game::targeting::resolved_targets`] instead of widening this
+/// pool-enumerability predicate.
+pub(crate) fn sacrifice_filter_is_battlefield_population(filter: &TargetFilter) -> bool {
+    match filter {
+        TargetFilter::Any
+        | TargetFilter::SelfRef
+        | TargetFilter::Typed(_)
+        | TargetFilter::SpecificObject { .. } => true,
+        TargetFilter::Or { filters } | TargetFilter::And { filters } => filters
+            .iter()
+            .all(sacrifice_filter_is_battlefield_population),
+        TargetFilter::Not { filter } => sacrifice_filter_is_battlefield_population(filter),
+        _ => false,
+    }
+}
+
+/// CR 608.2d + CR 701.21a: True when `filter` names an already-bound object — a
+/// referent whose refusal means the "sacrifice it" instruction did not happen —
+/// rather than a class of battlefield permanents.
+///
+/// This is the REFERENT axis and is deliberately NOT the same question as
+/// [`sacrifice_filter_is_battlefield_population`]: a `SpecificObject` is both
+/// pool-enumerable (the candidate pool admits it by identity) and a bound
+/// referent, so the `WhenYouDo` refusal gate must still read it as one named
+/// object. `Or`/`And` name a referent when ANY leg does (the inverse of the
+/// population predicate's all-legs rule); `Not` inherits its operand's shape.
+/// Every other referent filter names a bound object; `Any`/`SelfRef`/`Typed`
+/// are classes.
+pub(crate) fn sacrifice_filter_names_bound_object(filter: &TargetFilter) -> bool {
+    match filter {
+        TargetFilter::Any | TargetFilter::SelfRef | TargetFilter::Typed(_) => false,
+        TargetFilter::Or { filters } | TargetFilter::And { filters } => {
+            filters.iter().any(sacrifice_filter_names_bound_object)
+        }
+        TargetFilter::Not { filter } => sacrifice_filter_names_bound_object(filter),
+        _ => true,
+    }
 }
 
 /// CR 701.21a: To sacrifice a permanent, its controller moves it to its owner's graveyard.
@@ -200,8 +470,11 @@ pub fn resolve(
     // CR 609.3: Resolve the dynamic sacrifice count through
     // `resolve_quantity_with_targets` before attempting the sacrifice so
     // mandatory effects can do as much as possible against the rebound
-    // controller. A missing Sacrifice effect falls back to 1 so the
-    // compatibility branch below preserves existing behavior.
+    // controller. Unlike the optional "you may sacrifice N" gate
+    // ([`optional_sacrifice_is_infeasible`], CR 608.2d), a MANDATORY sacrifice
+    // is not all-or-nothing: a short pool still sacrifices as many eligible
+    // permanents as it can (CR 609.3). A missing Sacrifice effect falls back to
+    // 1 so the compatibility branch below preserves existing behavior.
     // Peel `UpTo` from the count expression to derive the upper-bound
     // expression and the may-pick-fewer flag. Plain
     // `QuantityExpr` (Fixed/Ref/DivideRounded/...) means a mandatory count;
@@ -572,36 +845,8 @@ pub fn resolve(
         // patterns. Multi-opponent multiplayer sacrifice is deferred to a
         // queued WaitingFor infrastructure.
         let chooser = affected[0];
-        // CR 107.3a + CR 601.2b: ability-context filter evaluation.
-        let ctx = crate::game::filter::FilterContext::from_ability(ability);
-        let eligible: Vec<ObjectId> = state
-            .battlefield
-            .iter()
-            .copied()
-            .filter(|id| {
-                // CR 614.13a/b: restrict to objects present before the devourer co-entry
-                // began; vacuous when None. (Pool is built from LIVE battlefield, so an
-                // object an earlier co-entering devourer already sacrificed is excluded by
-                // the live basis, and the devourers themselves by the snapshot.)
-                state
-                    .active_devour_eligible_snapshot()
-                    .is_none_or(|snapshot| snapshot.contains(id))
-                    && state.objects.get(id).is_some_and(|obj| {
-                        obj.controller == chooser
-                            && !obj.is_emblem
-                            && crate::game::filter::matches_target_filter(state, *id, filter, &ctx)
-                            // CR 608.2d: a resolving player can't choose an
-                            // illegal option — a permanent its chooser is
-                            // barred from sacrificing (Call for Aid's
-                            // installer bar, an object-wide grant) or that
-                            // this ability is barred from making them
-                            // sacrifice is not a legal candidate. Offering it
-                            // lets the chooser name it and evade a mandatory
-                            // sacrifice while keeping a legal victim.
-                            && can_sacrifice_for_ability(state, ability, *id, chooser)
-                    })
-            })
-            .collect();
+        let eligible: Vec<ObjectId> =
+            sacrifice_candidates(state, ability, filter, chooser).collect();
 
         if count == 0 {
             // CR 107.3a: A dynamic count that resolves to zero is a legal
@@ -701,6 +946,13 @@ pub fn resolve(
     }
 
     let mut selections = Vec::new();
+    // CR 701.21a + CR 608.2d: a referent this ability is barred from making its
+    // controller sacrifice is an impossible option. Track that exact refusal so
+    // an empty result can suppress the "If you do" rider (e.g. a "you may
+    // sacrifice it" referent such as an animated Treasure wearing Foot Chopper,
+    // which Quark bars) instead of letting it read as a performed sacrifice.
+    // Any other skip reason keeps its own semantics.
+    let mut refused_by_sacrifice_bar = false;
     for obj_id in targeted_objects {
         // CR 609.3 / CR 608.2b + CR 111.7: a member of this set that no longer
         // exists is a normal outcome, not an error. Which rule says so depends
@@ -770,10 +1022,18 @@ pub fn resolve(
         let player_id = obj.controller;
 
         if !can_sacrifice_for_ability(state, ability, obj_id, player_id) {
+            refused_by_sacrifice_bar = true;
             continue;
         }
 
         selections.push((player_id, vec![obj_id]));
+    }
+
+    // CR 701.21a + CR 608.2d: nothing was sacrificed because the only named
+    // referent was barred — the same "gated action didn't happen" signal the
+    // empty-pool arm sets, so a conditional rider does not fire.
+    if selections.is_empty() && refused_by_sacrifice_bar {
+        state.cost_payment_failed_flag = true;
     }
 
     let completion = PendingPlayerScopeSacrificeCompletion {
@@ -807,13 +1067,13 @@ mod tests {
     use crate::types::ability::{
         AbilityCondition, AbilityKind, AggregateFunction, Comparator, ControllerRef,
         CostPaidObjectSnapshot, Effect, FilterProp, ObjectProperty, PtStat, PtValue, PtValueScope,
-        QuantityRef, SubAbilityLink, TargetFilter, TypedFilter,
+        QuantityRef, SubAbilityLink, TargetFilter, TypeFilter, TypedFilter,
     };
     use crate::types::actions::GameAction;
     use crate::types::card_type::CoreType;
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::player::PlayerId;
-    use crate::types::statics::StaticMode;
+    use crate::types::statics::{ProhibitionScope, StaticMode};
     use crate::types::StaticDefinition;
 
     fn make_sacrifice_ability(target: ObjectId) -> ResolvedAbility {
@@ -2823,6 +3083,495 @@ mod tests {
         assert!(
             state.battlefield.contains(&bystander) && state.battlefield.contains(&spare),
             "only the referent may be sacrificed"
+        );
+    }
+
+    /// CR 608.2d: "sacrifice three nonland permanents" is one instruction the
+    /// player can only carry out in full. Two matching permanents make the
+    /// option impossible (its "If you do" reward must not follow a partial
+    /// sacrifice); three satisfy it. "Up to three" may pick fewer and stays
+    /// feasible on the same two-permanent pool. A dynamic count is judged after
+    /// resolving against the state, and a count that resolves to zero with an
+    /// empty pool keeps the pre-existing empty-pool answer.
+    #[test]
+    fn optional_sacrifice_exact_count_requires_a_full_pool() {
+        let mut state = GameState::new_two_player(42);
+        let filter = TargetFilter::Typed(
+            TypedFilter::permanent()
+                .with_type(TypeFilter::Non(Box::new(TypeFilter::Land)))
+                .controller(ControllerRef::You),
+        );
+        let ability_with = |count: QuantityExpr| {
+            ResolvedAbility::new(
+                Effect::Sacrifice {
+                    target: filter.clone(),
+                    count: count.into(),
+                    min_count: 0,
+                },
+                vec![],
+                ObjectId(100),
+                PlayerId(0),
+            )
+        };
+
+        let add_nonland = |state: &mut GameState, card: u64| {
+            let id = create_object(
+                state,
+                CardId(card),
+                PlayerId(0),
+                format!("Nonland Permanent {card}"),
+                Zone::Battlefield,
+            );
+            state.objects.get_mut(&id).unwrap().card_types.core_types = vec![CoreType::Artifact];
+            id
+        };
+        add_nonland(&mut state, 1);
+        add_nonland(&mut state, 2);
+
+        assert!(
+            optional_sacrifice_is_infeasible(
+                &state,
+                &ability_with(QuantityExpr::Fixed { value: 3 }),
+            ),
+            "two permanents cannot pay a mandatory three-permanent sacrifice"
+        );
+        assert!(
+            !optional_sacrifice_is_infeasible(
+                &state,
+                &ability_with(QuantityExpr::up_to(QuantityExpr::Fixed { value: 3 })),
+            ),
+            "\"up to three\" is feasible with two permanents"
+        );
+
+        // CR 608.2d: a non-Fixed count is resolved from the live state before
+        // the pool is judged. Two nonland permanents plus two lands resolve the
+        // battlefield-population count to four, above the two-filler nonland
+        // pool, so the option is infeasible even though the count is not
+        // literal.
+        let add_land = |state: &mut GameState, card: u64| {
+            let id = create_object(
+                state,
+                CardId(card),
+                PlayerId(0),
+                format!("Land {card}"),
+                Zone::Battlefield,
+            );
+            state.objects.get_mut(&id).unwrap().card_types.core_types = vec![CoreType::Land];
+            id
+        };
+        add_land(&mut state, 10);
+        add_land(&mut state, 11);
+        let battlefield_count = QuantityExpr::Ref {
+            qty: QuantityRef::ObjectCount {
+                filter: TargetFilter::Typed(TypedFilter::permanent()),
+            },
+        };
+        assert!(
+            optional_sacrifice_is_infeasible(&state, &ability_with(battlefield_count)),
+            "a dynamic count that resolves above the pool is infeasible"
+        );
+
+        // CR 608.2d: a count that resolves to zero keeps the pre-existing
+        // empty-pool answer — no candidate makes the option infeasible.
+        let empty = GameState::new_two_player(42);
+        assert!(
+            optional_sacrifice_is_infeasible(
+                &empty,
+                &ability_with(QuantityExpr::Fixed { value: 0 }),
+            ),
+            "zero with an empty pool keeps the pre-existing empty-pool answer"
+        );
+
+        add_nonland(&mut state, 3);
+        assert!(
+            !optional_sacrifice_is_infeasible(
+                &state,
+                &ability_with(QuantityExpr::Fixed { value: 3 }),
+            ),
+            "three permanents satisfy the exact count"
+        );
+    }
+
+    /// Quark, Humble Proprietor's "You can't sacrifice Treasure tokens." as a
+    /// player-scoped static on a battlefield source controlled by P0.
+    fn quark_cant_sacrifice_treasure(state: &mut GameState) -> ObjectId {
+        let quark = create_object(
+            state,
+            CardId(90),
+            PlayerId(0),
+            "Quark, Humble Proprietor".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&quark).unwrap();
+            obj.card_types.core_types = vec![CoreType::Creature];
+            obj.static_definitions
+                .push(StaticDefinition::new(StaticMode::CantSacrifice {
+                    who: ProhibitionScope::Controller,
+                    filter: TargetFilter::Typed(
+                        TypedFilter::default().subtype("Treasure".to_string()),
+                    ),
+                }));
+        }
+        quark
+    }
+
+    fn artifact_permanent(
+        state: &mut GameState,
+        card: u64,
+        name: &str,
+        treasure: bool,
+    ) -> ObjectId {
+        let id = create_object(
+            state,
+            CardId(card),
+            PlayerId(0),
+            name.to_string(),
+            Zone::Battlefield,
+        );
+        let obj = state.objects.get_mut(&id).unwrap();
+        obj.card_types.core_types = vec![CoreType::Artifact];
+        if treasure {
+            obj.is_token = true;
+            obj.card_types.subtypes.push("Treasure".to_string());
+        }
+        id
+    }
+
+    /// "You may sacrifice it. If you do, you gain 1 life." as a chain the
+    /// resolver can drive to completion: the root names `referent` and the
+    /// `SequentialSibling` rider is gated on the CR 608.2c/608.2d
+    /// optional-effect-performed signal. The prefilled root context simulates an
+    /// accepted "may" prompt — that latch lives on the ability context, not on
+    /// `GameState`.
+    fn optional_sacrifice_rider_chain(referent: ObjectId) -> ResolvedAbility {
+        let mut rider = ResolvedAbility::new(
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 1 },
+                player: TargetFilter::Controller,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        )
+        .condition(AbilityCondition::effect_performed());
+        rider.sub_link = SubAbilityLink::SequentialSibling;
+
+        let mut ability = make_sacrifice_ability(referent);
+        ability.context.optional_effect_performed = true;
+        ability.sub_ability = Some(Box::new(rider));
+        ability
+    }
+
+    /// CR 608.2d + CR 609.3: an "If you do" rider must not run when the only
+    /// named referent is a sacrifice the controller is barred from making — the
+    /// failed gate (`cost_payment_failed_flag`) overrides any accepted "may"
+    /// latch on the chain.
+    #[test]
+    fn optional_sacrifice_rider_does_not_fire_when_named_referent_is_barred() {
+        let mut state = GameState::new_two_player(42);
+        quark_cant_sacrifice_treasure(&mut state);
+        let treasure = artifact_permanent(&mut state, 1, "Animated Treasure", true);
+        let life_before = state.players[0].life;
+        let ability = optional_sacrifice_rider_chain(treasure);
+        let mut events = Vec::new();
+
+        resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+
+        assert!(
+            state.battlefield.contains(&treasure),
+            "the barred referent must survive"
+        );
+        assert_eq!(
+            state.players[0].life, life_before,
+            "an If-you-do rider must not run off a refused sacrifice"
+        );
+        assert!(state.cost_payment_failed_flag);
+    }
+
+    /// Control for the test above: the same chain naming an unbarred artifact
+    /// sacrifices it and the rider runs.
+    #[test]
+    fn optional_sacrifice_rider_fires_when_named_referent_is_not_barred() {
+        let mut state = GameState::new_two_player(42);
+        quark_cant_sacrifice_treasure(&mut state);
+        let sol_ring = artifact_permanent(&mut state, 1, "Sol Ring", false);
+        let life_before = state.players[0].life;
+        let ability = optional_sacrifice_rider_chain(sol_ring);
+        let mut events = Vec::new();
+
+        resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+
+        assert!(
+            !state.battlefield.contains(&sol_ring),
+            "the unbarred referent must be sacrificed"
+        );
+        assert!(state.players[0].graveyard.contains(&sol_ring));
+        assert_eq!(
+            state.players[0].life,
+            life_before + 1,
+            "the If-you-do rider must run after a performed sacrifice"
+        );
+        assert!(!state.cost_payment_failed_flag);
+    }
+
+    /// "You may sacrifice it. When you do, you gain 1 life." as a chain the
+    /// resolver can drive: the root names `referent` through `ParentTarget`
+    /// (the anaphoric back-reference "it" prints as) and the `WhenYouDo` rider
+    /// is the CR 603.12 reflexive. The prefilled root context simulates an
+    /// accepted "may" prompt — that latch lives on the ability context, not on
+    /// `GameState`.
+    fn optional_sacrifice_when_you_do_chain(referent: ObjectId) -> ResolvedAbility {
+        let mut rider = ResolvedAbility::new(
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 1 },
+                player: TargetFilter::Controller,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        )
+        .condition(AbilityCondition::WhenYouDo);
+        rider.sub_link = SubAbilityLink::SequentialSibling;
+
+        let mut ability = make_sacrifice_ability(referent);
+        if let Effect::Sacrifice { target, .. } = &mut ability.effect {
+            *target = TargetFilter::ParentTarget;
+        }
+        ability.context.optional_effect_performed = true;
+        ability.sub_ability = Some(Box::new(rider));
+        ability
+    }
+
+    /// CR 608.2d + CR 603.12: a "When you do" reflexive must not trigger when
+    /// the named referent of an optional sacrifice is refused by a sacrifice
+    /// bar — the event the reflexive keys on never occurred (CR 701.21a: the
+    /// controller cannot sacrifice it).
+    #[test]
+    fn optional_sacrifice_when_you_do_does_not_fire_when_named_referent_is_barred() {
+        let mut state = GameState::new_two_player(42);
+        quark_cant_sacrifice_treasure(&mut state);
+        let treasure = artifact_permanent(&mut state, 1, "Animated Treasure", true);
+        let life_before = state.players[0].life;
+        let ability = optional_sacrifice_when_you_do_chain(treasure);
+        let mut events = Vec::new();
+
+        resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+
+        assert!(
+            state.battlefield.contains(&treasure),
+            "the barred referent must survive"
+        );
+        assert!(
+            state.deferred_triggers.is_empty() && state.stack.is_empty(),
+            "a refused sacrifice must create no When-you-do reflexives"
+        );
+        assert_eq!(
+            state.players[0].life, life_before,
+            "a When-you-do rider must not run off a refused sacrifice"
+        );
+        assert!(state.cost_payment_failed_flag);
+    }
+
+    /// Control for the test above: the same chain naming an unbarred artifact
+    /// sacrifices it, triggers the CR 603.12 reflexive, and the rider resolves.
+    #[test]
+    fn optional_sacrifice_when_you_do_fires_when_named_referent_is_not_barred() {
+        let mut state = GameState::new_two_player(42);
+        quark_cant_sacrifice_treasure(&mut state);
+        let sol_ring = artifact_permanent(&mut state, 1, "Sol Ring", false);
+        let life_before = state.players[0].life;
+        let ability = optional_sacrifice_when_you_do_chain(sol_ring);
+        let mut events = Vec::new();
+
+        resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+
+        assert!(
+            !state.battlefield.contains(&sol_ring),
+            "the unbarred referent must be sacrificed"
+        );
+        assert!(state.players[0].graveyard.contains(&sol_ring));
+        assert!(!state.cost_payment_failed_flag);
+        assert_eq!(
+            state.deferred_triggers.len(),
+            1,
+            "the performed sacrifice must create one reflexive trigger"
+        );
+
+        // CR 603.12: the reflexive is put on the stack after the parent's
+        // resolution and resolves on its own; drive it through priority so the
+        // life gain proves the trigger actually fired.
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+        assert!(
+            crate::game::triggers::drain_deferred_trigger_queue(&mut state, &mut events).is_none(),
+            "the target-less reflexive reaches the stack without a prompt"
+        );
+        assert_eq!(state.stack.len(), 1, "the reflexive must be on the stack");
+        let mut safety = 4;
+        while !state.stack.is_empty() && safety > 0 {
+            crate::game::engine::apply_as_current(&mut state, GameAction::PassPriority)
+                .expect("resolve the reflexive trigger through priority");
+            safety -= 1;
+        }
+        assert_eq!(
+            state.players[0].life,
+            life_before + 1,
+            "the When-you-do rider must run after a performed sacrifice"
+        );
+    }
+
+    /// CR 608.2d + CR 118.12: "You may sacrifice two nonland permanents. If you
+    /// do, you gain 1 life." with ONE legal permanent is an impossible option.
+    /// The printed cost cannot be paid in full, so no prompt opens, the short
+    /// pool is left untouched, and the gated "If you do" rider does not run.
+    /// Two legal permanents keep the ordinary offer: the choice window opens
+    /// and nothing is sacrificed before it is answered.
+    #[test]
+    fn optional_sacrifice_short_pool_auto_declines_without_prompt_or_rider() {
+        let filter = TargetFilter::Typed(
+            TypedFilter::permanent()
+                .with_type(TypeFilter::Non(Box::new(TypeFilter::Land)))
+                .controller(ControllerRef::You),
+        );
+        let chain = || {
+            let mut rider = ResolvedAbility::new(
+                Effect::GainLife {
+                    amount: QuantityExpr::Fixed { value: 1 },
+                    player: TargetFilter::Controller,
+                },
+                vec![],
+                ObjectId(100),
+                PlayerId(0),
+            )
+            .condition(AbilityCondition::effect_performed());
+            rider.sub_link = SubAbilityLink::SequentialSibling;
+
+            let mut ability = ResolvedAbility::new(
+                Effect::Sacrifice {
+                    target: filter.clone(),
+                    count: QuantityExpr::Fixed { value: 2 }.into(),
+                    min_count: 0,
+                },
+                vec![],
+                ObjectId(100),
+                PlayerId(0),
+            );
+            ability.optional = true;
+            ability.sub_ability = Some(Box::new(rider));
+            ability
+        };
+        let add_nonland = |state: &mut GameState, card: u64| {
+            let id = create_object(
+                state,
+                CardId(card),
+                PlayerId(0),
+                format!("Nonland Permanent {card}"),
+                Zone::Battlefield,
+            );
+            state.objects.get_mut(&id).unwrap().card_types.core_types = vec![CoreType::Artifact];
+            id
+        };
+
+        // One matching permanent: "sacrifice two" cannot be paid in full.
+        let mut short = GameState::new_two_player(42);
+        let only = add_nonland(&mut short, 1);
+        let life_before = short.players[0].life;
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut short, &chain(), &mut events, 0).unwrap();
+
+        assert!(
+            short.battlefield.contains(&only),
+            "an infeasible exact sacrifice must leave the short pool untouched"
+        );
+        assert!(
+            !matches!(short.waiting_for, WaitingFor::OptionalEffectChoice { .. }),
+            "an impossible short-pool sacrifice must not offer an accept prompt"
+        );
+        assert_eq!(
+            short.players[0].life, life_before,
+            "the If-you-do rider must not run off a declined sacrifice"
+        );
+
+        // Control: two matching permanents make the option feasible, so the
+        // ordinary "you may" choice opens and nothing happens before it does.
+        let mut full = GameState::new_two_player(42);
+        let first = add_nonland(&mut full, 1);
+        let second = add_nonland(&mut full, 2);
+        let life_before = full.players[0].life;
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut full, &chain(), &mut events, 0).unwrap();
+
+        assert!(
+            matches!(full.waiting_for, WaitingFor::OptionalEffectChoice { .. }),
+            "a feasible optional sacrifice must still offer the choice"
+        );
+        assert!(
+            full.battlefield.contains(&first) && full.battlefield.contains(&second),
+            "nothing may be sacrificed before the optional choice is answered"
+        );
+        assert_eq!(full.players[0].life, life_before);
+    }
+
+    /// CR 701.21a + CR 608.2d: "you may sacrifice it" naming a Treasure token
+    /// Quark bars is an impossible option. The targeted path must leave the
+    /// token on the battlefield AND signal that nothing happened, so an "If you
+    /// do" rider cannot fire off an empty sacrifice.
+    #[test]
+    fn targeted_sacrifice_barred_referent_survives_and_fails_the_gate() {
+        let mut state = GameState::new_two_player(42);
+        quark_cant_sacrifice_treasure(&mut state);
+        let treasure = artifact_permanent(&mut state, 1, "Treasure Token", true);
+        let ability = make_sacrifice_ability(treasure);
+        let mut events = Vec::new();
+
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert!(
+            state.battlefield.contains(&treasure),
+            "a Treasure the controller can't sacrifice must stay on the battlefield"
+        );
+        assert!(
+            !state.players[0].graveyard.contains(&treasure),
+            "nothing may be sacrificed when the only named referent is barred"
+        );
+        assert!(
+            state.cost_payment_failed_flag,
+            "the gated action did not happen, so a conditional rider must not fire"
+        );
+    }
+
+    /// Control for the test above: the same Quark prohibition and board, but
+    /// the named referent is an unbarred artifact. It is sacrificed and the
+    /// failure flag stays clear — the bar is per permanent, not a blanket
+    /// suppression.
+    #[test]
+    fn targeted_sacrifice_unbarred_referent_is_sacrificed() {
+        let mut state = GameState::new_two_player(42);
+        quark_cant_sacrifice_treasure(&mut state);
+        let sol_ring = artifact_permanent(&mut state, 1, "Sol Ring", false);
+        let treasure = artifact_permanent(&mut state, 2, "Treasure Token", true);
+        let ability = make_sacrifice_ability(sol_ring);
+        let mut events = Vec::new();
+
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert!(
+            !state.battlefield.contains(&sol_ring),
+            "an unbarred referent must be sacrificed"
+        );
+        assert!(
+            state.players[0].graveyard.contains(&sol_ring),
+            "the sacrificed artifact moves to its owner's graveyard"
+        );
+        assert!(
+            state.battlefield.contains(&treasure),
+            "the barred Treasure is not the named referent and must survive"
+        );
+        assert!(
+            !state.cost_payment_failed_flag,
+            "a performed sacrifice must not signal failure"
         );
     }
 }

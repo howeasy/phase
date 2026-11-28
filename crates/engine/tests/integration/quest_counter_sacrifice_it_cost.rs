@@ -298,6 +298,25 @@ fn gorbag_of_minas_morgul_may_sacrifice_it_never_binds_the_source() {
         matches!(execute.effect.as_ref(), Effect::Sacrifice { .. }) && execute.optional,
         "the trigger must open with the optional sacrifice: {execute:?}"
     );
+    // The sacrifice targets a referent the trigger introduced, not a
+    // battlefield class: `TargetFilter::ParentTarget` keeps the reflexive's
+    // antecedent ("it" = the Goblin or Orc that dealt the damage) and lets the
+    // `WhenYouDo` gate in `effects/mod.rs` (`refused_named_referent_sacrifice`)
+    // read a refused referent as the action not occurring (CR 608.2d, CR
+    // 603.12). A battlefield-population filter would bypass that gate.
+    assert!(
+        matches!(
+            execute.effect.as_ref(),
+            Effect::Sacrifice {
+                target: TargetFilter::ParentTarget,
+                ..
+            }
+        ),
+        "the sacrifice must target the trigger-introduced referent (ParentTarget), not a \
+         battlefield class: when the sacrifice bar sets the failure flag, the WhenYouDo gate in \
+         effects/mod.rs treats a named-referent optional sacrifice as refused, so its reflexive \
+         body must not run (CR 608.2d, CR 603.12): {execute:?}"
+    );
     let reflexive = execute
         .sub_ability
         .as_deref()

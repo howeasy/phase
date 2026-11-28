@@ -2057,7 +2057,9 @@ fn pay_ability_cost_inner(
             if matches!(cost.target, TargetFilter::SelfRef) {
                 // Player-level bans plus object-level bars (Call for Aid binds
                 // its caster) share one authority; either fails payment.
-                if super::static_abilities::player_cant_sacrifice_as_cost(state, player, source_id)
+                // CR 118.3: the general bar was evaluated by
+                // object_cant_be_sacrificed_by; only the CantPayCost half runs here.
+                if super::static_abilities::player_cant_pay_sacrifice_cost(state, player, source_id)
                     || super::static_abilities::object_cant_be_sacrificed_by(
                         state, player, source_id,
                     )

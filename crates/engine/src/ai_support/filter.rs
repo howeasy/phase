@@ -1425,6 +1425,8 @@ impl LegalityPoisonGates {
             }
             // CR 602.5 / CR 117.1b: activation prohibitions and per-turn limit
             // modifiers (the latter make the folded activation count insufficient).
+            // CR 701.21a: a sacrifice prohibition bars sacrifice costs of activations,
+            // the same effect `CantPayCost` has on them.
             if matches!(
                 def.mode,
                 StaticMode::CantBeActivated { .. }
@@ -1432,6 +1434,7 @@ impl LegalityPoisonGates {
                     | StaticMode::CantTap
                     | StaticMode::CantUntap
                     | StaticMode::CantPayCost { .. }
+                    | StaticMode::CantSacrifice { .. }
                     | StaticMode::ModifyActivationLimit { .. }
             ) {
                 g.has_activation = true;
