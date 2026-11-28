@@ -3905,7 +3905,9 @@ pub(super) fn build_spell_meta(
         // CR 903.3 + CR 903.3d / CR 108.3: ownership and commander designation
         // are frozen object facts, unaffected by the rider projection above.
         // A non-commander spell the caster owns is `Owned`; any other owner is
-        // `NotOwned` (the fail-closed default when this snapshot is absent).
+        // `NotOwned`. The derived default is `Owned`, the fail-closed reading
+        // when this snapshot is absent: both the `Commander` and `NotOwned`
+        // leaves read false under it.
         caster_relation: if obj.is_commander && obj.owner == caster {
             SpellCasterRelation::Commander
         } else if obj.owner == caster {

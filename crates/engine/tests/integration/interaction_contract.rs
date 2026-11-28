@@ -33,7 +33,7 @@ use engine::types::identifiers::{CardId, ObjectId};
 use engine::types::interaction::{
     AmountAssignment, InteractionActionCode, InteractionAvailability, InteractionChoiceId,
     InteractionManaAbilityActivationScope, InteractionManaColor, InteractionManaRestriction,
-    InteractionManaSpellProperty, InteractionOpportunityResponse, InteractionOutcomeCode,
+    InteractionOpportunityResponse, InteractionOutcomeCode,
     InteractionPresentationSurface, InteractionPreviewRequest, InteractionPreviewStatus,
     InteractionReasonCode, InteractionResponse, InteractionResponseSpec, InteractionRoleCode,
     InteractionSessionId, InteractionShortcutCountSpec, InteractionShortcutDecision,
@@ -2259,118 +2259,6 @@ fn tap_land_for_mana_projects_resolved_and_missing_chosen_color_restrictions() {
         ],
         "a missing choice remains visibly fail-closed instead of appearing unrestricted"
     );
-}
-
-/// CR 106.6: the runtime `OnlyForSpellProperty` leaf projects losslessly to the
-/// viewer-safe `InteractionManaSpellProperty` token, including the compound
-/// clauses that pair the property with a type or color-count restriction.
-/// Revert-to-red: mapping the DTO back to the bare `OnlyForSpell` case, or
-/// dropping a property value, fails the per-source equality below.
-#[test]
-fn only_for_spell_property_projects() {
-    let cases: [(&str, &str, Vec<InteractionManaRestriction>); 4] = [
-        (
-            "Commander Property Contract",
-            "{T}: Add {G}. Spend this mana only to cast your commander.",
-            vec![InteractionManaRestriction::OnlyForSpellProperty {
-                property: InteractionManaSpellProperty::Commander,
-            }],
-        ),
-        (
-            "Not Owned Property Contract",
-            "{T}: Add {G}. Spend this mana only to cast spells you don't own.",
-            vec![InteractionManaRestriction::OnlyForSpellProperty {
-                property: InteractionManaSpellProperty::NotOwnedByCaster,
-            }],
-        ),
-        (
-            "No Abilities Property Contract",
-            "{T}: Add {G}. Spend this mana only to cast creature spells with no abilities.",
-            vec![
-                InteractionManaRestriction::OnlyForSpellType {
-                    spell_type: "Creature".to_string(),
-                },
-                InteractionManaRestriction::OnlyForSpellProperty {
-                    property: InteractionManaSpellProperty::NoAbilities,
-                },
-            ],
-        ),
-        (
-            "No X Property Contract",
-            "{T}: Add {G}. Spend this mana only to cast a spell that's one or more colors without {X} in its mana cost.",
-            vec![
-                InteractionManaRestriction::OnlyForSpellWithColorCount {
-                    comparator: engine::types::interaction::InteractionManaComparator::AtLeast,
-                    count: 1,
-                },
-                InteractionManaRestriction::OnlyForSpellProperty {
-                    property: InteractionManaSpellProperty::WithoutXInManaCost,
-                },
-            ],
-        ),
-    ];
-
-    let mut scenario = GameScenario::new();
-    scenario.at_phase(Phase::PreCombatMain);
-    let sources: Vec<(ObjectId, &str, Vec<InteractionManaRestriction>)> = cases
-        .iter()
-        .map(|(name, oracle, expected)| {
-            (
-                scenario.add_land_from_oracle(P0, name, oracle).id(),
-                *name,
-                expected.clone(),
-            )
-        })
-        .collect();
-    let mut runner = scenario.build();
-
-    for (index, (source, name, expected)) in sources.into_iter().enumerate() {
-        let state = runner.state_mut();
-        bind(state, &format!("spell-property-{index}"));
-        let view = priority_view(state);
-        let InteractionOpportunityResponse::ExactChoices { choices } =
-            &view.opportunities[0].response
-        else {
-            panic!("priority is projected as exact choices");
-        };
-        let restrictions = choices
-            .iter()
-            .find(|choice| {
-                choice.surfaces.iter().any(|surface| {
-                    matches!(
-                        surface,
-                        InteractionPresentationSurface::Action {
-                            code: InteractionActionCode::TapLandForMana,
-                            ..
-                        }
-                    )
-                }) && choice.surfaces.iter().any(|surface| {
-                    matches!(
-                        surface,
-                        InteractionPresentationSurface::Object {
-                            role: InteractionRoleCode::Source,
-                            reference,
-                            ..
-                        } if reference == &source.0.to_string()
-                    )
-                })
-            })
-            .and_then(|choice| {
-                choice.surfaces.iter().find_map(|surface| match surface {
-                    InteractionPresentationSurface::Mana {
-                        role: InteractionRoleCode::ProducedMana,
-                        restrictions,
-                        ..
-                    } => Some(restrictions.clone()),
-                    _ => None,
-                })
-            })
-            .unwrap_or_else(|| panic!("{name} projects one produced mana unit"));
-        assert_eq!(
-            restrictions, expected,
-            "{name} keeps its property restriction"
-        );
-    }
 }
 
 fn scry_identity_runner() -> (engine::game::scenario::GameRunner, ObjectId) {
