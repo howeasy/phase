@@ -1,0 +1,1140 @@
+//! The "target opponent may have <causee> <predicate>" class — CR 115.1 + CR
+//! 118.12 + CR 608.2d: exactly one opponent is declared as a target as the
+//! spell or ability is put on the stack (CR 115.1a / CR 115.1d, CR 601.2c),
+//! only that player makes the may-choice, and the causee ("you" = the
+//! controller, CR 109.5; or the card itself) performs the predicate. In the
+//! predicate and the body, "they" / "them" / "that player" / "the player" name
+//! the declared target; no other opponent is asked or affected.
+//!
+//! Cards (printed, added through `add_real_card` on the curated card
+//! database): Bane, Lord of Darkness; Combustible Gearhulk; Palantír of
+//! Orthanc; Terrapact Intimidator; Risk Factor. Tell Me What You See, the
+//! sixth member, lives in `tell_me_what_you_see_etb.rs`; it is marked
+//! `condition_wrong` (the optional draw is offered to a drawer who cannot
+//! draw, CR 121.3a) and is not claimed as supported. Printed costs are
+//! made payable by adding basic lands; the other hand and library cards are
+//! textless builder fillers.
+//!
+//! Two further printed decline witnesses live in this file: Braids's
+//! Frightful Return (a Read-ahead Saga whose chapter III asks ONE target
+//! opponent, CR 702.155a; on a two-player board) and Minn, Wily Illusionist (whose
+//! dies-trigger puts only from the controller's own hand).
+//!
+//! Every other row seats three players and targets the SECOND opponent, P2, so
+//! neither seat order (P1 first) nor a controller fallback (P0) can satisfy an
+//! assertion. The Leyline of Sanctity rows give opponents hexproof (CR
+//! 702.11c): with no legal target the trigger is removed (CR 603.3d) and a
+//! spell cannot be cast (CR 601.2c); with one legal target that target is
+//! chosen without a prompt.
+
+use std::collections::VecDeque;
+
+use engine::database::card_db::CardDatabase;
+use engine::game::coverage::card_face_gaps;
+use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
+use engine::game::scenario_db::GameScenarioDbExt;
+use engine::game::triggers::drain_order_triggers_with_identity;
+use engine::types::ability::TargetRef;
+use engine::types::actions::GameAction;
+use engine::types::confirmed_misparse::{ConfirmedMisparses, MisparseClass};
+use engine::types::counter::CounterType;
+use engine::types::game_state::{CastPaymentMode, WaitingFor};
+use engine::types::identifiers::ObjectId;
+use engine::types::mana::{ManaColor, ManaCost};
+use engine::types::phase::Phase;
+use engine::types::player::PlayerId;
+use engine::types::zones::Zone;
+
+use crate::support::shared_card_db;
+
+const P2: PlayerId = PlayerId(2);
+
+/// Every prompt the drive raised, in order, with its actor.
+#[derive(Debug, Default)]
+struct Record {
+    /// `legal_targets` of each target prompt, in prompt order.
+    target_prompts: Vec<Vec<TargetRef>>,
+    /// The player asked each `OptionalEffectChoice`.
+    optional_actors: Vec<PlayerId>,
+    /// The player of each `ScryChoice`.
+    scry_actors: Vec<PlayerId>,
+    /// `(player, cards)` of each `EffectZoneChoice`.
+    zone_choices: Vec<(PlayerId, Vec<ObjectId>)>,
+    /// `(player, options)` of each `NamedChoice` (a Read-ahead chapter pick).
+    named_choices: Vec<(PlayerId, Vec<String>)>,
+}
+
+/// The planned answers, consumed in prompt order. A prompt with no planned
+/// answer left panics, so an unplanned prompt is never silently answered.
+#[derive(Default)]
+struct Answers {
+    targets: VecDeque<TargetRef>,
+    optional: VecDeque<bool>,
+    zone_picks: VecDeque<Vec<ObjectId>>,
+    named: VecDeque<String>,
+}
+
+impl Answers {
+    fn new(targets: &[TargetRef], optional: &[bool]) -> Self {
+        Answers {
+            targets: targets.iter().cloned().collect(),
+            optional: optional.iter().copied().collect(),
+            zone_picks: VecDeque::new(),
+            named: VecDeque::new(),
+        }
+    }
+}
+
+/// Answer every prompt from `answers` until the stack is empty at a priority
+/// window.
+fn drive(runner: &mut GameRunner, mut answers: Answers) -> Record {
+    let mut record = Record::default();
+    for _ in 0..256 {
+        match runner.state().waiting_for.clone() {
+            WaitingFor::TriggerTargetSelection {
+                target_slots,
+                selection,
+                ..
+            }
+            | WaitingFor::TargetSelection {
+                target_slots,
+                selection,
+                ..
+            } => {
+                record
+                    .target_prompts
+                    .push(target_slots[selection.current_slot].legal_targets.clone());
+                let target = answers
+                    .targets
+                    .pop_front()
+                    .unwrap_or_else(|| panic!("unplanned target prompt: {record:?}"));
+                runner
+                    .act(GameAction::ChooseTarget {
+                        target: Some(target),
+                    })
+                    .expect("choose the planned target");
+            }
+            WaitingFor::OptionalEffectChoice { player, .. } => {
+                record.optional_actors.push(player);
+                let accept = answers
+                    .optional
+                    .pop_front()
+                    .unwrap_or_else(|| panic!("unplanned optional prompt: {record:?}"));
+                runner
+                    .act(GameAction::DecideOptionalEffect { accept })
+                    .expect("answer the optional prompt");
+            }
+            WaitingFor::ScryChoice { player, cards } => {
+                record.scry_actors.push(player);
+                runner
+                    .act(GameAction::SelectCards { cards })
+                    .expect("keep the scried cards on top");
+            }
+            WaitingFor::NamedChoice {
+                player, options, ..
+            } => {
+                record.named_choices.push((player, options));
+                let choice = answers
+                    .named
+                    .pop_front()
+                    .unwrap_or_else(|| panic!("unplanned named choice: {record:?}"));
+                runner
+                    .act(GameAction::ChooseOption { choice })
+                    .expect("answer the planned named choice");
+            }
+            WaitingFor::EffectZoneChoice { player, cards, .. } => {
+                record.zone_choices.push((player, cards));
+                let pick = answers
+                    .zone_picks
+                    .pop_front()
+                    .unwrap_or_else(|| panic!("unplanned zone choice: {record:?}"));
+                runner
+                    .act(GameAction::SelectCards { cards: pick })
+                    .expect("choose the planned cards");
+            }
+            WaitingFor::OrderTriggers { .. } => {
+                drain_order_triggers_with_identity(runner.state_mut());
+            }
+            WaitingFor::Priority { .. } => {
+                if runner.state().stack.is_empty() {
+                    return record;
+                }
+                runner
+                    .act(GameAction::PassPriority)
+                    .expect("pass priority while the stack resolves");
+            }
+            other => panic!("unexpected prompt {other:?}; record {record:?}"),
+        }
+    }
+    panic!("the stack did not resolve: {record:?}");
+}
+
+/// A three-player game in P0's precombat main phase with four library cards
+/// per seat (so every draw, mill and scry has cards).
+fn three_players() -> GameScenario {
+    let mut scenario = GameScenario::new_n_player(3, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    for seat in 0..3u8 {
+        for index in 0..4 {
+            scenario.add_spell_to_library_top(
+                PlayerId(seat),
+                &format!("Library {seat}-{index}"),
+                false,
+            );
+        }
+    }
+    scenario
+}
+
+/// A two-player game in P0's precombat main phase with four library cards per
+/// seat. The only opponent is chosen without a prompt.
+fn two_players() -> GameScenario {
+    let mut scenario = GameScenario::new_n_player(2, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    for seat in 0..2u8 {
+        for index in 0..4 {
+            scenario.add_spell_to_library_top(
+                PlayerId(seat),
+                &format!("Library {seat}-{index}"),
+                false,
+            );
+        }
+    }
+    scenario
+}
+
+/// CR 702.11c: Leyline of Sanctity gives each listed opponent hexproof.
+fn add_leylines(scenario: &mut GameScenario, players: &[PlayerId], db: &CardDatabase) {
+    for &player in players {
+        scenario.add_real_card(player, "Leyline of Sanctity", Zone::Battlefield, db);
+    }
+}
+
+fn hand_len(runner: &GameRunner, player: PlayerId) -> usize {
+    runner.state().players[player.0 as usize].hand.len()
+}
+
+fn lives(runner: &GameRunner) -> [i32; 3] {
+    [runner.life(P0), runner.life(P1), runner.life(P2)]
+}
+
+fn graveyard_len(runner: &GameRunner, player: PlayerId) -> usize {
+    runner.state().players[player.0 as usize].graveyard.len()
+}
+
+/// Announce casting `spell` with no pre-declared targets, so its target prompt
+/// is raised and recorded by `drive` (CR 601.2c).
+fn announce_cast(runner: &mut GameRunner, spell: ObjectId) {
+    let card_id = runner.state().objects[&spell].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: spell,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("announce the spell");
+}
+
+fn opponents_legal(legal: &[TargetRef]) -> bool {
+    legal.contains(&TargetRef::Player(P1))
+        && legal.contains(&TargetRef::Player(P2))
+        && !legal.contains(&TargetRef::Player(P0))
+}
+
+// ── Bane, Lord of Darkness ─────────────────────────────────────────────────
+
+struct BaneBoard {
+    runner: GameRunner,
+    bears: ObjectId,
+    bolt: ObjectId,
+    c0: ObjectId,
+    c0b: ObjectId,
+    c1: ObjectId,
+    c2: ObjectId,
+}
+
+/// Bane, Grizzly Bears and a Mountain (Lightning Bolt's printed {R}) under
+/// P0; P0 holds the printed bolt, two 2/2 creature cards (C0, C0b, so the
+/// put raises a choice) and a land; P1 and P2 each hold a 2/2 creature card
+/// (C1, C2), so a hand-owner misreading shows up in the zone-choice
+/// candidates themselves.
+fn bane_board(db: &CardDatabase, leylines: &[PlayerId]) -> BaneBoard {
+    let mut scenario = three_players();
+    scenario.add_basic_land(P0, ManaColor::Red);
+    scenario.add_real_card(P0, "Bane, Lord of Darkness", Zone::Battlefield, db);
+    let bears = scenario.add_real_card(P0, "Grizzly Bears", Zone::Battlefield, db);
+    let bolt = scenario.add_real_card(P0, "Lightning Bolt", Zone::Hand, db);
+    let c0 = scenario
+        .add_creature_to_hand(P0, "P0 Creature Card", 2, 2)
+        .id();
+    let c0b = scenario
+        .add_creature_to_hand(P0, "P0 Second Creature Card", 2, 2)
+        .id();
+    scenario.add_land_to_hand(P0, "Forest");
+    let c1 = scenario
+        .add_creature_to_hand(P1, "P1 Creature Card", 2, 2)
+        .id();
+    let c2 = scenario
+        .add_creature_to_hand(P2, "P2 Creature Card", 2, 2)
+        .id();
+    add_leylines(&mut scenario, leylines, db);
+    BaneBoard {
+        runner: scenario.build(),
+        bears,
+        bolt,
+        c0,
+        c0b,
+        c1,
+        c2,
+    }
+}
+
+/// P0 bolts its own Grizzly Bears (a real death), then the trigger is driven.
+fn bane_kill_bears(board: &mut BaneBoard, mut answers: Answers) -> Record {
+    answers.targets.push_front(TargetRef::Object(board.bears));
+    announce_cast(&mut board.runner, board.bolt);
+    drive(&mut board.runner, answers)
+}
+
+/// T-Bane-d — CR 118.12 + CR 109.5 + CR 400.1: P2 declines, so the
+/// CONTROLLER may put a creature card from the CONTROLLER's hand; P0 is the
+/// one asked, and only P0's creature card is a candidate.
+#[test]
+fn bane_decline_controller_puts_from_own_hand() {
+    let Some(db) = shared_card_db() else {
+        return;
+    };
+    let mut board = bane_board(db, &[]);
+    let hands_before = [
+        hand_len(&board.runner, P0),
+        hand_len(&board.runner, P1),
+        hand_len(&board.runner, P2),
+    ];
+    let mut answers = Answers::new(&[TargetRef::Player(P2)], &[false, true]);
+    answers.zone_picks.push_back(vec![board.c0]);
+    let record = bane_kill_bears(&mut board, answers);
+    let runner = &board.runner;
+
+    // REACH: the bolt's prompt, then the trigger's target prompt over the
+    // opponents only (CR 115.1).
+    assert_eq!(record.target_prompts.len(), 2, "{record:?}");
+    assert!(opponents_legal(&record.target_prompts[1]), "{record:?}");
+    // CR 608.2d: P2 decides the draw; P0 decides its own "you may put".
+    assert_eq!(record.optional_actors, vec![P2, P0]);
+    // CR 109.5 + CR 400.1: "your hand" is the controller's hand.
+    assert_zone_choice_is_p0_hand(&record, &board);
+    assert_eq!(runner.state().objects[&board.c0].zone, Zone::Battlefield);
+    assert_eq!(runner.state().objects[&board.c0].controller, P0);
+    // The bolt and C0 left P0's hand; nobody drew.
+    assert_eq!(hand_len(runner, P0), hands_before[0] - 2);
+    assert_eq!(hand_len(runner, P1), hands_before[1]);
+    assert_eq!(hand_len(runner, P2), hands_before[2]);
+    assert_eq!(runner.state().objects[&board.c1].zone, Zone::Hand);
+    assert_eq!(runner.state().objects[&board.c2].zone, Zone::Hand);
+}
+
+/// T-Bane-a — CR 118.12: P2 accepts, so P0 draws one card and is not asked
+/// to put anything.
+#[test]
+fn bane_accept_controller_draws() {
+    let Some(db) = shared_card_db() else {
+        return;
+    };
+    let mut board = bane_board(db, &[]);
+    let p0_hand = hand_len(&board.runner, P0);
+    let record = bane_kill_bears(&mut board, Answers::new(&[TargetRef::Player(P2)], &[true]));
+    assert_eq!(record.optional_actors, vec![P2]);
+    assert!(record.zone_choices.is_empty(), "{record:?}");
+    // The bolt left, one card was drawn.
+    assert_eq!(hand_len(&board.runner, P0), p0_hand);
+    assert_eq!(board.runner.state().objects[&board.c0].zone, Zone::Hand);
+}
+
+/// L-Bane — CR 603.3d: with every opponent hexproof the trigger has no legal
+/// target and is removed; nobody is asked.
+#[test]
+fn bane_no_legal_target_removes_the_trigger() {
+    let Some(db) = shared_card_db() else {
+        return;
+    };
+    let mut board = bane_board(db, &[P1, P2]);
+    let p0_hand = hand_len(&board.runner, P0);
+    let record = bane_kill_bears(&mut board, Answers::default());
+    assert_eq!(record.target_prompts.len(), 1, "only the bolt: {record:?}");
+    assert!(record.optional_actors.is_empty(), "{record:?}");
+    assert!(record.zone_choices.is_empty(), "{record:?}");
+    assert_eq!(hand_len(&board.runner, P0), p0_hand - 1);
+}
+
+/// L-Bane paired positive — CR 115.1: with only P1 hexproof, P2 is the sole
+/// legal target and is chosen without a prompt; the decline result lands on
+/// the controller's own hand.
+#[test]
+fn bane_sole_legal_target_is_chosen_without_prompt() {
+    let Some(db) = shared_card_db() else {
+        return;
+    };
+    let mut board = bane_board(db, &[P1]);
+    let mut answers = Answers::new(&[], &[false, true]);
+    answers.zone_picks.push_back(vec![board.c0]);
+    let record = bane_kill_bears(&mut board, answers);
+    assert_eq!(record.target_prompts.len(), 1, "only the bolt: {record:?}");
+    assert_eq!(record.optional_actors, vec![P2, P0]);
+    assert_zone_choice_is_p0_hand(&record, &board);
+    assert_eq!(
+        board.runner.state().objects[&board.c0].zone,
+        Zone::Battlefield
+    );
+}
+
+/// CR 109.5 + CR 400.1: exactly one zone choice, asked of P0, whose
+/// candidates are exactly P0's two creature cards.
+fn assert_zone_choice_is_p0_hand(record: &Record, board: &BaneBoard) {
+    let [(player, cards)] = record.zone_choices.as_slice() else {
+        panic!("expected exactly one zone choice: {record:?}");
+    };
+    assert_eq!(*player, P0);
+    let mut cards = cards.clone();
+    cards.sort();
+    let mut expected = vec![board.c0, board.c0b];
+    expected.sort();
+    assert_eq!(
+        cards, expected,
+        "only the controller's hand is a candidate pool"
+    );
+}
+
+// ── Combustible Gearhulk ───────────────────────────────────────────────────
+
+fn gearhulk_board(db: &CardDatabase, leylines: &[PlayerId]) -> (GameRunner, ObjectId) {
+    let mut scenario = three_players();
+    let gearhulk = scenario.add_real_card(P0, "Combustible Gearhulk", Zone::Hand, db);
+    // Printed cost {4}{R}{R}: six Mountains pay it.
+    for _ in 0..6 {
+        scenario.add_basic_land(P0, ManaColor::Red);
+    }
+    // `add_spell_to_library_top` inserts at index zero, so the reversed
+    // filler order leaves the library top reading 2, 5, 1, 9.
+    for (index, mana_value) in [2, 5, 1, 9].into_iter().rev().enumerate() {
+        scenario
+            .add_spell_to_library_top(P0, &format!("Gearhulk Library {index}"), false)
+            .with_mana_cost(ManaCost::generic(mana_value));
+    }
+    add_leylines(&mut scenario, leylines, db);
+    (scenario.build(), gearhulk)
+}
+
+/// T-Gear-d — CR 118.12 + CR 701.17a + CR 120.3a: P2 declines; P0 mills
+/// three, and Gearhulk deals P2 (only P2) the milled cards' total mana value.
+#[test]
+fn gearhulk_decline_damages_only_the_target() {
+    let Some(db) = shared_card_db() else {
+        return;
+    };
+    let (mut runner, gearhulk) = gearhulk_board(db, &[]);
+    let before = lives(&runner);
+    runner.cast(gearhulk).commit();
+    let record = drive(
+        &mut runner,
+        Answers::new(&[TargetRef::Player(P2)], &[false]),
+    );
+    assert_eq!(record.target_prompts.len(), 1, "{record:?}");
+    assert!(opponents_legal(&record.target_prompts[0]), "{record:?}");
+    assert_eq!(record.optional_actors, vec![P2]);
+    assert_eq!(graveyard_len(&runner, P0), 3);
+    assert_eq!(lives(&runner), [before[0], before[1], before[2] - 8]);
+}
+
+/// T-Gear-a — CR 118.12: P2 accepts; P0 draws three and nothing is milled.
+#[test]
+fn gearhulk_accept_controller_draws_three() {
+    let Some(db) = shared_card_db() else {
+        return;
+    };
+    let (mut runner, gearhulk) = gearhulk_board(db, &[]);
+    let before = lives(&runner);
+    let p0_hand = hand_len(&runner, P0);
+    runner.cast(gearhulk).commit();
+    let record = drive(&mut runner, Answers::new(&[TargetRef::Player(P2)], &[true]));
+    assert_eq!(record.optional_actors, vec![P2]);
+    assert_eq!(hand_len(&runner, P0), p0_hand - 1 + 3);
+    assert_eq!(graveyard_len(&runner, P0), 0);
+    assert_eq!(lives(&runner), before);
+}
+
+/// L-Gear — CR 603.3d: no legal target, so the trigger is removed.
+#[test]
+fn gearhulk_no_legal_target_removes_the_trigger() {
+    let Some(db) = shared_card_db() else {
+        return;
+    };
+    let (mut runner, gearhulk) = gearhulk_board(db, &[P1, P2]);
+    let before = lives(&runner);
+    let p0_hand = hand_len(&runner, P0);
+    runner.cast(gearhulk).commit();
+    let record = drive(&mut runner, Answers::default());
+    assert!(record.target_prompts.is_empty(), "{record:?}");
+    assert!(record.optional_actors.is_empty(), "{record:?}");
+    assert_eq!(hand_len(&runner, P0), p0_hand - 1);
+    assert_eq!(graveyard_len(&runner, P0), 0);
+    assert_eq!(lives(&runner), before);
+}
+
+/// L-Gear paired positive: P2 is the sole legal target, chosen without a
+/// prompt, and takes the decline damage.
+#[test]
+fn gearhulk_sole_legal_target_is_chosen_without_prompt() {
+    let Some(db) = shared_card_db() else {
+        return;
+    };
+    let (mut runner, gearhulk) = gearhulk_board(db, &[P1]);
+    let before = lives(&runner);
+    runner.cast(gearhulk).commit();
+    let record = drive(&mut runner, Answers::new(&[], &[false]));
+    assert!(record.target_prompts.is_empty(), "{record:?}");
+    assert_eq!(record.optional_actors, vec![P2]);
+    assert_eq!(lives(&runner), [before[0], before[1], before[2] - 8]);
+}
+
+// ── Palantír of Orthanc ────────────────────────────────────────────────────
+
+fn palantir_board(db: &CardDatabase, leylines: &[PlayerId]) -> (GameRunner, ObjectId) {
+    let mut scenario = three_players();
+    scenario.at_phase(Phase::PostCombatMain);
+    let palantir = scenario.add_real_card(P0, "Palantír of Orthanc", Zone::Battlefield, db);
+    scenario
+        .add_spell_to_library_top(P0, "Palantír Library Top", false)
+        .with_mana_cost(ManaCost::generic(3));
+    add_leylines(&mut scenario, leylines, db);
+    (scenario.build(), palantir)
+}
+
+fn influence(runner: &GameRunner, palantir: ObjectId) -> u32 {
+    runner.state().objects[&palantir]
+        .counters
+        .get(&CounterType::Generic("influence".to_string()))
+        .copied()
+        .unwrap_or(0)
+}
+
+/// A second decline setup, X = 2: one influence counter is seeded before the
+/// end step, so with the counter the trigger itself puts, "the number of
+/// influence counters on Palantír of Orthanc" is 2 when the mill resolves,
+/// and P0's library top is a mana-value-2 card under a mana-value-5 card.
+/// The decline branch mills exactly those two, so the printed loss is
+/// 2 + 5 = 7; the engine also counts Palantír of Orthanc's own {3} and loses
+/// 10 (the census row's defect, pinned by the rows that use this board).
+fn palantir_two_counters_board(db: &CardDatabase, leylines: &[PlayerId]) -> (GameRunner, ObjectId) {
+    let mut scenario = three_players();
+    scenario.at_phase(Phase::PostCombatMain);
+    let palantir = scenario.add_real_card(P0, "Palantír of Orthanc", Zone::Battlefield, db);
+    scenario
+        .add_spell_to_library_top(P0, "Milled Two", false)
+        .with_mana_cost(ManaCost::generic(2));
+    scenario
+        .add_spell_to_library_top(P0, "Milled Five", false)
+        .with_mana_cost(ManaCost::generic(5));
+    scenario.with_counter(palantir, CounterType::Generic("influence".to_string()), 1);
+    add_leylines(&mut scenario, leylines, db);
+    (scenario.build(), palantir)
+}
+
+/// T-Pal-d — CR 118.12: P0 gets the counter and scries 2; P2 declines; P0
+/// mills X = 1 (the influence counter the trigger just put) and P2 (only P2)
+/// loses life equal to the total mana value of those cards (CR 202.3): the
+/// milled card is "Palantír Library Top" with mana value 3, so the printed loss
+/// is 3 — Palantír of Orthanc's own {3} is not among the milled cards. The
+/// engine's tracked set also counts the source object and loses 6; the row pins
+/// that observed amount (the `palantír of orthanc` census row's defect).
+#[test]
+fn palantir_decline_only_the_target_loses_life() {
+    let Some(db) = shared_card_db() else {
+        return;
+    };
+    let (mut runner, palantir) = palantir_board(db, &[]);
+    let before = lives(&runner);
+    runner.advance_to_end_step();
+    let record = drive(
+        &mut runner,
+        Answers::new(&[TargetRef::Player(P2)], &[false]),
+    );
+    assert_eq!(record.target_prompts.len(), 1, "{record:?}");
+    assert!(opponents_legal(&record.target_prompts[0]), "{record:?}");
+    assert_eq!(influence(&runner, palantir), 1);
+    assert_eq!(record.scry_actors, vec![P0]);
+    assert_eq!(record.optional_actors, vec![P2]);
+    assert_eq!(graveyard_len(&runner, P0), 1);
+    // REACH: the milled card is exactly the mana-value-3 top card — the scry
+    // kept both scried cards on top, so X = 1 mills "Palantír Library Top".
+    assert_eq!(
+        runner
+            .state()
+            .objects
+            .values()
+            .find(|obj| obj.name == "Palantír Library Top")
+            .map(|obj| obj.zone),
+        Some(Zone::Graveyard),
+        "the milled card is the mana-value-3 library top: {record:?}"
+    );
+    // CR 202.3: the printed loss is the TOTAL MANA VALUE OF THE MILLED CARDS, 3.
+    // The engine also counts Palantír of Orthanc itself ({3}, the recipient of
+    // its own influence counter) in "those cards" and takes 6: the defect the
+    // `palantír of orthanc` census row records. This pins the observed amount
+    // so the row's claim is demonstrated; when the aggregate is fixed this
+    // assertion becomes `- 3` and the row is deleted.
+    let after = lives(&runner);
+    assert_eq!(
+        after,
+        [before[0], before[1], before[2] - 6],
+        "P2 loses the milled 3 plus Palantír's own {{3}} (printed text: 3): {after:?}"
+    );
+}
+
+/// T-Pal-a — CR 118.12: P2 accepts; P0 draws one, nothing is milled.
+#[test]
+fn palantir_accept_controller_draws() {
+    let Some(db) = shared_card_db() else {
+        return;
+    };
+    let (mut runner, palantir) = palantir_board(db, &[]);
+    let before = lives(&runner);
+    let p0_hand = hand_len(&runner, P0);
+    runner.advance_to_end_step();
+    let record = drive(&mut runner, Answers::new(&[TargetRef::Player(P2)], &[true]));
+    assert_eq!(record.optional_actors, vec![P2]);
+    assert_eq!(influence(&runner, palantir), 1);
+    assert_eq!(hand_len(&runner, P0), p0_hand + 1);
+    assert_eq!(graveyard_len(&runner, P0), 0);
+    assert_eq!(lives(&runner), before);
+}
+
+/// L-Pal — CR 603.3d: the whole ability is removed, so there is no counter
+/// and no scry either.
+#[test]
+fn palantir_no_legal_target_removes_the_whole_ability() {
+    let Some(db) = shared_card_db() else {
+        return;
+    };
+    let (mut runner, palantir) = palantir_board(db, &[P1, P2]);
+    let before = lives(&runner);
+    runner.advance_to_end_step();
+    let record = drive(&mut runner, Answers::default());
+    assert!(record.target_prompts.is_empty(), "{record:?}");
+    assert!(record.optional_actors.is_empty(), "{record:?}");
+    assert!(record.scry_actors.is_empty(), "{record:?}");
+    assert_eq!(influence(&runner, palantir), 0);
+    assert_eq!(lives(&runner), before);
+}
+
+/// L-Pal paired positive, X = 2: with only P1 hexproof, P2 is the sole legal
+/// target and is chosen without a prompt; P2 declines, P0 mills the
+/// mana-value-2 and mana-value-5 cards, and P2 loses exactly their total
+/// mana value 2 + 5 = 7 (CR 202.3); the engine's tracked set also counts
+/// Palantír of Orthanc's own {3} and loses 10, which this row pins (the census
+/// row's defect).
+#[test]
+fn palantir_sole_legal_target_is_chosen_without_prompt() {
+    let Some(db) = shared_card_db() else {
+        return;
+    };
+    let (mut runner, palantir) = palantir_two_counters_board(db, &[P1]);
+    let before = lives(&runner);
+    runner.advance_to_end_step();
+    let record = drive(&mut runner, Answers::new(&[], &[false]));
+    assert!(record.target_prompts.is_empty(), "{record:?}");
+    assert_eq!(record.scry_actors, vec![P0]);
+    assert_eq!(record.optional_actors, vec![P2]);
+    // One influence counter was seeded, the trigger put the second: X = 2.
+    assert_eq!(influence(&runner, palantir), 2);
+    assert_eq!(graveyard_len(&runner, P0), 2);
+    let after = lives(&runner);
+    // The printed loss is 2 + 5 = 7; the engine also counts Palantír of Orthanc's
+    // own {3} (the census row's defect) and takes 10, pinned here as in the
+    // single-card row above.
+    assert_eq!(
+        after,
+        [before[0], before[1], before[2] - 10],
+        "P2 loses 2 + 5 plus Palantír's own {{3}} (printed text: 7): {after:?}"
+    );
+}
+
+// ── Terrapact Intimidator ──────────────────────────────────────────────────
+
+fn terrapact_board(db: &CardDatabase, leylines: &[PlayerId]) -> (GameRunner, ObjectId) {
+    let mut scenario = three_players();
+    let terrapact = scenario.add_real_card(P0, "Terrapact Intimidator", Zone::Hand, db);
+    // Printed cost {1}{R}: two Mountains pay it.
+    for _ in 0..2 {
+        scenario.add_basic_land(P0, ManaColor::Red);
+    }
+    add_leylines(&mut scenario, leylines, db);
+    (scenario.build(), terrapact)
+}
+
+/// `(owner, controller)` of every Lander token on the battlefield.
+fn landers(runner: &GameRunner) -> Vec<(PlayerId, PlayerId)> {
+    runner
+        .state()
+        .objects
+        .values()
+        .filter(|object| object.zone == Zone::Battlefield && object.name == "Lander")
+        .map(|object| (object.owner, object.controller))
+        .collect()
+}
+
+fn plus_counters(runner: &GameRunner, id: ObjectId) -> u32 {
+    runner.state().objects[&id]
+        .counters
+        .get(&CounterType::Plus1Plus1)
+        .copied()
+        .unwrap_or(0)
+}
+
+/// T-Ter-a — CR 118.12 + CR 111.2: P2 accepts; the two Landers belong to
+/// and are controlled by P0, who created them.
+#[test]
+fn terrapact_accept_controller_creates_and_owns_landers() {
+    let Some(db) = shared_card_db() else {
+        return;
+    };
+    let (mut runner, terrapact) = terrapact_board(db, &[]);
+    runner.cast(terrapact).commit();
+    let record = drive(&mut runner, Answers::new(&[TargetRef::Player(P2)], &[true]));
+    assert_eq!(record.target_prompts.len(), 1, "{record:?}");
+    assert!(opponents_legal(&record.target_prompts[0]), "{record:?}");
+    assert_eq!(record.optional_actors, vec![P2]);
+    assert_eq!(landers(&runner), vec![(P0, P0), (P0, P0)]);
+    assert_eq!(plus_counters(&runner, terrapact), 0);
+}
+
+/// T-Ter-d — CR 118.12: P2 declines; two +1/+1 counters, no Lander.
+#[test]
+fn terrapact_decline_gets_two_counters() {
+    let Some(db) = shared_card_db() else {
+        return;
+    };
+    let (mut runner, terrapact) = terrapact_board(db, &[]);
+    runner.cast(terrapact).commit();
+    let record = drive(
+        &mut runner,
+        Answers::new(&[TargetRef::Player(P2)], &[false]),
+    );
+    assert_eq!(record.optional_actors, vec![P2]);
+    assert_eq!(plus_counters(&runner, terrapact), 2);
+    assert!(landers(&runner).is_empty());
+}
+
+/// L-Ter — CR 603.3d, with its paired positive.
+#[test]
+fn terrapact_no_legal_target_removes_the_trigger() {
+    let Some(db) = shared_card_db() else {
+        return;
+    };
+    let (mut runner, terrapact) = terrapact_board(db, &[P1, P2]);
+    runner.cast(terrapact).commit();
+    let record = drive(&mut runner, Answers::default());
+    assert!(record.target_prompts.is_empty(), "{record:?}");
+    assert!(record.optional_actors.is_empty(), "{record:?}");
+    assert_eq!(plus_counters(&runner, terrapact), 0);
+    assert!(landers(&runner).is_empty());
+
+    let (mut runner, terrapact) = terrapact_board(db, &[P1]);
+    runner.cast(terrapact).commit();
+    let record = drive(&mut runner, Answers::new(&[], &[false]));
+    assert!(record.target_prompts.is_empty(), "{record:?}");
+    assert_eq!(record.optional_actors, vec![P2]);
+    assert_eq!(plus_counters(&runner, terrapact), 2);
+    assert!(landers(&runner).is_empty());
+}
+
+// ── Risk Factor ────────────────────────────────────────────────────────────
+
+fn risk_factor_board(db: &CardDatabase, leylines: &[PlayerId]) -> (GameRunner, ObjectId) {
+    let mut scenario = three_players();
+    let risk = scenario.add_real_card(P0, "Risk Factor", Zone::Hand, db);
+    // Printed cost {2}{R}: three Mountains pay it.
+    for _ in 0..3 {
+        scenario.add_basic_land(P0, ManaColor::Red);
+    }
+    add_leylines(&mut scenario, leylines, db);
+    (scenario.build(), risk)
+}
+
+/// T-Risk-a — CR 115.1 + CR 118.12 + CR 120.3a: only opponents may be
+/// targeted; P2 accepts and Risk Factor deals 4 damage to "them" = P2.
+#[test]
+fn risk_factor_accept_damages_only_the_target() {
+    let Some(db) = shared_card_db() else {
+        return;
+    };
+    let (mut runner, risk) = risk_factor_board(db, &[]);
+    let before = lives(&runner);
+    let p0_hand = hand_len(&runner, P0);
+    announce_cast(&mut runner, risk);
+    let record = drive(&mut runner, Answers::new(&[TargetRef::Player(P2)], &[true]));
+    assert_eq!(record.target_prompts.len(), 1, "{record:?}");
+    assert!(opponents_legal(&record.target_prompts[0]), "{record:?}");
+    assert_eq!(record.optional_actors, vec![P2]);
+    assert_eq!(lives(&runner), [before[0], before[1], before[2] - 4]);
+    assert_eq!(hand_len(&runner, P0), p0_hand - 1);
+}
+
+/// T-Risk-d — CR 118.12: P2 declines; P0 draws three and nobody is damaged.
+#[test]
+fn risk_factor_decline_controller_draws_three() {
+    let Some(db) = shared_card_db() else {
+        return;
+    };
+    let (mut runner, risk) = risk_factor_board(db, &[]);
+    let before = lives(&runner);
+    let p0_hand = hand_len(&runner, P0);
+    announce_cast(&mut runner, risk);
+    let record = drive(
+        &mut runner,
+        Answers::new(&[TargetRef::Player(P2)], &[false]),
+    );
+    assert_eq!(record.optional_actors, vec![P2]);
+    assert_eq!(lives(&runner), before);
+    assert_eq!(hand_len(&runner, P0), p0_hand - 1 + 3);
+}
+
+/// L-Risk — CR 601.2c + CR 115.1a: with every opponent hexproof Risk Factor
+/// has no legal target and cannot be cast; it stays in hand.
+#[test]
+fn risk_factor_without_legal_target_cannot_be_cast() {
+    let Some(db) = shared_card_db() else {
+        return;
+    };
+    let (mut runner, risk) = risk_factor_board(db, &[P1, P2]);
+    let before = lives(&runner);
+    let card_id = runner.state().objects[&risk].card_id;
+    let cast = runner.act(GameAction::CastSpell {
+        object_id: risk,
+        card_id,
+        targets: vec![],
+        payment_mode: CastPaymentMode::Auto,
+    });
+    let still_in_hand = runner.state().objects[&risk].zone == Zone::Hand;
+    assert!(
+        cast.is_err() || still_in_hand,
+        "CR 601.2c: no legal target, no cast ({cast:?})"
+    );
+    assert!(still_in_hand);
+    assert!(runner.state().stack.is_empty());
+    assert_eq!(lives(&runner), before);
+
+    // Paired positive: only P1 hexproof, so the cast succeeds on P2.
+    let (mut runner, risk) = risk_factor_board(db, &[P1]);
+    let before = lives(&runner);
+    announce_cast(&mut runner, risk);
+    let record = drive(&mut runner, Answers::new(&[TargetRef::Player(P2)], &[true]));
+    assert_eq!(record.optional_actors, vec![P2]);
+    assert_eq!(lives(&runner), [before[0], before[1], before[2] - 4]);
+}
+
+// ── Braids's Frightful Return ──────────────────────────────────────────────
+
+/// The printed Saga and P1's two printed creatures on a two-player board (the only opponent is the declared target; the printed
+/// "target opponent" fan-out in games with more opponents is a separate, unclaimed
+/// behaviour of this Saga).
+/// P0 holds the Saga with the Swamps for its printed {2}{B}; P1 controls
+/// Grizzly Bears, Hill Giant and a Forest, so chapter III's "nonland,
+/// nontoken permanent" pool has exactly the two creatures,
+struct BraidsSagaBoard {
+    runner: GameRunner,
+    saga: ObjectId,
+    bears: ObjectId,
+    giant: ObjectId,
+}
+
+fn braids_saga_board(db: &CardDatabase) -> BraidsSagaBoard {
+    let mut scenario = two_players();
+    for _ in 0..3 {
+        scenario.add_basic_land(P0, ManaColor::Black);
+    }
+    let saga = scenario.add_real_card(P0, "Braids's Frightful Return", Zone::Hand, db);
+    let bears = scenario.add_real_card(P1, "Grizzly Bears", Zone::Battlefield, db);
+    let giant = scenario.add_real_card(P1, "Hill Giant", Zone::Battlefield, db);
+    scenario.add_basic_land(P1, ManaColor::Green);
+    BraidsSagaBoard {
+        runner: scenario.build(),
+        saga,
+        bears,
+        giant,
+    }
+}
+
+/// Cast the Saga and drive the whole card: CR 702.155b + CR 714.3b — the
+/// as-enters chapter choice is answered "3", so the Saga enters with three
+/// lore counters and, per CR 702.155a, only chapter III triggers.
+fn braids_cast_and_drive(board: &mut BraidsSagaBoard, mut answers: Answers) -> Record {
+    answers.named.push_front("3".to_string());
+    announce_cast(&mut board.runner, board.saga);
+    drive(&mut board.runner, answers)
+}
+
+/// T-BFR-d — CR 714.3b + CR 702.155a/b + CR 118.12 + CR 115.1d: the printed
+/// chapter III is "Target opponent may sacrifice a nonland, nontoken
+/// permanent of their choice. If they don't, they lose 2 life and you draw a
+/// card." P0 casts the Saga, chooses chapter III, and declares P1 as the one
+/// target; P1 declines, so ONLY P1 loses exactly 2 life and P0 draws exactly
+/// one card. The mutants killed: a
+/// `player_scope` fan-out over every opponent instead of the declared target
+/// (P1 would be asked first), and a decline tail whose draw detaches from the
+/// gated life loss. CR 714.4: once chapter III has left the stack, the Saga
+/// is sacrificed.
+#[test]
+fn braids_frightful_return_iii_decline_hits_only_the_target() {
+    let Some(db) = shared_card_db() else {
+        return;
+    };
+    let mut board = braids_saga_board(db);
+    let before = [board.runner.life(P0), board.runner.life(P1)];
+    let p0_hand = hand_len(&board.runner, P0);
+    let answers = Answers::new(&[TargetRef::Player(P1)], &[false, false]);
+    let record = braids_cast_and_drive(&mut board, answers);
+    // REACH: the read-ahead chapter choice is P0's, bounded by chapter III.
+    assert_eq!(
+        record.named_choices,
+        vec![(P0, vec!["1".to_string(), "2".to_string(), "3".to_string()])],
+        "{record:?}"
+    );
+    // REACH: CR 115.1d — the only opponent is the declared target, chosen
+    // without a prompt.
+    assert!(record.target_prompts.is_empty(), "{record:?}");
+    // CR 118.12: only the declared target makes the may-choice.
+    assert_eq!(record.optional_actors, vec![P1], "{record:?}");
+    assert!(record.zone_choices.is_empty(), "{record:?}");
+    let runner = &board.runner;
+    assert_eq!(
+        [runner.life(P0), runner.life(P1)],
+        [before[0], before[1] - 2]
+    );
+    // The cast spent the Saga; the decline branch drew exactly one card.
+    assert_eq!(hand_len(runner, P0), p0_hand);
+    assert_eq!(runner.state().objects[&board.bears].zone, Zone::Battlefield);
+    assert_eq!(runner.state().objects[&board.giant].zone, Zone::Battlefield);
+    // CR 714.4: chapter III has left the stack, so the Saga is sacrificed.
+    assert_eq!(runner.state().objects[&board.saga].zone, Zone::Graveyard);
+}
+
+/// T-BFR-a — CR 118.12 + CR 608.2d: P1 accepts, so no life is lost and no
+/// card is drawn; the "of their choice" pool is exactly P1's two printed
+/// creatures — P1's Forest is a land, and P0's Saga and Swamps are not P1's
+/// permanents — and the chosen permanent is sacrificed.
+#[test]
+fn braids_frightful_return_iii_accept_sacrifices_from_the_target_only() {
+    let Some(db) = shared_card_db() else {
+        return;
+    };
+    let mut board = braids_saga_board(db);
+    let before = [board.runner.life(P0), board.runner.life(P1)];
+    let p0_hand = hand_len(&board.runner, P0);
+    let mut answers = Answers::new(&[TargetRef::Player(P1)], &[true, true]);
+    answers.zone_picks.push_back(vec![board.giant]);
+    answers.zone_picks.push_back(vec![board.giant]);
+    let record = braids_cast_and_drive(&mut board, answers);
+    assert_eq!(record.named_choices.len(), 1, "{record:?}");
+    assert!(record.target_prompts.is_empty(), "{record:?}");
+    assert_eq!(record.optional_actors, vec![P1], "{record:?}");
+    let [(player, cards)] = record.zone_choices.as_slice() else {
+        panic!("expected exactly one sacrifice choice: {record:?}");
+    };
+    assert_eq!(*player, P1);
+    let mut cards = cards.clone();
+    cards.sort();
+    let mut expected = vec![board.bears, board.giant];
+    expected.sort();
+    assert_eq!(
+        cards, expected,
+        "the pool is exactly P1's two nonland nontoken permanents"
+    );
+    let runner = &board.runner;
+    // The named permanent is sacrificed; nothing else changes.
+    assert_eq!(runner.state().objects[&board.giant].zone, Zone::Graveyard);
+    assert_eq!(runner.state().objects[&board.bears].zone, Zone::Battlefield);
+    assert_eq!(
+        [runner.life(P0), runner.life(P1)],
+        before,
+        "no decline: nobody loses life"
+    );
+    assert_eq!(hand_len(runner, P0), p0_hand - 1, "no decline: no draw");
+    assert_eq!(runner.state().objects[&board.saga].zone, Zone::Graveyard);
+}
+
+// ── Minn, Wily Illusionist ────────────────────────────────────────────────
+
+/// Minn and a textless 3/1 Illusion filler under P0; P0 also holds a printed
+/// Lightning Bolt, a no-cost creature card (mana value 0) and a mana-value-4 one.
+/// A no-cost creature card sits in P0's graveyard and another in P1's hand, so a
+/// pool that reads the wrong zone or the wrong owner shows up in the candidates
+/// themselves. The filler's own mana value is 0 (CR 202.3a), so the cards that
+/// qualify are the ones the change under test can move: which zone and whose
+/// hand the "from your hand" put draws from. (The trigger's mana-value bound is
+/// read from the dying creature's mana value and not its power on main as well;
+/// that unclaimed behaviour is not asserted here.)
+struct MinnBoard {
+    runner: GameRunner,
+    bolt: ObjectId,
+    illusion: ObjectId,
+    cheap: ObjectId,
+    pricey: ObjectId,
+    grave: ObjectId,
+    opponents: ObjectId,
+}
+
+fn minn_board(db: &CardDatabase) -> MinnBoard {
+    let mut scenario = three_players();
+    scenario.add_basic_land(P0, ManaColor::Red);
+    scenario.add_real_card(P0, "Minn, Wily Illusionist", Zone::Battlefield, db);
+    let illusion = scenario
+        .add_creature(P0, "Vanilla Illusion", 3, 1)
+        .with_subtypes(vec!["Illusion"])
+        .id();
+    let bolt = scenario.add_real_card(P0, "Lightning Bolt", Zone::Hand, db);
+    let cheap = scenario
+        .add_creature_to_hand(P0, "Cheap Hand Permanent", 1, 1)
+        .id();
+    let pricey = scenario
+        .add_creature_to_hand(P0, "Pricey Hand Permanent", 5, 5)
+        .with_mana_cost(ManaCost::generic(4))
+        .id();
+    let grave = scenario
+        .add_creature_to_graveyard(P0, "Graveyard Permanent", 1, 1)
+        .id();
+    let opponents = scenario
+        .add_creature_to_hand(P1, "P1 Hand Permanent", 1, 1)
+        .id();
+    MinnBoard {
+        runner: scenario.build(),
+        bolt,
+        illusion,
+        cheap,
+        pricey,
+        grave,
+        opponents,
+    }
+}
+
+/// T-Minn — CR 700.4 + CR 704.5g + CR 608.2h + CR 202.3 + CR 603.5 + CR
+/// 109.5: P0 bolts its own textless 3/1 Illusion; the printed trigger
+/// "Whenever an Illusion you control dies, you may put a permanent card with
+/// mana value less than or equal to that creature's power from your hand
+/// onto the battlefield" (CR 202.3a: the filler's own mana value is 0)
+/// offers only P0's hand
+/// cards, and the chosen card enters the battlefield while every other card
+/// stays where it was. The mutants killed: a pool read from the graveyard or
+/// an opponent's hand (the put's "from your hand" origin left unbound).
+#[test]
+fn minn_illusion_death_puts_only_from_the_controllers_hand() {
+    let Some(db) = shared_card_db() else {
+        return;
+    };
+    let mut board = minn_board(db);
+    let p0_hand = hand_len(&board.runner, P0);
+    let mut answers = Answers::new(&[TargetRef::Object(board.illusion)], &[true]);
+    answers.zone_picks.push_back(vec![board.cheap]);
+    announce_cast(&mut board.runner, board.bolt);
+    let record = drive(&mut board.runner, answers);
+    // REACH: the bolt's target prompt covers the Illusion, and the bolt's 3
+    // damage is lethal on its 1 toughness (CR 704.5g), so it really dies
+    // (CR 700.4).
+    assert_eq!(record.target_prompts.len(), 1, "{record:?}");
+    assert!(
+        record.target_prompts[0].contains(&TargetRef::Object(board.illusion)),
+        "{record:?}"
+    );
+    assert_eq!(
+        board.runner.state().objects[&board.illusion].zone,
+        Zone::Graveyard
+    );
+    // CR 603.5: P0 makes the "may put" choice when the trigger resolves.
+    assert_eq!(record.optional_actors, vec![P0], "{record:?}");
+    // CR 202.3 + CR 608.2h: the pool is exactly P0's hand cards whose mana
+    // value is within the bound (the filler's mana value 0).
+    // A pool read from the graveyard or P1's hand would hold three no-cost
+    // cards and raise a choice; the single qualifying card is put without one.
+    assert!(record.zone_choices.is_empty(), "{record:?}");
+    let runner = &board.runner;
+    assert_eq!(runner.state().objects[&board.cheap].zone, Zone::Battlefield);
+    assert_eq!(runner.state().objects[&board.cheap].controller, P0);
+    assert_eq!(runner.state().objects[&board.pricey].zone, Zone::Hand);
+    assert_eq!(runner.state().objects[&board.grave].zone, Zone::Graveyard);
+    assert_eq!(runner.state().objects[&board.opponents].zone, Zone::Hand);
+    // The bolt and the put card left P0's hand; nothing was drawn.
+    assert_eq!(hand_len(runner, P0), p0_hand - 2);
+}
+
+// ── Census registry end state ──────────────────────────────────────────────
+
+/// Registry hygiene — the census rows of this class end as the runtime rows
+/// above leave them. Shakedown Heavy keeps its `wrong_object` row (its accept
+/// branch still binds "untap this creature" to the draw's parent target),
+/// Bane keeps `dropped_qualifier` (the "equal or lesser toughness" qualifier is
+/// not witnessed), and Palantír of Orthanc is marked `wrong_object` (its "total
+/// mana value of those cards" also counts the card itself, see the Palantír
+/// rows). Each committed row must agree with the regenerated integration
+/// fixture's face, and coverage must report the matching misparse gap, so a row
+/// deleted or a fixture left stale is caught. The unmarked members of the class
+/// are the paired positive control that the same readers report no misparse gap
+/// for a face that is claimed.
+#[test]
+fn the_census_rows_of_the_class_agree_with_the_regenerated_fixture() {
+    let db = CardDatabase::from_integration_fixture().expect("integration fixture loads");
+    let registry = ConfirmedMisparses::committed();
+    for (key, name, class) in [
+        (
+            "shakedown heavy",
+            "Shakedown Heavy",
+            MisparseClass::WrongObject,
+        ),
+        (
+            "bane, lord of darkness",
+            "Bane, Lord of Darkness",
+            MisparseClass::DroppedQualifier,
+        ),
+        (
+            "palantír of orthanc",
+            "Palantír of Orthanc",
+            MisparseClass::WrongObject,
+        ),
+        (
+            "tell me what you see",
+            "Tell Me What You See",
+            MisparseClass::ConditionWrong,
+        ),
+    ] {
+        assert_eq!(registry.class_of(key), Some(class), "registry row {key}");
+        let face = db
+            .get_face_by_name(name)
+            .unwrap_or_else(|| panic!("{name} is in the integration fixture"));
+        assert_eq!(
+            face.metadata.confirmed_misparse,
+            Some(class),
+            "{name}: the fixture copy carries the registry marker"
+        );
+        assert!(
+            card_face_gaps(face)
+                .iter()
+                .any(|gap| gap == class.handler()),
+            "{name}: coverage reports the marked misparse"
+        );
+    }
+    for name in [
+        "Combustible Gearhulk",
+        "Terrapact Intimidator",
+        "Risk Factor",
+    ] {
+        let face = db
+            .get_face_by_name(name)
+            .unwrap_or_else(|| panic!("{name} is in the integration fixture"));
+        assert_eq!(face.metadata.confirmed_misparse, None, "{name}");
+        assert!(
+            !card_face_gaps(face)
+                .iter()
+                .any(|gap| gap.starts_with("Misparse:")),
+            "{name}: no misparse gap is reported for a claimed face"
+        );
+    }
+}

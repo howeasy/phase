@@ -532,6 +532,7 @@ fn importance(event: &GameEvent) -> LogImportance {
         | GameEvent::PlayerCounterChanged { .. }
         | GameEvent::ManaExpended { .. }
         | GameEvent::PlayerPerformedAction { .. }
+        | GameEvent::FaceDilemmaPlaced { .. }
         | GameEvent::Specialized { .. }
         | GameEvent::Clash { .. }
         | GameEvent::CardNamed { .. }
@@ -700,7 +701,8 @@ fn tone(event: &GameEvent) -> LogTone {
         | GameEvent::EnergyChanged { .. }
         | GameEvent::PlayerCounterChanged { .. }
         | GameEvent::ManaExpended { .. }
-        | GameEvent::PlayerPerformedAction { .. } => LogTone::Neutral,
+        | GameEvent::PlayerPerformedAction { .. }
+        | GameEvent::FaceDilemmaPlaced { .. } => LogTone::Neutral,
     }
 }
 
@@ -744,6 +746,14 @@ fn should_exclude_event(event: &GameEvent) -> bool {
         // excluding it keeps the visible log from narrating internal ledger events.
         GameEvent::PlayerPerformedAction {
             action: crate::types::events::PlayerActionKind::Draw,
+            ..
+        } => true,
+        // CR 601.2i / CR 602.2b + CR 733.1: the choice-time `FaceDilemma` ledger
+        // event drives triggers but is not narrated; `FaceDilemmaPlaced` narrates
+        // the dilemma once at stack placement, so a cancelled announcement logs
+        // nothing (CR 700.17, edition effective 2026-11-06).
+        GameEvent::PlayerPerformedAction {
+            action: crate::types::events::PlayerActionKind::FaceDilemma,
             ..
         } => true,
         // StackPushed/StackResolved are low-signal bookkeeping —
@@ -895,6 +905,7 @@ fn player_action_label(action: PlayerActionKind) -> &'static str {
         PlayerActionKind::Investigate => "investigates",
         PlayerActionKind::Forage => "forages",
         PlayerActionKind::Draw => "draws",
+        PlayerActionKind::FaceDilemma => "faces a dilemma",
     }
 }
 
@@ -1099,6 +1110,7 @@ fn categorize(event: &GameEvent) -> LogCategory {
         | GameEvent::PlayerCounterChanged { .. }
         | GameEvent::ManaExpended { .. }
         | GameEvent::PlayerPerformedAction { .. }
+        | GameEvent::FaceDilemmaPlaced { .. }
         | GameEvent::RoomEntered { .. }
         | GameEvent::RoomDoorUnlocked { .. }
         | GameEvent::DungeonCompleted { .. }
@@ -1180,6 +1192,11 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
             player_seg(state, *player_id),
             text(" "),
             text(player_action_label(*action)),
+        ],
+        GameEvent::FaceDilemmaPlaced { player_id } => vec![
+            player_seg(state, *player_id),
+            text(" "),
+            text(player_action_label(PlayerActionKind::FaceDilemma)),
         ],
         GameEvent::CardPredicateGuessMade {
             player_id,
@@ -2742,6 +2759,61 @@ mod tests {
                 LogSegment::Text(" on top and ".to_string()),
                 LogSegment::Number(2),
                 LogSegment::Text(" on bottom".to_string()),
+            ]
+        );
+    }
+
+    /// CR 700.17 (edition effective 2026-11-06) + CR 601.2i / CR 602.2b + CR 733.1:
+    /// a faced dilemma is public information narrated once, at stack placement,
+    /// through `FaceDilemmaPlaced`. The choice-time `PlayerPerformedAction
+    /// { FaceDilemma }` ledger event is not narrated (a cancelled announcement
+    /// must leave no line); the scry entry beside it is the positive control that
+    /// the rest of the player-action family still renders.
+    #[test]
+    fn a_faced_dilemma_is_narrated_once_at_placement() {
+        use crate::types::events::PlayerActionKind;
+
+        let state = GameState::new_two_player(42);
+        let choice_time = GameEvent::PlayerPerformedAction {
+            player_id: PlayerId(0),
+            action: PlayerActionKind::FaceDilemma,
+            look_count: None,
+            scry_bottom_count: None,
+            scry_top_count: None,
+        };
+        let scry = GameEvent::PlayerPerformedAction {
+            player_id: PlayerId(0),
+            action: PlayerActionKind::Scry,
+            look_count: Some(1),
+            scry_bottom_count: Some(0),
+            scry_top_count: Some(1),
+        };
+        assert!(should_exclude_event(&choice_time));
+        assert!(!should_exclude_event(&scry));
+
+        let before_placement = resolve_log_entries(&[choice_time.clone(), scry], &state, &state);
+        assert_eq!(
+            before_placement.len(),
+            1,
+            "only the scry entry is narrated while the dilemma is unplaced"
+        );
+
+        let placed = GameEvent::FaceDilemmaPlaced {
+            player_id: PlayerId(0),
+        };
+        assert!(!should_exclude_event(&placed));
+        let entries = resolve_log_entries(&[choice_time, placed], &state, &state);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].presentation.visibility, LogVisibility::Public);
+        assert_eq!(
+            entries[0].segments,
+            vec![
+                LogSegment::PlayerName {
+                    name: "Player 1".to_string(),
+                    player_id: PlayerId(0),
+                },
+                LogSegment::Text(" ".to_string()),
+                LogSegment::Text("faces a dilemma".to_string()),
             ]
         );
     }

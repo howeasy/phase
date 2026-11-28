@@ -18977,7 +18977,9 @@ pub(super) fn begin_pending_trigger_target_selection(
                 return Ok(None);
             };
 
-            // CR 700.2b (override) + CR 701.9b (analogous): "choose ... at
+            // Ruling 2025-06-06 (Umaro, Raging Yeti; Summon: Magus Sisters): "you
+            // choose a mode at random", so the controller is the mode chooser
+            // (CR 700.17) and the draw faces a dilemma. "Choose ... at
             // random" modal triggers (Cult of Skaro) are resolved inline by
             // `dispatch_pending_trigger_context` via `state.rng` — they clear
             // `modal` before this re-entry surfaces a `WaitingFor`, so reaching

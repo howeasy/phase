@@ -44655,6 +44655,7 @@ impl GameState {
                 | GameEvent::Cycled { .. }
                 | GameEvent::PlayerPerformedAction { .. }
                 | GameEvent::CardPredicateGuessMade { .. }
+                | GameEvent::FaceDilemmaPlaced { .. }
                 | GameEvent::Regenerated { .. }
                 | GameEvent::CreatureSuspected { .. }
                 | GameEvent::CreatureNoLongerSuspected { .. }
@@ -45033,6 +45034,7 @@ impl GameState {
                 | GameEvent::Cycled { .. }
                 | GameEvent::PlayerPerformedAction { .. }
                 | GameEvent::CardPredicateGuessMade { .. }
+                | GameEvent::FaceDilemmaPlaced { .. }
                 | GameEvent::CardNamed { .. }
                 | GameEvent::Regenerated { .. }
                 | GameEvent::CreatureSuspected { .. }
@@ -45216,6 +45218,7 @@ impl GameState {
                 | GameEvent::Cycled { .. }
                 | GameEvent::PlayerPerformedAction { .. }
                 | GameEvent::CardPredicateGuessMade { .. }
+                | GameEvent::FaceDilemmaPlaced { .. }
                 | GameEvent::CardNamed { .. }
                 | GameEvent::Regenerated { .. }
                 | GameEvent::CreatureSuspected { .. }

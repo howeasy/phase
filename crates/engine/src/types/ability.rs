@@ -2293,6 +2293,22 @@ pub struct SpellContext {
     /// cast-latch channel.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub chosen_modes: Vec<usize>,
+    /// CR 700.2a + CR 700.2e + CR 601.2b + CR 602.2b: the player who chose this
+    /// spell's or activated ability's modes, when that choice faced a dilemma
+    /// (`ability_utils::mode_choice_dilemma_chooser`). Latched at the mode choice
+    /// and consumed once at stack placement (`take_mode_chooser_recursive`, which
+    /// also clears the copies stamped on the chain's branches) to record
+    /// `PlayerActionKind::FaceDilemma` in the per-turn history and to publish the
+    /// log-only `GameEvent::FaceDilemmaPlaced` narration (CR 733.1: an
+    /// announcement that is undone records and narrates nothing). A copy of a spell is created
+    /// after placement, so it carries none (CR 700.2g: it faces no dilemma).
+    /// A modal triggered ability latches it the same way. When its chosen mode
+    /// still needs a target, the dilemma observers are matched at the mode choice
+    /// (CR 700.17, edition effective 2026-11-06) and the latch carries only the
+    /// history and log bookkeeping to the trigger finisher, which reads it once
+    /// (`Option::take`) as it puts the entry on the stack.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode_chooser: Option<PlayerId>,
     /// Whether an optional "you may" effect was performed during resolution.
     /// Used by AbilityCondition::effect_performed() to gate dependent sub_abilities.
     #[serde(default)]
@@ -6338,6 +6354,19 @@ impl ResolvedAbility {
         }
     }
 
+    /// CR 700.17 (edition effective 2026-11-06): consume the mode-chooser latch of
+    /// this ability and clear every copy `propagate_shared_cast_context` stamped on
+    /// its sub/else branches, so a placed spell or activation carries none into a
+    /// reflexive trigger that clones its context at resolution (one mode choice
+    /// faces one dilemma).
+    pub fn take_mode_chooser_recursive(&mut self) -> Option<PlayerId> {
+        let chooser = self.context.mode_chooser.take();
+        for (_, child) in self.child_links_mut() {
+            child.take_mode_chooser_recursive();
+        }
+        chooser
+    }
+
     /// Propagate a chosen X value to this ability and every sub/else branch.
     /// CR 107.1b: X is one value per cast — the same for all effects produced.
     pub fn set_chosen_x_recursive(&mut self, value: u32) {
@@ -7731,6 +7760,33 @@ mod tests {
         ));
         let cloned = state.clone();
         assert_eq!(cloned, state);
+    }
+
+    /// CR 700.17 (edition effective 2026-11-06): the chooser latch is consumed
+    /// once with every copy `propagate_shared_cast_context` stamped on the
+    /// branches, so Slight Malfunction's "When you do" reflexive (which clones a
+    /// branch's context at resolution) cannot face a second dilemma. A building-
+    /// block test on a hand-built chain; the printed-card row needs the card in the
+    /// integration fixture.
+    #[test]
+    fn take_mode_chooser_recursive_clears_every_branch() {
+        let mut root = ResolvedAbility::new(Effect::NoOp, vec![], ObjectId(1), PlayerId(0));
+        let mut child = ResolvedAbility::new(Effect::NoOp, vec![], ObjectId(1), PlayerId(0));
+        child.context.mode_chooser = Some(PlayerId(0));
+        root.context.mode_chooser = Some(PlayerId(0));
+        root.sub_ability = Some(Box::new(child));
+
+        assert_eq!(root.take_mode_chooser_recursive(), Some(PlayerId(0)));
+        assert_eq!(root.context.mode_chooser, None);
+        assert_eq!(
+            root.sub_ability
+                .as_ref()
+                .expect("the branch exists")
+                .context
+                .mode_chooser,
+            None
+        );
+        assert_eq!(root.take_mode_chooser_recursive(), None, "consumed once");
     }
 
     #[test]

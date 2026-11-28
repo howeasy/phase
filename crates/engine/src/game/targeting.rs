@@ -4112,6 +4112,7 @@ pub(crate) fn extract_target_object_from_event(
         | GameEvent::Cycled { .. }
         | GameEvent::PlayerPerformedAction { .. }
         | GameEvent::CardPredicateGuessMade { .. }
+        | GameEvent::FaceDilemmaPlaced { .. }
         | GameEvent::Regenerated { .. }
         | GameEvent::CreatureSuspected { .. }
         | GameEvent::CreatureNoLongerSuspected { .. }

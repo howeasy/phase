@@ -35,11 +35,19 @@ pub(super) fn finalize_trigger_target_selection(
     ability: Box<ResolvedAbility>,
     events: &mut Vec<GameEvent>,
     span_owner: triggers::ConstructionSpanOwner,
+    matching: ModeDilemmaMatching,
 ) -> WaitingFor {
     let span_start = events.len();
-    let placement = place_trigger_targets(state, trigger, ability, events);
+    let matched_at_mode_choice =
+        matching == ModeDilemmaMatching::AtModeChoice && ability.context.mode_chooser.is_some();
+    let placement = place_trigger_targets(state, trigger, ability, events, matching);
     // CR 603.2e + CR 603.3b: match the finisher's own span now and queue what it triggered before the drain. Those abilities triggered during the placement process under way, so the drain places that process first and then these together with the other abilities that triggered during it. While an instant or sorcery is still resolving, the drain is refused (CR 608.2n) and these are placed later together with that resolution's other triggered abilities, not after them.
-    triggers::queue_construction_span(state, events, span_start, span_owner);
+    if matched_at_mode_choice {
+        // CR 603.2c + CR 603.3b: the observers were matched and the process joined at the mode choice; this span holds only the target-lock events.
+        triggers::queue_resumed_construction_span(state, events, span_start);
+    } else {
+        triggers::queue_construction_span(state, events, span_start, span_owner);
+    }
     match placement {
         FinalizedPlacement::Returned(waiting_for) => *waiting_for,
         FinalizedPlacement::OnStack { controller } => {
@@ -73,6 +81,19 @@ pub(super) fn finalize_trigger_target_selection(
     }
 }
 
+/// CR 700.17 (edition effective 2026-11-06) + CR 603.2: when a modal trigger's
+/// dilemma observers are matched relative to the finisher that completes it.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum ModeDilemmaMatching {
+    /// The mode choice and the finisher are one step: the finisher emits the
+    /// dilemma inside its own span.
+    AtFinisher,
+    /// A target prompt separated them: the observers were matched (and the
+    /// placement process joined) at the mode choice, so the finisher owes only
+    /// the placement bookkeeping.
+    AtModeChoice,
+}
+
 /// Private control flow of the finisher, not a rules or wire enum.
 enum FinalizedPlacement {
     /// Construction ended without a drain: the division prompt (CR 601.2d) or a
@@ -88,9 +109,25 @@ enum FinalizedPlacement {
 fn place_trigger_targets(
     state: &mut GameState,
     mut trigger: Box<PendingTrigger>,
-    ability: Box<ResolvedAbility>,
+    mut ability: Box<ResolvedAbility>,
     events: &mut Vec<GameEvent>,
+    matching: ModeDilemmaMatching,
 ) -> FinalizedPlacement {
+    // CR 700.17 (edition effective 2026-11-06) + CR 603.3c: the dilemma is faced at
+    // the mode choice. When mode choice and finisher are one step the finisher emits
+    // it inside its own span; when a target prompt separated them it was emitted and
+    // matched at the mode choice (`AtModeChoice`) and only the history and log
+    // bookkeeping happens here, at stack placement.
+    if let Some(chooser) = ability.context.mode_chooser.take() {
+        if matching == ModeDilemmaMatching::AtFinisher {
+            super::ability_utils::emit_face_dilemma_event(chooser, events);
+        }
+        super::ability_utils::record_face_dilemma_after_stack_placement(
+            state,
+            Some(chooser),
+            events,
+        );
+    }
     let assigned_targets = declared_targets_in_chain(&ability);
     let crime_candidate =
         casting::targets_commit_crime(state, &assigned_targets, trigger.controller);
@@ -252,6 +289,7 @@ pub(super) fn handle_trigger_target_selection_select_targets(
         ability,
         events,
         triggers::ConstructionSpanOwner::Finisher,
+        ModeDilemmaMatching::AtModeChoice,
     );
     // Round-20 seam 3: wrapping at the action seam — not per return inside
     // `finalize_trigger_target_selection` — covers all five of its returns
@@ -420,6 +458,7 @@ pub(super) fn handle_trigger_target_selection_choose_target(
                 ability,
                 events,
                 triggers::ConstructionSpanOwner::Finisher,
+                ModeDilemmaMatching::AtModeChoice,
             );
             // Round-20 seam 3, step-by-step walk completion.
             Ok(triggers::finish_trigger_construction_action(

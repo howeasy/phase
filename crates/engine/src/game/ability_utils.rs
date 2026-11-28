@@ -1673,6 +1673,72 @@ fn modal_indices_have_legal_target_assignment(
     }
 }
 
+/// CR 700.17 (edition effective 2026-11-06; the repo's pinned edition predates it)
+/// and CR 700.2a, CR 700.2b, CR 700.2e: the player who faces a dilemma for this
+/// mode choice — the mode chooser — or `None` when zero modes are chosen ("as
+/// you choose one or more modes"; CR 603.3c removes a zero-mode trigger).
+///
+/// The selection procedure does not change the chooser: a "choose one at
+/// random" trigger (Cult of Skaro) is still the controller's mode choice.
+/// Ruling 2025-06-06 (Umaro, Raging Yeti; Summon: Magus Sisters): "you choose a
+/// mode at random", so a nonempty random draw faces a dilemma exactly like a
+/// prompted one (CR 700.17).
+pub(crate) fn mode_choice_dilemma_chooser(
+    chooser: PlayerId,
+    indices: &[usize],
+) -> Option<PlayerId> {
+    (!indices.is_empty()).then_some(chooser)
+}
+
+/// CR 700.17 (edition effective 2026-11-06) + CR 603.2: the dilemma is a game
+/// event as the modes are announced; abilities that trigger on it ("whenever you
+/// face a dilemma") trigger now.
+pub(crate) fn emit_face_dilemma_event(
+    chooser: PlayerId,
+    events: &mut Vec<crate::types::events::GameEvent>,
+) {
+    events.push(crate::types::events::GameEvent::PlayerPerformedAction {
+        player_id: chooser,
+        action: crate::types::events::PlayerActionKind::FaceDilemma,
+        look_count: None,
+        scry_bottom_count: None,
+        scry_top_count: None,
+    });
+}
+
+/// CR 700.17 (edition effective 2026-11-06) + CR 601.2i + CR 602.2b + CR 733.1:
+/// record the dilemma in the per-turn history once the announcement that faced
+/// it has reached the stack, so an undone announcement records nothing.
+///
+/// The same placement publishes `GameEvent::FaceDilemmaPlaced`, the log-only
+/// narration: the choice-time `PlayerPerformedAction { FaceDilemma }` is excluded
+/// from the game log, so a cancelled announcement narrates nothing.
+pub(crate) fn record_face_dilemma_after_stack_placement(
+    state: &mut GameState,
+    chooser: Option<PlayerId>,
+    events: &mut Vec<crate::types::events::GameEvent>,
+) {
+    if let Some(player) = chooser {
+        record_face_dilemma_history(state, player);
+        events.push(crate::types::events::GameEvent::FaceDilemmaPlaced { player_id: player });
+    }
+}
+
+/// CR 700.17 (edition effective 2026-11-06) + CR 104.3a + CR 800.4a: write the
+/// per-turn history entry of a dilemma `chooser` already faced. The entry is
+/// committed once the announcement that faced it ends: when it reaches the
+/// stack ([`record_face_dilemma_after_stack_placement`]) or when its
+/// controller departs mid-announcement, which is not an undone action (CR 733.1)
+/// so the choice the surviving chooser made still occurred. Narration
+/// (`FaceDilemmaPlaced`) stays placement-only.
+pub(crate) fn record_face_dilemma_history(state: &mut GameState, chooser: PlayerId) {
+    super::effects::record_player_action_this_turn(
+        state,
+        chooser,
+        crate::types::events::PlayerActionKind::FaceDilemma,
+    );
+}
+
 /// Records chosen mode indices for NoRepeat constraint enforcement.
 /// CR 700.2: Inserts into per-turn and/or per-game tracking maps.
 /// CR 400.7: `source` must be the same incarnation key the matching
@@ -2362,12 +2428,14 @@ pub fn random_select_targets_for_ability(
     Ok(chosen)
 }
 
-/// CR 700.2b (override) + CR 701.9b (analogous): Resolve a modal ability whose
-/// `selection` is `Random` (Cult of Skaro "choose one at random") by uniformly
-/// drawing mode index/indices from the legal set using the engine's seeded RNG
-/// (`state.rng`). The game — not `modal.chooser` — makes the selection, so no
+/// Resolve a modal ability whose `selection` is `Random` (Cult of Skaro
+/// "choose one at random") by uniformly drawing mode index/indices from the
+/// legal set using the engine's seeded RNG (`state.rng`), so no
 /// `WaitingFor::AbilityModeChoice` is emitted. Mirrors
-/// `random_select_targets_for_ability` for the mode-selection axis.
+/// `random_select_targets_for_ability` for the mode-selection axis. Ruling
+/// 2025-06-06 (Umaro, Raging Yeti; Summon: Magus Sisters): "you choose a mode at
+/// random", so the controller is the mode chooser and the draw faces a dilemma
+/// (CR 700.17).
 ///
 /// The legal set is `0..mode_count` minus `unavailable_modes` (modes ruled out
 /// by prior selection or unsatisfiable target legality, per CR 700.2b). A count

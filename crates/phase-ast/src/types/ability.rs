@@ -8433,9 +8433,10 @@ impl TargetSelectionMode {
         matches!(self, TargetSelectionMode::Chosen)
     }
 
-    /// CR 700.2b (override) + CR 701.9b (analogous): The game selects uniformly
-    /// at random instead of the controller choosing (Cult of Skaro "choose one
-    /// at random").
+    /// CR 701.9b (analogous): The game selects uniformly at random how the
+    /// choice is made (Cult of Skaro "choose one at random"). Ruling 2025-06-06
+    /// (Umaro, Raging Yeti; Summon: Magus Sisters): "you choose a mode at
+    /// random", so the controller is the mode chooser (CR 700.17).
     pub fn is_random(&self) -> bool {
         matches!(self, TargetSelectionMode::Random)
     }
@@ -37647,9 +37648,10 @@ pub struct ModalChoice {
     /// controller (CR 700.2a) for all standard modal spells/abilities.
     #[serde(default = "default_player_filter_controller")]
     pub chooser: PlayerFilter,
-    /// CR 700.2b (override) + CR 701.9b (analogous): When `Random`, the game
-    /// selects the mode(s) uniformly at random (Cult of Skaro "choose one at
-    /// random") instead of `chooser` choosing per CR 700.2a/700.2b. Default
+    /// CR 701.9b (analogous): When `Random`, the game draws the
+    /// mode(s) uniformly at random (Cult of Skaro "choose one at random"). Ruling
+    /// 2025-06-06 (Umaro, Raging Yeti; Summon: Magus Sisters): "you choose a mode
+    /// at random", so the controller is the mode chooser (CR 700.17). Default
     /// `Chosen` preserves controller-choice; omitted from card-data when default.
     #[serde(default, skip_serializing_if = "TargetSelectionMode::is_chosen")]
     pub selection: TargetSelectionMode,

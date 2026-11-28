@@ -3905,9 +3905,12 @@ pub(crate) struct ModalHeaderAst {
     /// CR 700.2e: The player who chooses the mode(s). `Controller` (CR 700.2a)
     /// for standard `Choose one —` headers and the `you choose —` alias.
     pub(crate) chooser: PlayerFilter,
-    /// CR 700.2b (override) + CR 701.9b (analogous): `Random` for "choose one at
-    /// random" headers (Cult of Skaro) — the game selects the mode(s), not the
-    /// chooser. `Chosen` for all standard modal headers.
+    /// CR 701.9b (analogous): `Random` for "choose one at random"
+    /// headers (Cult of Skaro) — the game draws the mode(s). Ruling 2025-06-06
+    /// (Umaro, Raging Yeti; Summon: Magus Sisters): "you choose a mode at
+    /// random", so the controller is the mode chooser and the choice faces a
+    /// dilemma (CR 700.17, edition effective 2026-11-06). `Chosen` for all
+    /// standard modal headers.
     pub(crate) selection: crate::types::ability::TargetSelectionMode,
     /// CR 700.2 + CR 107.3m: Dynamic max ("choose up to X —") — `Some` carries
     /// the cost {X} reference resolved live at runtime; `None` for fixed caps.
