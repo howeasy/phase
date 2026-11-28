@@ -38,7 +38,7 @@ use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
 use engine::types::game_state::WaitingFor;
 use engine::types::identifiers::ObjectId;
-use engine::types::mana::{ManaColor, ManaCost, ManaType, ManaUnit};
+use engine::types::mana::{ManaColor, ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::zones::Zone;
 
@@ -623,10 +623,6 @@ fn kaito_shizuki_entered_a_previous_turn_stays_phased_in_at_his_end_step() {
 // Novice Knight (static, same attachment-state arm)
 // ---------------------------------------------------------------------------
 
-const REALITY_RIPPLE: &str = "Target artifact, creature, or land phases out. (While it's phased \
-out, it's treated as though it doesn't exist. It phases in before its controller untaps during \
-their next untap step.)";
-
 /// "Defender\nAs long as this creature is enchanted or equipped, it can attack
 /// as though it didn't have defender."
 /// CR 702.3b + CR 303.4b: a Novice Knight enchanted by a printed Aura (Rancor,
@@ -724,10 +720,13 @@ fn novice_knight_with_only_a_phased_out_equipment_cannot_attack() {
     let knight = scenario.add_real_card(P0, "Novice Knight", Zone::Battlefield, db);
     let shuko = scenario.add_real_card(P0, "Shuko", Zone::Battlefield, db);
     let bears = scenario.add_real_card(P0, "Grizzly Bears", Zone::Battlefield, db);
-    let ripple = scenario
-        .add_spell_to_hand_from_oracle(P1, "Reality Ripple", true, REALITY_RIPPLE)
-        .with_mana_cost(ManaCost::zero())
-        .id();
+    let ripple = scenario.add_real_card(P1, "Reality Ripple", Zone::Hand, db);
+    // CR 601.2g-h: {1}{U} is paid through the normal cast pipeline, which
+    // auto-taps these two Islands for P1.
+    let islands = [
+        scenario.add_basic_land(P1, ManaColor::Blue),
+        scenario.add_basic_land(P1, ManaColor::Blue),
+    ];
     let mut runner = scenario.build();
     engine::game::rehydrate_game_from_card_db(runner.state_mut(), db);
 
@@ -757,6 +756,15 @@ fn novice_knight_with_only_a_phased_out_equipment_cannot_attack() {
         WaitingFor::Priority { player: P1 }
     ));
     runner.cast(ripple).target_object(shuko).commit().resolve();
+
+    // Reach: the printed {1}{U} was paid, so the cast ran the normal payment
+    // path (both Islands auto-tapped) rather than a synthetic free cast.
+    assert!(
+        islands
+            .iter()
+            .all(|&island| runner.state().objects[&island].tapped),
+        "reach: both Islands paid Reality Ripple's printed {{1}}{{U}}"
+    );
 
     // CR 702.26d + CR 702.26i: direct phasing preserves the zone and remembers
     // the attachment so it can phase in attached to the same host.
