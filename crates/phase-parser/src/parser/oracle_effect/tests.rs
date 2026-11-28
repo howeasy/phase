@@ -109077,6 +109077,17 @@ enum DieExileCensusClass {
     Gap,
 }
 
+/// (face name, MTGJSON face count, types, subtypes, keywords, oracle text, class).
+type DieExileCensusRow = (
+    &'static str,
+    usize,
+    &'static [&'static str],
+    &'static [&'static str],
+    &'static [&'static str],
+    &'static str,
+    DieExileCensusClass,
+);
+
 // SHAPE + REACH: the committed enumeration of the 18-face census class
 // (`jq --arg re 'dealt damage this way would die'` over MTGJSON AtomicCards
 // 5.3.0+20261102, canonical SHA-256
@@ -109086,8 +109097,7 @@ enum DieExileCensusClass {
 #[test]
 fn die_exile_census_faces_lower_to_their_declared_class() {
     use DieExileCensusClass::{Carveout, Gap, Prior};
-    // (face name, MTGJSON face count, types, subtypes, keywords, oracle text, class).
-    let faces: [(&str, usize, &[&str], &[&str], &[&str], &str, DieExileCensusClass); 18] = [
+    let faces: [DieExileCensusRow; 18] = [
         ("Anger of the Gods", 1, &["Sorcery"], &[], &[], "Anger of the Gods deals 3 damage to each creature. If a creature dealt damage this way would die this turn, exile it instead.", Prior),
         ("Annihilating Fire", 1, &["Instant"], &[], &[], "Annihilating Fire deals 3 damage to any target. If a creature dealt damage this way would die this turn, exile it instead.", Prior),
         ("Chandra, Awakened Inferno", 1, &["Planeswalker"], &["Chandra"], &[], "This spell can't be countered.\n[+2]: Each opponent gets an emblem with \"At the beginning of your upkeep, this emblem deals 1 damage to you.\"\n[−3]: Chandra deals 3 damage to each non-Elemental creature.\n[−X]: Chandra deals X damage to target creature or planeswalker. If a permanent dealt damage this way would die this turn, exile it instead.", Prior),
