@@ -1,19 +1,23 @@
 //! Whole-card runtime witnesses for the parser's intervening-if support on
-//! "self state" conditions. Each card's trigger only fires when the printed
-//! condition holds, driven end to end through the production pipeline
-//! (`add_real_card` printed cards + `GameRunner` real player actions).
+//! "self state" conditions. Each card's moment-of-trigger behaviour is driven
+//! end to end through the production pipeline (`add_real_card` printed cards +
+//! `GameRunner` real player actions): a single-state gate fires only when the
+//! printed condition holds, and a compound attachment-state gate stays
+//! unparsed so it never fires.
 //!
 //! Cards (verbatim Oracle text, from client/public/card-data.json):
 //!   - Krond the Dawn-Clad: "Whenever Krond attacks, if it's enchanted, exile
 //!     target permanent."
 //!   - Warchanter Skald: "Whenever this creature becomes tapped, if it's
 //!     enchanted or equipped, create a 2/1 red Dwarf Berserker creature token."
+//!     Its compound gate is deliberately not parsed (CR 603.4), so the trigger
+//!     stays Unimplemented and never creates a token.
 //!   - Kaito Shizuki: "At the beginning of your end step, if Kaito entered
 //!     this turn, he phases out."
 //!
-//! Krond the Dawn-Clad and Warchanter Skald are also fenced by confirmed-misparse
-//! rows; these tests only prove their parse and runtime behaviour in the covered
-//! scenarios, not the broader support the rows withhold.
+//! Krond the Dawn-Clad is also fenced by a confirmed-misparse row; these tests
+//! only prove its parse and runtime behaviour in the covered scenarios, not the
+//! broader support the row withholds.
 //!
 //! CR references (all verified against docs/MagicCompRules.txt):
 //!   - CR 603.4: an intervening "if" clause after a trigger condition is
@@ -37,13 +41,13 @@ use engine::game::combat::{get_valid_attacker_ids, validate_attackers, AttackTar
 use engine::game::game_object::{AttachTarget, PhaseStatus};
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::scenario_db::GameScenarioDbExt;
-use engine::types::ability::{AbilityTag, TargetRef};
+use engine::types::ability::{AbilityTag, Effect, TargetRef};
 use engine::types::actions::GameAction;
-use engine::types::card_type::CoreType;
 use engine::types::game_state::WaitingFor;
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaColor, ManaType, ManaUnit};
 use engine::types::phase::Phase;
+use engine::types::triggers::TriggerMode;
 use engine::types::zones::Zone;
 
 use crate::support::shared_card_db;
@@ -95,8 +99,9 @@ fn settle_at_end_step_priority(runner: &GameRunner) {
     );
 }
 
-/// Battlefield ids of the created Dwarf Berserker tokens (the Warchanter Skald
-/// token is printed with that exact name).
+/// Battlefield ids of any Dwarf Berserker tokens — the name the Warchanter
+/// Skald token would carry. The Skald's trigger is deliberately unparsed, so
+/// the witness asserts this stays empty.
 fn dwarf_berserker_ids(runner: &GameRunner) -> Vec<ObjectId> {
     runner
         .state()
@@ -330,19 +335,44 @@ fn krond_equipped_attacker_is_not_enchanted_and_exiles_nothing() {
 }
 
 // ---------------------------------------------------------------------------
-// Warchanter Skald
+// Warchanter Skald (compound attachment-state gate deliberately unparsed)
 // ---------------------------------------------------------------------------
 
 /// "Whenever this creature becomes tapped, if it's enchanted or equipped,
 /// create a 2/1 red Dwarf Berserker creature token."
 ///
-/// Positive, enchanted branch: a printed Aura (Rancor) is cast onto the Skald,
-/// then the Skald attacks and becomes tapped (CR 508.1f). CR 603.4 + CR 303.4b:
-/// the "enchanted or equipped" condition is true, so exactly one 2/1 red Dwarf
-/// Berserker token is created for P0.
+/// CR 603.4: a compound "enchanted or equipped" gate would be read by the
+/// trigger collector at the end of the resolution (an effect such as Croaking
+/// Curse taps the creature, then attaches a Role), not at the tap event, so the
+/// parser deliberately leaves it unhoisted. The trigger therefore stays an
+/// honest `Effect::Unimplemented` gap and creates nothing — exactly as on main.
+/// Witness: Rancor is attached before the attack, so the gate would hold at the
+/// event, yet the tap creates no Dwarf Berserker token.
 #[test]
-fn warchanter_skald_becomes_tapped_while_enchanted_creates_one_dwarf_berserker() {
+fn warchanter_skald_compound_gate_stays_unparsed_and_creates_no_token() {
     let db = load_db();
+    let face = db
+        .get_face_by_name("Warchanter Skald")
+        .expect("Warchanter Skald must be in the fixture");
+    let trigger = face.triggers.first().expect("the Skald's tap trigger");
+    assert_eq!(trigger.mode, TriggerMode::Taps);
+    assert!(
+        trigger.condition.is_none(),
+        "the compound attachment gate must not hoist: {:?}",
+        trigger.condition
+    );
+    assert!(
+        matches!(
+            trigger
+                .execute
+                .as_deref()
+                .map(|ability| ability.effect.as_ref()),
+            Some(Effect::Unimplemented { .. })
+        ),
+        "the compound gate must stay an honest gap: {:?}",
+        trigger.execute
+    );
+
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     let skald = scenario.add_real_card(P0, "Warchanter Skald", Zone::Battlefield, db);
@@ -377,113 +407,12 @@ fn warchanter_skald_becomes_tapped_while_enchanted_creates_one_dwarf_berserker()
 
     runner.advance_until_stack_empty();
 
-    let tokens = dwarf_berserker_ids(&runner);
-    assert_eq!(tokens.len(), 1, "exactly one Dwarf Berserker token");
-    let token = runner.state().objects.get(&tokens[0]).unwrap();
-    assert_eq!(
-        token.controller, P0,
-        "the token is created for the trigger's controller"
-    );
-    assert!(token.is_token, "the created object is a token");
-    assert_eq!(token.power, Some(2), "printed token power 2");
-    assert_eq!(token.toughness, Some(1), "printed token toughness 1");
-    assert_eq!(token.color, vec![ManaColor::Red], "printed token color red");
-    assert!(
-        token.card_types.core_types.contains(&CoreType::Creature),
-        "the token is a creature"
-    );
-    assert!(
-        token
-            .card_types
-            .subtypes
-            .iter()
-            .any(|subtype| subtype == "Dwarf")
-            && token
-                .card_types
-                .subtypes
-                .iter()
-                .any(|subtype| subtype == "Berserker"),
-        "the token is a Dwarf Berserker"
-    );
-    settle_at_declare_attackers_priority(&runner);
-}
-
-/// Positive, equipped branch: the Skald is equipped with a printed Equipment
-/// (Shuko, attached via its printed equip {0} activation, CR 301.5a), attacks,
-/// becomes tapped, and the token is created.
-#[test]
-fn warchanter_skald_becomes_tapped_while_equipped_creates_one_dwarf_berserker() {
-    let db = load_db();
-    let mut scenario = GameScenario::new();
-    scenario.at_phase(Phase::PreCombatMain);
-    let skald = scenario.add_real_card(P0, "Warchanter Skald", Zone::Battlefield, db);
-    let shuko = scenario.add_real_card(P0, "Shuko", Zone::Battlefield, db);
-    let mut runner = scenario.build();
-    engine::game::rehydrate_game_from_card_db(runner.state_mut(), db);
-
-    let equip_index = equip_ability_index(&runner, shuko);
-    runner
-        .activate(shuko, equip_index)
-        .target_object(skald)
-        .resolve();
-    assert_eq!(
-        runner.state().objects[&shuko].attached_to,
-        Some(AttachTarget::Object(skald)),
-        "reach: Shuko must be attached to the Skald, so it is equipped (CR 301.5a)"
-    );
-
-    runner.advance_to_combat();
-    runner
-        .declare_attackers(&[(skald, AttackTarget::Player(P1))])
-        .expect("the equipped Skald must be declarable as an attacker");
-    assert!(
-        runner.state().objects[&skald].tapped,
-        "reach: attacking must have tapped the Skald (CR 508.1f)"
-    );
-
-    runner.advance_until_stack_empty();
-
-    let tokens = dwarf_berserker_ids(&runner);
-    assert_eq!(tokens.len(), 1, "exactly one Dwarf Berserker token");
-    let token = runner.state().objects.get(&tokens[0]).unwrap();
-    assert_eq!(
-        token.controller, P0,
-        "the token is created for the trigger's controller"
-    );
-    assert_eq!(token.power, Some(2), "printed token power 2");
-    assert_eq!(token.toughness, Some(1), "printed token toughness 1");
-    settle_at_declare_attackers_priority(&runner);
-}
-
-/// Negative sibling: a bare Skald attacks, becomes tapped (reach-guard,
-/// CR 508.1f), and NOTHING happens — CR 603.4: the "if it's enchanted or
-/// equipped" condition is false at the tap event, so no trigger reaches the
-/// stack and no token is created.
-#[test]
-fn warchanter_skald_becomes_tapped_unattached_creates_no_token() {
-    let db = load_db();
-    let mut scenario = GameScenario::new();
-    scenario.at_phase(Phase::PreCombatMain);
-    let skald = scenario.add_real_card(P0, "Warchanter Skald", Zone::Battlefield, db);
-    let mut runner = scenario.build();
-    engine::game::rehydrate_game_from_card_db(runner.state_mut(), db);
-
-    runner.advance_to_combat();
-    runner
-        .declare_attackers(&[(skald, AttackTarget::Player(P1))])
-        .expect("the bare Skald must be declarable as an attacker");
-    assert!(
-        runner.state().objects[&skald].tapped,
-        "reach: attacking must have tapped the Skald (CR 508.1f), so the tap \
-         trigger event really happened"
-    );
-
-    settle_at_declare_attackers_priority(&runner);
     assert_eq!(
         dwarf_berserker_ids(&runner).len(),
         0,
-        "the unmet trigger must create no Dwarf Berserker token"
+        "the unparsed compound gate must create no Dwarf Berserker token"
     );
+    settle_at_declare_attackers_priority(&runner);
 }
 
 // ---------------------------------------------------------------------------

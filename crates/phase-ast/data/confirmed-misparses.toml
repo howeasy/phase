@@ -2612,7 +2612,6 @@ face = [
   { key = "war tax", class = "wrong_player", clauses = ["{X}{U}: This turn, creatures can't attack unless their controller pays {X} for each attacking creature they control."] },
   { key = "warbriar blessing", class = "target_wrong", clauses = ["When this Aura enters, enchanted creature fights up to one target creature you don't control."] },
   { key = "warbringer", class = "cost_wrong", clauses = ["Dash costs you pay cost {2} less"] },
-  { key = "warchanter skald", class = "trigger_wrong", clauses = ["Whenever this creature becomes tapped, if it's enchanted or equipped, create a 2/1 red Dwarf Berserker creature token."] },
   { key = "wardscale dragon", class = "missing_effect", clauses = ["As long as this creature is attacking, defending player can't cast spells."] },
   { key = "wargling", class = "wrong_object", clauses = ["Ferocious — Whenever this creature attacks while you control a creature with power 4 or greater, until end of turn, this creature gets +1/+0 and creatures you control gain trample."] },
   { key = "warmonger's chariot", class = "wrong_object", clauses = ["As long as equipped creature has defender, it can attack as though it didn't have defender."] },

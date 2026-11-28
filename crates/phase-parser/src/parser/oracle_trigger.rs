@@ -11302,6 +11302,29 @@ enum InterveningExtraction {
     RefusedLeadingGuard,
 }
 
+/// CR 301.5a + CR 303.4 + CR 603.4: true when `sc` is an `Or`/`And` whose
+/// members are all bare attachment states of the source ("if it's enchanted or
+/// equipped", Warchanter Skald). Such a compound gate is not hoisted to the
+/// trigger condition: the trigger collector reads attachment state at the end
+/// of the resolution (an effect such as Croaking Curse taps the creature and
+/// then attaches a Role), not at the event CR 603.4 requires, so hoisting would
+/// fire on state the triggering event never had. The trigger stays unparsed
+/// (fail closed). Single-state forms (Krond the Dawn-Clad) and statics
+/// (Novice Knight's "as long as this creature is enchanted or equipped") are
+/// unaffected — statics evaluate continuously, never at a trigger event.
+fn is_compound_attachment_state_gate(sc: &StaticCondition) -> bool {
+    let (StaticCondition::Or { conditions } | StaticCondition::And { conditions }) = sc else {
+        return false;
+    };
+    !conditions.is_empty()
+        && conditions.iter().all(|condition| {
+            matches!(
+                condition,
+                StaticCondition::SourceIsEquipped | StaticCondition::SourceIsEnchanted
+            )
+        })
+}
+
 fn try_extract_intervening(
     tp: &TextPair<'_>,
     lower: &str,
@@ -11354,6 +11377,11 @@ fn try_extract_intervening(
     let Ok((rest, sc)) = parse_inner_condition(condition_input) else {
         return InterveningExtraction::Absent;
     };
+    // CR 301.5a + CR 303.4 + CR 603.4: a compound attachment-state gate is not
+    // hoisted; the trigger stays unparsed rather than checked at the wrong time.
+    if is_compound_attachment_state_gate(&sc) {
+        return InterveningExtraction::Absent;
+    }
     // CR 201.5 + CR 603.4: the shared possessive composer binds "its"/"her"/
     // "his"/"it" to the ability source. On a non-self trigger that reading is
     // wrong for a STRICT P/T gate — the pronoun names the event object, whose

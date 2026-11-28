@@ -48217,9 +48217,13 @@ fn or_split_carries_shared_adjunct_to_bare_leg() {
     }
 }
 
-/// CR 301.5a + CR 303.4 + CR 603.4: on a self trigger, a bare source-bound "it's
-/// enchanted" / "it's enchanted or equipped" is hoisted to the trigger condition
-/// through the shared grammar (Krond the Dawn-Clad, Warchanter Skald).
+/// CR 301.5a + CR 303.4 + CR 603.4: on a self trigger, a bare single-state
+/// source-bound "it's enchanted" is hoisted to the trigger condition through
+/// the shared grammar (Krond the Dawn-Clad). A COMPOUND attachment-state gate
+/// ("it's enchanted or equipped", Warchanter Skald) is deliberately not
+/// hoisted: the trigger collector reads attachment state after the resolution
+/// rather than at the event, so the trigger stays unparsed and its body is an
+/// honest `Effect::Unimplemented`.
 #[test]
 fn self_trigger_bare_its_attachment_state_hoists_the_intervening_if() {
     let krond = parse_trigger_line(
@@ -48245,10 +48249,19 @@ fn self_trigger_bare_its_attachment_state_hoists_the_intervening_if() {
     );
     assert_eq!(skald.mode, TriggerMode::Taps);
     assert!(
-        matches!(&skald.condition, Some(TriggerCondition::Or { conditions }) if conditions.len() == 2),
-        "expected Or[enchanted, equipped], got {:?}",
+        skald.condition.is_none(),
+        "the compound attachment-state gate must not hoist: {:?}",
         skald.condition
     );
+    // CR 603.4: the unhoisted gate fails the trigger closed instead of firing
+    // on attachment state read after the resolution.
+    assert!(matches!(
+        skald
+            .execute
+            .as_deref()
+            .map(|ability| ability.effect.as_ref()),
+        Some(Effect::Unimplemented { .. })
+    ));
 }
 
 /// Negative twin: on a trigger whose subject is not the source, "it" names the

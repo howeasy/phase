@@ -2695,10 +2695,14 @@ fn parse_source_attachment_state(input: &str) -> OracleResult<'_, StaticConditio
     .parse(input)
 }
 
-/// CR 301.5a + CR 303.4 + CR 603.4: "<subject> is enchanted or equipped" /
-/// "<subject> is equipped and enchanted" — two attachment states sharing one
-/// subject and one copula (Warchanter Skald). The bare right-hand predicate has
-/// no subject of its own, so `parse_condition_connective` cannot recurse into it;
+/// CR 301.5a + CR 303.4: "<subject> is enchanted or equipped" / "<subject> is
+/// equipped and enchanted" — two attachment states sharing one subject and one
+/// copula. Statics use it (Novice Knight's "as long as this creature is
+/// enchanted or equipped"); trigger gates deliberately do not hoist it
+/// (`oracle_trigger::try_extract_intervening` fails the trigger closed, since
+/// the trigger collector would check attachment state after the resolution
+/// instead of at the event — CR 603.4). The bare right-hand predicate has no
+/// subject of its own, so `parse_condition_connective` cannot recurse into it;
 /// the connector axis is the shared `parse_condition_connector`.
 fn parse_source_attachment_state_list(input: &str) -> OracleResult<'_, StaticCondition> {
     let (rest, _) = parse_source_subject(input)?;
@@ -29558,10 +29562,11 @@ mod intervening_if_state_condition_tests {
         ));
     }
 
-    /// CR 301.5a + CR 303.4 + CR 603.4: two attachment states sharing one subject
-    /// and copula fold to one connective over the typed source predicates
-    /// (Warchanter Skald: "it's enchanted or equipped"); the single-state and the
-    /// "enchanted by N Auras" forms keep their own arms.
+    /// CR 301.5a + CR 303.4: two attachment states sharing one subject and
+    /// copula fold to one connective over the typed source predicates
+    /// ("it's enchanted or equipped", used by statics such as Novice Knight;
+    /// trigger gates deliberately do not hoist this shape, CR 603.4); the
+    /// single-state and the "enchanted by N Auras" forms keep their own arms.
     #[test]
     fn source_attachment_state_list_composes_one_connective() {
         let (rest, c) = parse_inner_condition("this creature is enchanted or equipped").unwrap();

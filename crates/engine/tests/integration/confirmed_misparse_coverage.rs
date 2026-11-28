@@ -303,12 +303,13 @@ fn compare_population(raw: &Map<String, Value>, populations: &[(&ConfirmedMispar
 /// gap with its parse untouched. Krond the Dawn-Clad is fenced the same way: its
 /// `exile target permanent` uses the shared `TypeFilter::Permanent` matcher, which
 /// rejects a battlefield permanent that lost all types; the shared-predicate fix is
-/// a follow-up. Warchanter Skald is fenced because its "if it's enchanted or
-/// equipped" gate may be checked at trigger collection (after an effect such as
-/// Croaking Curse attaches a Role) rather than when the tap happens (CR 603.4);
-/// this is not measured here, and a follow-up ticket owns the timing check. The
-/// remaining claimed cards (Kaito Shizuki, Novice Knight) stay supported and
-/// gap-free.
+/// a follow-up. Warchanter Skald's compound "if it's enchanted or equipped" gate
+/// is deliberately not parsed: the trigger collector would read attachment state
+/// after the whole resolution (an effect such as Croaking Curse taps the creature
+/// and then attaches a Role) instead of at the event, contrary to CR 603.4, so
+/// its trigger stays an honest `Effect::Unimplemented` gap exactly as on main and
+/// it needs no committed row. The remaining claimed cards (Kaito Shizuki, Novice
+/// Knight) stay supported and gap-free.
 /// Sandstalker Moloch (shared dig path, ticket 359) and Sarevok,
 /// Deathbringer (a typeless permanent leaving is not counted) keep their committed
 /// rows; their gates stay unparsed (`unclaimed_history_gates_stay_unparsed`), so
@@ -321,7 +322,6 @@ fn intervening_if_unclaimed_cards_stay_unsupported_and_claimed_cards_stay_suppor
         ("sarevok, deathbringer", MisparseClass::ConditionWrong),
         ("syrix, carrier of the flame", MisparseClass::WrongZone),
         ("krond the dawn-clad", MisparseClass::TargetWrong),
-        ("warchanter skald", MisparseClass::TriggerWrong),
     ] {
         assert_eq!(committed.class_of(key), Some(class), "committed row: {key}");
     }
@@ -329,7 +329,6 @@ fn intervening_if_unclaimed_cards_stay_unsupported_and_claimed_cards_stay_suppor
     let fenced = [
         ("syrix, carrier of the flame", MisparseClass::WrongZone),
         ("krond the dawn-clad", MisparseClass::TargetWrong),
-        ("warchanter skald", MisparseClass::TriggerWrong),
     ];
     let pool: Map<String, Value> = fenced
         .iter()
