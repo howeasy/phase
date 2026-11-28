@@ -10496,20 +10496,48 @@ fn parse_spell_history_origin_props(input: &str) -> Option<(Vec<FilterProp>, usi
     })
 }
 
-fn parse_cast_origin_anywhere_other_than_suffix(input: &str) -> Option<(Vec<FilterProp>, usize)> {
+pub(crate) fn parse_cast_origin_anywhere_other_than_suffix(
+    input: &str,
+) -> Option<(Vec<FilterProp>, usize)> {
+    let (_, zone, consumed) = parse_cast_origin_exclusion_parts(input)?;
+    // Spell history records the origin zone, not its owner.
+    // CR 601.2a + CR 400.11: Negating a zone match also admits casts from
+    // outside the game, which is not a zone.
+    Some((
+        vec![FilterProp::Not {
+            prop: Box::new(FilterProp::InZone { zone }),
+        }],
+        consumed,
+    ))
+}
+
+pub(crate) fn parse_cast_origin_exclusion_of_your_zone(input: &str) -> Option<(Zone, usize)> {
+    let (possessive, zone, consumed) = parse_cast_origin_exclusion_parts(input)?;
+    (possessive == Some(ControllerRef::You)).then_some((zone, consumed))
+}
+
+fn parse_cast_origin_exclusion_parts(input: &str) -> Option<(Option<ControllerRef>, Zone, usize)> {
     let trimmed = input.trim_start();
     let leading_ws = input.len() - trimmed.len();
     let (rest, _) = tag::<_, _, OracleError<'_>>("from anywhere other than ")
         .parse(trimmed)
         .ok()?;
-    let (rest, _) = opt(alt((
-        value((), tag::<_, _, OracleError<'_>>("your ")),
-        value((), tag("their ")),
-        value((), tag("his ")),
-        value((), tag("her ")),
-        value((), tag("its ")),
-        value((), tag("a ")),
-        value((), tag("the ")),
+    let (rest, possessive) = opt(alt((
+        value(
+            Some(ControllerRef::You),
+            tag::<_, _, OracleError<'_>>("your "),
+        ),
+        value(
+            None,
+            alt((
+                tag("their "),
+                tag("his "),
+                tag("her "),
+                tag("its "),
+                tag("a "),
+                tag("the "),
+            )),
+        ),
     )))
     .parse(rest)
     .ok()?;
@@ -10517,16 +10545,7 @@ fn parse_cast_origin_anywhere_other_than_suffix(input: &str) -> Option<(Vec<Filt
     let (rest, _) = peek_zone_boundary(rest).ok()?;
 
     let consumed = leading_ws + trimmed.len() - rest.len();
-    // CR 601.2a + CR 707.13 + CR 400.11: "from anywhere other than <zone>" is the
-    // NEGATION of "from <zone>", not a positive list of the remaining zones — a spell
-    // cast from outside the game (Garth One-Eye's copy) is from no zone, so it is
-    // not from <zone> and must satisfy the clause.
-    Some((
-        vec![FilterProp::Not {
-            prop: Box::new(FilterProp::InZone { zone }),
-        }],
-        consumed,
-    ))
+    Some((possessive.flatten(), zone, consumed))
 }
 
 fn parse_spell_history_base_filter(type_text: &str) -> Option<TargetFilter> {
@@ -15541,6 +15560,38 @@ mod tests {
     #[test]
     fn test_parse_condition_failure() {
         assert!(parse_condition("when something happens").is_err());
+    }
+
+    // Parser-shape-only possessive variations; nearest printed cost static: Savvy Trader.
+    #[test]
+    fn cast_origin_exclusion_keeps_the_history_zone_contract() {
+        let your_hand = "from anywhere other than your hand";
+        let their_hand = "from anywhere other than their hand";
+        let your_graveyard = "from anywhere other than your graveyard";
+        for origin in [your_hand, their_hand] {
+            assert_eq!(
+                parse_cast_origin_anywhere_other_than_suffix(origin),
+                Some((
+                    vec![FilterProp::Not {
+                        prop: Box::new(FilterProp::InZone { zone: Zone::Hand }),
+                    }],
+                    origin.len(),
+                ))
+            );
+        }
+        assert_eq!(
+            parse_cast_origin_exclusion_of_your_zone(your_hand),
+            Some((Zone::Hand, your_hand.len()))
+        );
+        assert_eq!(
+            parse_cast_origin_exclusion_of_your_zone(your_graveyard),
+            Some((Zone::Graveyard, your_graveyard.len()))
+        );
+        assert_eq!(parse_cast_origin_exclusion_of_your_zone(their_hand), None);
+        assert_eq!(
+            parse_cast_origin_exclusion_of_your_zone("from anywhere other than a hand"),
+            None
+        );
     }
 
     #[test]
