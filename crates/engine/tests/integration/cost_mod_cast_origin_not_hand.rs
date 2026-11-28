@@ -27,7 +27,9 @@ use engine::game::mana_sources::activatable_mana_actions_for_player;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::scenario_db::GameScenarioDbExt;
 use engine::game::triggers::drain_order_triggers_with_identity;
-use engine::types::ability::{CastingPermission, Duration, Effect, TargetRef};
+use engine::types::ability::{
+    CardPlayMode, CastingPermission, Duration, Effect, PlayFromExileProvenance, TargetRef,
+};
 use engine::types::actions::{CastChoice, GameAction};
 use engine::types::game_state::{CastOfferKind, CastPaymentMode, WaitingFor};
 use engine::types::identifiers::ObjectId;
@@ -35,7 +37,8 @@ use engine::types::keywords::Keyword;
 use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
-use engine::types::zones::Zone;
+use engine::types::statics::CastFrequency;
+use engine::types::zones::{EtbTapState, Zone};
 
 use crate::create_card_copy_with_chosen_name::garth_choose;
 
@@ -2093,6 +2096,117 @@ fn savvy_trader_reduces_garths_copy_cast_from_outside_the_game() {
         Some(cost(1, vec![ManaCostShard::White])),
         "a Disenchant cast from P0's hand pays its full printed {{1}}{{W}}, not the reduced {{W}}"
     );
+}
+
+/// P0's Garth One-Eye against P1's real Aven Interrupter and Black Lotus, with a
+/// real Disenchant exiled under a cast-from-exile grant and exactly four white
+/// mana units in P0's pool. No Savvy Trader: the Interrupter is the only cost
+/// modifier on the board, so any payment beyond the printed cost is its tax.
+fn garth_disenchant_copy_with_interrupter_scenario() -> (GameRunner, ObjectId, ObjectId, ObjectId) {
+    let interrupter_db = crate::support::shared_card_db()
+        .expect("the integration card fixture carries Aven Interrupter");
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_mana_pool(P0, units("WWWW"));
+    let garth = scenario.add_real_card(P0, "Garth One-Eye", Zone::Battlefield, db());
+    // "Spells your opponents cast from graveyards or from exile cost {2} more
+    // to cast." — the printed card, not a hand-built static. This file's
+    // atomic fixture does not carry the Interrupter, so it comes from the
+    // committed integration fixture; the tax clause is still the printed one.
+    scenario.add_real_card(P1, "Aven Interrupter", Zone::Battlefield, interrupter_db);
+    let lotus = scenario.add_real_card(P1, "Black Lotus", Zone::Battlefield, db());
+    // The real exile cast the same static must tax.
+    let exiled_disenchant = scenario.add_real_card(P0, "Disenchant", Zone::Exile, db());
+    let mut r = scenario.build();
+    engine::game::rehydrate_game_from_card_db(r.state_mut(), db());
+    // The impulse-style cast-from-exile grant the Savvy Trader witnesses use:
+    // without a permission the exiled Disenchant is not castable at all.
+    r.state_mut()
+        .objects
+        .get_mut(&exiled_disenchant)
+        .expect("the exiled Disenchant exists")
+        .casting_permissions
+        .push(CastingPermission::PlayFromExile {
+            provenance: PlayFromExileProvenance::Impulse,
+            duration: Duration::UntilEndOfTurn,
+            granted_to: P0,
+            mode: CardPlayMode::Cast,
+            frequency: CastFrequency::Unlimited,
+            source_id: None,
+            invalidation: None,
+            exiled_by_ability_controller: None,
+            mana_spend_permission: None,
+            card_filter: None,
+            single_use_group: None,
+            single_use: false,
+            cast_cost_modifier: None,
+            alt_ability_cost: None,
+            without_paying_mana_cost: false,
+            land_enter_tapped: EtbTapState::Unspecified,
+        });
+    (r, garth, lotus, exiled_disenchant)
+}
+
+/// Aven Interrupter (P1): "Spells your opponents cast from graveyards or from
+/// exile cost {2} more to cast."
+///
+/// CR 707.13 + CR 400.11: Garth's staged copy is cast from outside the game,
+/// never from the exile zone it is staged in, so the Interrupter's
+/// origin-scoped tax must not apply: the {1}{W} Disenchant copy spends two of
+/// the four white units, where a taxed copy ({3}{W}) would spend all four.
+/// CR 601.2a + CR 601.2f: the paired control is a REAL Disenchant in P0's
+/// exile under a cast-from-exile grant — its origin IS exile, so the same
+/// static raises its {1}{W} to {3}{W} and the cast spends exactly four units.
+#[test]
+fn aven_interrupter_taxes_exile_cast_but_not_garths_copy_cast_from_outside_the_game() {
+    // Outside-the-game copy: the Interrupter must not read it as an exile cast.
+    let (mut r, garth, lotus, _exiled_disenchant) =
+        garth_disenchant_copy_with_interrupter_scenario();
+    garth_choose(&mut r, garth, "Disenchant");
+    let copy = r
+        .state()
+        .last_created_token_ids
+        .first()
+        .copied()
+        .expect("the choose-and-copy resolution created the copy");
+    assert!(
+        r.state().objects[&copy].created_outside_game,
+        "CR 707.13 + CR 400.11: the copy is created outside the game"
+    );
+    drive_copy_cast(&mut r, copy, 0, Some(TargetRef::Object(lotus)));
+    assert_eq!(
+        pool_size(&r, P0),
+        2,
+        "the copy cast paid only its printed {{1}}{{W}}: the Interrupter's {{2}} tax does not reach a cast from outside the game"
+    );
+    pass_until_stack_empty(&mut r, "Aven Interrupter copy cast");
+    assert_eq!(
+        zone_of(&r, lotus),
+        Zone::Graveyard,
+        "the untaxed Disenchant copy resolved and destroyed the artifact"
+    );
+    assert_settled(&r, P0, "Aven Interrupter copy cast");
+
+    // Real exile cast: the same static must tax it.
+    let (mut r, _garth, lotus, exiled_disenchant) =
+        garth_disenchant_copy_with_interrupter_scenario();
+    assert_eq!(
+        display_spell_cost(r.state(), P0, exiled_disenchant),
+        Some(cost(3, vec![ManaCostShard::White])),
+        "the exiled Disenchant costs its printed {{1}}{{W}} plus the Interrupter's {{2}} because its cast origin is exile"
+    );
+    r.cast(exiled_disenchant).target_object(lotus).resolve();
+    assert_eq!(
+        pool_size(&r, P0),
+        0,
+        "the taxed exile cast charged exactly {{3}}{{W}} from the four white units"
+    );
+    assert_eq!(
+        zone_of(&r, lotus),
+        Zone::Graveyard,
+        "the taxed Disenchant resolved and destroyed the artifact"
+    );
+    assert_settled(&r, P0, "Aven Interrupter exile cast");
 }
 
 /// Savvy Trader ({3}{G}): "When this creature enters, exile target permanent
