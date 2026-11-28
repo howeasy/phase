@@ -21,7 +21,9 @@ use crate::types::card_type::CoreType;
 use crate::types::counter::CounterType;
 use crate::types::keywords::{Keyword, ProtectionColorSet, ProtectionTarget, WardCost};
 use crate::types::mana::{ManaColor, ManaCost};
-use crate::types::statics::{AdditionalCostTaxAction, CrewAction, CrewContributionKind};
+use crate::types::statics::{
+    AdditionalCostTaxAction, CostModifyMode, CrewAction, CrewContributionKind,
+};
 use crate::types::zones::Zone;
 
 fn dynamic_power_value(modification: &ContinuousModification) -> Option<&QuantityExpr> {
@@ -45453,6 +45455,146 @@ fn burden_of_proof_otherwise_branch_cannot_block_detectives() {
         "no clause may be swallowed; warnings = {:?}",
         parsed.parse_warnings
     );
+}
+
+fn outside_your_hand() -> FilterProp {
+    // CR 109.5 + CR 400.3: not (in hand AND owned by the controller), via
+    // De Morgan — AnyOf[Not(InZone(Hand)), Not(Owned(You))].
+    FilterProp::AnyOf {
+        props: vec![
+            FilterProp::Not {
+                prop: Box::new(FilterProp::InZone { zone: Zone::Hand }),
+            },
+            FilterProp::Not {
+                prop: Box::new(FilterProp::Owned {
+                    controller: ControllerRef::You,
+                }),
+            },
+        ],
+    }
+}
+
+/// CR 109.5 + CR 400.3: "other than your hand" excludes only the static
+/// controller's hand, not every hand. Pin Savvy Trader's {1} and Sage of the
+/// Beyond's {2}.
+#[test]
+fn cost_mod_cast_origin_not_hand_is_the_negation_of_your_hand_origin() {
+    for (line, amount) in [
+        (
+            "Spells you cast from anywhere other than your hand cost {1} less to cast.",
+            1,
+        ),
+        (
+            "Spells you cast from anywhere other than your hand cost {2} less to cast.",
+            2,
+        ),
+    ] {
+        let def = parse_static_line(line).unwrap_or_else(|| panic!("{line} should parse"));
+        let StaticMode::ModifyCost {
+            mode,
+            amount: parsed_amount,
+            spell_filter,
+            ..
+        } = def.mode
+        else {
+            panic!("expected ModifyCost for {line}");
+        };
+        assert_eq!(mode, CostModifyMode::Reduce, "{line}");
+        assert_eq!(parsed_amount, ManaCost::generic(amount), "{line}");
+        let Some(TargetFilter::Typed(tf)) = spell_filter else {
+            panic!("{line}: expected a Typed origin filter, got {spell_filter:?}");
+        };
+        assert_eq!(tf.properties, vec![outside_your_hand()], "{line}");
+    }
+}
+
+/// The exclusion composes with a type restriction instead of replacing it, and
+/// the positive-zone form keeps its own reading (printed: Gravebreaker Lamia,
+/// "Spells you cast from your graveyard cost {1} less to cast.").
+///
+/// The typed subject line is parser-shape-only: no printed card types the subject
+/// of this clause. Nearest printed card: Savvy Trader.
+#[test]
+fn cost_mod_cast_origin_composes_with_type_and_keeps_positive_zones() {
+    let def = parse_static_line(
+        "Creature spells you cast from anywhere other than your hand cost {1} less to cast.",
+    )
+    .expect("cost reduction should parse");
+    let StaticMode::ModifyCost { spell_filter, .. } = def.mode else {
+        panic!("expected ModifyCost");
+    };
+    let Some(TargetFilter::Typed(tf)) = spell_filter else {
+        panic!("expected a Typed filter, got {spell_filter:?}");
+    };
+    assert_eq!(tf.type_filters, vec![TypeFilter::Creature]);
+    assert!(tf.properties.contains(&outside_your_hand()));
+
+    let def = parse_static_line("Spells you cast from your graveyard cost {1} less to cast.")
+        .expect("cost reduction should parse");
+    let StaticMode::ModifyCost { spell_filter, .. } = def.mode else {
+        panic!("expected ModifyCost");
+    };
+    let Some(TargetFilter::Typed(tf)) = spell_filter else {
+        panic!("expected a Typed filter, got {spell_filter:?}");
+    };
+    assert_eq!(
+        tf.properties,
+        vec![FilterProp::InZone {
+            zone: Zone::Graveyard
+        }]
+    );
+}
+
+/// An origin exclusion other than the "your hand" form is not modelled: the
+/// whole line declines instead of reducing every spell (CR 601.2f). It can also
+/// appear as the second "from" clause, which the cast-origin authority does not
+/// consume and the fail-closed scan must catch.
+///
+/// Declined lines are parser-shape-only: no printed card carries them.
+/// Nearest printed card: Savvy Trader.
+#[test]
+fn cost_mod_unmodelled_origin_exclusion_declines() {
+    for line in [
+        "Spells you cast from anywhere other than your graveyard cost {1} less to cast.",
+        "Spells you cast from exile or from anywhere other than your hand cost {1} less to cast.",
+        "Spells you cast from anywhere other than their hand cost {1} less to cast.",
+        "Spells you cast from anywhere other than a hand cost {1} less to cast.",
+        "Spells you cast from anywhere other than the hand cost {1} less to cast.",
+        "Spells you cast from anywhere other than hand cost {1} less to cast.",
+    ] {
+        assert_eq!(parse_static_line(line), None, "{line}");
+        let parsed = crate::parser::oracle::parse_oracle_text(
+            line,
+            "Savvy Trader",
+            &[],
+            &["Creature".to_owned()],
+            &[],
+        );
+        assert!(parsed.statics.is_empty(), "{line}: {:?}", parsed.statics);
+        assert!(
+            parsed
+                .abilities
+                .iter()
+                .any(|ability| matches!(*ability.effect, Effect::Unimplemented { .. })),
+            "{line}: expected an unimplemented line, got {:?}",
+            parsed.abilities
+        );
+    }
+
+    // Positive guard in the same test: the printed Savvy Trader line still parses
+    // with the hand exclusion, so the declines above are the fail-closed scan
+    // firing and not a broken input.
+    let def = parse_static_line(
+        "Spells you cast from anywhere other than your hand cost {1} less to cast.",
+    )
+    .expect("the printed Savvy Trader line parses");
+    let StaticMode::ModifyCost { spell_filter, .. } = def.mode else {
+        panic!("expected ModifyCost");
+    };
+    let Some(TargetFilter::Typed(tf)) = spell_filter else {
+        panic!("expected a Typed filter, got {spell_filter:?}");
+    };
+    assert_eq!(tf.properties, vec![outside_your_hand()]);
 }
 
 /// SHAPE: the quoted static keeps the entire definition on the resolving effect.

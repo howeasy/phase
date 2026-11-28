@@ -636,6 +636,7 @@ pub(crate) fn try_parse_cost_modification(
     // Extract "from [zone(s)]" clause between player scope and "cost".
     // E.g., "cast from graveyards or from exile" → [Graveyard, Exile]
     // This must be extracted before type parsing so it doesn't pollute type_desc.
+    let mut origin_exclusion: Option<FilterProp> = None;
     let cast_from_zones: Vec<Zone> = {
         let mut zones = Vec::new();
         // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
@@ -649,9 +650,36 @@ pub(crate) fn try_parse_cost_modification(
             if let Some(from_idx) = prefix.find(" from ") {
                 // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
                 let from_text = &prefix[from_idx..];
-                // Skip "from anywhere other than" — that's a negation pattern
-                // requiring a Not filter, not a direct zone match.
-                if !nom_primitives::scan_contains(from_text, "anywhere other than") {
+                // CR 109.5 + CR 400.3: "your hand" is the static source's
+                // controller's hand, and a card in a hand is identified by its
+                // owner — not by what "Opponent" happens to mean at evaluation
+                // time. The exclusion is therefore the negation of "in hand AND
+                // owned by the controller"; with no AllOf, De Morgan gives
+                // AnyOf[Not(InZone(Hand)), Not(Owned(You))].
+                let origin = from_text.trim();
+                if crate::parser::oracle_nom::condition::parse_cast_origin_exclusion_of_your_zone(
+                    origin,
+                )
+                .is_some_and(|(zone, consumed)| zone == Zone::Hand && consumed == origin.len())
+                {
+                    origin_exclusion = Some(FilterProp::AnyOf {
+                        props: vec![
+                            FilterProp::Not {
+                                prop: Box::new(FilterProp::InZone { zone: Zone::Hand }),
+                            },
+                            FilterProp::Not {
+                                prop: Box::new(FilterProp::Owned {
+                                    controller: ControllerRef::You,
+                                }),
+                            },
+                        ],
+                    });
+                } else if nom_primitives::scan_contains(from_text, "anywhere other than") {
+                    // CR 601.2f: an exclusion the typed surface does not model (any
+                    // origin but the "your hand" form above) fails closed:
+                    // skipping it would reduce every spell the controller casts.
+                    return None;
+                } else {
                     if nom_primitives::scan_contains(from_text, "graveyard") {
                         zones.push(Zone::Graveyard);
                     }
@@ -694,7 +722,7 @@ pub(crate) fn try_parse_cost_modification(
         during_your_turn_scope = turn_scope;
         let prefix = strip_cost_modifier_target_clause(prefix);
         // Strip "from [zones]" clause (only if zones were detected), player scope, then "spells"
-        let without_from = if !cast_from_zones.is_empty() {
+        let without_from = if !cast_from_zones.is_empty() || origin_exclusion.is_some() {
             // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
             if let Some(from_idx) = prefix.find(" from ") {
                 // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
@@ -806,40 +834,26 @@ pub(crate) fn try_parse_cost_modification(
     // Merge cast-from-zone restriction into the spell filter.
     // If zones were extracted, add InZone/InAnyZone to ensure the cost modification
     // only applies when the spell is being cast from the specified zone(s).
-    let spell_filter = if !cast_from_zones.is_empty() {
-        let zone_prop = if cast_from_zones.len() == 1 {
-            FilterProp::InZone {
-                zone: cast_from_zones[0],
-            }
-        } else {
-            FilterProp::InAnyZone {
-                zones: cast_from_zones,
-            }
-        };
-        match spell_filter {
-            Some(TargetFilter::Typed(mut tf)) => {
-                tf.properties.push(zone_prop);
-                Some(TargetFilter::Typed(tf))
-            }
-            Some(other) => {
-                // Wrap non-Typed filters with an And that adds the zone constraint.
-                Some(TargetFilter::And {
-                    filters: vec![
-                        other,
-                        TargetFilter::Typed(TypedFilter::card().properties(vec![zone_prop])),
-                    ],
-                })
-            }
-            None => {
-                // No type filter, just zone restriction (e.g., "Spells ... cast from exile cost more")
-                Some(TargetFilter::Typed(
-                    TypedFilter::card().properties(vec![zone_prop]),
-                ))
-            }
-        }
-    } else {
-        spell_filter
-    };
+    // `compose_cost_mod_property` covers all three shapes: a typed filter absorbs
+    // the prop directly; a non-Typed filter is And-wrapped with a card+prop leaf;
+    // with no type filter, the zone restriction alone is the constraint
+    // (e.g., "Spells ... cast from exile cost more").
+    let spell_filter = compose_cost_mod_property(
+        spell_filter,
+        origin_exclusion.or_else(|| {
+            (!cast_from_zones.is_empty()).then(|| {
+                if cast_from_zones.len() == 1 {
+                    FilterProp::InZone {
+                        zone: cast_from_zones[0],
+                    }
+                } else {
+                    FilterProp::InAnyZone {
+                        zones: cast_from_zones,
+                    }
+                }
+            })
+        }),
+    );
 
     // Detect dynamic "for each" count pattern
     // "for each artifact you control" → QuantityRef::ObjectCount

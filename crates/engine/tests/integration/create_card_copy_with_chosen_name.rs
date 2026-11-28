@@ -1070,7 +1070,7 @@ fn drive_copy_cast(runner: &mut GameRunner, x: u32, target: Option<TargetRef>) {
     }
 }
 
-fn garth_choose(runner: &mut GameRunner, garth: ObjectId, name: &str) {
+pub(crate) fn garth_choose(runner: &mut GameRunner, garth: ObjectId, name: &str) {
     activate_to_the_prompt(runner, garth);
     runner
         .act(GameAction::ChooseOption {
