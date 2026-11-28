@@ -10124,7 +10124,22 @@ fn spell_object_matches_property(
                                 Some(ctx.source_controller),
                             )
                         }
-                        _ => source_context_from_spell_filter(ctx),
+                        ControllerRef::ScopedPlayer
+                        | ControllerRef::TargetPlayer
+                        | ControllerRef::TargetOpponent
+                        | ControllerRef::ParentTargetController
+                        | ControllerRef::EventTargetController
+                        | ControllerRef::ParentTargetOwner
+                        | ControllerRef::DefendingPlayer
+                        | ControllerRef::ChosenPlayer { index: _ }
+                        | ControllerRef::DeclaredPlayer { group: _ }
+                        | ControllerRef::SourceChosenPlayer
+                        | ControllerRef::TriggeringPlayer
+                        | ControllerRef::EnchantedPlayer
+                        | ControllerRef::ActivePlayer
+                        | ControllerRef::SpecificPlayer { id: _ } => {
+                            source_context_from_spell_filter(ctx)
+                        }
                     };
                     owned_axis_admits(ctx.state, &source, controller, spell.owner)
                 })
