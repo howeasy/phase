@@ -178,6 +178,9 @@ fn perpetual_target_object_ids(
     if let Some(zone) = target.extract_in_zone() {
         if zone != crate::types::zones::Zone::Battlefield {
             let ctx = crate::game::filter::FilterContext::from_source(state, ability.source_id);
+            // CR 607.2a: a pile filter reads the link store once for this scan, not per candidate.
+            let pile = crate::game::filter::scan_linked_pile(state, target, &ctx);
+            let ctx = ctx.scoped_to(&pile);
             return crate::game::targeting::zone_object_ids(state, zone)
                 .into_iter()
                 .filter(|&id| crate::game::filter::matches_target_filter(state, id, target, &ctx))

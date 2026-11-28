@@ -1227,6 +1227,9 @@ pub(crate) fn distinct_colors_among_permanents(
     let zone = filter
         .extract_in_zone()
         .unwrap_or(crate::types::zones::Zone::Battlefield);
+    // CR 607.2a: a pile filter reads the link store once for this scan, not per candidate.
+    let pile = crate::game::filter::scan_linked_pile(state, filter, &filter_ctx);
+    let filter_ctx = filter_ctx.scoped_to(&pile);
     distinct_colors(
         crate::game::targeting::zone_object_ids(state, zone)
             .iter()

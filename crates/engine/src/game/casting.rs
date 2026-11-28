@@ -1545,6 +1545,7 @@ pub(crate) fn is_blocked_by_cant_play_lands(
                         granting_object: None,
                         stack_trigger_context: None,
                         pre_entry_battlefield: None,
+                        linked_pile: None,
                     };
                     // CR 712.12 + CR 101.2: a spell//land modal card is played
                     // as its land back face, so the prohibition is read on that
@@ -6533,6 +6534,9 @@ fn exile_objects_castable_by_permission(
         let pool = exile_permission_pool(state, source);
         let ctx =
             super::filter::FilterContext::from_source_with_controller(source.source_id, player);
+        // CR 607.2a: a pile filter reads the link store once for this pool, not per card.
+        let pile = super::filter::scan_linked_pile(state, source.filter, &ctx);
+        let ctx = ctx.scoped_to(&pile);
         for &exiled_id in &pool {
             // CR 400.7: An exiled card may have left exile since being tagged
             // (e.g. milled into a graveyard by another effect). Re-check zone
@@ -28485,6 +28489,7 @@ fn apply_mana_spell_grants(
                 granting_object: None,
                 stack_trigger_context: None,
                 pre_entry_battlefield: None,
+                linked_pile: None,
             };
             if !crate::game::filter::matches_target_filter(
                 rider_view.as_ref().unwrap_or(state),

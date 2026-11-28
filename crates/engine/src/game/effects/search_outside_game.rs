@@ -147,6 +147,9 @@ fn collect_face_up_exile_candidates(
 ) -> Vec<OutsideGameChoiceEntry> {
     let controller = ability.controller;
     let ctx = crate::game::filter::FilterContext::from_ability(ability);
+    // CR 607.2a: a pile filter reads the link store once for this scan, not per candidate.
+    let pile = crate::game::filter::scan_linked_pile(state, filter, &ctx);
+    let ctx = ctx.scoped_to(&pile);
     // CR 406.3: A card's default face state in exile is face-up; the
     // `face_down: true` marker means the card is exiled face-down.
     // CR 108.2 + CR 109.1: the candidates are CARDS in exile, so iterate the

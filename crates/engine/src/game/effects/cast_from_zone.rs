@@ -183,6 +183,9 @@ fn tracked_set_cast_candidates(
     let mut scoped_ability = ability.clone();
     scoped_ability.set_unpinned_targets(deduped.iter().copied().map(TargetRef::Object).collect());
     let ctx = crate::game::filter::FilterContext::from_ability(&scoped_ability);
+    // CR 607.2a: a pile filter reads the link store once for this scan, not per candidate.
+    let pile = crate::game::filter::scan_linked_pile(state, &bound, &ctx);
+    let ctx = ctx.scoped_to(&pile);
     deduped
         .into_iter()
         .filter(|obj_id| crate::game::filter::matches_target_filter(state, *obj_id, &bound, &ctx))
@@ -1587,6 +1590,9 @@ pub(crate) fn exiled_by_source_fallback_binding(
             .collect(),
     );
     let ctx = crate::game::filter::FilterContext::from_ability(&scoped_ability);
+    // CR 607.2a: a pile filter reads the link store once for this scan, not per candidate.
+    let pile = crate::game::filter::scan_linked_pile(state, target_filter, &ctx);
+    let ctx = ctx.scoped_to(&pile);
     let linked_ids: Vec<_> = candidate_ids
         .iter()
         .copied()

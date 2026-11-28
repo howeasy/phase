@@ -503,6 +503,9 @@ fn resolution_zone_candidates(
         ability,
         filter_controller,
     );
+    // CR 607.2a: a pile filter reads the link store once for this scan, not per candidate.
+    let pile = crate::game::filter::scan_linked_pile(state, target_filter, &ctx);
+    let ctx = ctx.scoped_to(&pile);
     let terminal_shuffle_move = matches!(
         ability.effect,
         Effect::ChangeZone {
@@ -2115,6 +2118,9 @@ pub fn resolve(
         {
             let origin_zones = change_zone_all_origin_zones(state, *sub_origin, sub_target);
             let filter_ctx = crate::game::filter::FilterContext::from_ability(ability);
+            // CR 607.2a: a pile filter reads the link store once for this scan.
+            let pile = crate::game::filter::scan_linked_pile(state, sub_target, &filter_ctx);
+            let filter_ctx = filter_ctx.scoped_to(&pile);
             let mut matches: Vec<ObjectId> = state
                 .objects
                 .iter()
@@ -4144,6 +4150,9 @@ pub fn resolve_all(
         ability,
         filter_controller,
     );
+    // CR 607.2a: a pile filter reads the link store once for this scan, not per candidate.
+    let pile = crate::game::filter::scan_linked_pile(state, &effective_filter, &ctx);
+    let ctx = ctx.scoped_to(&pile);
     let mut matching: Vec<_> = if let Some(objects) = selected_objects {
         objects
     } else if let Some(player) = player_scope {

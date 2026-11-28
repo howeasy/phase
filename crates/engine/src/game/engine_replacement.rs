@@ -8988,6 +8988,9 @@ pub fn find_copy_targets(
     // Clone / Phantasmal Image / Vesuvan Doppelganger / Cackling Counterpart behaviour.
     let source_zone = filter.extract_in_zone().unwrap_or(Zone::Battlefield);
     let ctx = super::filter::FilterContext::from_source_with_controller(source_id, controller);
+    // CR 607.2a: a pile filter reads the link store once for this scan, not per candidate.
+    let pile = super::filter::scan_linked_pile(state, filter, &ctx);
+    let ctx = ctx.scoped_to(&pile);
     state
         .objects
         .iter()

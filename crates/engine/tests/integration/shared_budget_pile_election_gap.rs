@@ -65,7 +65,9 @@ fn has_play_grant(face: &CardFace) -> bool {
 }
 
 fn carries_gap(face: &CardFace) -> bool {
-    card_face_gaps(face).contains(&SHARED_BUDGET_PILE_ELECTION_GAP.to_string())
+    card_face_gaps(face)
+        .iter()
+        .any(|gap| gap == SHARED_BUDGET_PILE_ELECTION_GAP)
 }
 
 #[test]
@@ -78,7 +80,8 @@ fn court_of_locthwain_is_reported_unsupported_by_the_typed_election_gap() {
     let coverage = card_face_coverage(&court);
     assert!(coverage
         .gap_handlers()
-        .contains(&SHARED_BUDGET_PILE_ELECTION_GAP.to_string()));
+        .iter()
+        .any(|gap| gap == SHARED_BUDGET_PILE_ELECTION_GAP));
     assert!(!coverage.is_supported());
 
     // The typed gap does not lean on the confirmed-misparse marker.

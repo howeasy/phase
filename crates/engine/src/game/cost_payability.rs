@@ -2501,6 +2501,9 @@ pub(super) fn eligible_exile_cost_objects(
         _ => {
             let ctx = FilterContext::from_source_with_controller(source, player)
                 .with_granting_object(granting_object);
+            // CR 607.2a: a pile filter reads the link store once for this scan, not per candidate.
+            let pile = filter.and_then(|f| crate::game::filter::scan_linked_pile(state, f, &ctx));
+            let ctx = ctx.scoped_to(&pile);
             return state
                 .objects
                 .values()
@@ -2544,6 +2547,9 @@ pub(crate) fn eligible_exile_with_aggregate_objects(
     zone: Zone,
 ) -> Vec<ObjectId> {
     let ctx = FilterContext::from_source_with_controller(source, player);
+    // CR 607.2a: a pile filter reads the link store once for this scan, not per candidate.
+    let pile = crate::game::filter::scan_linked_pile(state, filter, &ctx);
+    let ctx = ctx.scoped_to(&pile);
     let zone_ids: Vec<ObjectId> = match (zone, state.players.get(player.0 as usize)) {
         (Zone::Graveyard, Some(p)) => state.graveyard_of(p.id).iter().copied().collect(),
         (Zone::Hand, Some(p)) => p.hand.iter().copied().collect(),

@@ -899,6 +899,9 @@ fn copy_source_from_exiled_by_source(
     target: &TargetFilter,
 ) -> Option<StackEntry> {
     let ctx = FilterContext::from_ability(ability);
+    // CR 607.2a: a pile filter reads the link store once for this scan, not per candidate.
+    let pile = crate::game::filter::scan_linked_pile(state, target, &ctx);
+    let ctx = ctx.scoped_to(&pile);
     // CR 607.2a: the lookup is scoped by `ability.source_id` but kind-agnostic
     // (it matches ANY `ExileLinkKind` linked to this source), mirroring the
     // pre-existing `cast_from_zone.rs` linked-exile pattern. Accepted
@@ -931,6 +934,9 @@ fn copy_source_from_tracked_set(
         .or_else(|| crate::game::targeting::latest_tracked_set_id(state))
         .or(state.chain_tracked_set_id)?;
     let ctx = FilterContext::from_ability(ability);
+    // CR 607.2a: a pile filter reads the link store once for this scan, not per candidate.
+    let pile = crate::game::filter::scan_linked_pile(state, &effective_filter, &ctx);
+    let ctx = ctx.scoped_to(&pile);
     let source_id = state
         .tracked_object_sets
         .get(&tracked_set_id)?

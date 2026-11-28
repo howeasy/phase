@@ -1827,6 +1827,11 @@ pub(super) fn handle_unless_payment(
                 // opponent-controlled object, even though the Oracle text
                 // named no such restriction.
                 let filter_ref = filter.as_ref();
+                // CR 607.2a: a pile filter reads the link store once for this scan.
+                let pile = filter_ref.and_then(|f| {
+                    crate::game::filter::scan_linked_pile(state, f, &ctx)
+                });
+                let ctx = ctx.scoped_to(&pile);
                 let eligible: Vec<ObjectId> = zone_objects
                     .iter()
                     .filter(|id| {

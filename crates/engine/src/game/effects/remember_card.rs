@@ -36,6 +36,9 @@ pub fn resolve(
     // published pick (the cards chosen by the preceding `ChooseFromZone`).
     let resolved = resolve_tracked_set_sentinel(state, target.clone());
     let ctx = FilterContext::from_source(state, ability.source_id);
+    // CR 607.2a: a pile filter reads the link store once for this scan, not per object.
+    let pile = crate::game::filter::scan_linked_pile(state, &resolved, &ctx);
+    let ctx = ctx.scoped_to(&pile);
     let mut chosen: Vec<ObjectId> = state
         .objects
         .keys()

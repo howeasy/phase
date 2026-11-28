@@ -179,6 +179,9 @@ pub(crate) fn resolve_copy_token_specs(
                 }
             };
             let filter_ctx = FilterContext::from_ability(ability);
+            // CR 607.2a: a pile filter reads the link store once for this scan, not per candidate.
+            let pile = crate::game::filter::scan_linked_pile(state, source_filter, &filter_ctx);
+            let filter_ctx = filter_ctx.scoped_to(&pile);
             zones
                 .into_iter()
                 .flat_map(|zone| targeting::zone_object_ids(state, zone))

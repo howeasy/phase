@@ -9677,6 +9677,9 @@ fn expand_granted_activated_abilities(
                     host_source_id,
                     recipient_controller,
                 );
+                // CR 607.2a: the provider scan reads the host's pile once, not per provider.
+                let pile = super::filter::scan_linked_pile(state, source, &provider_ctx);
+                let provider_ctx = provider_ctx.scoped_to(&pile);
                 provider_ids
                     .iter()
                     .copied()
@@ -9854,6 +9857,9 @@ fn expand_granted_triggered_abilities(
                     host_source_id,
                     recipient_controller,
                 );
+                // CR 607.2a: the provider scan reads the host's pile once, not per provider.
+                let pile = super::filter::scan_linked_pile(state, source, &provider_ctx);
+                let provider_ctx = provider_ctx.scoped_to(&pile);
                 provider_ids
                     .iter()
                     .copied()
@@ -10523,10 +10529,13 @@ fn apply_combat_assignment_rule_effects_filtered(
         let condition_controller = combat_effect_condition_controller(state, &effect);
         let ctx =
             FilterContext::from_source_with_controller(effect.source_id, condition_controller);
+        // CR 607.2a: a pile filter reads the link store once for this scan, not per candidate.
+        let pile = super::filter::scan_linked_pile(state, &effect.affected_filter, &ctx);
+        let scan_ctx = ctx.scoped_to(&pile);
         let affected_ids: Vec<ObjectId> = scan_ids
             .iter()
             .filter(|&&id| restrict_to.is_none_or(|ids| ids.contains(&id)))
-            .filter(|&&id| matches_target_filter(state, id, &effect.affected_filter, &ctx))
+            .filter(|&&id| matches_target_filter(state, id, &effect.affected_filter, &scan_ctx))
             .filter(|&&id| {
                 effect.condition.as_ref().is_none_or(|condition| {
                     evaluate_condition_with_recipient(
@@ -12870,13 +12879,16 @@ fn apply_continuous_effect_filtered(
             condition_uses_recipient
                 || evaluate_condition(state, condition, condition_controller, effect.source_id)
         });
+        // CR 607.2a: a pile filter reads the link store once for this scan, not per candidate.
+        let pile = super::filter::scan_linked_pile(state, &effect.affected_filter, &ctx);
+        let scan_ctx = ctx.scoped_to(&pile);
         newly_affected_ids = scan_ids
             .iter()
             // Incremental fast path: re-apply only to the freshly-entered objects.
             // The rest of the battlefield was not reset and keeps its prior derived
             // values, so re-applying to it would double-apply.
             .filter(|&&id| restrict_to.is_none_or(|ids| ids.contains(&id)))
-            .filter(|&&id| matches_target_filter(state, id, &effect.affected_filter, &ctx))
+            .filter(|&&id| matches_target_filter(state, id, &effect.affected_filter, &scan_ctx))
             .filter(|&&id| {
                 non_recipient_condition_passes
                     && effect.condition.as_ref().is_none_or(|condition| {

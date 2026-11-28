@@ -194,6 +194,31 @@ pub(crate) fn link_search_look(
     );
 }
 
+/// Test-support count of flat link-store scans (`links_for_reader`, the one funnel behind both
+/// the live-link read and the trigger-bound pile read). Thread-local so parallel tests cannot
+/// charge one another; a test reads only its own thread's work.
+#[cfg(any(test, feature = "test-support"))]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct LinkStoreWork {
+    pub scans: usize,
+}
+
+#[cfg(any(test, feature = "test-support"))]
+thread_local! {
+    static LINK_STORE_WORK: core::cell::Cell<LinkStoreWork> =
+        const { core::cell::Cell::new(LinkStoreWork { scans: 0 }) };
+}
+
+#[cfg(any(test, feature = "test-support"))]
+pub fn link_store_work() -> LinkStoreWork {
+    LINK_STORE_WORK.with(core::cell::Cell::get)
+}
+
+#[cfg(any(test, feature = "test-support"))]
+pub fn reset_link_store_work() {
+    LINK_STORE_WORK.with(|work| work.set(LinkStoreWork::default()));
+}
+
 /// CR 400.7 + CR 607.2a: `source_id`'s links that belong to the object as it
 /// now exists.
 pub(crate) fn live_links_for_source(
@@ -214,6 +239,12 @@ pub(crate) fn links_for_reader(
     source_id: ObjectId,
     reader: Option<u64>,
 ) -> impl Iterator<Item = &ExileLink> {
+    #[cfg(any(test, feature = "test-support"))]
+    LINK_STORE_WORK.with(|work| {
+        work.set(LinkStoreWork {
+            scans: work.get().scans + 1,
+        })
+    });
     let live = state.objects.get(&source_id).map(|obj| obj.incarnation);
     state.exile_links.iter().filter(move |link| {
         link.source_id == source_id

@@ -22696,7 +22696,9 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
     }
 
     fn has_election_gap(face: &CardFace) -> bool {
-        card_face_gaps(face).contains(&SHARED_BUDGET_PILE_ELECTION_GAP.to_string())
+        card_face_gaps(face)
+            .iter()
+            .any(|gap| gap == SHARED_BUDGET_PILE_ELECTION_GAP)
     }
 
     /// CR 601.2b + CR 118.9a: a shared-budget pile cast next to another route

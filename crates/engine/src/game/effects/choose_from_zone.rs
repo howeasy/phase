@@ -1,7 +1,7 @@
 use crate::types::game_state::RandomDraw;
 use rand::seq::IndexedRandom; // rand 0.9: `choose_multiple` on `[T]` lives here.
 
-use crate::game::filter::{matches_target_filter, FilterContext};
+use crate::game::filter::{matches_target_filter, scan_linked_pile, FilterContext};
 use crate::game::players;
 use crate::game::topology;
 use crate::types::ability::{
@@ -745,6 +745,9 @@ fn filter_category_pool(
     member_filter: &TargetFilter,
 ) -> Vec<ObjectId> {
     let filter_ctx = FilterContext::from_ability(ability);
+    // CR 607.2a: a pile filter reads the link store once for this scan, not per candidate.
+    let pile = scan_linked_pile(state, member_filter, &filter_ctx);
+    let filter_ctx = filter_ctx.scoped_to(&pile);
     pool.iter()
         .copied()
         .filter(|id| state.objects.get(id).is_some_and(|obj| obj.zone == zone))
@@ -1624,6 +1627,9 @@ fn collect_player_zone_cards(
     filter: Option<&TargetFilter>,
 ) -> Vec<ObjectId> {
     let filter_ctx = FilterContext::from_ability(ability);
+    // CR 607.2a: a pile filter reads the link store once for this scan, not per candidate.
+    let pile = filter.and_then(|filter| scan_linked_pile(state, filter, &filter_ctx));
+    let filter_ctx = filter_ctx.scoped_to(&pile);
     let mut zones = Vec::with_capacity(1 + additional_zones.len());
     zones.push(zone);
     zones.extend_from_slice(additional_zones);
@@ -1862,6 +1868,9 @@ fn retain_matching_candidates(
         return cards;
     };
     let filter_ctx = FilterContext::from_ability(ability);
+    // CR 607.2a: a pile filter reads the link store once for this scan, not per candidate.
+    let pile = scan_linked_pile(state, filter, &filter_ctx);
+    let filter_ctx = filter_ctx.scoped_to(&pile);
     cards
         .into_iter()
         .filter(|id| matches_target_filter(state, *id, filter, &filter_ctx))
@@ -2026,6 +2035,9 @@ fn collect_direct_zone_cards(
     filter: Option<&TargetFilter>,
 ) -> Result<Vec<ObjectId>, EffectError> {
     let filter_ctx = FilterContext::from_ability(ability);
+    // CR 607.2a: a pile filter reads the link store once for this scan, not per candidate.
+    let pile = filter.and_then(|filter| scan_linked_pile(state, filter, &filter_ctx));
+    let filter_ctx = filter_ctx.scoped_to(&pile);
     let mut zones = Vec::with_capacity(1 + additional_zones.len());
     zones.push(zone);
     zones.extend_from_slice(additional_zones);

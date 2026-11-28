@@ -425,6 +425,9 @@ pub(crate) fn resolved_battlefield_object_ids(
         .extract_in_zone()
         .unwrap_or(crate::types::zones::Zone::Battlefield);
     let ctx = crate::game::filter::FilterContext::from_ability(ability);
+    // CR 607.2a: a pile filter (`ExiledBySource`) reads the link store once for this scan.
+    let pile = crate::game::filter::scan_linked_pile(state, target, &ctx);
+    let ctx = ctx.scoped_to(&pile);
     crate::game::targeting::zone_object_ids(state, zone)
         .into_iter()
         .filter(|id| crate::game::filter::matches_target_filter(state, *id, target, &ctx))

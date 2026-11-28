@@ -4912,6 +4912,9 @@ fn filter_population_anchor_ids(
     filter: &TargetFilter,
     filter_ctx: &FilterContext<'_>,
 ) -> Option<Vec<ObjectId>> {
+    // CR 607.2a: a pile filter reads the link store once for this scan, not per candidate.
+    let pile = crate::game::filter::scan_linked_pile(state, filter, filter_ctx);
+    let filter_ctx = &filter_ctx.scoped_to(&pile);
     let ids = match filter {
         TargetFilter::LastZoneChanged => state.last_zone_changed_ids.clone(),
         TargetFilter::TrackedSet { id } => tracked_set_object_ids(state, *id),
@@ -5015,6 +5018,9 @@ fn matching_object_ids_in_filter_universe(
     filter: &TargetFilter,
     filter_ctx: &FilterContext<'_>,
 ) -> Vec<ObjectId> {
+    // CR 607.2a: a pile filter reads the link store once for this scan, not per candidate.
+    let pile = crate::game::filter::scan_linked_pile(state, filter, filter_ctx);
+    let filter_ctx = &filter_ctx.scoped_to(&pile);
     if let TargetFilter::Not { filter: inner } = filter {
         let excluded: HashSet<ObjectId> =
             matching_object_ids_in_filter_universe(state, inner, filter_ctx)
@@ -5097,6 +5103,9 @@ pub(crate) fn object_count_matching_ids(
     filter_ctx: &FilterContext<'_>,
     source_id: ObjectId,
 ) -> Vec<ObjectId> {
+    // CR 607.2a: a pile filter reads the link store once for this scan, not per candidate.
+    let pile = crate::game::filter::scan_linked_pile(state, filter, filter_ctx);
+    let filter_ctx = &filter_ctx.scoped_to(&pile);
     object_count_matching_candidate_ids(
         state,
         matching_object_ids_in_filter_universe(state, filter, filter_ctx),
@@ -5117,6 +5126,9 @@ pub(crate) fn object_count_matching_candidate_ids(
     filter_ctx: &FilterContext<'_>,
     source_id: ObjectId,
 ) -> Vec<ObjectId> {
+    // CR 607.2a: a pile filter reads the link store once for this scan, not per candidate.
+    let pile = crate::game::filter::scan_linked_pile(state, filter, filter_ctx);
+    let filter_ctx = &filter_ctx.scoped_to(&pile);
     let mut seen = HashSet::new();
     let mut ids: Vec<ObjectId> = candidate_ids
         .into_iter()
@@ -5544,6 +5556,9 @@ fn resolve_ref(
                 std::collections::HashSet::new();
             // CR 108.2 + CR 109.1: distinct qualities among the cards in the
             // zone when the filter names cards; generic queries see every object.
+            // CR 607.2a: a pile filter reads the link store once for this scan.
+            let pile = crate::game::filter::scan_linked_pile(state, filter, &filter_ctx);
+            let filter_ctx = filter_ctx.scoped_to(&pile);
             for id in zone_population_ids(state, zone, filter) {
                 // CR 400.3 + CR 109.5 + CR 108.4a: graveyard/hand/library
                 // membership is owner-scoped, not controller-scoped, so a
@@ -5930,6 +5945,9 @@ fn resolve_ref(
                             .with_granting_object(ctx.granting_object),
                     }
                     .with_pre_entry_battlefield(filter_ctx.pre_entry_battlefield);
+                    // CR 607.2a: a pile filter reads the link store once per player's scan.
+                    let pile = crate::game::filter::scan_linked_pile(state, filter, &pctx);
+                    let pctx = pctx.scoped_to(&pile);
                     usize_to_i32_saturating(
                         zone_ids
                             .iter()
@@ -5955,6 +5973,9 @@ fn resolve_ref(
             let zone = filter
                 .extract_in_zone()
                 .unwrap_or(crate::types::zones::Zone::Battlefield);
+            // CR 607.2a: a pile filter reads the link store once for this scan.
+            let pile = crate::game::filter::scan_linked_pile(state, filter, &filter_ctx);
+            let filter_ctx = filter_ctx.scoped_to(&pile);
             crate::game::targeting::zone_object_ids(state, zone)
                 .iter()
                 .filter_map(|&id| {

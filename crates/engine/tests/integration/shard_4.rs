@@ -302,6 +302,7 @@ mod linked_exile_ltb_return;
 mod linked_exile_return_binding;
 mod linked_exile_single_cast_budget;
 mod linked_pile_live_read;
+mod linked_pile_scan_work;
 mod living_armor_target_mana_value_1375;
 mod living_conundrum_skip_empty_draw;
 mod living_death_ordering_2932;

@@ -701,15 +701,21 @@ fn find_legal_targets_with_context(
                 }
                 // CR 108.2 + CR 109.1: an exile-zone target is a card in
                 // exile; the CR 722.3c retained prepare copy is not one.
-                Zone::Exile => add_zone_targets(
-                    state,
-                    Zone::Exile,
-                    zone_card_ids(state, Zone::Exile),
-                    filter,
-                    source_controller,
-                    target_ctx,
-                    &mut targets,
-                ),
+                // CR 607.2a: a pile filter reads the link store once for the exile
+                // scan, not once per exile card.
+                Zone::Exile => {
+                    super::filter::with_scan_linked_pile(state, filter, target_ctx, |scan_ctx| {
+                        add_zone_targets(
+                            state,
+                            Zone::Exile,
+                            zone_card_ids(state, Zone::Exile),
+                            filter,
+                            source_controller,
+                            scan_ctx,
+                            &mut targets,
+                        )
+                    })
+                }
                 Zone::Graveyard => {
                     for player in &state.players {
                         add_zone_targets(
@@ -2963,12 +2969,21 @@ pub(crate) fn resolved_object_ids_for_filter_with_context(
                 }
                 _ => state.battlefield.iter().copied().collect(),
             };
-            target_ids
-                .into_iter()
-                .filter(|id| {
-                    super::filter::matches_target_filter(state, *id, &effective_filter, ctx)
-                })
-                .collect()
+            // CR 607.2a: a tracked set can hold exile cards; a pile filter over it reads the
+            // link store once for the scan.
+            super::filter::with_scan_linked_pile(state, &effective_filter, ctx, |scan_ctx| {
+                target_ids
+                    .into_iter()
+                    .filter(|id| {
+                        super::filter::matches_target_filter(
+                            state,
+                            *id,
+                            &effective_filter,
+                            scan_ctx,
+                        )
+                    })
+                    .collect()
+            })
         }
         TargetFilter::Any | TargetFilter::None | TargetFilter::Player => {
             object_targets(&ability.targets).collect()

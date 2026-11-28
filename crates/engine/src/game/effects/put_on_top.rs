@@ -161,6 +161,9 @@ pub fn resolve(
     // evaluates the full filter, every `And` leg together.
     if collected_targets.is_empty() && target_filter.references_exiled_by_source() {
         let ctx = crate::game::filter::FilterContext::from_ability(ability);
+        // CR 607.2a: the exile scan reads the pile once, not once per exile card.
+        let pile = crate::game::filter::scan_linked_pile(state, &target_filter, &ctx);
+        let ctx = ctx.scoped_to(&pile);
         // CR 400.7j + CR 608.2c: after an "exile cards … until …" loop, "the
         // other cards exiled this way" (Invasion of Alara) and "put the rest"
         // (Jodah, the Unifier) are found among the exact batch that loop handed

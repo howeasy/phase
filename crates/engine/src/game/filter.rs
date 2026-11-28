@@ -13,6 +13,7 @@ use crate::game::crew_payment::CrewHistoryPair;
 use crate::game::game_object::GameObject;
 use crate::game::game_object::ObjectIncarnationRefExt;
 use crate::game::keywords::HeldObject;
+use crate::game::players::LinkedExilePile;
 use crate::game::quantity::{
     counter_count_from_map, quantity_expr_characteristic_reads_at, resolve_quantity,
     resolve_quantity_with_ctx, QuantityContext,
@@ -1630,6 +1631,11 @@ pub struct FilterContext<'a> {
     /// not yet part of the population the entering permanent counts. `None`
     /// everywhere except an entering object's replacement-time quantity read.
     pub pre_entry_battlefield: Option<&'a HashSet<ObjectId>>,
+    /// CR 607.2a: the "cards exiled with ~" pile read once for the zone scan this context
+    /// evaluates (see [`with_scan_linked_pile`]). `None` outside a scan, where the
+    /// `ExiledBySource` arm probes the link store directly. A view answers only a read made
+    /// for the source it was read for ([`LinkedExilePile::serves`]).
+    pub linked_pile: Option<&'a LinkedExilePile<'a>>,
 }
 
 impl<'a> FilterContext<'a> {
@@ -1651,6 +1657,7 @@ impl<'a> FilterContext<'a> {
             granting_object: source.granting_object,
             ability_targets: None,
             pre_entry_battlefield: None,
+            linked_pile: None,
         }
     }
 
@@ -1698,6 +1705,27 @@ impl<'a> FilterContext<'a> {
         FilterContext {
             pre_entry_battlefield,
             ..self
+        }
+    }
+
+    /// CR 607.2a: evaluate this filter with a pile view read once for the scan
+    /// (see [`FilterContext::linked_pile`]). `None` leaves the direct probe authoritative.
+    fn with_linked_pile(self, linked_pile: Option<&'a LinkedExilePile<'a>>) -> Self {
+        FilterContext {
+            linked_pile,
+            ..self
+        }
+    }
+
+    /// CR 607.2a: this context scoped to the pile view [`scan_linked_pile`] read for one scan;
+    /// without a view (`None`) the context is unchanged, so a view it already carries survives.
+    pub(crate) fn scoped_to<'b>(&self, pile: &'b Option<LinkedExilePile<'b>>) -> FilterContext<'b>
+    where
+        'a: 'b,
+    {
+        match pile {
+            Some(pile) => self.with_linked_pile(Some(pile)),
+            None => *self,
         }
     }
 
@@ -1772,6 +1800,7 @@ impl<'a> FilterContext<'a> {
             declared_slot_view: None,
             granting_object: None,
             pre_entry_battlefield: None,
+            linked_pile: None,
         }
     }
 
@@ -1796,6 +1825,7 @@ impl<'a> FilterContext<'a> {
             declared_slot_view: None,
             granting_object: None,
             pre_entry_battlefield: None,
+            linked_pile: None,
         }
     }
 
@@ -1816,6 +1846,7 @@ impl<'a> FilterContext<'a> {
             declared_slot_view: None,
             granting_object: None,
             pre_entry_battlefield: None,
+            linked_pile: None,
         }
     }
 
@@ -1836,6 +1867,7 @@ impl<'a> FilterContext<'a> {
             declared_slot_view: None,
             granting_object: source.granting_object,
             pre_entry_battlefield: None,
+            linked_pile: None,
         }
     }
 
@@ -1859,6 +1891,7 @@ impl<'a> FilterContext<'a> {
             declared_slot_view: None,
             granting_object: source.granting_object,
             pre_entry_battlefield: None,
+            linked_pile: None,
         }
     }
 
@@ -1884,6 +1917,7 @@ impl<'a> FilterContext<'a> {
             declared_slot_view: None,
             granting_object: None,
             pre_entry_battlefield: None,
+            linked_pile: None,
         }
     }
 
@@ -1904,6 +1938,7 @@ impl<'a> FilterContext<'a> {
             declared_slot_view: None,
             granting_object: ability.context.granting_object,
             pre_entry_battlefield: None,
+            linked_pile: None,
         }
     }
 
@@ -1926,6 +1961,7 @@ impl<'a> FilterContext<'a> {
             declared_slot_view: None,
             granting_object: ability.context.granting_object,
             pre_entry_battlefield: None,
+            linked_pile: None,
         }
     }
 
@@ -1951,8 +1987,54 @@ impl<'a> FilterContext<'a> {
             declared_slot_view: None,
             granting_object: ability.context.granting_object,
             pre_entry_battlefield: None,
+            linked_pile: None,
         }
     }
+}
+
+/// Whether `filter` names `TargetFilter::ExiledBySource` anywhere in its tree: through `Not`,
+/// `Or` and `And` legs and every filter operand a `FilterProp` or quantity embeds. The one
+/// walk of [`filter_operands_contain`], so no second walker can drift. (Not
+/// `references_exiled_by_source`: that ignores `Not` and requires every `Or` leg.)
+fn names_exiled_by_source(filter: &TargetFilter) -> bool {
+    filter_operands_contain(filter, &|leaf| matches!(leaf, TargetFilter::ExiledBySource))
+}
+
+/// The pile view one zone scan of `filter` under `ctx` needs (CR 607.2a: "cards exiled with ~"
+/// is one pile per source), or `None` when the scan needs none: `filter` names no
+/// `ExiledBySource`, or `ctx` already carries a view that serves its source. Bind it for the
+/// scan and evaluate through [`FilterContext::scoped_to`]:
+///
+/// `let pile = scan_linked_pile(state, &filter, &ctx); let ctx = ctx.scoped_to(&pile);`
+///
+/// Maintainer review item: pile membership was evaluated per candidate and each evaluation
+/// scanned the flat link store (O(candidates x links)). The pile is now read once per scan, so
+/// the scan reads the store once whatever the candidate count. The view is built only when
+/// `filter` names `ExiledBySource` anywhere; a context the view does not serve falls back to
+/// the direct probe, so the view can change the cost of a scan but never an answer.
+pub(crate) fn scan_linked_pile<'a>(
+    state: &GameState,
+    filter: &TargetFilter,
+    ctx: &FilterContext<'a>,
+) -> Option<LinkedExilePile<'a>> {
+    let already_served = ctx
+        .linked_pile
+        .is_some_and(|pile| pile.serves(ctx.source_id, ctx.trigger_source));
+    (!already_served && names_exiled_by_source(filter))
+        .then(|| LinkedExilePile::read(state, ctx.source_id, ctx.trigger_source))
+}
+
+/// Run `scan` with a context that carries the pile view [`scan_linked_pile`] reads for `filter`.
+/// The closure form of the same scoping, for a scan that is one expression:
+/// `with_scan_linked_pile(state, &filter, &ctx, |ctx| ids.filter(|id| matches_target_filter(.., ctx)))`.
+pub(crate) fn with_scan_linked_pile<R>(
+    state: &GameState,
+    filter: &TargetFilter,
+    ctx: &FilterContext<'_>,
+    scan: impl FnOnce(&FilterContext<'_>) -> R,
+) -> R {
+    let pile = scan_linked_pile(state, filter, ctx);
+    scan(&ctx.scoped_to(&pile))
 }
 
 /// The [`FilterContext`] a [`ReplacementDefinition`]'s `valid_card` is read in.
@@ -4835,6 +4917,7 @@ pub(crate) fn matches_target_filter_on_entry_observation(
         ctx.granting_object,
         ControllerLookup::LiveOrLki,
         ctx.ability_targets,
+        ctx.linked_pile,
         HeldObject::Detached,
     )
 }
@@ -5126,6 +5209,7 @@ pub fn matches_target_filter_including_phased_out(
         ctx.granting_object,
         ControllerLookup::LiveOnly,
         ctx.ability_targets,
+        ctx.linked_pile,
         HeldObject::Live,
     )
 }
@@ -5488,6 +5572,7 @@ pub fn matches_target_filter_in_owner_zone(
             ctx.granting_object,
             ControllerLookup::OwnerZone,
             ctx.ability_targets,
+            ctx.linked_pile,
             HeldObject::Live,
         );
     }
@@ -5511,6 +5596,7 @@ pub fn matches_target_filter_in_owner_zone(
         ctx.granting_object,
         ControllerLookup::OwnerZone,
         ctx.ability_targets,
+        ctx.linked_pile,
         HeldObject::Live,
     )
 }
@@ -5712,6 +5798,10 @@ pub fn token_entry_projection_work() -> TokenEntryProjectionWork {
 pub fn reset_token_entry_projection_work() {
     TOKEN_ENTRY_PROJECTION_WORK.with(|work| work.set(TokenEntryProjectionWork::default()));
 }
+
+// `exile_links` is crate-private; the link-store work counter is exposed beside the token one.
+#[cfg(any(test, feature = "test-support"))]
+pub use crate::game::exile_links::{link_store_work, reset_link_store_work, LinkStoreWork};
 
 /// CR 712.14 + CR 712.14a: the face a double-faced entrant has up as it is put onto the battlefield.
 /// Engine-internal: the entry event and `BattlefieldEntrantProjection::new` keep their
@@ -6603,6 +6693,7 @@ pub(crate) fn matches_target_filter_on_object(
         ctx.granting_object,
         ControllerLookup::LiveOrLki,
         ctx.ability_targets,
+        ctx.linked_pile,
         HeldObject::Detached,
     )
 }
@@ -6649,6 +6740,7 @@ fn entry_filter_matches_staged(
         ctx.granting_object,
         ControllerLookup::LiveOrLki,
         ctx.ability_targets,
+        ctx.linked_pile,
         held,
     )
 }
@@ -6779,6 +6871,7 @@ pub fn matches_target_filter_on_battlefield_entry(
                     ctx.granting_object,
                     ControllerLookup::LiveOrLki,
                     ctx.ability_targets,
+                    ctx.linked_pile,
                     HeldObject::Detached,
                 );
             }
@@ -6852,6 +6945,7 @@ pub fn matches_target_filter_on_battlefield_entry(
                     ctx.granting_object,
                     ControllerLookup::LiveOrLki,
                     ctx.ability_targets,
+                    ctx.linked_pile,
                     HeldObject::Detached,
                 )
             })
@@ -6880,6 +6974,7 @@ pub fn matches_target_filter_on_battlefield_entry(
                 ctx.granting_object,
                 ControllerLookup::LiveOrLki,
                 ctx.ability_targets,
+                ctx.linked_pile,
                 HeldObject::Detached,
             )
         }
@@ -6959,6 +7054,7 @@ pub fn matches_target_filter_on_counter_added_record(
         ctx.granting_object,
         ControllerLookup::LiveOrLki,
         ctx.ability_targets,
+        ctx.linked_pile,
         HeldObject::Detached,
     )
 }
@@ -7010,6 +7106,7 @@ pub fn matches_target_filter_on_attack_declaration_record(
         ctx.granting_object,
         ControllerLookup::LiveOrLki,
         ctx.ability_targets,
+        ctx.linked_pile,
         HeldObject::Detached,
     )
 }
@@ -7094,6 +7191,7 @@ pub fn matches_target_filter_on_damage_record_source(
         ctx.granting_object,
         ControllerLookup::LiveOrLki,
         ctx.ability_targets,
+        ctx.linked_pile,
         HeldObject::Detached,
     )
 }
@@ -7467,6 +7565,7 @@ pub(crate) fn matches_target_filter_on_event_snapshot(
         ctx.granting_object,
         ControllerLookup::LiveOnly,
         ctx.ability_targets,
+        ctx.linked_pile,
         HeldObject::Detached,
     )
 }
@@ -7653,6 +7752,7 @@ fn filter_inner_with_lookup(
         ctx.granting_object,
         controller_lookup,
         ctx.ability_targets,
+        ctx.linked_pile,
         HeldObject::Live,
     )
 }
@@ -7675,6 +7775,7 @@ fn filter_inner_for_object(
     granting_object: Option<ObjectIncarnationRef>,
     controller_lookup: ControllerLookup,
     ability_targets: Option<ParkedTargets<'_>>,
+    linked_pile: Option<&LinkedExilePile<'_>>,
     held: HeldObject,
 ) -> bool {
     match filter {
@@ -7991,6 +8092,7 @@ fn filter_inner_for_object(
             granting_object,
             controller_lookup,
             ability_targets,
+            linked_pile,
             held,
         ),
         TargetFilter::Or { filters } => filters.iter().any(|f| {
@@ -8011,6 +8113,7 @@ fn filter_inner_for_object(
                 granting_object,
                 controller_lookup,
                 ability_targets,
+                linked_pile,
                 held,
             )
         }),
@@ -8032,6 +8135,7 @@ fn filter_inner_for_object(
                 granting_object,
                 controller_lookup,
                 ability_targets,
+                linked_pile,
                 held,
             )
         }),
@@ -8055,6 +8159,7 @@ fn filter_inner_for_object(
                     declared_slot_view,
                     granting_object,
                     pre_entry_battlefield: None,
+                    linked_pile: None,
                 },
             )
         }
@@ -8281,6 +8386,7 @@ fn filter_inner_for_object(
                     granting_object,
                     controller_lookup,
                     ability_targets,
+                    linked_pile,
                     held,
                 )
         }
@@ -8290,14 +8396,25 @@ fn filter_inner_for_object(
         // CR 400.7: an entry names the object it captured, so a card that left
         // exile (and any later exile of it) does not match.
         TargetFilter::ExiledBySource => {
-            match trigger_source {
-                Some(source) => {
-                    crate::game::players::linked_exile_pile_holds(state, source, object_id)
+            // CR 400.7 + CR 607.2a: both pile readings require the card to be in exile NOW
+            // (`LinkedExileSnapshot::is_still_exiled` reads the LIVE object), so a candidate
+            // the live state holds elsewhere is never a pile card and the link store need not
+            // be read for it. This reads the live object, never `obj`: a detached or
+            // synthesized object (event snapshot, entry observation) can carry a zone that
+            // differs from the live one.
+            state
+                .objects
+                .get(&object_id)
+                .is_some_and(|live| live.zone == Zone::Exile)
+                && match linked_pile.filter(|pile| pile.serves(source_id, trigger_source)) {
+                    Some(pile) => pile.contains(object_id),
+                    None => crate::game::players::exiled_by_source_holds(
+                        state,
+                        source_id,
+                        trigger_source,
+                        object_id,
+                    ),
                 }
-                None => crate::game::players::linked_exile_cards_for_source(state, source_id)
-                    .iter()
-                    .any(|entry| entry.exiled_id == object_id && entry.is_still_exiled(state)),
-            }
         }
         // CR 607.2a: References a specific card exiled by the source, indexed by order.
         // Used by The Mimeoplasm to distinguish "the first card exiled this way" from
@@ -8472,6 +8589,7 @@ fn filter_inner_for_object(
                 declared_slot_view,
                 granting_object,
                 pre_entry_battlefield: None,
+                linked_pile: None,
             };
             state
                 .last_chosen_damage_source
@@ -11292,6 +11410,7 @@ fn aura_can_enchant_referenced_target(
                 granting_object: source.granting_object,
                 stack_trigger_context: source.stack_trigger_context,
                 pre_entry_battlefield: None,
+                linked_pile: None,
             };
             filter_inner(state, *target_id, enchant_filter, &ctx)
         }
@@ -14050,6 +14169,7 @@ fn object_shares_quality_with_reference_filter(
         granting_object: source.granting_object,
         stack_trigger_context: source.stack_trigger_context,
         pre_entry_battlefield: None,
+        linked_pile: None,
     };
     // CR 109.2 + CR 205.3m: resolve a bare descriptive reference such as "a
     // creature you control" or "a creature card in your graveyard" to the zone
@@ -21103,6 +21223,177 @@ mod tests {
             &filter,
             source
         ));
+    }
+
+    /// Mirror of Life Trapping's printed pile filter (fixture; Oracle: "Whenever a creature
+    /// enters, if it was cast, exile it, then return all other permanent cards exiled with this
+    /// artifact to the battlefield under their owners' control."):
+    /// `And[Permanent + Another, ExiledBySource, Not(LastZoneChanged)]`.
+    fn mirror_of_life_trapping_pile_filter() -> TargetFilter {
+        let db = crate::database::CardDatabase::from_integration_fixture_cached()
+            .expect("integration fixture loads");
+        let face = db
+            .get_face_by_name("Mirror of Life Trapping")
+            .expect("Mirror of Life Trapping is in the fixture");
+        face.triggers
+            .iter()
+            .filter_map(|trigger| trigger.execute.as_ref())
+            .find_map(|def| {
+                let mut node = Some(&**def);
+                while let Some(def) = node {
+                    if let Effect::ChangeZoneAll { target, .. } = &*def.effect {
+                        return Some(target.clone());
+                    }
+                    node = def.sub_ability.as_deref();
+                }
+                None
+            })
+            .expect("the trigger returns the cards exiled with the artifact")
+    }
+
+    /// CR 400.7 + CR 607.2a: the live-zone guard on the `ExiledBySource` arm reads the LIVE
+    /// object (the one `is_still_exiled` reads), never the evaluated object's own zone: a
+    /// detached object (an event snapshot) whose captured zone differs from the live one is
+    /// still answered by the pile. Reach guard: the pre-change expression (the direct link
+    /// read) answers `true` for this fixture. Sibling: a live object that left exile answers
+    /// `false` without reading the link store at all.
+    ///
+    /// Mutant: guarding on `obj.zone` instead of the live zone answers `false` for the
+    /// detached snapshot below.
+    #[test]
+    fn exiled_by_source_guard_reads_the_live_zone_not_the_detached_objects() {
+        let filter = mirror_of_life_trapping_pile_filter();
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Mirror of Life Trapping".into(),
+            Zone::Battlefield,
+        );
+        let card = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Exiled Permanent Card".into(),
+            Zone::Exile,
+        );
+        state
+            .objects
+            .get_mut(&card)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+        state.exile_links.push(ExileLink {
+            exiled_id: card,
+            source_id: source,
+            kind: ExileLinkKind::TrackedBySource,
+            supplier: None,
+        });
+        let ctx = FilterContext::from_source(&state, source);
+
+        // The detached copy claims a graveyard zone while the live card is still exiled.
+        let mut snapshot = state
+            .capture_connive_subject(card)
+            .expect("a live object captures a snapshot")
+            .snapshot;
+        snapshot.zone = Zone::Graveyard;
+
+        // Reach guard: the pre-change expression answers `true`.
+        assert!(
+            crate::game::players::linked_exile_cards_for_source(&state, source)
+                .iter()
+                .any(|entry| entry.exiled_id == card && entry.is_still_exiled(&state))
+        );
+        assert!(
+            matches_target_filter_on_event_snapshot(&state, &snapshot, &filter, &ctx),
+            "the live card is still exiled with the artifact"
+        );
+
+        // Sibling: the live card left exile; the answer is `false` and the store is not read.
+        let mut events = Vec::new();
+        crate::game::zones::move_to_zone(&mut state, card, Zone::Graveyard, &mut events);
+        let ctx = FilterContext::from_source(&state, source);
+        reset_link_store_work();
+        assert!(!matches_target_filter_on_event_snapshot(
+            &state, &snapshot, &filter, &ctx
+        ));
+        assert_eq!(
+            link_store_work().scans,
+            0,
+            "a candidate the live state holds outside exile reads no link"
+        );
+    }
+
+    /// `Not` over `ExiledBySource` is a filter that names the pile: a scan of exile cards under
+    /// `scan_linked_pile` answers exactly what the direct probe answers, and a filter that
+    /// names no pile builds no view.
+    #[test]
+    fn linked_pile_scan_view_matches_the_probe_under_not_and_builds_only_for_pile_filters() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Source".into(),
+            Zone::Battlefield,
+        );
+        let cards: Vec<ObjectId> = (2..6)
+            .map(|n| {
+                create_object(
+                    &mut state,
+                    CardId(n),
+                    PlayerId(1),
+                    format!("Exiled {n}"),
+                    Zone::Exile,
+                )
+            })
+            .collect();
+        for card in &cards[..2] {
+            state.exile_links.push(ExileLink {
+                exiled_id: *card,
+                source_id: source,
+                kind: ExileLinkKind::TrackedBySource,
+                supplier: None,
+            });
+        }
+        let ctx = FilterContext::from_source(&state, source);
+        let not_pile = TargetFilter::Not {
+            filter: Box::new(TargetFilter::ExiledBySource),
+        };
+        let plain = TargetFilter::Typed(TypedFilter::default());
+
+        let direct: Vec<bool> = cards
+            .iter()
+            .map(|id| super::matches_target_filter(&state, *id, &not_pile, &ctx))
+            .collect();
+        let pile = scan_linked_pile(&state, &not_pile, &ctx);
+        assert!(pile.is_some(), "`Not(ExiledBySource)` names the pile");
+        let scoped = ctx.scoped_to(&pile);
+        let viewed: Vec<bool> = cards
+            .iter()
+            .map(|id| super::matches_target_filter(&state, *id, &not_pile, &scoped))
+            .collect();
+        assert_eq!(viewed, direct);
+        assert_eq!(direct, vec![false, false, true, true], "reach guard");
+
+        assert!(scan_linked_pile(&state, &TargetFilter::ExiledBySource, &ctx).is_some());
+        assert!(scan_linked_pile(&state, &plain, &ctx).is_none());
+        // A context that already carries a serving view builds no second one.
+        assert!(scan_linked_pile(&state, &not_pile, &scoped).is_none());
+        // A view read for another source is not served, so the direct probe answers.
+        let other = FilterContext::from_source(&state, cards[0]);
+        let other_scoped = other.scoped_to(&pile);
+        assert_eq!(
+            super::matches_target_filter(
+                &state,
+                cards[2],
+                &TargetFilter::ExiledBySource,
+                &other_scoped
+            ),
+            super::matches_target_filter(&state, cards[2], &TargetFilter::ExiledBySource, &other),
+        );
     }
 
     /// CR 607.2a + CR 400.7: a snapshot entry names the object it captured. The

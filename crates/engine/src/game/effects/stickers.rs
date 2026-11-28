@@ -27,6 +27,9 @@ pub(crate) fn recipient_ids(state: &GameState, ability: &ResolvedAbility) -> Vec
     let ids = if described {
         let effective = super::resolved_object_filter(state, ability, target);
         let ctx = FilterContext::from_ability(ability);
+        // CR 607.2a: a pile filter reads the link store once for this scan, not per candidate.
+        let pile = crate::game::filter::scan_linked_pile(state, &effective, &ctx);
+        let ctx = ctx.scoped_to(&pile);
         let mut zones = target.extract_zones();
         if zones.is_empty() {
             zones.push(Zone::Battlefield);

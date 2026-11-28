@@ -576,6 +576,95 @@ pub fn linked_exile_pile_holds(
         .any(|snap| snap.exiled_id == exiled_id && snap.is_still_exiled(state))
 }
 
+/// CR 607.2a + CR 400.7 + CR 607.5: whether `object_id` is a card "exiled with" the source a
+/// filter is read for, still in exile as the object the pile entry captured. A trigger-bound
+/// read answers from the pile of the trigger's bound incarnation
+/// ([`linked_exile_pile_holds`]); any other context reads the live links of the incarnation
+/// the read is made for ([`linked_exile_cards_for_source`]). The per-candidate authority behind
+/// the `ExiledBySource` filter arm; [`LinkedExilePile`] is its once-per-scan materialization.
+pub fn exiled_by_source_holds(
+    state: &GameState,
+    source_id: ObjectId,
+    trigger_source: Option<&TriggerSourceContext>,
+    object_id: ObjectId,
+) -> bool {
+    match trigger_source {
+        Some(source) => linked_exile_pile_holds(state, source, object_id),
+        None => linked_exile_cards_for_source(state, source_id)
+            .iter()
+            .any(|entry| entry.exiled_id == object_id && entry.is_still_exiled(state)),
+    }
+}
+
+/// CR 607.2a + CR 400.7 + CR 607.5: the cards of one "cards exiled with ~" pile, materialized
+/// once for a whole zone scan.
+///
+/// Maintainer review item: pile membership was evaluated per candidate and each evaluation
+/// scanned the flat link store (O(candidates x links)). The pile is now read once per zone scan
+/// (`filter::with_scan_linked_pile`) from the same admission rule (`pile_entries` /
+/// `linked_exile_cards_for_source`), so a scan reads the store once whatever the candidate
+/// count; a candidate whose context is not served by the view (a different source or trigger)
+/// falls back to the direct probe ([`exiled_by_source_holds`]), so answers never depend on the
+/// view.
+///
+/// The view is a scan-local borrowed value carried by `FilterContext`; it is never stored on
+/// state, so it cannot go stale across a mutation.
+#[derive(Debug)]
+pub struct LinkedExilePile<'a> {
+    source_id: ObjectId,
+    trigger_source: Option<&'a TriggerSourceContext>,
+    /// Exiled ids with at least one admitted entry that is still in exile as the captured object:
+    /// exactly the ids [`exiled_by_source_holds`] answers `true` for.
+    members: std::collections::HashSet<ObjectId>,
+}
+
+impl<'a> LinkedExilePile<'a> {
+    /// Read the pile of `source_id` (or of the trigger's bound incarnation) once.
+    pub fn read(
+        state: &GameState,
+        source_id: ObjectId,
+        trigger_source: Option<&'a TriggerSourceContext>,
+    ) -> Self {
+        let members = match trigger_source {
+            Some(source) => pile_entries(state, source)
+                .filter(|snap| snap.is_still_exiled(state))
+                .map(|snap| snap.exiled_id)
+                .collect(),
+            None => linked_exile_cards_for_source(state, source_id)
+                .into_iter()
+                .filter(|snap| snap.is_still_exiled(state))
+                .map(|snap| snap.exiled_id)
+                .collect(),
+        };
+        Self {
+            source_id,
+            trigger_source,
+            members,
+        }
+    }
+
+    /// Whether this view answers a read made for `source_id` / `trigger_source`. A nested
+    /// evaluation that rebinds either is a different pile and falls back to the direct probe.
+    /// The pile of a trigger read is a function of the whole latched context (its bound
+    /// incarnation, latched snapshot and observed zone), so the context compares whole.
+    pub fn serves(
+        &self,
+        source_id: ObjectId,
+        trigger_source: Option<&TriggerSourceContext>,
+    ) -> bool {
+        self.source_id == source_id
+            && match (self.trigger_source, trigger_source) {
+                (None, None) => true,
+                (Some(read_for), Some(asked)) => std::ptr::eq(read_for, asked) || read_for == asked,
+                (Some(_), None) | (None, Some(_)) => false,
+            }
+    }
+
+    pub fn contains(&self, object_id: ObjectId) -> bool {
+        self.members.contains(&object_id)
+    }
+}
+
 /// CR 406.6 + CR 607.1: Returns true if `player` owns at least one card currently
 /// in exile that is linked to `source_id`.
 pub fn owns_card_exiled_by_source(
@@ -2022,6 +2111,123 @@ mod tests {
                 assert_eq!(linked_exile_pile_holds(&state, &context, card), expected);
             }
         }
+    }
+
+    /// Every object id of `state`, in order, with the view's answer next to the direct probe's.
+    fn view_and_probe_answers(
+        state: &GameState,
+        source: ObjectId,
+        trigger_source: Option<&TriggerSourceContext>,
+    ) -> Vec<(ObjectId, bool, bool)> {
+        let view = LinkedExilePile::read(state, source, trigger_source);
+        let mut ids: Vec<ObjectId> = state.objects.keys().copied().collect();
+        ids.sort();
+        ids.into_iter()
+            .map(|id| {
+                (
+                    id,
+                    view.contains(id),
+                    exiled_by_source_holds(state, source, trigger_source, id),
+                )
+            })
+            .collect()
+    }
+
+    /// CR 607.2a + CR 400.7 + CR 607.5: the once-per-scan view answers exactly what the
+    /// per-candidate probe answers, for the trigger-bound reading (latched pile, live links
+    /// made since, a card that left exile) and for the live-link reading, with the CR-derived
+    /// expectation asserted beside the equality.
+    ///
+    /// Mutant: dropping `is_still_exiled` from `LinkedExilePile::read` makes the left-exile
+    /// row answer `true` from the view and `false` from the probe.
+    #[test]
+    fn linked_exile_pile_view_agrees_with_the_direct_probe() {
+        use crate::types::ability::CharacteristicSetRef::Own;
+        let (mut state, source, first, second) = live_source_with_exiles();
+        resolving_characteristic(&mut state, source, Own);
+        crate::game::exile_links::push_tracked_by_source(&mut state, first, source);
+        let context = crate::game::triggers::trigger_source_context_for_latch(
+            &state,
+            &state.objects[&source],
+        );
+        // `second` is exiled with the source after the trigger latched: the pile reads it live.
+        crate::game::exile_links::push_tracked_by_source(&mut state, second, source);
+        for trigger_source in [Some(&context), None] {
+            let rows = view_and_probe_answers(&state, source, trigger_source);
+            for (id, from_view, from_probe) in &rows {
+                assert_eq!(from_view, from_probe, "{id:?} for {trigger_source:?}");
+            }
+            // Reach guards: both pile cards are members, the source itself is not.
+            assert!(rows.iter().any(|(id, held, _)| *id == first && *held));
+            assert!(rows.iter().any(|(id, held, _)| *id == second && *held));
+            assert!(rows.iter().any(|(id, held, _)| *id == source && !*held));
+        }
+        // CR 400.7: a card that left exile is not a pile card even while its link entry or
+        // latched snapshot remains.
+        let mut events = Vec::new();
+        move_to_zone(&mut state, first, Zone::Graveyard, &mut events);
+        for trigger_source in [Some(&context), None] {
+            let rows = view_and_probe_answers(&state, source, trigger_source);
+            for (id, from_view, from_probe) in &rows {
+                assert_eq!(from_view, from_probe, "{id:?} for {trigger_source:?}");
+            }
+            assert!(rows.iter().any(|(id, held, _)| *id == first && !*held));
+        }
+        // CR 400.7 + CR 603.10a: after the bound incarnation left, its trigger reads the pile it
+        // departed with (the linked-exile LKI); the view agrees with the probe for every card,
+        // including one the successor exiles (the admission rule is `pile_entries`' alone).
+        move_to_zone(&mut state, source, Zone::Graveyard, &mut events);
+        move_to_zone(&mut state, source, Zone::Battlefield, &mut events);
+        let successor_card = create_object(
+            &mut state,
+            CardId(9),
+            PlayerId(1),
+            "Successor Card".into(),
+            Zone::Exile,
+        );
+        crate::game::exile_links::push_tracked_by_source(&mut state, successor_card, source);
+        let rows = view_and_probe_answers(&state, source, Some(&context));
+        for (id, from_view, from_probe) in &rows {
+            assert_eq!(
+                from_view, from_probe,
+                "{id:?} after the source changed zones"
+            );
+        }
+        assert!(
+            rows.iter().any(|(id, held, _)| *id == second && *held),
+            "reach guard: the pile it departed with is still read"
+        );
+    }
+
+    /// CR 607.2a: a view answers only the read it was made for. A nested evaluation that
+    /// rebinds the source, or the trigger context, is not served and reads the store itself.
+    #[test]
+    fn linked_exile_pile_view_serves_only_the_read_it_was_made_for() {
+        let (mut state, source, first, _) = live_source_with_exiles();
+        crate::game::exile_links::push_tracked_by_source(&mut state, first, source);
+        let context = crate::game::triggers::trigger_source_context_for_latch(
+            &state,
+            &state.objects[&source],
+        );
+        // A second trigger context for the same incarnation whose latched pile differs.
+        let mut other_pile = context.clone();
+        other_pile.linked_exile_snapshot.clear();
+        assert_ne!(context, other_pile, "the two latches read different piles");
+
+        let view = LinkedExilePile::read(&state, source, Some(&context));
+        assert!(view.serves(source, Some(&context)));
+        assert!(
+            view.serves(source, Some(&context.clone())),
+            "a clone of the bound context is the same read"
+        );
+        assert!(!view.serves(source, Some(&other_pile)));
+        assert!(!view.serves(source, None));
+        assert!(!view.serves(ObjectId(source.0 + 1), Some(&context)));
+        let live = LinkedExilePile::read(&state, source, None);
+        assert!(live.serves(source, None));
+        assert!(!live.serves(source, Some(&context)));
+        // Reach guard: a view that served the wrong read would change the answer.
+        assert!(view.contains(first));
     }
 
     /// CR 400.7: once the bound incarnation has left, the object that later
