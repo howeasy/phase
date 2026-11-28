@@ -16225,7 +16225,7 @@ fn finalize_cast_with_phyrexian_choices_inner(
 
     // CR 608.2c + CR 611.2a: the shared cast budget of an `ExileWithAltCost` grant
     // ("you may cast a creature spell from among cards exiled with this artifact"
-    // — Idol of Endurance), read from the elected permission before the move drops
+    // — Serpent's Soul-Jar), read from the elected permission before the move drops
     // it, like the `PlayFromExile` group above.
     //
     // CR 118.9a + CR 601.2a: a cast whose own independent alternative cost

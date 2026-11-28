@@ -2930,7 +2930,10 @@ pub enum LingeringCastBudget {
     /// Each object has an independent permission; the grant has no shared cap.
     #[default]
     PerObject,
-    /// Casting one card spends the permissions that the same grant wrote.
+    /// Casting one card spends the permissions that the same grant wrote. A
+    /// grant that casts without paying its mana cost still parses to this
+    /// budget, but the runtime stamps no shared group for it, so the cap is not
+    /// enforced at runtime.
     SharedSingleCast,
 }
 
@@ -3169,7 +3172,7 @@ impl CastFromZoneDriver {
     /// | mechanism | bounds it can enforce | why |
     /// |---|---|---|
     /// | [`CastMechanism::LingeringPermission`] with `PerObject` | unbounded only | `record_lingering_permissions` writes an independent `CastingPermission` per object, with no grant-scoped cap. |
-    /// | [`CastMechanism::LingeringPermission`] with `SharedSingleCast` | exactly one cast | the permissions one resolution writes share a `single_use_group` budget, so one cast under any of them voids the rest. |
+    /// | [`CastMechanism::LingeringPermission`] with `SharedSingleCast` | exactly one cast, normal-cost grant only | the permissions one resolution writes share a `single_use_group` budget, so one cast under any of them voids the rest; a grant that casts without paying its mana cost parses to this budget but the runtime stamps no group for it, so the cap is not enforced. |
     /// | [`CastMechanism::SingleCardDuringResolution`] | exactly one cast | `initiate_cast_during_resolution` puts exactly one card on the stack. It cannot reach `N > 1`, and it cannot honor an unbounded clause either. |
     /// | [`CastMechanism::ResolutionTimePrivateZonePick`] | exactly one cast | `open_private_zone_cast_selection` opens `EffectZoneChoice { count: 1, up_to: true }`. Same one-card ceiling, enforced by the private-zone tail rather than by the driver. |
     /// | [`CastMechanism::ResolutionWindow`] | any bounds | `Effect::FreeCastFromZones`' stop-early loop reads `ResolutionCastWindow` directly. |
@@ -5488,13 +5491,15 @@ pub enum CastingPermission {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cast_cost_modifier: Option<CastCostModifier>,
         /// CR 608.2c + CR 611.2a: Identity of the one cast budget this grant shares
-        /// with its sibling permissions. `Some` only for a grant whose printed
-        /// cap is exactly one cast over a source-linked pile ("until end of turn,
-        /// you may cast a creature spell from among cards exiled with this artifact" —
-        /// Idol of Endurance, Serpent's Soul-Jar): `record_lingering_permissions`
+        /// with its sibling permissions. `Some` only for a normal-cost grant whose
+        /// printed cap is exactly one cast over a source-linked pile ("until end
+        /// of turn, you may cast a creature spell from among cards exiled with
+        /// this artifact" — Serpent's Soul-Jar): `record_lingering_permissions`
         /// writes one permission per pile card, and the first cast made under any
         /// of them spends the group (`casting::consume_single_use_play_from_exile`),
-        /// which strips the rest. The id is a fresh `TrackedSetId` that names no
+        /// which strips the rest. A grant that casts without paying its mana cost
+        /// parses to this budget but is not stamped, so its cap is not enforced at
+        /// runtime. The id is a fresh `TrackedSetId` that names no
         /// published set (a grant identity, not a membership list). `None` for
         /// every other grant, which keeps its independent per-object permission.
         #[serde(default, skip_serializing_if = "Option::is_none")]

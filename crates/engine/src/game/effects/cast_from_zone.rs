@@ -3129,23 +3129,32 @@ fn record_lingering_permissions(
         _ => return Err(EffectError::MissingParam("CastFromZone".to_string())),
     };
     let constraint = freeze_cast_permission_constraint(state, ability, constraint);
-    // CR 608.2c + CR 611.2a: a grant whose printed cap is exactly one cast
-    // ("you may cast a spell from among cards exiled with this enchantment")
-    // authorizes one cast across every card it stamps. One group per resolution,
-    // shared by the sibling permissions below. The id names no published tracked
-    // set: registering one would make it the highest id, which a later
-    // `TrackedSet { id: 0 }` anaphor in the same chain would mis-bind to.
+    // CR 608.2c + CR 611.2a: a normal-cost grant whose printed cap is exactly
+    // one cast ("you may cast a spell from among cards exiled with this
+    // enchantment") authorizes one cast across every card it stamps. One group
+    // per resolution, shared by the sibling permissions below. The id names no
+    // published tracked set: registering one would make it the highest id,
+    // which a later `TrackedSet { id: 0 }` anaphor in the same chain would
+    // mis-bind to.
+    //
+    // A grant that casts without paying carries no shared budget: the engine
+    // offers no player election between it and a pile card's own "you may cast
+    // this card from exile" permission (Eternal Scourge), so the cast elects the
+    // free grant's slot, and charging a shared group there would strip the rest
+    // of the pile. Left unbudgeted, the free grant keeps the base behaviour:
+    // every card in the pile stays castable through it. Only a normal-cost grant
+    // (Serpent's Soul-Jar), whose route costs the same as the card's own, holds
+    // the shared single cast. The `ExileWithAltAbilityCost` form (Nashi)
+    // stores no group: its permission carries no budget field.
     let single_use_group = match driver {
         crate::types::ability::CastFromZoneDriver::LingeringPermission {
             budget: LingeringCastBudget::SharedSingleCast,
-        } => {
+        } if !without_paying => {
             let group = crate::types::identifiers::TrackedSetId(state.next_tracked_set_id);
             state.next_tracked_set_id += 1;
             Some(group)
         }
-        crate::types::ability::CastFromZoneDriver::LingeringPermission {
-            budget: LingeringCastBudget::PerObject,
-        }
+        crate::types::ability::CastFromZoneDriver::LingeringPermission { .. }
         | crate::types::ability::CastFromZoneDriver::DuringResolution
         | crate::types::ability::CastFromZoneDriver::ResolutionWindow { .. } => None,
     };
