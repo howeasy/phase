@@ -47,6 +47,55 @@ function ParseItemPill({ item, depth = 0 }: { item: ParsedItem; depth?: number }
   );
 }
 
+export interface UnsupportedExpandButtonProps {
+  unsupported: UnsupportedCard;
+  expanded: boolean;
+  onToggle: () => void;
+}
+
+/** Amber `!` toggle that expands a card's unsupported reasons. Lives here (not
+ *  in `CardEntryRow`) so the pinned commander rows in `DeckList` show the same
+ *  control and panel as a main-deck row; each caller owns the `expanded` state,
+ *  because the panel renders after the row rather than beside the toggle. */
+export function UnsupportedExpandButton({
+  unsupported,
+  expanded,
+  onToggle,
+}: UnsupportedExpandButtonProps) {
+  const { t } = useTranslation("deck-builder");
+  return (
+    <button
+      onClick={(e) => { e.stopPropagation(); onToggle(); }}
+      className="ml-1 inline-flex h-3.5 w-3.5 items-center justify-center rounded-sm bg-amber-500/80 text-[8px] font-bold leading-none text-black"
+      aria-label={t("card.unsupportedExpand", { count: unsupported.gaps.length })}
+      aria-expanded={expanded}
+      title={t("card.unsupportedTitle", { count: unsupported.gaps.length })}
+    >
+      !
+    </button>
+  );
+}
+
+/** The expanded reason panel: engine gap list, printed Oracle text, and parse
+ *  chips. Shared with the commander rows in `DeckList`. */
+export function UnsupportedReasonPanel({ unsupported }: { unsupported: UnsupportedCard }) {
+  return (
+    <div className="mb-1.5 ml-4 mt-0.5 rounded-lg border border-white/6 bg-black/30 px-2 py-1.5">
+      <UnsupportedGapList card={unsupported} />
+      {unsupported.oracle_text && (
+        <div className="mb-1.5 font-mono text-[10px] leading-snug text-slate-400 italic">
+          {unsupported.oracle_text}
+        </div>
+      )}
+      <div className="flex flex-wrap gap-1">
+        {(unsupported.parse_details ?? []).map((item, i) => (
+          <ParseItemPill key={i} item={item} />
+        ))}
+      </div>
+    </div>
+  );
+}
+
 export interface CardEntryRowProps {
   entry: DeckEntry;
   printingLabel?: string;
@@ -166,15 +215,11 @@ export function CardEntryRow({
           {entry.name}
           {printingLabel && <span className="ml-1 whitespace-nowrap text-[10px] text-gray-500">{printingLabel}</span>}
           {unsupported && (
-            <button
-              onClick={(e) => { e.stopPropagation(); setExpanded((v) => !v); }}
-              className="ml-1 inline-flex h-3.5 w-3.5 items-center justify-center rounded-sm bg-amber-500/80 text-[8px] font-bold leading-none text-black"
-              aria-label={t("card.unsupportedExpand", { count: unsupported.gaps.length })}
-              aria-expanded={expanded}
-              title={t("card.unsupportedTitle", { count: unsupported.gaps.length })}
-            >
-              !
-            </button>
+            <UnsupportedExpandButton
+              unsupported={unsupported}
+              expanded={expanded}
+              onToggle={() => setExpanded((v) => !v)}
+            />
           )}
           {hasAlternates && (
             onOpenArtPicker ? (
@@ -263,21 +308,7 @@ export function CardEntryRow({
           )}
         </span>
       </div>
-      {expanded && unsupported && (
-        <div className="mb-1.5 ml-4 mt-0.5 rounded-lg border border-white/6 bg-black/30 px-2 py-1.5">
-          <UnsupportedGapList card={unsupported} />
-          {unsupported.oracle_text && (
-            <div className="mb-1.5 font-mono text-[10px] leading-snug text-slate-400 italic">
-              {unsupported.oracle_text}
-            </div>
-          )}
-          <div className="flex flex-wrap gap-1">
-            {(unsupported.parse_details ?? []).map((item, i) => (
-              <ParseItemPill key={i} item={item} />
-            ))}
-          </div>
-        </div>
-      )}
+      {expanded && unsupported && <UnsupportedReasonPanel unsupported={unsupported} />}
     </div>
   );
 }

@@ -255,9 +255,12 @@ describe("DeckList unsupported card reasons", () => {
     handler: "Misparse:wrong_player",
     source_text: "If you control a Demon, each opponent loses 2 life and you gain 2 life.",
   };
-  const nazgulGap = {
-    handler: "Misparse:wrong_count",
-    source_text: "Nazgûl's reason text.",
+  // Verbatim census clause for Lim-Dûl's Paladin (confirmed-misparses.toml;
+  // also pinned by deck_compatibility_census_clauses_survive_alias_and_composite_spellings).
+  const paladinGap = {
+    handler: "Misparse:missing_effect",
+    source_text:
+      "Whenever this creature attacks and isn't blocked, it assigns no combat damage this turn and defending player loses 4 life.",
   };
 
   function compatibilityResult(
@@ -291,10 +294,10 @@ describe("DeckList unsupported card reasons", () => {
         ],
       },
       {
-        name: "Nazgûl",
-        gaps: [nazgulGap.handler],
-        gap_details: [nazgulGap],
-        entry_names: ["Nazgul", "Nazgûl"],
+        name: "Lim-Dûl's Paladin",
+        gaps: [paladinGap.handler],
+        gap_details: [paladinGap],
+        entry_names: ["Lim-Dul's Paladin", "Lim-Dûl's Paladin"],
       },
     ],
   });
@@ -311,6 +314,27 @@ describe("DeckList unsupported card reasons", () => {
         canIncrementCard={() => true}
         onMoveCard={vi.fn()}
         onImport={vi.fn()}
+        compatibility={compatibility}
+        cardDataCache={new Map()}
+        groupMode="type"
+      />,
+    );
+    return container;
+  }
+
+  function renderWithCommanders(
+    compatibility: DeckCompatibilityResult,
+    commanders: string[],
+  ): HTMLElement {
+    const { container } = render(
+      <DeckList
+        deck={emptyDeck}
+        onRemoveCard={vi.fn()}
+        onIncrementCard={vi.fn()}
+        canIncrementCard={() => true}
+        onMoveCard={vi.fn()}
+        onImport={vi.fn()}
+        commanders={commanders}
         compatibility={compatibility}
         cardDataCache={new Map()}
         groupMode="type"
@@ -343,7 +367,7 @@ describe("DeckList unsupported card reasons", () => {
       "Unholy Annex // Ritual Chamber",
       "Unholy Annex//Ritual Chamber",
       "Unholy Annex/Ritual Chamber",
-      "Nazgul",
+      "Lim-Dul's Paladin",
       "Lightning Bolt",
     ]);
 
@@ -355,7 +379,7 @@ describe("DeckList unsupported card reasons", () => {
     ]) {
       expectReasons(container, spelling, /each opponent loses 2 life/i);
     }
-    expectReasons(container, "Nazgul", /Nazgûl's reason text/i);
+    expectReasons(container, "Lim-Dul's Paladin", /assigns no combat damage/i);
 
     expect(
       within(row(container, "Lightning Bolt")).queryByRole("button", {
@@ -389,6 +413,35 @@ describe("DeckList unsupported card reasons", () => {
     }
     expect(
       within(row(container, "Unholy Annex//Ritual Chamber")).queryByRole("button", {
+        name: /expand details/i,
+      }),
+    ).toBeNull();
+  });
+
+  it("shows the reason panel on an unsupported commander row", () => {
+    // The pinned commander section renders outside the main list, so it needs
+    // its own lookup: without it an unsupported commander (a Room commander
+    // listed by its glued spelling, or a plain-name one) shows no reason.
+    const container = renderWithCommanders(withEntryNames, [
+      "Unholy Annex//Ritual Chamber",
+      "Lim-Dûl's Paladin",
+    ]);
+
+    expectReasons(container, "Unholy Annex//Ritual Chamber", /each opponent loses 2 life/i);
+    expectReasons(container, "Lim-Dûl's Paladin", /assigns no combat damage/i);
+  });
+
+  it("leaves a supported commander row without an expand button", () => {
+    // Reach guard: the unsupported commander in the same render must still
+    // expand, so the absent button below is the supported card's own state.
+    const container = renderWithCommanders(withEntryNames, [
+      "Unholy Annex//Ritual Chamber",
+      "Krenko, Mob Boss",
+    ]);
+
+    expectReasons(container, "Unholy Annex//Ritual Chamber", /each opponent loses 2 life/i);
+    expect(
+      within(row(container, "Krenko, Mob Boss")).queryByRole("button", {
         name: /expand details/i,
       }),
     ).toBeNull();

@@ -8637,8 +8637,10 @@ fn blank_gap_text(gap: &GapDetail, lines: &[String], dropped: &[&str]) -> String
     // has ever described them; say what the projection limit means.
     if gap.handler == ENTRY_PROJECTION_GAP {
         return "This permanent makes a choice as it enters (such as a creature type) and has \
-                static abilities whose changes to characteristics the engine's entry projection \
-                cannot yet prove, so an entry consumer may see unprojected values (CR 614.12)"
+                static abilities that may write the chosen value into a characteristic (such \
+                as adding the chosen creature type to creatures you control, or a chosen \
+                colour's protection), a change the engine's entry projection cannot yet \
+                prove, so an entry consumer may see unprojected values (CR 614.12)"
             .to_string();
     }
     if gap.handler == ENTRY_CONSUMER_GAP {
