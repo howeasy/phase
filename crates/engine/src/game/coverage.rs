@@ -29040,9 +29040,9 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
 
     /// CR 614.1a + CR 614.6: Dr. McCoy's "would be destroyed, instead remove all
     /// +1/+1 counters from it and all damage already dealt to it is healed" is a
-    /// destroy-instead substitution. Its riders need the staged simultaneous-Destroy
-    /// batch to deliver them, which is not implemented, so the line must stay
-    /// honestly unsupported: half-parsing it into a `Destroy`
+    /// destroy-instead substitution. The staged Destroy batch exists, but this
+    /// substitution's counter-removal and damage-healing riders are not
+    /// supported, so the line must stay honestly unsupported: half-parsing it into a `Destroy`
     /// replacement with an `execute` body would let the destruction proceed after
     /// the counters came off (CR 614.6: a replaced event never happens).
     #[test]

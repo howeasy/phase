@@ -16,16 +16,16 @@
 //! Food — so a mode is offered only when it can be performed in full. If
 //! neither mode is performable, foraging does nothing.
 
+use super::sacrifice::can_sacrifice_for_ability;
 use crate::game::ability_utils::{append_to_sub_chain, build_resolved_from_def};
+use crate::game::filter::{matches_target_filter, FilterContext};
 use crate::types::ability::{
-    AbilityDefinition, AbilityKind, ChooseOneOfKind, Comparator, ControllerRef, Effect,
-    EffectError, EffectKind, EffectResolutionResult, FilterProp, MultiTargetSpec, PlayerFilter,
-    QuantityExpr, ResolvedAbility, TargetChoiceTiming, TargetFilter, TargetRef, ThisWayCause,
-    TypedFilter,
+    AbilityDefinition, AbilityKind, ChooseOneOfKind, ControllerRef, Effect, EffectError,
+    EffectKind, EffectResolutionResult, FilterProp, MultiTargetSpec, PlayerFilter, QuantityExpr,
+    ResolvedAbility, TargetChoiceTiming, TargetFilter, TargetRef, ThisWayCause, TypedFilter,
 };
 use crate::types::events::{GameEvent, PlayerActionKind};
 use crate::types::game_state::GameState;
-use crate::types::identifiers::ObjectId;
 use crate::types::player::PlayerId;
 use crate::types::zones::Zone;
 
@@ -46,27 +46,52 @@ fn graveyard_size(state: &GameState, player: PlayerId) -> usize {
         .unwrap_or(0)
 }
 
-fn controls_food(state: &GameState, player: PlayerId, source_id: ObjectId) -> bool {
-    // Reuse the layer-aware, phased-out-aware control-count building block
-    // (CR 702.26b) rather than a raw battlefield subtype scan, so the
-    // eligibility gate agrees with the `Sacrifice` resolver it gates.
-    let filter = TargetFilter::Typed(TypedFilter::permanent().subtype("Food".to_string()));
-    super::player_control_count_compares(state, player, &filter, Comparator::GE, 1, source_id)
+/// CR 701.61a: the Food the forager may sacrifice — "a Food" they control.
+fn food_filter() -> TargetFilter {
+    TargetFilter::Typed(
+        TypedFilter::permanent()
+            .controller(ControllerRef::You)
+            .subtype("Food".to_string()),
+    )
 }
 
-fn available_modes(state: &GameState, player: PlayerId, source_id: ObjectId) -> Vec<ForageMode> {
+/// CR 701.61a + CR 701.21a: whether the forager has a Food they could actually
+/// sacrifice. Evaluates the same candidate pool as the `Sacrifice` resolver the
+/// Food mode runs (`FilterContext::from_ability` filter match, controlled by the
+/// forager, layer-aware and phased-out-aware via `matches_target_filter`) and
+/// the same legality authority (`can_sacrifice_for_ability`, which reads
+/// "can't sacrifice" statics such as Quark, Humble Proprietor), so the mode is
+/// never offered when the resolver would reject every Food.
+fn controls_food(state: &GameState, ability: &ResolvedAbility) -> bool {
+    let controller = ability.controller;
+    let mut probe =
+        build_resolved_from_def(&sacrifice_food_branch(), ability.source_id, controller);
+    probe.context = ability.context.clone();
+    let filter = food_filter();
+    let ctx = FilterContext::from_ability(&probe);
+    state.battlefield.iter().any(|id| {
+        state.objects.get(id).is_some_and(|obj| {
+            obj.controller == controller
+                && !obj.is_emblem
+                && matches_target_filter(state, *id, &filter, &ctx)
+                && can_sacrifice_for_ability(state, &probe, *id, controller)
+        })
+    })
+}
+
+fn available_modes(state: &GameState, ability: &ResolvedAbility) -> Vec<ForageMode> {
     let mut modes = Vec::with_capacity(2);
-    if graveyard_size(state, player) >= FORAGE_EXILE_COUNT {
+    if graveyard_size(state, ability.controller) >= FORAGE_EXILE_COUNT {
         modes.push(ForageMode::ExileThree);
     }
-    if controls_food(state, player, source_id) {
+    if controls_food(state, ability) {
         modes.push(ForageMode::SacrificeFood);
     }
     modes
 }
 
 pub(crate) fn can_forage(state: &GameState, ability: &ResolvedAbility) -> bool {
-    !available_modes(state, ability.controller, ability.source_id).is_empty()
+    !available_modes(state, ability).is_empty()
 }
 
 fn completion(cause: ThisWayCause, count: usize) -> AbilityDefinition {
@@ -121,11 +146,7 @@ fn sacrifice_food_branch() -> AbilityDefinition {
     AbilityDefinition::new(
         AbilityKind::Spell,
         Effect::Sacrifice {
-            target: TargetFilter::Typed(
-                TypedFilter::permanent()
-                    .controller(ControllerRef::You)
-                    .subtype("Food".to_string()),
-            ),
+            target: food_filter(),
             count: QuantityExpr::Fixed { value: 1 }.into(),
             min_count: 1,
         },
@@ -143,7 +164,7 @@ pub(crate) fn resolve(
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
     let controller = ability.controller;
-    let modes = available_modes(state, controller, ability.source_id);
+    let modes = available_modes(state, ability);
     let mut branches: Vec<AbilityDefinition> = modes
         .iter()
         .map(|mode| match mode {

@@ -665,3 +665,131 @@ fn sacrifice_cost_authority_reads_quarks_prohibition_per_permanent_and_player() 
         "control: 'You can't sacrifice' scopes Quark's controller only"
     );
 }
+
+/// P0 controls Quark, Gourmand's Talent (during P0's turn their artifacts are
+/// Foods) and Corpseberry Cultivator ("At the beginning of combat on your turn,
+/// you may forage."), all printed cards, with an empty graveyard. Quark's
+/// upkeep trigger creates the Treasure token for real; with `ordinary_food` an
+/// ordinary Food artifact joins it. The runner stops in P0's beginning of
+/// combat, where Corpseberry's trigger is on the stack.
+fn forage_board(ordinary_food: bool) -> (GameRunner, ObjectId, ObjectId, Option<ObjectId>) {
+    let db = shared_card_db().expect("integration card fixture must load");
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::Untap);
+    let quark = scenario.add_real_card(P0, "Quark, Humble Proprietor", Zone::Battlefield, db);
+    scenario.add_real_card(P0, "Gourmand's Talent", Zone::Battlefield, db);
+    let corpseberry = scenario.add_real_card(P0, "Corpseberry Cultivator", Zone::Battlefield, db);
+    let food = ordinary_food.then(|| {
+        scenario
+            .add_creature(P0, "Ordinary Food", 0, 0)
+            .as_artifact()
+            .with_subtypes(vec!["Food"])
+            .id()
+    });
+    // CR 504.1: P0 draws during the draw step on the way to combat.
+    scenario.with_library_top(P0, &["Island"]);
+    let mut runner = scenario.build();
+    assert_quark_prohibition(&runner, quark);
+    runner.advance_to_upkeep();
+    runner.advance_until_stack_empty();
+    let treasure = treasure_token(&runner);
+    runner.advance_to_phase(Phase::BeginCombat);
+    // Reach guards: it is P0's beginning of combat, the graveyard cannot fund
+    // the exile mode (fewer than three cards, CR 701.61a), and Gourmand's Talent
+    // made the Quark-barred Treasure a Food.
+    assert_eq!(runner.state().phase, Phase::BeginCombat);
+    assert_eq!(runner.state().active_player, P0);
+    assert!(runner.state().players[0].graveyard.is_empty());
+    assert!(
+        runner.state().objects[&treasure]
+            .card_types
+            .subtypes
+            .iter()
+            .any(|subtype| subtype == "Food"),
+        "Gourmand's Talent makes the Treasure a Food on P0's turn"
+    );
+    (runner, corpseberry, treasure, food)
+}
+
+/// Drives Corpseberry's beginning-of-combat trigger. Returns whether the
+/// optional forage prompt surfaced (leaving it pending); `false` once the
+/// stack has drained without ever asking.
+fn drive_forage_trigger(runner: &mut GameRunner) -> bool {
+    for _ in 0..40 {
+        match runner.state().waiting_for.clone() {
+            WaitingFor::OptionalEffectChoice { player, .. } => {
+                assert_eq!(player, P0);
+                return true;
+            }
+            WaitingFor::OrderTriggers { .. } => {
+                engine::game::triggers::drain_order_triggers_with_identity(runner.state_mut());
+            }
+            WaitingFor::Priority { .. } if runner.state().stack.is_empty() => return false,
+            WaitingFor::Priority { .. } => {
+                runner
+                    .act(GameAction::PassPriority)
+                    .expect("advance Corpseberry's trigger");
+            }
+            other => panic!("unexpected prompt while driving forage: {other:?}"),
+        }
+    }
+    panic!("Corpseberry's trigger never settled");
+}
+
+fn plus_one_counters(runner: &GameRunner, id: ObjectId) -> u32 {
+    runner.state().objects[&id]
+        .counters
+        .get(&engine::types::counter::CounterType::Plus1Plus1)
+        .copied()
+        .unwrap_or(0)
+}
+
+/// CR 701.61a + CR 701.21a + CR 608.2d: Gourmand's Talent makes Quark's
+/// controller's Treasure token a Food, but "You can't sacrifice Treasure
+/// tokens" bars it, so the sacrifice-a-Food mode is not performable. With fewer
+/// than three cards in the graveyard no forage mode is, so Corpseberry's "you
+/// may forage" opens no prompt and nothing is sacrificed.
+#[test]
+fn forage_is_not_offered_when_the_only_food_is_a_treasure_token_quark_bars() {
+    let (mut runner, corpseberry, treasure, _) = forage_board(false);
+    assert!(
+        !drive_forage_trigger(&mut runner),
+        "no forage prompt: the only Food cannot be sacrificed"
+    );
+    assert!(on_battlefield(&runner, treasure));
+    assert!(runner.state().players[0].graveyard.is_empty());
+    assert_eq!(plus_one_counters(&runner, corpseberry), 0);
+    assert!(runner.state().stack.is_empty());
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+}
+
+/// The same board with an ordinary Food restores the forage option: the
+/// prompt surfaces, accepting sacrifices the ordinary Food (the one legal
+/// candidate, so no further choice), the Treasure token Food stays, and
+/// Corpseberry's "Whenever you forage" trigger grows it.
+#[test]
+fn forage_sacrifices_the_ordinary_food_never_the_barred_treasure() {
+    let (mut runner, corpseberry, treasure, food) = forage_board(true);
+    let food = food.expect("ordinary Food fixture");
+    assert!(
+        drive_forage_trigger(&mut runner),
+        "an ordinary Food makes the forage offer performable"
+    );
+    runner
+        .act(GameAction::DecideOptionalEffect { accept: true })
+        .expect("accept forage");
+    assert!(
+        !matches!(
+            runner.state().waiting_for,
+            WaitingFor::EffectZoneChoice { .. }
+        ),
+        "the barred Treasure is not a candidate, so there is nothing to choose between"
+    );
+    runner.advance_until_stack_empty();
+    assert_eq!(runner.state().objects[&food].zone, Zone::Graveyard);
+    assert!(on_battlefield(&runner, treasure));
+    assert_eq!(plus_one_counters(&runner, corpseberry), 1);
+}

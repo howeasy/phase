@@ -16,7 +16,7 @@ use engine::game::coverage::card_face_gaps;
 use engine::game::engine::EngineError;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::scenario_db::GameScenarioDbExt;
-use engine::types::ability::{AbilityDefinition, AbilityKind, Effect};
+use engine::types::ability::{AbilityDefinition, AbilityKind, Effect, TargetRef};
 use engine::types::actions::GameAction;
 use engine::types::counter::CounterType;
 use engine::types::game_state::{CastPaymentMode, WaitingFor};
@@ -650,4 +650,149 @@ fn dathon_and_clockspinning_whole_cards_have_no_coverage_gap() {
             card_face_gaps(face)
         );
     }
+}
+
+/// Clockspinning's second target class: "Choose a counter on target permanent
+/// or suspended card." A printed Rift Bolt is suspended through the public
+/// hand-activation path (`ActivateAbility` on its Suspend ability, paying {R}),
+/// which exiles it with one time counter (CR 702.62a). A Stun counter is then
+/// seeded on the exiled card so that two kinds are present and the controller
+/// is asked which one (CR 608.2d; a single kind would be auto-selected). After
+/// choosing Time only the two Time adjustments are offered (CR 608.2c), and
+/// removing the card's last time counter fires the suspend trigger (CR 702.62a),
+/// whose accepted cast puts Rift Bolt on the stack and deals 3 damage.
+#[test]
+fn clockspinning_removes_the_last_time_counter_from_a_suspended_card() {
+    let db = shared_card_db().expect("integration card fixture must load");
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let rift_bolt = scenario.add_real_card(P0, "Rift Bolt", Zone::Hand, db);
+    let clockspinning = scenario.add_real_card(P0, "Clockspinning", Zone::Hand, db);
+    // Rift Bolt's Suspend {R} and Clockspinning's printed {U}; Buyback {3}
+    // stays declined (the cast driver's default optional policy).
+    scenario.with_mana_pool(
+        P0,
+        vec![
+            ManaUnit::new(ManaType::Red, ObjectId(0), false, vec![]),
+            ManaUnit::new(ManaType::Blue, ObjectId(0), false, vec![]),
+        ],
+    );
+    let mut runner = scenario.build();
+
+    let suspend_index = runner.state().objects[&rift_bolt]
+        .abilities
+        .iter()
+        .position(|ability| ability.activation_zone == Some(Zone::Hand))
+        .expect("Rift Bolt's printed Suspend hand ability");
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: rift_bolt,
+            ability_index: suspend_index,
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("suspend Rift Bolt from hand");
+    assert_eq!(runner.state().objects[&rift_bolt].zone, Zone::Exile);
+    assert_eq!(counters(&runner, rift_bolt, CounterType::Time), 1);
+    // Seed a second kind so the kind choice is a real prompt.
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&rift_bolt)
+        .expect("suspended card")
+        .counters
+        .insert(CounterType::Stun, 1);
+    let life_before = runner.state().players[1].life;
+
+    let outcome = runner
+        .cast(clockspinning)
+        .target_object(rift_bolt)
+        .commit()
+        .resolve();
+    let WaitingFor::NamedChoice { options, .. } = outcome.final_waiting_for().clone() else {
+        panic!(
+            "the counter kind is chosen first, got {:?}",
+            outcome.final_waiting_for()
+        );
+    };
+    assert_eq!(options.len(), 2, "Time and Stun are the kinds: {options:?}");
+    let choice = options
+        .iter()
+        .find(|option| option.eq_ignore_ascii_case("time"))
+        .cloned()
+        .expect("Time is an option");
+    runner
+        .act(GameAction::ChooseOption { choice })
+        .expect("choose the Time counter");
+    let WaitingFor::ChooseOneOfBranch { branches, .. } = runner.state().waiting_for.clone() else {
+        panic!(
+            "the adjustment is offered next, got {:?}",
+            runner.state().waiting_for
+        );
+    };
+    assert_eq!(
+        branches.len(),
+        2,
+        "remove or add a Time counter only: {branches:?}"
+    );
+    // Branch 0 is the printed "Remove that counter" (branch 1 is the add).
+    runner
+        .act(GameAction::ChooseBranch { index: 0 })
+        .expect("remove the Time counter");
+
+    // Clockspinning resolves, then the suspend trigger for the last counter
+    // removed asks whether to cast the card.
+    for _ in 0..10 {
+        match runner.state().waiting_for.clone() {
+            WaitingFor::OptionalEffectChoice { .. } => break,
+            WaitingFor::Priority { .. } if !runner.state().stack.is_empty() => {
+                runner
+                    .act(GameAction::PassPriority)
+                    .expect("pass so the suspend trigger resolves");
+            }
+            other => panic!("expected the suspend cast prompt, got {other:?}"),
+        }
+    }
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::OptionalEffectChoice { player, .. } if player == P0
+        ),
+        "suspend cast prompt, got {:?}",
+        runner.state().waiting_for
+    );
+    assert_eq!(runner.state().objects[&rift_bolt].zone, Zone::Exile);
+    assert_eq!(counters(&runner, rift_bolt, CounterType::Time), 0);
+    assert_eq!(
+        counters(&runner, rift_bolt, CounterType::Stun),
+        1,
+        "the other kind is untouched"
+    );
+
+    runner
+        .act(GameAction::DecideOptionalEffect { accept: true })
+        .expect("cast Rift Bolt for free");
+    if matches!(
+        runner.state().waiting_for,
+        WaitingFor::TargetSelection { .. }
+    ) {
+        runner
+            .act(GameAction::ChooseTarget {
+                target: Some(TargetRef::Player(P1)),
+            })
+            .expect("target the opponent");
+    }
+    for _ in 0..10 {
+        if runner.state().stack.is_empty() {
+            break;
+        }
+        runner
+            .act(GameAction::PassPriority)
+            .expect("pass so Rift Bolt resolves");
+    }
+    assert_eq!(runner.state().objects[&rift_bolt].zone, Zone::Graveyard);
+    assert_eq!(
+        runner.state().players[1].life,
+        life_before - 3,
+        "Rift Bolt dealt 3 damage"
+    );
 }
