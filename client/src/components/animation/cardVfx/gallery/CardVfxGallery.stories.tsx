@@ -58,3 +58,6 @@ export const Combat: Story = { args: { scenario: "combat" } };
 export const LifeGain: Story = { args: { scenario: "lifeGain" } };
 export const LifeLoss: Story = { args: { scenario: "lifeLoss" } };
 export const Counters: Story = { args: { scenario: "counters" } };
+export const Meld: Story = { args: { scenario: "meld" } };
+export const RippleReveal: Story = { args: { scenario: "cardsRevealed" } };
+export const DamageFlurry: Story = { args: { scenario: "damageFlurry" } };

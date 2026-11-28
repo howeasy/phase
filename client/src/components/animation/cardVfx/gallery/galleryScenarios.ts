@@ -1,4 +1,5 @@
 import type { GameEvent, GameObject, GameState, ManaColor, ObjectId, TargetRef, Zone } from "../../../../adapter/types.ts";
+import { GROUPED_COMBAT_DAMAGE_THRESHOLD } from "../../../../animation/types.ts";
 import { gameObjectFactory } from "../../../../test/factories/gameObjectFactory.ts";
 import { buildStackEntry, gameStateFactory } from "../../../../test/factories/gameStateFactory.ts";
 
@@ -465,6 +466,58 @@ export const GALLERY_SCENARIOS: Record<string, GalleryScenario> = {
       (state) => {
         state.objects[BEARS] = { ...state.objects[BEARS], counters: { P1P1: 1 }, power: 3, toughness: 3 };
         return [{ type: "CounterRemoved", data: { object_id: BEARS, counter_type: "P1P1", count: 1 } }];
+      },
+    ],
+  },
+  meld: {
+    title: "Meld a pair",
+    description: "The pair leaves the battlefield and returns fused as one, and the forge turns over the combined face.",
+    batches: [
+      (state) => {
+        move(state, BEARS, "Exile");
+        move(state, ANGEL, "Exile");
+        state.objects[BEARS] = card({
+          id: BEARS,
+          name: "Brisela, Voice of Nightmares",
+          zone: "Battlefield",
+          colors: ["White"],
+          creature: [9, 10],
+        });
+        move(state, BEARS, "Battlefield");
+        return [
+          zoneChanged(BEARS, "Battlefield", "Exile"),
+          zoneChanged(ANGEL, "Battlefield", "Exile"),
+          zoneChanged(BEARS, "Exile", "Battlefield"),
+          { type: "Melded", data: { object_id: BEARS, partner_id: ANGEL, controller: YOU } },
+        ];
+      },
+    ],
+  },
+  cardsRevealed: {
+    title: "Ripple reveal",
+    description: "Ripple reveals the top three cards of your library; they fan out of the library pile.",
+    batches: [
+      () => [
+        {
+          type: "CardsRevealed",
+          data: { player: YOU, card_names: ["Opt", "Island", "Shock"] },
+        },
+      ],
+    ],
+  },
+  damageFlurry: {
+    title: "Collapsed combat damage",
+    description: "A run of combat hits on the opponent collapses into one flurry.",
+    batches: [
+      (state) => {
+        const events: GameEvent[] = [];
+        const sources = [BEARS, ANGEL];
+        for (let hit = 0; hit < GROUPED_COMBAT_DAMAGE_THRESHOLD; hit++) {
+          const source = sources[hit % sources.length];
+          events.push(damage(source, { Player: OPPONENT }, 1, true));
+          events.push(lifeChanged(OPPONENT, -1, state));
+        }
+        return events;
       },
     ],
   },
