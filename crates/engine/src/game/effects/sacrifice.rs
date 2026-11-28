@@ -1,3 +1,4 @@
+use crate::game::filter::{matches_target_filter, FilterContext};
 use crate::game::quantity::resolve_quantity_with_targets;
 use crate::types::ability::{
     ControllerRef, Effect, EffectError, EffectKind, EffectResolutionResult, QuantityExpr,
@@ -167,6 +168,46 @@ fn sacrifice_cause_muzzled(
         player,
         crate::types::ability::CostCategory::SacrificesPermanent,
     )
+}
+
+/// CR 701.21a + CR 608.2d: The permanents the sacrifice resolver may offer
+/// `chooser` for `ability` under `filter`.
+///
+/// This is the single candidate pool: the resolver collects it to build its
+/// `WaitingFor` options, and effect-eligibility probes (e.g. forage's Food
+/// mode) use it to decide whether a sacrifice is possible at all, so a mode is
+/// never offered when the resolver would reject every candidate.
+pub(crate) fn sacrifice_candidates<'a>(
+    state: &'a GameState,
+    ability: &'a ResolvedAbility,
+    filter: &'a TargetFilter,
+    chooser: PlayerId,
+) -> impl Iterator<Item = ObjectId> + 'a {
+    // CR 107.3a + CR 601.2b: ability-context filter evaluation.
+    let ctx = FilterContext::from_ability(ability);
+    state.battlefield.iter().copied().filter(move |id| {
+        // CR 614.13a/b: restrict to objects present before the devourer co-entry
+        // began; vacuous when None. (Pool is built from LIVE battlefield, so an
+        // object an earlier co-entering devourer already sacrificed is excluded by
+        // the live basis, and the devourers themselves by the snapshot.)
+        state
+            .active_devour_eligible_snapshot()
+            .is_none_or(|snapshot| snapshot.contains(id))
+            && state.objects.get(id).is_some_and(|obj| {
+                obj.controller == chooser
+                    && !obj.is_emblem
+                    && matches_target_filter(state, *id, filter, &ctx)
+                    // CR 608.2d: a resolving player can't choose an
+                    // illegal option — a permanent its chooser is
+                    // barred from sacrificing (Call for Aid's
+                    // installer bar, an object-wide grant) or that
+                    // this ability is barred from making them
+                    // sacrifice is not a legal candidate. Offering it
+                    // lets the chooser name it and evade a mandatory
+                    // sacrifice while keeping a legal victim.
+                    && can_sacrifice_for_ability(state, ability, *id, chooser)
+            })
+    })
 }
 
 /// CR 701.21a + CR 609.3: Whether `player` choosing `object_id` for `ability`'s
@@ -572,36 +613,8 @@ pub fn resolve(
         // patterns. Multi-opponent multiplayer sacrifice is deferred to a
         // queued WaitingFor infrastructure.
         let chooser = affected[0];
-        // CR 107.3a + CR 601.2b: ability-context filter evaluation.
-        let ctx = crate::game::filter::FilterContext::from_ability(ability);
-        let eligible: Vec<ObjectId> = state
-            .battlefield
-            .iter()
-            .copied()
-            .filter(|id| {
-                // CR 614.13a/b: restrict to objects present before the devourer co-entry
-                // began; vacuous when None. (Pool is built from LIVE battlefield, so an
-                // object an earlier co-entering devourer already sacrificed is excluded by
-                // the live basis, and the devourers themselves by the snapshot.)
-                state
-                    .active_devour_eligible_snapshot()
-                    .is_none_or(|snapshot| snapshot.contains(id))
-                    && state.objects.get(id).is_some_and(|obj| {
-                        obj.controller == chooser
-                            && !obj.is_emblem
-                            && crate::game::filter::matches_target_filter(state, *id, filter, &ctx)
-                            // CR 608.2d: a resolving player can't choose an
-                            // illegal option — a permanent its chooser is
-                            // barred from sacrificing (Call for Aid's
-                            // installer bar, an object-wide grant) or that
-                            // this ability is barred from making them
-                            // sacrifice is not a legal candidate. Offering it
-                            // lets the chooser name it and evade a mandatory
-                            // sacrifice while keeping a legal victim.
-                            && can_sacrifice_for_ability(state, ability, *id, chooser)
-                    })
-            })
-            .collect();
+        let eligible: Vec<ObjectId> =
+            sacrifice_candidates(state, ability, filter, chooser).collect();
 
         if count == 0 {
             // CR 107.3a: A dynamic count that resolves to zero is a legal

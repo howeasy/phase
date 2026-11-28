@@ -16,9 +16,8 @@
 //! Food — so a mode is offered only when it can be performed in full. If
 //! neither mode is performable, foraging does nothing.
 
-use super::sacrifice::can_sacrifice_for_ability;
+use super::sacrifice::sacrifice_candidates;
 use crate::game::ability_utils::{append_to_sub_chain, build_resolved_from_def};
-use crate::game::filter::{matches_target_filter, FilterContext};
 use crate::types::ability::{
     AbilityDefinition, AbilityKind, ChooseOneOfKind, ControllerRef, Effect, EffectError,
     EffectKind, EffectResolutionResult, FilterProp, MultiTargetSpec, PlayerFilter, QuantityExpr,
@@ -56,27 +55,20 @@ fn food_filter() -> TargetFilter {
 }
 
 /// CR 701.61a + CR 701.21a: whether the forager has a Food they could actually
-/// sacrifice. Evaluates the same candidate pool as the `Sacrifice` resolver the
-/// Food mode runs (`FilterContext::from_ability` filter match, controlled by the
-/// forager, layer-aware and phased-out-aware via `matches_target_filter`) and
-/// the same legality authority (`can_sacrifice_for_ability`, which reads
-/// "can't sacrifice" statics such as Quark, Humble Proprietor), so the mode is
-/// never offered when the resolver would reject every Food.
+/// sacrifice. Reads the `Sacrifice` resolver's own candidate query
+/// (`sacrifice_candidates`: `FilterContext::from_ability` filter match,
+/// controlled by the forager, layer-aware and phased-out-aware) and its
+/// legality authority (`can_sacrifice_for_ability`, which reads "can't
+/// sacrifice" statics such as Quark, Humble Proprietor), so the mode is never
+/// offered when the resolver would reject every Food.
 fn controls_food(state: &GameState, ability: &ResolvedAbility) -> bool {
     let controller = ability.controller;
     let mut probe =
         build_resolved_from_def(&sacrifice_food_branch(), ability.source_id, controller);
     probe.context = ability.context.clone();
     let filter = food_filter();
-    let ctx = FilterContext::from_ability(&probe);
-    state.battlefield.iter().any(|id| {
-        state.objects.get(id).is_some_and(|obj| {
-            obj.controller == controller
-                && !obj.is_emblem
-                && matches_target_filter(state, *id, &filter, &ctx)
-                && can_sacrifice_for_ability(state, &probe, *id, controller)
-        })
-    })
+    let first_candidate = sacrifice_candidates(state, &probe, &filter, controller).next();
+    first_candidate.is_some()
 }
 
 fn available_modes(state: &GameState, ability: &ResolvedAbility) -> Vec<ForageMode> {

@@ -29087,8 +29087,11 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
     }
 
     /// The census is the printed record that Crackling Emergence's destroy-instead
-    /// Aura substitution is a known misparse, and the staged Destroy batch cannot
-    /// deliver its rider yet, so the row must keep saying so: `MissingEffect`, with the unparsed clause text.
+    /// Aura substitution cannot be delivered by the staged Destroy batch yet, so
+    /// the row must keep saying so: `MissingEffect`. The parser already
+    /// half-lowers the clause into a `Destroy` replacement with an execute body
+    /// (CR 614.1a), which is why the census marker — not the parser alone — is
+    /// what keeps the export face unsupported.
     #[test]
     fn crackling_emergence_census_row_stays_marked() {
         let entry = ConfirmedMisparses::committed()
@@ -29106,6 +29109,57 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
                 .any(|clause| clause.contains("would be destroyed, instead sacrifice this Aura")),
             "the census row must keep the unparsed destroy-instead clause: {:?}",
             entry.clauses
+        );
+
+        // Live-parser witness. This is the printed Oracle text (Scryfall); the
+        // export carries "this Aura", which the parser normalizes to `~`.
+        // `counter_rider_face` has no subtype slot, so Aura enters only through
+        // the printed `Enchant` keyword.
+        let mut face = counter_rider_face(
+            "Crackling Emergence",
+            "Enchant land you control\nEnchanted land is a 3/3 red Spirit creature with haste. It's still a land.\nIf enchanted land would be destroyed, instead sacrifice this Aura and that land gains indestructible until end of turn.",
+            &["Enchant"],
+            &["Enchantment"],
+        );
+        // REACH: the destroy-instead sentence reaches the replacement parser.
+        let destroy = face
+            .replacements
+            .iter()
+            .find(|replacement| replacement.event == ReplacementEvent::Destroy)
+            .unwrap_or_else(|| {
+                panic!(
+                    "the destroy-instead clause must parse to a Destroy replacement: {:?}",
+                    face.replacements
+                )
+            });
+        // The parser half-lowers the clause: the execute body exists even though
+        // the staged Destroy batch cannot deliver its sacrifice-and-grant rider,
+        // so the parse tree alone reports this face as supported.
+        assert!(
+            destroy.execute.is_some(),
+            "the destroy-instead clause is half-lowered into an execute body: {destroy:?}"
+        );
+        // The census marker is therefore load-bearing: stamping it, as the export
+        // does, turns that silent half-lowering into the honest clause-level gap.
+        face.metadata.confirmed_misparse = Some(entry.class);
+        assert!(
+            card_face_gaps(&face)
+                .iter()
+                .any(|gap| gap == entry.class.handler()),
+            "the marked face reports Misparse:missing_effect: {:?}",
+            card_face_gaps(&face)
+        );
+        let mut details = public_gap_details(&card_face_coverage(&face).gaps);
+        attach_misparse_clauses("crackling emergence", &face, &mut details);
+        assert!(
+            details.iter().any(|gap| {
+                gap.handler == entry.class.handler()
+                    && gap
+                        .source_text
+                        .as_deref()
+                        .is_some_and(|text| text.contains("instead sacrifice this Aura"))
+            }),
+            "the census gap must name the destroy-instead clause: {details:?}"
         );
     }
 

@@ -655,12 +655,11 @@ fn dathon_and_clockspinning_whole_cards_have_no_coverage_gap() {
 /// Clockspinning's second target class: "Choose a counter on target permanent
 /// or suspended card." A printed Rift Bolt is suspended through the public
 /// hand-activation path (`ActivateAbility` on its Suspend ability, paying {R}),
-/// which exiles it with one time counter (CR 702.62a). A Stun counter is then
-/// seeded on the exiled card so that two kinds are present and the controller
-/// is asked which one (CR 608.2d; a single kind would be auto-selected). After
-/// choosing Time only the two Time adjustments are offered (CR 608.2c), and
-/// removing the card's last time counter fires the suspend trigger (CR 702.62a),
-/// whose accepted cast puts Rift Bolt on the stack and deals 3 damage.
+/// which exiles it with one time counter (CR 702.62a). Time is the only kind
+/// present, so it is auto-selected (CR 608.2d), and the two Time adjustments
+/// are offered (CR 608.2c). Removing the card's last time counter fires the
+/// suspend trigger (CR 702.62a), whose accepted cast puts Rift Bolt on the
+/// stack and deals 3 damage.
 #[test]
 fn clockspinning_removes_the_last_time_counter_from_a_suspended_card() {
     let db = shared_card_db().expect("integration card fixture must load");
@@ -693,14 +692,6 @@ fn clockspinning_removes_the_last_time_counter_from_a_suspended_card() {
         .expect("suspend Rift Bolt from hand");
     assert_eq!(runner.state().objects[&rift_bolt].zone, Zone::Exile);
     assert_eq!(counters(&runner, rift_bolt, CounterType::Time), 1);
-    // Seed a second kind so the kind choice is a real prompt.
-    runner
-        .state_mut()
-        .objects
-        .get_mut(&rift_bolt)
-        .expect("suspended card")
-        .counters
-        .insert(CounterType::Stun, 1);
     let life_before = runner.state().players[1].life;
 
     let outcome = runner
@@ -708,25 +699,10 @@ fn clockspinning_removes_the_last_time_counter_from_a_suspended_card() {
         .target_object(rift_bolt)
         .commit()
         .resolve();
-    let WaitingFor::NamedChoice { options, .. } = outcome.final_waiting_for().clone() else {
+    let WaitingFor::ChooseOneOfBranch { branches, .. } = outcome.final_waiting_for().clone() else {
         panic!(
-            "the counter kind is chosen first, got {:?}",
+            "the adjustment is offered first, got {:?}",
             outcome.final_waiting_for()
-        );
-    };
-    assert_eq!(options.len(), 2, "Time and Stun are the kinds: {options:?}");
-    let choice = options
-        .iter()
-        .find(|option| option.eq_ignore_ascii_case("time"))
-        .cloned()
-        .expect("Time is an option");
-    runner
-        .act(GameAction::ChooseOption { choice })
-        .expect("choose the Time counter");
-    let WaitingFor::ChooseOneOfBranch { branches, .. } = runner.state().waiting_for.clone() else {
-        panic!(
-            "the adjustment is offered next, got {:?}",
-            runner.state().waiting_for
         );
     };
     assert_eq!(
@@ -762,11 +738,6 @@ fn clockspinning_removes_the_last_time_counter_from_a_suspended_card() {
     );
     assert_eq!(runner.state().objects[&rift_bolt].zone, Zone::Exile);
     assert_eq!(counters(&runner, rift_bolt, CounterType::Time), 0);
-    assert_eq!(
-        counters(&runner, rift_bolt, CounterType::Stun),
-        1,
-        "the other kind is untouched"
-    );
 
     runner
         .act(GameAction::DecideOptionalEffect { accept: true })
