@@ -237,14 +237,14 @@ pub(crate) fn can_sacrifice_for_ability(
 /// illegal option would sacrifice nothing while the "When you do" rider still
 /// fires (Cornered Crook with only a Treasure token Quark bars, CR 701.21a).
 ///
-/// CR 608.2d + CR 609.3: a mandatory count is also infeasible when the pool
-/// holds FEWER permanents than the resolved count — "you may sacrifice three
-/// nonland permanents" cannot be paid with a two-permanent partial sacrifice,
-/// so its "If you do" reward must not follow (mirrors `discard.rs`'s
+/// CR 608.2d: a mandatory exact count is also infeasible when the pool holds
+/// FEWER permanents than the resolved count — "you may sacrifice three nonland
+/// permanents" cannot be paid with a two-permanent partial sacrifice, so its
+/// "If you do" reward must not follow (mirrors `discard.rs`'s
 /// `optional_discard_is_infeasible`). The count is resolved exactly as
-/// [`resolve`] resolves it (peel `UpTo`, clamp non-negative). "Up to N" may
-/// pick fewer and stays feasible on any non-empty pool; a count of zero
-/// imposes no requirement.
+/// [`resolve`] resolves it (peel `UpTo`, clamp non-negative). An "up to N"
+/// count or a count that resolves to zero keeps the pre-existing rule:
+/// infeasible only when the pool is empty.
 ///
 /// The candidate pool is consulted only for filters whose subject is a class of
 /// battlefield permanents. Referent filters (`TriggeringSource`, `ParentTarget`,
@@ -320,7 +320,7 @@ pub(crate) fn optional_sacrifice_is_infeasible(
         .first()
         .copied()
         .unwrap_or(ability.controller);
-    // CR 608.2d + CR 609.3: resolve the required count exactly as [`resolve`]
+    // CR 608.2d: resolve the required count exactly as [`resolve`]
     // does before judging the pool, so an exact "sacrifice N" is infeasible
     // when N legal candidates do not exist. `EntireReferent` (no count) keeps
     // the pre-existing empty-pool rule.
@@ -335,8 +335,9 @@ pub(crate) fn optional_sacrifice_is_infeasible(
         )
     });
     // CR 608.2d: an exact instruction can only be carried out in full, so a
-    // short pool makes the option impossible. CR 609.3: "up to N" — and a count
-    // of zero, which demands nothing — is feasible whenever a candidate exists.
+    // short pool makes the option impossible. An "up to N" count or a count
+    // that resolves to zero keeps the pre-existing rule: infeasible only when
+    // the pool is empty.
     let (bound, exact) = match required {
         Some((count, false)) if count > 0 => (count, true),
         _ => (1, false),
@@ -382,8 +383,11 @@ pub fn resolve(
     // CR 609.3: Resolve the dynamic sacrifice count through
     // `resolve_quantity_with_targets` before attempting the sacrifice so
     // mandatory effects can do as much as possible against the rebound
-    // controller. A missing Sacrifice effect falls back to 1 so the
-    // compatibility branch below preserves existing behavior.
+    // controller. Unlike the optional "you may sacrifice N" gate
+    // ([`optional_sacrifice_is_infeasible`], CR 608.2d), a MANDATORY sacrifice
+    // is not all-or-nothing: a short pool still sacrifices as many eligible
+    // permanents as it can (CR 609.3). A missing Sacrifice effect falls back to
+    // 1 so the compatibility branch below preserves existing behavior.
     // Peel `UpTo` from the count expression to derive the upper-bound
     // expression and the may-pick-fewer flag. Plain
     // `QuantityExpr` (Fixed/Ref/DivideRounded/...) means a mandatory count;
@@ -857,9 +861,10 @@ pub fn resolve(
     let mut selections = Vec::new();
     // CR 701.21a + CR 608.2d: a referent this ability is barred from making its
     // controller sacrifice is an impossible option. Track that exact refusal so
-    // an empty result can suppress the "If you do" rider (Foot Chopper naming a
-    // Treasure token Quark bars) instead of letting it read as a performed
-    // sacrifice. Any other skip reason keeps its own semantics.
+    // an empty result can suppress the "If you do" rider (e.g. a "you may
+    // sacrifice it" referent such as an animated Treasure wearing Foot Chopper,
+    // which Quark bars) instead of letting it read as a performed sacrifice.
+    // Any other skip reason keeps its own semantics.
     let mut refused_by_sacrifice_bar = false;
     for obj_id in targeted_objects {
         // CR 609.3 / CR 608.2b + CR 111.7: a member of this set that no longer
@@ -2994,11 +2999,13 @@ mod tests {
         );
     }
 
-    /// CR 608.2d + CR 609.3: "sacrifice three nonland permanents" is one
-    /// instruction the player can only carry out in full. Two matching
-    /// permanents make the option impossible (its "If you do" reward must not
-    /// follow a partial sacrifice); three satisfy it. "Up to three" may pick
-    /// fewer and stays feasible on the same two-permanent pool.
+    /// CR 608.2d: "sacrifice three nonland permanents" is one instruction the
+    /// player can only carry out in full. Two matching permanents make the
+    /// option impossible (its "If you do" reward must not follow a partial
+    /// sacrifice); three satisfy it. "Up to three" may pick fewer and stays
+    /// feasible on the same two-permanent pool. A dynamic count is judged after
+    /// resolving against the state, and a count that resolves to zero with an
+    /// empty pool keeps the pre-existing empty-pool answer.
     #[test]
     fn optional_sacrifice_exact_count_requires_a_full_pool() {
         let mut state = GameState::new_two_player(42);
@@ -3047,6 +3054,45 @@ mod tests {
                 &ability_with(QuantityExpr::up_to(QuantityExpr::Fixed { value: 3 })),
             ),
             "\"up to three\" is feasible with two permanents"
+        );
+
+        // CR 608.2d: a non-Fixed count is resolved from the live state before
+        // the pool is judged. Two nonland permanents plus two lands resolve the
+        // battlefield-population count to four, above the two-filler nonland
+        // pool, so the option is infeasible even though the count is not
+        // literal.
+        let add_land = |state: &mut GameState, card: u64| {
+            let id = create_object(
+                state,
+                CardId(card),
+                PlayerId(0),
+                format!("Land {card}"),
+                Zone::Battlefield,
+            );
+            state.objects.get_mut(&id).unwrap().card_types.core_types = vec![CoreType::Land];
+            id
+        };
+        add_land(&mut state, 10);
+        add_land(&mut state, 11);
+        let battlefield_count = QuantityExpr::Ref {
+            qty: QuantityRef::ObjectCount {
+                filter: TargetFilter::Typed(TypedFilter::permanent()),
+            },
+        };
+        assert!(
+            optional_sacrifice_is_infeasible(&state, &ability_with(battlefield_count)),
+            "a dynamic count that resolves above the pool is infeasible"
+        );
+
+        // CR 608.2d: a count that resolves to zero keeps the pre-existing
+        // empty-pool answer — no candidate makes the option infeasible.
+        let empty = GameState::new_two_player(42);
+        assert!(
+            optional_sacrifice_is_infeasible(
+                &empty,
+                &ability_with(QuantityExpr::Fixed { value: 0 }),
+            ),
+            "zero with an empty pool keeps the pre-existing empty-pool answer"
         );
 
         add_nonland(&mut state, 3);
@@ -3103,6 +3149,83 @@ mod tests {
             obj.card_types.subtypes.push("Treasure".to_string());
         }
         id
+    }
+
+    /// "You may sacrifice it. If you do, you gain 1 life." as a chain the
+    /// resolver can drive to completion: the root names `referent` and the
+    /// `SequentialSibling` rider is gated on the CR 608.2c/608.2d
+    /// optional-effect-performed signal. The prefilled root context simulates an
+    /// accepted "may" prompt — that latch lives on the ability context, not on
+    /// `GameState`.
+    fn optional_sacrifice_rider_chain(referent: ObjectId) -> ResolvedAbility {
+        let mut rider = ResolvedAbility::new(
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 1 },
+                player: TargetFilter::Controller,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        )
+        .condition(AbilityCondition::effect_performed());
+        rider.sub_link = SubAbilityLink::SequentialSibling;
+
+        let mut ability = make_sacrifice_ability(referent);
+        ability.context.optional_effect_performed = true;
+        ability.sub_ability = Some(Box::new(rider));
+        ability
+    }
+
+    /// CR 608.2d + CR 609.3: an "If you do" rider must not run when the only
+    /// named referent is a sacrifice the controller is barred from making — the
+    /// failed gate (`cost_payment_failed_flag`) overrides any accepted "may"
+    /// latch on the chain.
+    #[test]
+    fn optional_sacrifice_rider_does_not_fire_when_named_referent_is_barred() {
+        let mut state = GameState::new_two_player(42);
+        quark_cant_sacrifice_treasure(&mut state);
+        let treasure = artifact_permanent(&mut state, 1, "Animated Treasure", true);
+        let life_before = state.players[0].life;
+        let ability = optional_sacrifice_rider_chain(treasure);
+        let mut events = Vec::new();
+
+        resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+
+        assert!(
+            state.battlefield.contains(&treasure),
+            "the barred referent must survive"
+        );
+        assert_eq!(
+            state.players[0].life, life_before,
+            "an If-you-do rider must not run off a refused sacrifice"
+        );
+        assert!(state.cost_payment_failed_flag);
+    }
+
+    /// Control for the test above: the same chain naming an unbarred artifact
+    /// sacrifices it and the rider runs.
+    #[test]
+    fn optional_sacrifice_rider_fires_when_named_referent_is_not_barred() {
+        let mut state = GameState::new_two_player(42);
+        quark_cant_sacrifice_treasure(&mut state);
+        let sol_ring = artifact_permanent(&mut state, 1, "Sol Ring", false);
+        let life_before = state.players[0].life;
+        let ability = optional_sacrifice_rider_chain(sol_ring);
+        let mut events = Vec::new();
+
+        resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+
+        assert!(
+            !state.battlefield.contains(&sol_ring),
+            "the unbarred referent must be sacrificed"
+        );
+        assert!(state.players[0].graveyard.contains(&sol_ring));
+        assert_eq!(
+            state.players[0].life,
+            life_before + 1,
+            "the If-you-do rider must run after a performed sacrifice"
+        );
+        assert!(!state.cost_payment_failed_flag);
     }
 
     /// CR 701.21a + CR 608.2d: "you may sacrifice it" naming a Treasure token
