@@ -12,7 +12,7 @@
 //!   mana value 3 or less from your graveyard until this artifact leaves the battlefield.\n{1}{W},
 //!   {T}: Until end of turn, you may cast a creature spell from among cards exiled with this
 //!   artifact without paying its mana cost."
-//!   Assimilation Assessor {3}{U}, Creature - Borg 3/3 (fixture a.jsonl): "When this creature
+//!   Assimilation Assessor {4}{B}, Artifact Creature - Borg 5/5 (fixture a.jsonl): "When this creature
 //!   enters, exile target opponent's graveyard.\nWhenever this creature attacks, assimilate a
 //!   creature card exiled with it. (Put it onto the battlefield under your control with a +1/+1
 //!   counter. It's a Borg artifact creature and loses all other creature types.)"
@@ -53,6 +53,7 @@ use engine::types::ability::{
 use engine::types::game_state::{ExileLink, ExileLinkKind, GameState, LayersDirty, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::keywords::Keyword;
+use engine::types::mana::{ManaCost, ManaCostShard};
 use engine::types::zones::Zone;
 
 const IDOL_OF_ENDURANCE: &str = "When this artifact enters, exile all creature cards with mana \
@@ -213,7 +214,13 @@ fn linked_pile_scan_work_non_exile_candidates_read_no_link() {
     let filter = assessor_pile_filter();
     let mut scenario = GameScenario::new();
     let assessor = scenario
-        .add_creature_from_oracle(P0, "Assimilation Assessor", 3, 3, ASSIMILATION_ASSESSOR)
+        .add_creature_from_oracle(P0, "Assimilation Assessor", 5, 5, ASSIMILATION_ASSESSOR)
+        .as_artifact_creature()
+        .with_subtypes(vec!["Borg"])
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Black],
+            generic: 4,
+        })
         .id();
     let battlefield: Vec<ObjectId> = (0..40)
         .map(|n| scenario.add_creature(P1, &format!("Bear {n}"), 2, 2).id())
