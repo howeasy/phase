@@ -5490,8 +5490,8 @@ pub enum CastingPermission {
         /// CR 608.2c + CR 611.2a: Identity of the one cast budget this grant shares
         /// with its sibling permissions. `Some` only for a grant whose printed
         /// cap is exactly one cast over a source-linked pile ("until end of turn,
-        /// you may cast a spell from among cards exiled with this enchantment" —
-        /// Court of Locthwain, Idol of Endurance): `record_lingering_permissions`
+        /// you may cast a creature spell from among cards exiled with this artifact" —
+        /// Idol of Endurance, Serpent's Soul-Jar): `record_lingering_permissions`
         /// writes one permission per pile card, and the first cast made under any
         /// of them spends the group (`casting::consume_single_use_play_from_exile`),
         /// which strips the rest. The id is a fresh `TrackedSetId` that names no

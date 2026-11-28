@@ -2018,7 +2018,7 @@ pub enum StaticMode {
     /// (per-turn-scoped), not the controller's graveyard. Distinct from
     /// `TopOfLibraryCastPermission`: the eligible cards are a tracked exile
     /// set carved out by a prior exile-with-source effect, not the live top
-    /// of library. Distinct from `Effect::CastFromZone` (Court of Locthwain,
+    /// of library. Distinct from `Effect::CastFromZone` (Idol of Endurance,
     /// Mizzix's Mastery): that is a one-shot effect that grants per-card
     /// permissions; this is a continuous static that grants the controller a
     /// recurring per-turn cast slot.

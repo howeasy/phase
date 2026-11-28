@@ -41437,7 +41437,7 @@ fn try_parse_cast_effect(lower: &str, ctx: &ParseContext) -> Option<Effect> {
         };
         // CR 608.2c + CR 611.2a: a printed cap of exactly one cast ("you may cast A
         // spell from among cards exiled with ~") under a STATED duration ("until
-        // end of turn" — Court of Locthwain, Idol of Endurance, Serpent's Soul-Jar)
+        // end of turn" — Idol of Endurance, Serpent's Soul-Jar)
         // bounds the whole grant, so the permissions it writes share one budget
         // (`SharedSingleCast`, chosen through the pairing authority). Every
         // other shape keeps the per-object permission; see the residual above.

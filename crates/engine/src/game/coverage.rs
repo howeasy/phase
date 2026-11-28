@@ -8386,6 +8386,7 @@ pub fn compute_card_face_coverage(
         &mut missing,
     );
     check_shared_source_graveyard_slot(face, &mut missing);
+    check_shared_budget_pile_election(face, &mut missing);
     check_confirmed_misparse(face, &mut missing);
     check_unrun_card_type(face, &mut missing);
     match entry_projection {
@@ -8888,6 +8889,146 @@ fn check_shared_source_graveyard_slot(face: &CardFace, missing: &mut Vec<String>
         > 1
     {
         push_shared_source_graveyard_slot_gap(missing);
+    }
+}
+
+/// The coverage label for a face that writes a shared-budget free cast over a
+/// source-linked exile pile AND another cast/play route over exiled cards.
+///
+/// CR 601.2b + CR 118.9a: the player announces which method of casting a spell
+/// uses (the free permission versus the ordinary one), and only one alternative
+/// cost applies to a spell. Court of Locthwain is the printed example: "You may
+/// play that card for as long as it remains exiled, and mana of any type can be
+/// spent to cast it. If you're the monarch, until end of turn, you may cast a
+/// spell from among cards exiled with this enchantment without paying its mana
+/// cost" puts two routes over one pile, so paying for one card and then casting
+/// another free is a legal sequence. `GameAction::CastSpell` carries no
+/// permission selector, so the free-first election
+/// (`casting::selected_object_cast_permission_index`, `actions.rs`) spends the
+/// shared budget before the player can pay the ordinary cost, and that sequence
+/// is lost. The face fails closed until the engine can offer the election
+/// (ticket 370). Keyed on the typed shape, not on a card: a face whose only
+/// pile route is the shared-budget cast (Idol of Endurance, Serpent's Soul-Jar)
+/// has nothing to elect and stays supported.
+pub const SHARED_BUDGET_PILE_ELECTION_GAP: &str = "LingeringPermission:shared_budget_pile_election";
+
+fn push_shared_budget_pile_election_gap(missing: &mut Vec<String>) {
+    if !missing
+        .iter()
+        .any(|label| label == SHARED_BUDGET_PILE_ELECTION_GAP)
+    {
+        missing.push(SHARED_BUDGET_PILE_ELECTION_GAP.to_string());
+    }
+}
+
+/// The cast/play routes one face writes over source-linked exiled cards.
+#[derive(Default)]
+struct PileCastRoutes {
+    /// `CastFromZone` over the source's pile whose lingering permissions share
+    /// one cast budget (CR 608.2c + CR 611.2a).
+    shared_budget_casts: usize,
+    /// Every other route the face writes over exiled cards.
+    other_routes: usize,
+}
+
+impl PileCastRoutes {
+    /// The face's routes over exiled cards: its abilities, trigger bodies and
+    /// replacement payloads, every ability granted by a modification, and its
+    /// static permissions (including statics granted to other objects).
+    fn of_face(face: &CardFace) -> Self {
+        let mut routes = Self::default();
+        for ability in &face.abilities {
+            routes.observe_ability(ability);
+        }
+        for execute in face
+            .triggers
+            .iter()
+            .filter_map(|trigger| trigger.execute.as_deref())
+        {
+            routes.observe_ability(execute);
+        }
+        for replacement in &face.replacements {
+            visit_replacement_ability_payloads(replacement, |_, payload| {
+                routes.observe_ability(payload);
+            });
+        }
+        for definition in &face.static_abilities {
+            let _ = definition.walk_self_and_granted(&mut |granted| {
+                routes.observe_static(granted);
+                ControlFlow::Continue(())
+            });
+            visit_static_modifications(definition, &mut |modification| {
+                routes.observe_grant(modification);
+            });
+        }
+        routes
+    }
+
+    fn observe_ability(&mut self, def: &AbilityDefinition) {
+        let mut effects = Vec::new();
+        crate::analysis::ability_graph::collect_effects(def, &mut effects);
+        for (effect, _) in effects {
+            self.observe_effect(effect);
+        }
+        visit_ability_modifications(def, TokenStaticTraversal::Include, &mut |modification| {
+            self.observe_grant(modification);
+        });
+    }
+
+    fn observe_grant(&mut self, modification: &ContinuousModification) {
+        if let ContinuousModification::GrantAbility { definition } = modification {
+            self.observe_ability(definition);
+        }
+    }
+
+    fn observe_effect(&mut self, effect: &Effect) {
+        use crate::types::ability::{CastFromZoneDriver, LingeringCastBudget};
+        match effect {
+            Effect::CastFromZone { target, driver, .. } if target.references_exiled_by_source() => {
+                match driver {
+                    CastFromZoneDriver::LingeringPermission {
+                        budget: LingeringCastBudget::SharedSingleCast,
+                    } => self.shared_budget_casts += 1,
+                    CastFromZoneDriver::LingeringPermission {
+                        budget: LingeringCastBudget::PerObject,
+                    } => self.other_routes += 1,
+                    // CR 608.2g: cast as the granting ability resolves, so no
+                    // later `CastSpell` action exists to elect between routes.
+                    CastFromZoneDriver::DuringResolution
+                    | CastFromZoneDriver::ResolutionWindow { .. } => {}
+                }
+            }
+            // Any permission the face writes onto exiled cards counts as a
+            // route over the pile: the grant's target is a tracked set whose
+            // membership in the source's pile the AST cannot prove, and
+            // over-approximating only withholds a support claim.
+            Effect::GrantCastingPermission { .. } => self.other_routes += 1,
+            _ => {}
+        }
+    }
+
+    fn observe_static(&mut self, definition: &StaticDefinition) {
+        use crate::types::statics::ExileCardPool;
+        if let StaticMode::ExileCastPermission { pool, .. } = &definition.mode {
+            match pool {
+                ExileCardPool::ThisTurn | ExileCardPool::Persistent => self.other_routes += 1,
+                // A counter-keyed pool is a different pile, not the source's.
+                ExileCardPool::CounterLinked { .. } => {}
+            }
+        }
+    }
+
+    /// CR 601.2b + CR 118.9a: electing between two methods of casting needs
+    /// at least two routes over the pile, one of them the shared-budget cast.
+    fn needs_player_election(&self) -> bool {
+        self.shared_budget_casts > 0 && self.other_routes > 0
+    }
+}
+
+/// See `SHARED_BUDGET_PILE_ELECTION_GAP`.
+fn check_shared_budget_pile_election(face: &CardFace, missing: &mut Vec<String>) {
+    if PileCastRoutes::of_face(face).needs_player_election() {
+        push_shared_budget_pile_election_gap(missing);
     }
 }
 
@@ -22485,6 +22626,159 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
         .affected(TargetFilter::Typed(
             crate::types::ability::TypedFilter::creature(),
         ))
+    }
+
+    fn pile_cast(driver: crate::types::ability::CastFromZoneDriver) -> AbilityDefinition {
+        AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::CastFromZone {
+                target: TargetFilter::And {
+                    filters: vec![
+                        TargetFilter::Typed(crate::types::ability::TypedFilter::creature()),
+                        TargetFilter::ExiledBySource,
+                    ],
+                },
+                without_paying_mana_cost: true,
+                mode: crate::types::ability::CardPlayMode::Cast,
+                cast_transformed: false,
+                alt_ability_cost: None,
+                constraint: None,
+                duration: Some(crate::types::ability::Duration::UntilEndOfTurn),
+                driver,
+                mana_spend_permission: None,
+                additional_cost: None,
+                cast_cost_modifier: None,
+            },
+        )
+    }
+
+    fn shared_budget_pile_cast() -> AbilityDefinition {
+        pile_cast(
+            crate::types::ability::CastFromZoneDriver::LingeringPermission {
+                budget: crate::types::ability::LingeringCastBudget::SharedSingleCast,
+            },
+        )
+    }
+
+    fn play_from_exile_grant() -> AbilityDefinition {
+        AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::GrantCastingPermission {
+                permission: serde_json::from_value(serde_json::json!({
+                    "type": "PlayFromExile", "duration": "Permanent", "granted_to": 0
+                }))
+                .expect("PlayFromExile permission deserializes"),
+                target: TargetFilter::Any,
+                grantee: Default::default(),
+            },
+        )
+    }
+
+    fn exile_cast_static(pool: crate::types::statics::ExileCardPool) -> StaticDefinition {
+        StaticDefinition::new(StaticMode::ExileCastPermission {
+            frequency: crate::types::statics::CastFrequency::Unlimited,
+            play_mode: crate::types::ability::CardPlayMode::Cast,
+            cost: Default::default(),
+            pool,
+            timing: Default::default(),
+            mana_spend_permission: None,
+            grants_flash: false,
+            extra_cost: None,
+            enters_with_counter: None,
+            grantee: crate::types::statics::ExileCastGrantee::SourceController,
+        })
+    }
+
+    fn face_with_abilities(abilities: Vec<AbilityDefinition>) -> CardFace {
+        let mut face = make_face();
+        face.abilities = abilities;
+        face
+    }
+
+    fn has_election_gap(face: &CardFace) -> bool {
+        card_face_gaps(face).contains(&SHARED_BUDGET_PILE_ELECTION_GAP.to_string())
+    }
+
+    /// CR 601.2b + CR 118.9a: a shared-budget pile cast next to another route
+    /// over exiled cards is a player election the engine can't offer, so the
+    /// face is unsupported with the named reason; reported once.
+    #[test]
+    fn shared_budget_pile_cast_beside_a_play_grant_is_a_named_gap() {
+        let face = face_with_abilities(vec![shared_budget_pile_cast(), play_from_exile_grant()]);
+        assert!(has_election_gap(&face));
+        assert_eq!(
+            card_face_gaps(&face)
+                .iter()
+                .filter(|label| *label == SHARED_BUDGET_PILE_ELECTION_GAP)
+                .count(),
+            1
+        );
+        assert!(!coverage_result_for_face(face).supported);
+
+        // Reach guards: each route alone is not the shape.
+        assert!(!has_election_gap(&face_with_abilities(vec![
+            shared_budget_pile_cast()
+        ])));
+        assert!(!has_election_gap(&face_with_abilities(vec![
+            play_from_exile_grant()
+        ])));
+    }
+
+    #[test]
+    fn shared_budget_pile_election_gap_reads_every_route_carrier() {
+        use crate::types::ability::CastFromZoneDriver;
+        use crate::types::statics::ExileCardPool;
+        // A static permission over the source's persistent pile is a second route.
+        let mut with_static = face_with_abilities(vec![shared_budget_pile_cast()]);
+        with_static
+            .static_abilities
+            .push(exile_cast_static(ExileCardPool::Persistent));
+        assert!(has_election_gap(&with_static));
+
+        // ... a counter-keyed pool is a different pile.
+        let mut counter_pool = face_with_abilities(vec![shared_budget_pile_cast()]);
+        counter_pool
+            .static_abilities
+            .push(exile_cast_static(ExileCardPool::CounterLinked {
+                matcher: CounterMatch::Any,
+            }));
+        assert!(!has_election_gap(&counter_pool));
+
+        // A standing per-object pile cast is a second route.
+        assert!(has_election_gap(&face_with_abilities(vec![
+            shared_budget_pile_cast(),
+            pile_cast(CastFromZoneDriver::PER_OBJECT_LINGERING),
+        ])));
+        // ... a cast during resolution has no later election.
+        assert!(!has_election_gap(&face_with_abilities(vec![
+            shared_budget_pile_cast(),
+            pile_cast(CastFromZoneDriver::DuringResolution),
+        ])));
+
+        // Court's layout: both routes chained under one trigger body.
+        let mut chained = play_from_exile_grant();
+        chained.sub_ability = Some(Box::new(shared_budget_pile_cast()));
+        let mut in_trigger = make_face();
+        in_trigger.triggers.push(TriggerDefinition {
+            execute: Some(Box::new(chained)),
+            ..TriggerDefinition::new(TriggerMode::Phase)
+        });
+        assert!(has_election_gap(&in_trigger));
+
+        // The shape inside a granted ability is read too.
+        let mut granted = make_face();
+        granted
+            .static_abilities
+            .push(StaticDefinition::continuous().modifications(vec![
+                ContinuousModification::GrantAbility {
+                    definition: Box::new({
+                        let mut def = shared_budget_pile_cast();
+                        def.sub_ability = Some(Box::new(play_from_exile_grant()));
+                        def
+                    }),
+                },
+            ]));
+        assert!(has_election_gap(&granted));
     }
 
     /// Two once-per-turn graveyard permissions printed on one face share the

@@ -18866,7 +18866,7 @@ fn when_you_do_mandatory_parent_did_nothing(
 ///   may play that card this turn") moves nothing (Cait Sith, Fortune Teller;
 ///   Hidetsugu, Devouring Chaos). Scoped to the direct reader: other consumers
 ///   after a permission node keep the established cleared ledger, because
-///   "cards exiled with this enchantment" readers (Court of Locthwain) would
+///   "cards exiled with this artifact" readers (Idol of Endurance) would
 ///   otherwise narrow to the current resolution's exile. Deliberately excludes
 ///   `CastFromZone`, which can also cast during resolution.
 /// - CR 121.1: a draw (putting the top card of a library into a hand) is not
@@ -28911,8 +28911,7 @@ fn resolve_chain_body(
         // an empty moving clause clears, and a nonmoving clause (Xathrid
         // Demon's "each opponent loses life ...") restores this ledger for the
         // fallback that follows. Every other non-moving node keeps the
-        // ordinary reset (Court of Locthwain's linked-exile permission,
-        // CR 406.6).
+        // ordinary reset (a linked-exile permission reader, CR 406.6).
         let ledger_before_fan_out = state.last_zone_changed_ids.clone();
         // CR 608.2f (F1): a gated bare-token fan-out resolves as one
         // simultaneous action (one compound event, one pipeline run), so a
