@@ -10,8 +10,8 @@
 //! The face is reported unsupported until the mass move declares the chosen
 //! player. The label is keyed to the pair of shapes: Release to Memory (the same
 //! opponent graveyard mass exile, no assimilate reader) stays gap-free for this,
-//! and the assimilate-only faces (Borg Cube, Mimic Vat, Mysterious Limousine,
-//! Duplicity, Moonring Mirror, Mirror of Life Trapping) never carry it.
+//! and the faces without that mass exile (Borg Cube, Mimic Vat, Mysterious
+//! Limousine, Duplicity, Moonring Mirror, Mirror of Life Trapping) never carry it.
 
 use engine::database::CardDatabase;
 use engine::game::coverage::{
