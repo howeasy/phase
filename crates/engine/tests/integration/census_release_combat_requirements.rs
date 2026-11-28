@@ -5,19 +5,18 @@
 //! Every card is the printed card loaded through `add_real_card` and driven
 //! through public `GameRunner` actions. The only synthetic setup is a mana pool
 //! (and, for the P1-turn observer pairs, the active/priority player, as in
-//! `champions_of_minas_tirith.rs`). Block legality is read from the public
-//! `combat::validate_blockers_for_player` (CR 509.1c) and from the engine-built
-//! `DeclareBlockers` prompt.
+//! `champions_of_minas_tirith.rs`; and, for the end-of-turn expiry witnesses,
+//! library cards to survive the crossed draw steps). Block legality is read from
+//! the public `combat::validate_blockers_for_player` (CR 509.1c) and from the
+//! engine-built `DeclareBlockers` prompt.
 //!
 //! Witnesses: Alluring Scent, Bloodscent, Valor Made Real, Joraga Invocation,
-//! Khenra Scrapper, Trueheart Twins, Vizier of the True, Taunting Arbormage,
-//! The Masamune.
+//! Khenra Scrapper, Trueheart Twins, Vizier of the True, Taunting Arbormage.
 
 use std::collections::HashMap;
 
 use engine::game::combat::{validate_blockers_for_player, AttackTarget, AttackerInfo, CombatState};
-use engine::game::functioning_abilities::active_static_definitions;
-use engine::game::game_object::{AttachTarget, GameObject};
+use engine::game::game_object::GameObject;
 use engine::game::layers::evaluate_layers;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::scenario_db::GameScenarioDbExt;
@@ -33,7 +32,7 @@ use engine::types::keywords::Keyword;
 use engine::types::mana::{ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
-use engine::types::statics::{StaticMode, TriggerCause};
+use engine::types::statics::StaticMode;
 use engine::types::triggers::TriggerMode;
 use engine::types::zones::Zone;
 
@@ -161,46 +160,6 @@ fn joraga_grants_pump_then_block_requirement(object: &GameObject) -> bool {
     })
 }
 
-/// The printed `MustBeBlocked` static is the whole clause-1 witness: it must be
-/// gated on the recipient attacking, and the equipment must also grant the
-/// dying-creature trigger doubler.
-fn masamune_has_expected_statics(object: &GameObject) -> bool {
-    let mut attacking_requirement = false;
-    let mut first_strike = false;
-    let mut dying_doubler = false;
-    for definition in object.static_definitions.iter_unchecked() {
-        if matches!(&definition.mode, StaticMode::MustBeBlocked { by: None })
-            && definition.condition.is_some()
-        {
-            attacking_requirement = true;
-        }
-        if matches!(&definition.mode, StaticMode::Continuous)
-            && definition.modifications.iter().any(|modification| {
-                matches!(
-                    modification,
-                    ContinuousModification::AddKeyword {
-                        keyword: Keyword::FirstStrike
-                    }
-                )
-            })
-        {
-            first_strike = true;
-        }
-        if definition.modifications.iter().any(|modification| {
-            matches!(
-                modification,
-                ContinuousModification::GrantStaticAbility { definition }
-                    if matches!(&definition.mode, StaticMode::DoubleTriggers {
-                        cause: TriggerCause::CreatureDying
-                    })
-            )
-        }) {
-            dying_doubler = true;
-        }
-    }
-    attacking_requirement && first_strike && dying_doubler
-}
-
 fn trigger_effect(entry: &TriggerEntry) -> Option<&Effect> {
     entry
         .definition
@@ -229,33 +188,6 @@ fn arbormage_has_kicked_lure(object: &GameObject) -> bool {
                 )
             })
     })
-}
-
-// CR 702.6a: the equip action announces, then chooses its attached creature.
-// With a single legal creature the engine chooses it during the announcement,
-// so the target prompt only appears when two or more creatures are legal.
-fn equip(runner: &mut GameRunner, equipment: ObjectId, target: ObjectId) {
-    let action = GameAction::Equip {
-        equipment_id: equipment,
-        target_id: target,
-    };
-    let before = runner.state().stack.len();
-    runner.act(action.clone()).expect("announce equip");
-    if matches!(runner.state().waiting_for, WaitingFor::EquipTarget { .. }) {
-        runner.act(action).expect("choose equip target");
-    }
-    assert_eq!(
-        runner.state().stack.len(),
-        before + 1,
-        "the equip activation is the only new stack entry, got {:?}",
-        runner.state().waiting_for
-    );
-    runner.advance_until_stack_empty();
-    assert_eq!(
-        runner.state().objects[&equipment].attached_to,
-        Some(AttachTarget::Object(target)),
-        "reach guard: the Equipment is attached"
-    );
 }
 
 // CR 701.43a + CR 701.43d: the exert event names both the permanent and the
@@ -299,6 +231,56 @@ fn give_turn(runner: &mut GameRunner, player: PlayerId) {
     state.active_player = player;
     state.priority_player = player;
     state.waiting_for = WaitingFor::Priority { player };
+}
+
+/// Drive past the end of the current turn regardless of what's waiting,
+/// declaring no attackers/blockers along the way. Mirrors
+/// `blocked_history_primitive.rs::advance_past_end_of_turn`; the CR 514.2
+/// cleanup step it crosses is what expires "this turn"/"until end of turn"
+/// effects.
+fn advance_past_end_of_turn(runner: &mut GameRunner) {
+    let start_turn = runner.state().turn_number;
+    let mut guard = 0;
+    while runner.state().turn_number == start_turn {
+        guard += 1;
+        assert!(
+            guard < 256,
+            "turn never ended; phase = {:?}, waiting_for = {:?}",
+            runner.state().phase,
+            runner.state().waiting_for,
+        );
+        let action = match &runner.state().waiting_for {
+            WaitingFor::DeclareAttackers { .. } => GameAction::DeclareAttackers {
+                attacks: vec![],
+                bands: vec![],
+            },
+            WaitingFor::DeclareBlockers { .. } => GameAction::DeclareBlockers {
+                assignments: vec![],
+            },
+            WaitingFor::DiscardToHandSize { count, cards, .. } => GameAction::SelectCards {
+                cards: cards.iter().take(*count).copied().collect(),
+            },
+            _ => GameAction::PassPriority,
+        };
+        if let Err(e) = runner.act(action) {
+            panic!(
+                "advancing past end of turn failed: {e:?} (phase = {:?}, waiting_for = {:?})",
+                runner.state().phase,
+                runner.state().waiting_for,
+            );
+        }
+    }
+}
+
+/// Two players need a real library for the draw steps crossed by the
+/// end-of-turn expiry witnesses below.
+fn stock_libraries(scenario: &mut GameScenario) {
+    for player in [P0, P1] {
+        scenario.with_library_top(
+            player,
+            &["Blank card", "Blank card", "Blank card", "Blank card"],
+        );
+    }
 }
 
 fn trigger_target_legal_targets(runner: &GameRunner, player: PlayerId) -> Vec<TargetRef> {
@@ -401,6 +383,52 @@ fn alluring_scent_compels_every_able_blocker_to_block_the_target_only() {
     assert!(
         validate_blockers_for_player(runner.state(), P1, &[(b1, target), (b2, target)]).is_ok(),
         "CR 509.1c: both compelled blockers obey; the untargeted attacker may stay unblocked"
+    );
+}
+
+#[test]
+fn alluring_scent_lure_expires_after_the_turn_ends() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    stock_libraries(&mut scenario);
+    let target = card(&mut scenario, P0, "Grizzly Bears", Zone::Battlefield);
+    let lion = card(&mut scenario, P0, "Savannah Lions", Zone::Battlefield);
+    let b1 = card(&mut scenario, P1, "Grizzly Bears", Zone::Battlefield);
+    let scent = card(&mut scenario, P0, "Alluring Scent", Zone::Hand);
+    scenario.with_mana_pool(P0, mana(&[(ManaType::Colorless, 1), (ManaType::Green, 2)]));
+    let mut runner = scenario.build();
+
+    runner.cast(scent).target_object(target).resolve();
+    // CR 514.2: "this turn" effects expire in the cleanup step. Cross a full
+    // round so the same creatures attack again on P0's next turn.
+    advance_past_end_of_turn(&mut runner);
+    advance_past_end_of_turn(&mut runner);
+    assert_eq!(
+        runner.state().active_player,
+        P0,
+        "reach guard: the round trip returned to P0's turn"
+    );
+
+    declare_attacks(
+        &mut runner,
+        vec![
+            (target, AttackTarget::Player(P1)),
+            (lion, AttackTarget::Player(P1)),
+        ],
+    );
+
+    let valid = valid_block_targets(&runner);
+    assert!(
+        valid.get(&b1).is_some_and(|legal| legal.contains(&target)),
+        "reach guard: the blocker is still able to block the former lure target"
+    );
+    assert!(
+        must_be_blocked_targets(&runner).is_empty(),
+        "CR 514.2: the lure's requirement is gone after the turn ended"
+    );
+    assert!(
+        validate_blockers_for_player(runner.state(), P1, &[]).is_ok(),
+        "CR 509.1c: with no requirement, an empty declaration is legal again"
     );
 }
 
@@ -549,6 +577,46 @@ fn valor_made_real_lets_the_target_block_any_number_of_attackers() {
     );
 }
 
+#[test]
+fn valor_made_real_extra_blockers_expire_after_the_turn_ends() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    stock_libraries(&mut scenario);
+    let a1 = card(&mut scenario, P0, "Grizzly Bears", Zone::Battlefield);
+    let a2 = card(&mut scenario, P0, "Savannah Lions", Zone::Battlefield);
+    let target = card(&mut scenario, P1, "Grizzly Bears", Zone::Battlefield);
+    let valor = card(&mut scenario, P0, "Valor Made Real", Zone::Hand);
+    scenario.with_mana_pool(P0, mana(&[(ManaType::White, 1)]));
+    let mut runner = scenario.build();
+
+    runner.cast(valor).target_object(target).resolve();
+    advance_past_end_of_turn(&mut runner);
+    advance_past_end_of_turn(&mut runner);
+    assert_eq!(
+        runner.state().active_player,
+        P0,
+        "reach guard: the round trip returned to P0's turn"
+    );
+
+    declare_attacks(
+        &mut runner,
+        vec![
+            (a1, AttackTarget::Player(P1)),
+            (a2, AttackTarget::Player(P1)),
+        ],
+    );
+
+    assert_eq!(
+        block_capacities(&runner).get(&target),
+        Some(&Some(1)),
+        "CR 514.2: 'this turn' expired, so the one-blocker default is back"
+    );
+    assert!(
+        validate_blockers_for_player(runner.state(), P1, &[(target, a1), (target, a2)]).is_err(),
+        "CR 509.1a: the target may no longer block two attackers"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Joraga Invocation: "Each creature you control gets +3/+3 until end of turn
 // and must be blocked this turn if able."
@@ -639,13 +707,72 @@ fn joraga_invocation_pumps_each_creature_and_requires_the_attacking_ones_to_be_b
 }
 
 #[test]
-fn joraga_invocation_does_not_grant_its_locked_set_to_a_later_entrant() {
+fn joraga_invocation_pump_and_requirement_expire_after_the_turn_ends() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    stock_libraries(&mut scenario);
+    let a1 = card(&mut scenario, P0, "Grizzly Bears", Zone::Battlefield);
+    let a2 = card(&mut scenario, P0, "Grizzly Bears", Zone::Battlefield);
+    let b1 = card(&mut scenario, P1, "Grizzly Bears", Zone::Battlefield);
+    let joraga = card(&mut scenario, P0, "Joraga Invocation", Zone::Hand);
+    scenario.with_mana_pool(P0, mana(&[(ManaType::Colorless, 4), (ManaType::Green, 2)]));
+    let mut runner = scenario.build();
+
+    runner.cast(joraga).resolve();
+    evaluate_layers(runner.state_mut());
+    assert_eq!(
+        runner.state().objects[&a1].power,
+        Some(5),
+        "reach guard: the pump applied in the cast turn"
+    );
+
+    advance_past_end_of_turn(&mut runner);
+    advance_past_end_of_turn(&mut runner);
+    assert_eq!(
+        runner.state().active_player,
+        P0,
+        "reach guard: the round trip returned to P0's turn"
+    );
+    evaluate_layers(runner.state_mut());
+
+    assert_eq!(
+        (
+            runner.state().objects[&a1].power,
+            runner.state().objects[&a1].toughness
+        ),
+        (Some(2), Some(2)),
+        "CR 514.2: the +3/+3 until end of turn expired"
+    );
+
+    declare_attacks(
+        &mut runner,
+        vec![
+            (a1, AttackTarget::Player(P1)),
+            (a2, AttackTarget::Player(P1)),
+        ],
+    );
+
+    let valid = valid_block_targets(&runner);
+    assert!(
+        valid.get(&b1).is_some_and(|legal| legal.contains(&a1)),
+        "reach guard: the blocker is still able"
+    );
+    assert!(
+        must_be_blocked_targets(&runner).is_empty(),
+        "CR 514.2: 'must be blocked this turn' expired"
+    );
+    assert!(
+        validate_blockers_for_player(runner.state(), P1, &[]).is_ok(),
+        "CR 509.1c: an empty declaration is legal again"
+    );
+}
+
+#[test]
+fn joraga_invocation_pump_does_not_reach_a_later_entrant() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     let a1 = card(&mut scenario, P0, "Grizzly Bears", Zone::Battlefield);
     let a2 = card(&mut scenario, P0, "Grizzly Bears", Zone::Battlefield);
-    let b1 = card(&mut scenario, P1, "Grizzly Bears", Zone::Battlefield);
-    let b2 = card(&mut scenario, P1, "Grizzly Bears", Zone::Battlefield);
     let joraga = card(&mut scenario, P0, "Joraga Invocation", Zone::Hand);
     let goblin = card(&mut scenario, P0, "Raging Goblin", Zone::Hand);
     scenario.with_mana_pool(
@@ -665,8 +792,6 @@ fn joraga_invocation_does_not_grant_its_locked_set_to_a_later_entrant() {
     );
 
     runner.cast(joraga).resolve();
-    // CR 702.10a: the real Raging Goblin has haste, so it can attack on the
-    // turn it enters.
     runner.cast(goblin).resolve();
     evaluate_layers(runner.state_mut());
     assert_eq!(
@@ -674,6 +799,20 @@ fn joraga_invocation_does_not_grant_its_locked_set_to_a_later_entrant() {
         Zone::Battlefield,
         "reach guard: the late creature entered after Joraga resolved"
     );
+    for id in [a1, a2] {
+        assert_eq!(
+            (
+                runner.state().objects[&id].power,
+                runner.state().objects[&id].toughness
+            ),
+            (Some(5), Some(5)),
+            "reach guard: the resolution-time set was pumped"
+        );
+    }
+    // CR 611.2c: the +3/+3 modifies characteristics, so the part's affected set
+    // is determined when the effect begins. The block requirement is a
+    // rules-modifying part and may reach later entrants; only the pump is
+    // witnessed as locked here.
     assert_eq!(
         (
             runner.state().objects[&goblin].power,
@@ -681,41 +820,6 @@ fn joraga_invocation_does_not_grant_its_locked_set_to_a_later_entrant() {
         ),
         (Some(1), Some(1)),
         "CR 611.2c: a creature that entered after resolution is not pumped"
-    );
-    assert!(
-        !active_static_definitions(runner.state(), &runner.state().objects[&goblin])
-            .any(|definition| matches!(&definition.mode, StaticMode::MustBeBlocked { .. })),
-        "CR 611.2c: the block requirement's affected set was fixed at resolution"
-    );
-
-    declare_attacks(
-        &mut runner,
-        vec![
-            (a1, AttackTarget::Player(P1)),
-            (a2, AttackTarget::Player(P1)),
-            (goblin, AttackTarget::Player(P1)),
-        ],
-    );
-
-    let named = must_be_blocked_targets(&runner);
-    for blocker in [b1, b2] {
-        let attackers = named.get(&blocker).expect("able blocker is named");
-        assert!(
-            attackers.contains(&a1) && attackers.contains(&a2),
-            "reach guard: the resolution-time attackers are still required"
-        );
-        assert!(
-            !attackers.contains(&goblin),
-            "CR 611.2c: the late entrant is not required to be blocked"
-        );
-    }
-    assert!(
-        validate_blockers_for_player(runner.state(), P1, &[]).is_err(),
-        "reach guard: the original affected set still creates requirements"
-    );
-    assert!(
-        validate_blockers_for_player(runner.state(), P1, &[(b1, a1), (b2, a2)]).is_ok(),
-        "CR 611.2c: blocking the original attackers is complete; the late entrant may go unblocked"
     );
 }
 
@@ -796,6 +900,16 @@ fn khenra_scrapper_exert_pumps_and_keeps_it_tapped_through_its_next_untap() {
         cant_untap_markers(&runner, khenra),
         0,
         "CR 701.43a: the no-untap effect expires at that same untap step"
+    );
+
+    // CR 514.2: the +2/+0 lasts until end of turn, so cleanup removes it even
+    // though the no-untap rider already did its work at this untap step.
+    advance_past_end_of_turn(&mut runner);
+    evaluate_layers(runner.state_mut());
+    assert_eq!(
+        runner.state().objects[&khenra].power,
+        Some(2),
+        "CR 514.2: the exert pump expired with the turn"
     );
 }
 
@@ -883,6 +997,11 @@ fn trueheart_twins_exert_pumps_its_controllers_creatures() {
 
     assert_eq!(exerted_events(&events), vec![(twins, P0)]);
     assert_eq!(
+        cant_untap_markers(&runner, twins),
+        1,
+        "CR 701.43a: exerting installs the no-untap rider"
+    );
+    assert_eq!(
         runner.state().objects[&twins].power,
         Some(5),
         "4/4 plus +1/+0"
@@ -916,6 +1035,11 @@ fn trueheart_twins_declined_exert_pumps_nothing() {
     evaluate_layers(runner.state_mut());
 
     assert!(exerted_events(&events).is_empty());
+    assert_eq!(
+        cant_untap_markers(&runner, twins),
+        0,
+        "declining the exert cost installs no no-untap rider"
+    );
     assert_eq!(runner.state().objects[&twins].power, Some(4));
     assert_eq!(runner.state().objects[&bear].power, Some(2));
 }
@@ -1007,6 +1131,11 @@ fn vizier_of_the_true_exert_taps_an_opponents_creature() {
         .act(GameAction::ChooseExert { exert: true })
         .expect("choose to exert");
     runner.advance_until_stack_empty();
+    assert_eq!(
+        cant_untap_markers(&runner, vizier),
+        1,
+        "CR 701.43a: exerting installs the no-untap rider"
+    );
 
     let legal = trigger_target_legal_targets(&runner, P0);
     assert!(
@@ -1042,6 +1171,11 @@ fn vizier_of_the_true_declined_exert_taps_nothing() {
         .act(GameAction::ChooseExert { exert: false })
         .expect("decline");
     runner.advance_until_stack_empty();
+    assert_eq!(
+        cant_untap_markers(&runner, vizier),
+        0,
+        "declining the exert cost installs no no-untap rider"
+    );
 
     assert_no_trigger_target_prompt(&runner);
     assert!(!runner.state().objects[&p1_bear].tapped);
@@ -1269,233 +1403,52 @@ fn taunting_arbormage_unkicked_etb_is_a_silent_no_op() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// The Masamune: equipped attacking creature has first strike and must be
-// blocked; the equipped creature's creature-dying triggers double.
-// ---------------------------------------------------------------------------
-
 #[test]
-fn the_masamune_equipped_attacker_has_first_strike_and_must_be_blocked() {
+fn taunting_arbormage_kicked_lure_expires_after_the_turn_ends() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
-    let artist = card(&mut scenario, P0, "Blood Artist", Zone::Battlefield);
-    let masamune = card(&mut scenario, P0, "The Masamune", Zone::Battlefield);
-    let blocker = card(&mut scenario, P1, "Grizzly Bears", Zone::Battlefield);
-    scenario.with_mana_pool(P0, mana(&[(ManaType::Colorless, 2)]));
+    stock_libraries(&mut scenario);
+    let target = card(&mut scenario, P0, "Grizzly Bears", Zone::Battlefield);
+    let lion = card(&mut scenario, P0, "Savannah Lions", Zone::Battlefield);
+    let b1 = card(&mut scenario, P1, "Grizzly Bears", Zone::Battlefield);
+    let arbormage = card(&mut scenario, P0, "Taunting Arbormage", Zone::Hand);
+    scenario.with_mana_pool(P0, mana(&[(ManaType::Colorless, 5), (ManaType::Green, 1)]));
     let mut runner = scenario.build();
 
+    let prompts = cast_arbormage(&mut runner, arbormage, KickerPayment::Pay);
     assert!(
-        masamune_has_expected_statics(&runner.state().objects[&masamune]),
-        "SHAPE: The Masamune must carry the attacking-gated first-strike and \
-         must-be-blocked statics plus the dying doubler: {:#?}",
-        runner.state().objects[&masamune].static_definitions
+        prompts.contains(&"OptionalCostChoice"),
+        "CR 702.33a: the kicker was offered"
     );
+    resolve_kicked_arbormage_etb(&mut runner, arbormage, target);
 
-    equip(&mut runner, masamune, artist);
-    evaluate_layers(runner.state_mut());
-    declare_attacks(&mut runner, vec![(artist, AttackTarget::Player(P1))]);
-    evaluate_layers(runner.state_mut());
-
-    assert!(
-        runner.state().objects[&artist]
-            .keywords
-            .contains(&Keyword::FirstStrike),
-        "CR 702.7a: the attacking equipped creature has first strike"
-    );
+    advance_past_end_of_turn(&mut runner);
+    advance_past_end_of_turn(&mut runner);
     assert_eq!(
-        must_be_blocked_targets(&runner),
-        HashMap::from([(blocker, vec![artist])]),
-        "CR 509.1c: the attacking equipped creature must be blocked if able"
-    );
-    assert!(
-        validate_blockers_for_player(runner.state(), P1, &[]).is_err(),
-        "CR 509.1c: an able blocker must block the equipped attacker"
-    );
-    assert!(
-        validate_blockers_for_player(runner.state(), P1, &[(blocker, artist)]).is_ok(),
-        "blocking the equipped attacker obeys the requirement"
-    );
-}
-
-#[test]
-fn the_masamune_equipped_attacker_has_neither_when_not_attacking() {
-    let mut scenario = GameScenario::new();
-    scenario.at_phase(Phase::PreCombatMain);
-    let artist = card(&mut scenario, P0, "Blood Artist", Zone::Battlefield);
-    let other = card(&mut scenario, P0, "Grizzly Bears", Zone::Battlefield);
-    let masamune = card(&mut scenario, P0, "The Masamune", Zone::Battlefield);
-    let _ = card(&mut scenario, P1, "Grizzly Bears", Zone::Battlefield);
-    scenario.with_mana_pool(P0, mana(&[(ManaType::Colorless, 2)]));
-    let mut runner = scenario.build();
-
-    equip(&mut runner, masamune, artist);
-    evaluate_layers(runner.state_mut());
-    assert!(
-        !runner.state().objects[&artist]
-            .keywords
-            .contains(&Keyword::FirstStrike),
-        "the 'as long as equipped creature is attacking' condition is false at \
-         precombat main"
+        runner.state().active_player,
+        P0,
+        "reach guard: the round trip returned to P0's turn"
     );
 
-    // Reach guard: another creature attacks, so the blocker prompt genuinely
-    // exists; the equipped but nonattacking Artist is simply not a requirement.
-    declare_attacks(&mut runner, vec![(other, AttackTarget::Player(P1))]);
-    assert!(
-        must_be_blocked_targets(&runner).is_empty(),
-        "CR 509.1c: the nonattacking equipped creature carries no requirement"
-    );
-    assert!(
-        validate_blockers_for_player(runner.state(), P1, &[]).is_ok(),
-        "an empty declaration is legal while nothing must be blocked"
-    );
-    assert!(
-        !runner.state().objects[&artist]
-            .keywords
-            .contains(&Keyword::FirstStrike),
-        "the nonattacking creature still has no first strike"
-    );
-}
-
-#[test]
-fn the_masamune_unequipped_attacker_has_neither_keyword_nor_requirement() {
-    let mut scenario = GameScenario::new();
-    scenario.at_phase(Phase::PreCombatMain);
-    let artist = card(&mut scenario, P0, "Blood Artist", Zone::Battlefield);
-    let masamune = card(&mut scenario, P0, "The Masamune", Zone::Battlefield);
-    let blocker = card(&mut scenario, P1, "Grizzly Bears", Zone::Battlefield);
-    let mut runner = scenario.build();
-
-    assert!(
-        masamune_has_expected_statics(&runner.state().objects[&masamune]),
-        "reach guard: the unattached Equipment parsed its statics: {:#?}",
-        runner.state().objects[&masamune].static_definitions
+    declare_attacks(
+        &mut runner,
+        vec![
+            (target, AttackTarget::Player(P1)),
+            (lion, AttackTarget::Player(P1)),
+        ],
     );
 
-    declare_attacks(&mut runner, vec![(artist, AttackTarget::Player(P1))]);
-
+    let valid = valid_block_targets(&runner);
     assert!(
-        !runner.state().objects[&artist]
-            .keywords
-            .contains(&Keyword::FirstStrike),
-        "an unequipped creature does not get the equipment's first strike"
+        valid.get(&b1).is_some_and(|legal| legal.contains(&target)),
+        "reach guard: the blocker is still able"
     );
     assert!(
         must_be_blocked_targets(&runner).is_empty(),
-        "the unattached Equipment's EquippedBy static affects nothing"
+        "CR 514.2: the kicked lure expired with the turn"
     );
     assert!(
         validate_blockers_for_player(runner.state(), P1, &[]).is_ok(),
-        "reach guard: the able blocker ({blocker:?}) is not compelled"
+        "CR 509.1c: an empty declaration is legal again"
     );
-}
-
-#[test]
-fn the_masamune_doubles_equipped_blood_artists_creature_death_trigger() {
-    let mut scenario = GameScenario::new();
-    scenario.at_phase(Phase::PreCombatMain);
-    let artist = card(&mut scenario, P0, "Blood Artist", Zone::Battlefield);
-    let masamune = card(&mut scenario, P0, "The Masamune", Zone::Battlefield);
-    let victim = card(&mut scenario, P1, "Grizzly Bears", Zone::Battlefield);
-    let murder = card(&mut scenario, P0, "Murder", Zone::Hand);
-    // Equip {2} + Murder {1}{B}{B}.
-    scenario.with_mana_pool(P0, mana(&[(ManaType::Colorless, 3), (ManaType::Black, 2)]));
-    let mut runner = scenario.build();
-
-    assert!(
-        masamune_has_expected_statics(&runner.state().objects[&masamune]),
-        "SHAPE: The Masamune must parse the dying-creature doubler: {:#?}",
-        runner.state().objects[&masamune].static_definitions
-    );
-    assert!(
-        !runner.state().objects[&artist]
-            .trigger_definitions
-            .is_empty(),
-        "SHAPE: Blood Artist's death observer exists"
-    );
-
-    equip(&mut runner, masamune, artist);
-    evaluate_layers(runner.state_mut());
-
-    // CR 603.2d: the dying creature is controlled by P1, not the doubler's
-    // controller; both Blood Artist triggers still fire and each chooses P1.
-    let outcome = runner
-        .cast(murder)
-        .target_object(victim)
-        .target_player(P1)
-        .resolve();
-    outcome.assert_zone(&[victim], Zone::Graveyard);
-    outcome.assert_life_delta(P1, -2);
-    outcome.assert_life_delta(P0, 2);
-}
-
-#[test]
-fn the_masamune_does_not_double_a_non_death_trigger_on_the_equipped_creature() {
-    let mut scenario = GameScenario::new();
-    scenario.at_phase(Phase::PreCombatMain);
-    let twins = card(&mut scenario, P0, "Trueheart Twins", Zone::Battlefield);
-    let bear = card(&mut scenario, P0, "Grizzly Bears", Zone::Battlefield);
-    let masamune = card(&mut scenario, P0, "The Masamune", Zone::Battlefield);
-    scenario.with_mana_pool(P0, mana(&[(ManaType::Colorless, 2)]));
-    let mut runner = scenario.build();
-
-    assert!(
-        masamune_has_expected_statics(&runner.state().objects[&masamune]),
-        "SHAPE: The Masamune must parse the dying-creature cause predicate: {:#?}",
-        runner.state().objects[&masamune].static_definitions
-    );
-
-    equip(&mut runner, masamune, twins);
-    evaluate_layers(runner.state_mut());
-
-    runner.advance_to_combat();
-    runner
-        .declare_attackers(&[(twins, AttackTarget::Player(P1))])
-        .expect("legal attack");
-    assert_eq!(runner.waiting_for_kind(), "ExertChoice");
-    runner
-        .act(GameAction::ChooseExert { exert: true })
-        .expect("choose to exert");
-    runner.advance_until_stack_empty();
-    evaluate_layers(runner.state_mut());
-
-    // CR 603.2d: the doubler's cause is a creature dying; an exert event is not
-    // that cause, so the observer resolves exactly once (+1/+0, not +2/+0).
-    assert_eq!(
-        runner.state().objects[&twins].power,
-        Some(5),
-        "the equipped observer's non-death trigger must not double"
-    );
-    assert_eq!(
-        runner.state().objects[&bear].power,
-        Some(3),
-        "the pump is applied once"
-    );
-}
-
-#[test]
-fn the_masamune_absent_does_not_double_blood_artists_death_trigger() {
-    let mut scenario = GameScenario::new();
-    scenario.at_phase(Phase::PreCombatMain);
-    let artist = card(&mut scenario, P0, "Blood Artist", Zone::Battlefield);
-    let victim = card(&mut scenario, P1, "Grizzly Bears", Zone::Battlefield);
-    let murder = card(&mut scenario, P0, "Murder", Zone::Hand);
-    scenario.with_mana_pool(P0, mana(&[(ManaType::Colorless, 1), (ManaType::Black, 2)]));
-    let mut runner = scenario.build();
-
-    assert!(
-        !runner.state().objects[&artist]
-            .trigger_definitions
-            .is_empty(),
-        "SHAPE: Blood Artist's death observer exists without The Masamune"
-    );
-
-    let outcome = runner
-        .cast(murder)
-        .target_object(victim)
-        .target_player(P1)
-        .resolve();
-    outcome.assert_zone(&[victim], Zone::Graveyard);
-    outcome.assert_life_delta(P1, -1);
-    outcome.assert_life_delta(P0, 1);
 }

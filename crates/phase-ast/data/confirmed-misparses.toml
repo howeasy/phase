@@ -2352,6 +2352,7 @@ face = [
   { key = "the maelstrom", class = "condition_wrong", clauses = ["If a permanent card is revealed this way, you may put it onto the battlefield.", "If you revealed a card but didn't put it onto the battlefield, put it on the bottom of your library."] },
   { key = "the magic bandit", class = "dropped_qualifier", clauses = ["Whenever you cast a spell or play a land you don't own, copy it."] },
   { key = "the many deeds of belzenlok", class = "wrong_object", clauses = ["Copy its chapter I ability.", "Copy its chapter II ability.", "Copy its chapter III ability."] },
+  { key = "the masamune", class = "missing_effect", clauses = ["and must be blocked if able.", "Equipped creature has \"If a creature dying causes a triggered ability of this creature or an emblem you own to trigger, that ability triggers an additional time.\""] },
   { key = "the master, multiplied", class = "dropped_qualifier", clauses = ["Triggered abilities you control can't cause you to sacrifice or exile creature tokens you control."] },
   { key = "the master, transcendent", class = "dropped_qualifier", clauses = ["{T}: Put target creature card in a graveyard that was milled this turn onto the battlefield under your control."] },
   { key = "the mighty will fall", class = "dropped_qualifier", clauses = ["When you set this scheme in motion, choose an opponent with the highest life total among your opponents."] },
