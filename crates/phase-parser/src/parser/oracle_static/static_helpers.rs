@@ -636,6 +636,7 @@ pub(crate) fn try_parse_cost_modification(
     // Extract "from [zone(s)]" clause between player scope and "cost".
     // E.g., "cast from graveyards or from exile" → [Graveyard, Exile]
     // This must be extracted before type parsing so it doesn't pollute type_desc.
+    let mut origin_exclusion: Option<FilterProp> = None;
     let cast_from_zones: Vec<Zone> = {
         let mut zones = Vec::new();
         // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
@@ -649,9 +650,31 @@ pub(crate) fn try_parse_cost_modification(
             if let Some(from_idx) = prefix.find(" from ") {
                 // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
                 let from_text = &prefix[from_idx..];
-                // Skip "from anywhere other than" — that's a negation pattern
-                // requiring a Not filter, not a direct zone match.
-                if !nom_primitives::scan_contains(from_text, "anywhere other than") {
+                // CR 109.5 + CR 400.3: "your hand" is the static source's
+                // controller's hand. A card cast from a different player's
+                // hand also qualifies, since a card in a hand is in its owner's hand.
+                let origin = from_text.trim();
+                if crate::parser::oracle_nom::condition::parse_cast_origin_exclusion_of_your_zone(
+                    origin,
+                )
+                .is_some_and(|(zone, consumed)| zone == Zone::Hand && consumed == origin.len())
+                {
+                    origin_exclusion = Some(FilterProp::AnyOf {
+                        props: vec![
+                            FilterProp::Not {
+                                prop: Box::new(FilterProp::InZone { zone: Zone::Hand }),
+                            },
+                            FilterProp::Owned {
+                                controller: ControllerRef::Opponent,
+                            },
+                        ],
+                    });
+                } else if nom_primitives::scan_contains(from_text, "anywhere other than") {
+                    // CR 601.2f: an exclusion the typed surface does not model (any
+                    // origin but the "your hand" form above) fails closed:
+                    // skipping it would reduce every spell the controller casts.
+                    return None;
+                } else {
                     if nom_primitives::scan_contains(from_text, "graveyard") {
                         zones.push(Zone::Graveyard);
                     }
@@ -694,7 +717,7 @@ pub(crate) fn try_parse_cost_modification(
         during_your_turn_scope = turn_scope;
         let prefix = strip_cost_modifier_target_clause(prefix);
         // Strip "from [zones]" clause (only if zones were detected), player scope, then "spells"
-        let without_from = if !cast_from_zones.is_empty() {
+        let without_from = if !cast_from_zones.is_empty() || origin_exclusion.is_some() {
             // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
             if let Some(from_idx) = prefix.find(" from ") {
                 // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
@@ -806,16 +829,19 @@ pub(crate) fn try_parse_cost_modification(
     // Merge cast-from-zone restriction into the spell filter.
     // If zones were extracted, add InZone/InAnyZone to ensure the cost modification
     // only applies when the spell is being cast from the specified zone(s).
-    let spell_filter = if !cast_from_zones.is_empty() {
-        let zone_prop = if cast_from_zones.len() == 1 {
-            FilterProp::InZone {
-                zone: cast_from_zones[0],
+    let spell_filter = if let Some(zone_prop) = origin_exclusion.or_else(|| {
+        (!cast_from_zones.is_empty()).then(|| {
+            if cast_from_zones.len() == 1 {
+                FilterProp::InZone {
+                    zone: cast_from_zones[0],
+                }
+            } else {
+                FilterProp::InAnyZone {
+                    zones: cast_from_zones,
+                }
             }
-        } else {
-            FilterProp::InAnyZone {
-                zones: cast_from_zones,
-            }
-        };
+        })
+    }) {
         match spell_filter {
             Some(TargetFilter::Typed(mut tf)) => {
                 tf.properties.push(zone_prop);

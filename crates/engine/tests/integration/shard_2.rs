@@ -341,6 +341,7 @@ mod copy_token_except_keyword_and_quoted_ability;
 mod corrupted_resolve_counter_poisoned;
 mod corrupted_zendikon_keeps_land_type;
 mod cosmic_intervention_graveyard_redirect;
+mod cost_mod_cast_origin_not_hand;
 mod cost_paid_objects_historical_restore;
 mod cost_paid_provenance;
 mod cost_reduction_order_election;
