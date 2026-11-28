@@ -5172,6 +5172,31 @@ pub(super) fn selected_exile_alt_cost_permission_graveyard_replacement(
 /// Scourge first, or another pile creature first through the grant) are legal.
 /// A non-owner has only the grant and spends it. `GameAction::CastSpell`
 /// carries no permission selector.
+///
+/// CR 712.11c + CR 712.8a + CR 601.2a: a cast that commits a modal card's BACK
+/// face spends no shared budget either. The grant's restriction ("a creature
+/// spell") was evaluated against the card's FRONT face when the permission was
+/// attached — the only face a modal card has in exile (CR 712.8a) — and the
+/// elected back face is never tested against it (CR 712.11c: only the face put
+/// onto the stack is evaluated). That back-face cast is therefore not the one
+/// cast the grant offers, and charging it would strip the sibling creature cast
+/// the grant does offer. This is main's observable behaviour for that path:
+/// main carried no budget at all, so the back-face cast never removed the
+/// sibling's cast. Admitting the back face through the grant in the first
+/// place is a pre-existing gap (the permission rides the object and the only
+/// cast-time constraint is the mana-value one), not something this carve-out
+/// widens. Only the budget read is carved out; the cast stays offered by
+/// `exile_alt_cost_permission_supports_cast`. A rider cast that elects an index
+/// through `selected_rider_zone_authority_permission_index` reaches this same
+/// read, so the rule lives here rather than at either caller.
+///
+/// Class limit: the carve-out keys on the elected face alone, because the
+/// grant's restriction is not carried on the permission (only the objects that
+/// matched it received one). A future UNRESTRICTED normal-cost shared-budget
+/// pile grant would therefore let its back-face cast through uncharged. No
+/// printed face is known to have that shape — the repo's coverage tests name
+/// only Serpent's Soul-Jar as the normal-cost shared-budget pile cast — and
+/// closing it would first need the restriction carried on the permission.
 pub(super) fn selected_exile_alt_cost_permission_single_use_group(
     state: &GameState,
     object_id: ObjectId,
@@ -5180,6 +5205,12 @@ pub(super) fn selected_exile_alt_cost_permission_single_use_group(
 ) -> Option<TrackedSetId> {
     let index = casting_permission_index?;
     let obj = state.objects.get(&object_id)?;
+    // CR 712.11c + CR 601.2a: the elected back face's characteristics were
+    // never tested against the grant's restriction, so its cast is not the one
+    // the grant offers. See the doc comment above.
+    if obj.modal_back_face {
+        return None;
+    }
     if own_exile_cast_permission(state, obj, player) {
         return None;
     }

@@ -5,6 +5,13 @@
 //! budget (`ExileWithAltCost::single_use_group`); the first cast spends it and
 //! the rest of the pile is no longer castable through the grant.
 //!
+//! A modal card's BACK-face cast through such a grant spends none of the
+//! budget: the grant's "creature spell" restriction was evaluated on the card's
+//! front face when the permission was attached (CR 712.11c), so the back-face
+//! cast is not the one cast the grant offers. This pins main's behaviour for
+//! that path, where no budget existed at all; admitting the back face through
+//! the grant in the first place is a pre-existing gap.
+//!
 //! A FREE grant (Idol of Endurance, "without paying its mana cost") carries no
 //! shared budget: every card in its pile stays castable through the grant after
 //! the first cast. This is UNCHANGED FROM MAIN, not a rules-correct cap: the
@@ -33,9 +40,12 @@
 //!   spell from among cards exiled with this artifact."
 
 use engine::ai_support::legal_actions;
+use engine::game::game_object::BackFaceData;
 use engine::game::scenario::{GameRunner, GameScenario, P0};
 use engine::types::ability::CastingPermission;
 use engine::types::actions::{AlternativeCastDecision, GameAction};
+use engine::types::card::LayoutKind;
+use engine::types::card_type::{CardType, CoreType};
 use engine::types::game_state::{CastPaymentMode, ExileLink, ExileLinkKind, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType, ManaUnit};
@@ -817,5 +827,160 @@ fn soul_jar_two_activations_face_down_spend_one_group_per_cast() {
         tapped_count(&runner, &lands),
         1 + 3 + 3,
         "the Key's {{1}} plus one face-down {{3}} per cast"
+    );
+}
+
+/// The noncreature spell face of the synthetic modal DFC below. CR 712.11c:
+/// only the elected face is evaluated as the spell, so this face's
+/// characteristics — not the front creature's — are the ones the cast presents.
+fn noncreature_modal_back_face() -> BackFaceData {
+    let mut card_types = CardType::default();
+    card_types.core_types.push(CoreType::Enchantment);
+    BackFaceData {
+        name: "Bridge Face".to_string(),
+        card_types,
+        mana_cost: cost(&[ManaCostShard::Green], 1),
+        color: vec![ManaColor::Green],
+        layout_kind: Some(LayoutKind::Modal),
+        ..BackFaceData::default()
+    }
+}
+
+/// Serpent's Soul-Jar plus the pile its own dies trigger builds: a synthetic
+/// modal DFC whose front face is an Elf creature and whose back face is a
+/// noncreature spell, and a plain Elf creature. Both die to printed Murder, so
+/// the Jar's trigger — not a fixture — creates the linked exile the grant
+/// reads. Returns the runner, the Jar, the modal card, and the sibling.
+fn soul_jar_modal_pile() -> (GameRunner, ObjectId, ObjectId, ObjectId) {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let jar = scenario
+        .add_artifact_from_oracle(P0, "Serpent's Soul-Jar", SERPENTS_SOUL_JAR)
+        .with_mana_cost(cost(&[ManaCostShard::Black], 2))
+        .id();
+    // Front face: an Elf creature, so the Jar's own dies trigger builds the pile.
+    let mdfc = scenario
+        .add_creature(P0, "MDFC Elf", 1, 4)
+        .with_subtypes(vec!["Elf"])
+        .with_mana_cost(cost(&[ManaCostShard::Green], 0))
+        .id();
+    let sibling = scenario
+        .add_creature(P0, "Elvish Warrior", 2, 3)
+        .with_subtypes(vec!["Elf", "Warrior"])
+        .with_mana_cost(cost(&[ManaCostShard::Green, ManaCostShard::Green], 0))
+        .id();
+    let murders: Vec<ObjectId> = (0..2)
+        .map(|_| {
+            scenario
+                .add_spell_to_hand_from_oracle(P0, "Murder", true, MURDER)
+                .with_mana_cost(cost(&[ManaCostShard::Black, ManaCostShard::Black], 1))
+                .id()
+        })
+        .collect();
+    // Six green sources: the back face's {1}{G} and the sibling's {G}{G}.
+    for _ in 0..6 {
+        scenario.add_basic_land(P0, ManaColor::Green);
+    }
+    // {1}{B}{B} twice: six black mana pays for both Murders in this main phase.
+    scenario.with_mana_pool(
+        P0,
+        (0..6)
+            .map(|_| ManaUnit::new(ManaType::Black, ObjectId(0), false, vec![]))
+            .collect(),
+    );
+    let mut runner = scenario.build();
+    // Fixture: the modal card's back face (a noncreature spell). The front face
+    // stays the live face in exile (CR 712.8a), which is what receives the
+    // grant.
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&mdfc)
+        .expect("the modal DFC exists")
+        .back_face = Some(noncreature_modal_back_face());
+
+    for (murder, card) in murders.iter().zip([mdfc, sibling]) {
+        runner.cast(*murder).target_object(card).resolve();
+        assert_eq!(
+            runner.state().objects[&card].zone,
+            Zone::Exile,
+            "the Jar's dies trigger exiled the dead Elf"
+        );
+    }
+    (runner, jar, mdfc, sibling)
+}
+
+/// CR 712.11c + CR 712.8a + CR 608.2c: the grant's "creature spell" restriction
+/// was evaluated on the modal card's front face when the Jar stamped the
+/// permission (the only face a modal card has in exile), and the elected back
+/// face is never tested against it. A back-face cast through the grant is
+/// therefore not the one cast the grant offers: it must not spend the shared
+/// budget, and the sibling creature cast the grant does offer stays available.
+/// This is main's observable behaviour for the path — main carried no budget at
+/// all — not a rules-ideal reading: admitting the back face through the grant
+/// in the first place is a pre-existing gap.
+#[test]
+fn soul_jar_back_face_cast_spends_no_budget_so_the_sibling_creature_stays_castable() {
+    let (mut runner, jar, mdfc, sibling) = soul_jar_modal_pile();
+    runner.activate(jar, 0).resolve();
+    assert!(
+        cast_is_offered(&runner, mdfc),
+        "reach-guard: the modal DFC's creature front face is inside the grant's pile"
+    );
+    assert!(cast_is_offered(&runner, sibling));
+
+    // Cast the modal card's BACK face (a noncreature spell) through the grant.
+    runner.cast(mdfc).modal_back_face(true).resolve();
+    assert_eq!(runner.state().objects[&mdfc].zone, Zone::Battlefield);
+    assert_eq!(
+        runner.state().objects[&mdfc].name,
+        "Bridge Face",
+        "reach-guard: the cast presented the back face"
+    );
+    assert!(
+        runner.state().exile_play_single_use_consumed.is_empty(),
+        "main's behaviour: the back-face cast charges none of the grant's shared budget"
+    );
+
+    assert!(
+        cast_is_offered(&runner, sibling),
+        "the sibling creature cast the grant does offer is still available"
+    );
+    cast_to_resolution(&mut runner, sibling);
+    assert_eq!(runner.state().objects[&sibling].zone, Zone::Battlefield);
+    assert_eq!(
+        runner.state().exile_play_single_use_consumed.len(),
+        1,
+        "the sibling's creature cast is the one cast the grant allows"
+    );
+}
+
+/// The control for the carve-out: the modal card's FRONT face is the creature
+/// the grant offers, so electing it spends the grant's one cast. The rule keys
+/// on the elected back face, never on `cast_face_committed` (a front election
+/// sets that flag too) or on the card's layout. CR 712.11c: the front creature
+/// face is the spell evaluated; CR 608.2c: that cast is the grant's one spell.
+#[test]
+fn soul_jar_front_face_cast_of_the_modal_card_still_spends_the_budget() {
+    let (mut runner, jar, mdfc, sibling) = soul_jar_modal_pile();
+    runner.activate(jar, 0).resolve();
+    assert!(cast_is_offered(&runner, mdfc));
+    assert!(cast_is_offered(&runner, sibling));
+
+    runner.cast(mdfc).modal_back_face(false).resolve();
+    assert_eq!(runner.state().objects[&mdfc].zone, Zone::Battlefield);
+    assert_eq!(
+        runner.state().objects[&mdfc].name,
+        "MDFC Elf",
+        "reach-guard: the cast presented the front face"
+    );
+    assert_eq!(
+        runner.state().exile_play_single_use_consumed.len(),
+        1,
+        "the front-face creature cast is the one cast the grant offers"
+    );
+    assert!(
+        !cast_is_offered(&runner, sibling),
+        "the one cast the grant allows is spent: the sibling is not castable"
     );
 }
