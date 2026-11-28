@@ -1135,8 +1135,8 @@ fn if_you_do_look_anchor(clauses: &[ClauseIr], condition: &AbilityCondition) -> 
         .map(|clause| clause.parsed.effect.clone())
 }
 
-/// CR 608.2c + CR 614.6 + CR 708.7 + CR 118.1: Reinterpret a generic "if you
-/// can't" rider when the antecedent's ledger entry does not answer the rider.
+/// CR 608.2c + CR 708.7 + CR 118.1: Reinterpret a generic "if you can't" rider
+/// for a preceding effect that performs no zone change.
 ///
 /// `try_nom_condition_as_ability_condition` lowers "if you can't" to
 /// `Not { ZoneChangedThisWay { Any } }` — the right proxy for the common
@@ -1158,21 +1158,6 @@ fn if_you_do_look_anchor(clauses: &[ClauseIr], condition: &AbilityCondition) -> 
 /// would be true even after the instruction SUCCEEDED — firing the rider every
 /// time regardless of affordability.
 ///
-/// A third class needs the same guard repaired for the opposite reason: the
-/// linked-exile `assimilate` expansion ("put it onto the battlefield … It's a
-/// Borg artifact creature", CR 607.2a). Its success IS a zone change, but the
-/// rider's word "can't" means "the card did not arrive on the battlefield".
-/// When a replacement sends the would-be entry elsewhere (Containment Priest:
-/// "exile it instead"), the redirected move is still recorded as a `ZoneChanged`
-/// event for the same card, so the destination-less generic guard would read the
-/// move as a successful assimilation and skip the printed fallback. CR 614.6:
-/// the replaced entry never happens. The rider is therefore rewritten to
-/// `Not { ZoneChangedThisWay { filter: Any, destination: Some(Battlefield) } }`,
-/// which only an actual arrival satisfies. This branch is strictly the shape
-/// `parse_assimilate_target` emits (`origin: Some(Exile)` plus an
-/// `ExiledBySource` target); every other `ChangeZone` antecedent — a search's
-/// put onto the battlefield, a graveyard return — keeps the generic lowering.
-///
 /// The correct general signal for "the preceding instruction couldn't be
 /// performed" is `Not { OptionalEffectPerformed }`: a mandatory parent whose
 /// action occurred seeds `optional_effect_performed` via
@@ -1190,6 +1175,10 @@ fn if_you_do_look_anchor(clauses: &[ClauseIr], condition: &AbilityCondition) -> 
 /// `effect_success_is_zone_ledger_invisible`, is not re-expressed here; it
 /// strict-fails through
 /// `cant_rider_reads_only_zone_ledger_invisible_antecedents` below.
+///
+/// CR 118.12: a linked-exile assimilate whose entry is replaced (Containment
+/// Priest) was still started, so its "if you can't" rider keeps the generic
+/// zone-change guard and the fallback does not run.
 fn rewrite_cant_rider_for_non_zone_change_parent(
     condition: Option<AbilityCondition>,
     clauses: &[ClauseIr],
@@ -1210,36 +1199,6 @@ fn rewrite_cant_rider_for_non_zone_change_parent(
     if prev_is_ledger_invisible {
         return Some(AbilityCondition::Not {
             condition: Box::new(AbilityCondition::effect_performed()),
-        });
-    }
-    // CR 608.2c + CR 614.6: the linked-exile assimilate promises a BATTLEFIELD
-    // arrival; a replacement can redirect the entry (Containment Priest exiles
-    // it instead) and the redirected move still records a `ZoneChanged` for the
-    // same card. Reading that event as success would skip the printed fallback,
-    // so the guard names the arrival the instruction promised. Strictly the
-    // `parse_assimilate_target` shape — every other ChangeZone antecedent keeps
-    // the generic destination-less guard.
-    let prev_is_assimilate = clauses
-        .iter()
-        .rev()
-        .find(|clause| !matches!(clause.disposition, ClauseDisposition::Continue { .. }))
-        .is_some_and(|clause| {
-            matches!(
-                &clause.parsed.effect,
-                Effect::ChangeZone {
-                    origin: Some(Zone::Exile),
-                    destination: Zone::Battlefield,
-                    target,
-                    ..
-                } if target.references_exiled_by_source()
-            )
-        });
-    if prev_is_assimilate {
-        return Some(AbilityCondition::Not {
-            condition: Box::new(AbilityCondition::ZoneChangedThisWay {
-                filter: TargetFilter::Any,
-                destination: Some(Zone::Battlefield),
-            }),
         });
     }
     condition

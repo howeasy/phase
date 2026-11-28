@@ -75013,7 +75013,7 @@ fn assimilate_a_creature_card_exiled_with_it_lowers_to_linked_exile_pick() {
     ));
 
     // The "If you can't" fallback: exile up to one target creature, gated on the
-    // assimilate's card arriving on the battlefield (CR 614.6).
+    // assimilate having moved nothing.
     let mut node = Some(execute);
     let mut fallback = None;
     while let Some(def) = node {
@@ -75072,88 +75072,6 @@ fn assimilate_a_creature_card_exiled_with_it_lowers_to_linked_exile_pick() {
                 }
             )),
         "the Assessor attack trigger must lower to the linked-exile ChangeZone shape"
-    );
-}
-
-/// CR 608.2c + CR 614.6: the linked-exile `assimilate`'s "If you can't" rider
-/// must read the BATTLEFIELD arrival, not merely "some zone change happened".
-/// A replacement that redirects the would-be entry (Containment Priest exiles
-/// it instead) still records a `ZoneChanged` for the card (Exile → Exile), so
-/// the generic destination-less guard would report success and skip the printed
-/// fallback even though the permanent never entered. The rider is rewritten to a
-/// `Battlefield`-bound ledger read; a non-assimilate `ChangeZone` antecedent
-/// keeps the destination-less guard, whose "could not be performed" reading is
-/// the right one there.
-#[test]
-fn assimilate_if_you_cant_reads_the_battlefield_arrival() {
-    let def = parse_effect_chain(
-        "assimilate a creature card exiled with it. If you can't, exile up to one target creature.",
-        AbilityKind::Spell,
-    );
-    assert!(
-        matches!(
-            &*def.effect,
-            Effect::ChangeZone {
-                origin: Some(Zone::Exile),
-                destination: Zone::Battlefield,
-                target,
-                ..
-            } if target.references_exiled_by_source()
-        ),
-        "reach-guard: the antecedent is the linked-exile assimilate move: {:#?}",
-        def.effect
-    );
-    let rider = std::iter::successors(Some(&def), |node| node.sub_ability.as_deref())
-        .find(|node| {
-            matches!(
-                &*node.effect,
-                Effect::ChangeZone {
-                    destination: Zone::Exile,
-                    ..
-                }
-            )
-        })
-        .expect("the If-you-can't fallback exile is chained");
-    assert_eq!(
-        rider.condition,
-        Some(AbilityCondition::Not {
-            condition: Box::new(AbilityCondition::ZoneChangedThisWay {
-                filter: TargetFilter::Any,
-                destination: Some(Zone::Battlefield),
-            }),
-        }),
-        "the rider must bind the assimilate's battlefield arrival"
-    );
-
-    // Control: a non-assimilate ChangeZone antecedent keeps the generic
-    // destination-less guard — the rewrite is strictly the linked-exile shape.
-    let control = parse_effect_chain(
-        "return target creature card from your graveyard to the battlefield. If you can't, draw a card.",
-        AbilityKind::Spell,
-    );
-    assert!(
-        matches!(
-            &*control.effect,
-            Effect::ChangeZone {
-                destination: Zone::Battlefield,
-                ..
-            }
-        ),
-        "reach-guard: the control antecedent is a ChangeZone: {:#?}",
-        control.effect
-    );
-    let control_rider = std::iter::successors(Some(&control), |node| node.sub_ability.as_deref())
-        .find(|node| matches!(&*node.effect, Effect::Draw { .. }))
-        .expect("the control rider is chained to the return");
-    assert_eq!(
-        control_rider.condition,
-        Some(AbilityCondition::Not {
-            condition: Box::new(AbilityCondition::ZoneChangedThisWay {
-                filter: TargetFilter::Any,
-                destination: None,
-            }),
-        }),
-        "a non-assimilate ChangeZone antecedent keeps the generic guard"
     );
 }
 

@@ -255,14 +255,14 @@ fn borg_cube_exiles_on_entry_then_assimilates_on_attack() {
 const CONTAINMENT_PRIEST: &str =
     "Flash\nIf a nontoken creature would enter and it wasn't cast, exile it instead.";
 
-/// CR 614.6 + CR 608.2c: Containment Priest replaces the assimilate's would-be
-/// battlefield entry with an exile. The card never arrives, so Borg Cube's
-/// "If you can't" fallback must still run — even though the redirected move is
-/// recorded as a `ZoneChanged` event for the same card. Without binding the
-/// rider to the battlefield arrival, that event reads as a successful
-/// assimilation and the fallback is skipped.
+/// CR 118.12: Containment Priest replaces the assimilate's would-be battlefield
+/// entry with an exile, but the assimilate was still STARTED — Borg Cube had an
+/// eligible linked creature card and began the action. The rider's "can't"
+/// checks whether the action was started, regardless of what events actually
+/// occurred, and a replacement effect does not make the action impossible. So
+/// "If you can't" is false and the fallback exile does not run.
 #[test]
-fn borg_cube_assimilate_replaced_by_containment_priest_runs_the_fallback() {
+fn borg_cube_assimilate_replaced_by_containment_priest_does_not_run_the_fallback() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     scenario
@@ -308,9 +308,12 @@ fn borg_cube_assimilate_replaced_by_containment_priest_runs_the_fallback() {
         .expect("declare Borg Cube as attacker");
 
     // The attack trigger assimilates Grizzly Bears; the Priest replaces the
-    // entry with exile, so "If you can't" holds and the fallback exiles the
-    // target.
-    resolve_with_trigger_target(&mut runner, Some(fallback_target));
+    // entry with exile. CR 118.12: the assimilate was still started, so the
+    // "If you can't" rider is false and its fallback target is never exiled.
+    assert!(
+        resolve_with_trigger_target(&mut runner, Some(fallback_target)),
+        "the attack trigger must be given the fallback target and resolve"
+    );
 
     assert_eq!(
         runner.state().objects[&linked_bear].zone,
@@ -318,13 +321,21 @@ fn borg_cube_assimilate_replaced_by_containment_priest_runs_the_fallback() {
         "CR 614.6: the replaced entry never happens — the Bears never arrive"
     );
     assert_eq!(
+        runner.state().objects[&linked_bear]
+            .counters
+            .get(&CounterType::Plus1Plus1)
+            .copied(),
+        None,
+        "CR 614.6: the replaced entry never happens, so no +1/+1 counter is placed"
+    );
+    assert_eq!(
         runner.state().objects[&fallback_target].zone,
-        Zone::Exile,
-        "the assimilate put no permanent onto the battlefield, so the fallback runs"
+        Zone::Battlefield,
+        "CR 118.12: the assimilate was started, so the fallback exile does not run"
     );
     assert!(
-        is_linked_to(&runner, fallback_target, cube),
-        "the fallback exile links its card to Borg Cube: {:?}",
+        !is_linked_to(&runner, fallback_target, cube),
+        "the fallback exile does not run, so nothing new is linked to Borg Cube: {:?}",
         runner.state().exile_links
     );
 }

@@ -5165,14 +5165,13 @@ pub(super) fn selected_exile_alt_cost_permission_graveyard_replacement(
 /// that elects no cost slot passes the index from
 /// `selected_rider_zone_authority_permission_index` instead.
 ///
-/// CR 604.6 + CR 113.6f: a card carrying its own "you may cast this card from
-/// exile" permission (Eternal Scourge) is exempt. `GameAction::CastSpell`
-/// carries no grant selector, so the engine auto-elects the pile grant and
-/// cannot distinguish that route from the card's own permission; charging the
-/// grant would spend the pile's one shared cast on a cast the own permission
-/// also authorized, stripping the rest of the pile. Its cast therefore spends
-/// no shared budget and the grant stays available for the rest of the pile —
-/// main's observable behaviour (ticket 370), not the rules-ideal reading.
+/// CR 601.3: a pile card whose owner holds its own unrestricted "you may cast
+/// this card from exile" permission (Eternal Scourge; see the
+/// owner/static/unlimited/no-extra-cost checks below) may be cast under that
+/// permission, so its cast spends no shared budget; both cast orders (the
+/// Scourge first, or another pile creature first through the grant) are legal.
+/// A non-owner has only the grant and spends it. `GameAction::CastSpell`
+/// carries no permission selector.
 pub(super) fn selected_exile_alt_cost_permission_single_use_group(
     state: &GameState,
     object_id: ObjectId,
