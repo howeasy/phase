@@ -5,7 +5,7 @@ import type { GameEvent, GameObject, GameState, ObjectId } from "../../../adapte
 import { useGameStore } from "../../../stores/gameStore.ts";
 import { usePreferencesStore } from "../../../stores/preferencesStore.ts";
 import { StackEntry } from "../../stack/StackEntry.tsx";
-import { buildGameObject, buildObjectMap } from "../../../test/factories/gameObjectFactory.ts";
+import { buildObjectMap, gameObjectFactory } from "../../../test/factories/gameObjectFactory.ts";
 import {
   buildGameState,
   buildStackEntry,
@@ -18,27 +18,23 @@ vi.mock("../../../hooks/useCardImage.ts", () => ({
 vi.mock("../../../game/dispatch.ts", () => ({ dispatchAction: vi.fn() }));
 
 const TRIGGER = 80;
-const TEXT = "When Llanowar Elves enters, draw a card.";
+// Elvish Visionary's printed text, the whole of it.
+const NAME = "Elvish Visionary";
+const TEXT = "When this creature enters, draw a card.";
 
 function push(objectId: ObjectId): GameEvent {
   return { type: "StackPushed", data: { object_id: objectId } };
 }
 
-function source(zone: GameObject["zone"] = "Battlefield"): GameObject {
-  return buildGameObject({
-    id: 7,
-    card_id: 70,
-    name: "Llanowar Elves",
-    zone,
-    power: 1,
-    toughness: 1,
-    base_power: 1,
-    base_toughness: 1,
-    color: ["Green"],
-    base_color: ["Green"],
-    entered_battlefield_turn: null,
-    card_types: { supertypes: [], core_types: ["Creature"], subtypes: [] },
-  });
+function source(id: ObjectId = 7): GameObject {
+  return gameObjectFactory
+    .creature(1, 1)
+    .onBattlefield()
+    .colored("Green")
+    .withId(id)
+    .named(NAME)
+    .params({ card_types: { subtypes: ["Elf", "Shaman"] } })
+    .build();
 }
 
 function triggerEntry(id = TRIGGER, sourceId = 7) {
@@ -50,8 +46,8 @@ function triggerEntry(id = TRIGGER, sourceId = 7) {
       type: "TriggeredAbility",
       data: {
         source_id: sourceId,
-        source_name: "Llanowar Elves",
-        description: "When ~ enters, draw a card.",
+        source_name: NAME,
+        description: TEXT,
         ability: { targets: [] },
       },
     },
@@ -70,7 +66,7 @@ function stateWith(
     derived: {
       stack_entry_details: {
         [String(entry.id)]: {
-          source_name: "Llanowar Elves",
+          source_name: NAME,
           kind_label: "Triggered",
           ability_kind: { type: "Triggered" },
         },
@@ -146,7 +142,7 @@ describe("TriggerTagLayer", () => {
       <StackEntry
         entry={entry}
         details={{
-          source_name: "Llanowar Elves",
+          source_name: NAME,
           kind_label: "Triggered",
           ability_kind: { type: "Triggered" },
         }}
@@ -184,7 +180,8 @@ describe("TriggerTagLayer", () => {
 
   it("tags nothing when the source is not on the battlefield", () => {
     const entry = triggerEntry();
-    const state = stateWith(entry, source("Hand"));
+    const inHand = gameObjectFactory.creature(1, 1).inHand().withId(7).named(NAME).build();
+    const state = stateWith(entry, inHand);
     renderLayer();
     measure(7);
 
@@ -318,20 +315,23 @@ describe("TriggerTagLayer", () => {
     vi.useRealTimers();
   });
 
-  it("keeps one summary across overflowing commits", () => {
-    const entries = [81, 82, 83, 84, 85].map((id) => triggerEntry(id, 7));
-    const stacked = (count: number) =>
-      buildGameState({
-        objects: buildObjectMap(source()),
-        battlefield: [7],
-        stack: entries.slice(0, count),
-      });
-    renderLayer();
-    measure(7);
+  const visionaries = [7, 8, 9, 10, 11];
+  const fiveTriggers = () => visionaries.map((id, index) => triggerEntry(81 + index, id));
+  const fiveOnBoard = (entries: ReturnType<typeof fiveTriggers>) =>
+    buildGameState({
+      objects: buildObjectMap(...visionaries.map((id) => source(id))),
+      battlefield: visionaries,
+      stack: entries,
+    });
 
-    commit(stacked(3), [push(81), push(82), push(83)]);
-    commit(stacked(4), [push(84)]);
-    commit(stacked(5), [push(85)]);
+  it("keeps one summary across overflowing commits", () => {
+    const entries = fiveTriggers();
+    renderLayer(visionaries);
+    visionaries.forEach((id, index) => measure(id, 100 + index * 150, 100));
+
+    commit(fiveOnBoard(entries.slice(0, 3)), [push(81), push(82), push(83)]);
+    commit(fiveOnBoard(entries.slice(0, 4)), [push(84)]);
+    commit(fiveOnBoard(entries), [push(85)]);
 
     const summaries = document.querySelectorAll("[data-trigger-tag-more]");
     expect(summaries).toHaveLength(1);
@@ -339,20 +339,16 @@ describe("TriggerTagLayer", () => {
   });
 
   it("does not count a re-pushed entry twice in the summary", () => {
-    const entries = [81, 82, 83, 84, 85].map((id) => triggerEntry(id, 7));
-    const state = () =>
-      buildGameState({ objects: buildObjectMap(source()), battlefield: [7], stack: entries });
+    const entries = fiveTriggers();
     const pushes = entries.map((entry) => push(entry.id));
-    renderLayer();
-    measure(7);
+    renderLayer(visionaries);
+    visionaries.forEach((id, index) => measure(id, 100 + index * 150, 100));
 
-    commit(state(), pushes);
+    commit(fiveOnBoard(entries), pushes);
     act(() => {
-      useGameStore.setState({
-        gameState: buildGameState({ objects: buildObjectMap(source()), battlefield: [7], stack: [] }),
-      });
+      useGameStore.setState({ gameState: fiveOnBoard([]) });
     });
-    commit(state(), [...pushes]);
+    commit(fiveOnBoard(entries), [...pushes]);
 
     expect(document.querySelectorAll("[data-trigger-tag]")).toHaveLength(3);
     const summaries = document.querySelectorAll("[data-trigger-tag-more]");
@@ -364,7 +360,7 @@ describe("TriggerTagLayer", () => {
     const first = triggerEntry(81, 7);
     const second = triggerEntry(82, 8);
     const state = buildGameState({
-      objects: buildObjectMap(source(), { ...source(), id: 8 }),
+      objects: buildObjectMap(source(), source(8)),
       battlefield: [7, 8],
       stack: [first, second],
     });
@@ -384,48 +380,27 @@ describe("TriggerTagLayer", () => {
   });
 
   it("caps the tags and counts the rest in one '+N more' tag", () => {
-    const entries = [1, 2, 3, 4, 5].map((offset) => triggerEntry(80 + offset, 7));
-    const objects = [8, 9, 10, 11].map((id) =>
-      buildGameObject({
-        id,
-        card_id: id,
-        name: `Creature ${id}`,
-        zone: "Battlefield",
-        power: 1,
-        toughness: 1,
-        base_power: 1,
-        base_toughness: 1,
-        color: [],
-        base_color: [],
-        entered_battlefield_turn: null,
-        card_types: { supertypes: [], core_types: ["Creature"], subtypes: [] },
-      }),
-    );
-    const state = buildGameState({
-      objects: buildObjectMap(source(), ...objects),
-      battlefield: [7, 8, 9, 10, 11],
-      stack: entries,
-      derived: {
-        stack_entry_details: Object.fromEntries(
-          entries.map((entry) => [
-            String(entry.id),
-            { source_name: `Creature ${entry.source_id}`, kind_label: "Triggered" },
-          ]),
-        ),
-      },
-    });
-    renderLayer([7, 8, 9]);
+    const entries = fiveTriggers();
+    renderLayer(visionaries.slice(0, 3));
     measure(7, 100, 100);
     measure(8, 300, 100);
     measure(9, 500, 100);
+    // The last two have no card to measure; they are still counted.
+    for (const id of [10, 11]) {
+      const anchor = document.createElement("div");
+      anchor.setAttribute("data-object-id", String(id));
+      document.body.appendChild(anchor);
+    }
 
     commit(
-      state,
+      fiveOnBoard(entries),
       entries.map((entry) => push(entry.id)),
     );
 
     expect(document.querySelectorAll("[data-trigger-tag]")).toHaveLength(3);
+    expect(document.querySelector('[data-trigger-tag="81"]')?.textContent).toBe(TEXT);
     expect(document.querySelector("[data-trigger-tag-more]")?.textContent).toBe("+2 more");
+    for (const id of [10, 11]) document.querySelector(`body > [data-object-id="${id}"]`)?.remove();
   });
 
   it("clears tags and timers on a session change", () => {
@@ -463,6 +438,8 @@ describe("TriggerTagLayer", () => {
   });
 
   it("stacks several tags on one card without sharing a top position", () => {
+    // Panharmonicon: "that ability triggers an additional time", so one entering
+    // Visionary puts two of its triggers on the stack.
     const first = triggerEntry(80, 7);
     const second = triggerEntry(81, 7);
     const state = buildGameState({
@@ -471,8 +448,8 @@ describe("TriggerTagLayer", () => {
       stack: [first, second],
       derived: {
         stack_entry_details: {
-          "80": { source_name: "Llanowar Elves", kind_label: "Triggered" },
-          "81": { source_name: "Llanowar Elves", kind_label: "Triggered" },
+          "80": { source_name: NAME, kind_label: "Triggered" },
+          "81": { source_name: NAME, kind_label: "Triggered" },
         },
       },
     });
@@ -486,5 +463,8 @@ describe("TriggerTagLayer", () => {
     );
     expect(tops).toHaveLength(2);
     expect(new Set(tops).size).toBe(2);
+    for (const tag of document.querySelectorAll("[data-trigger-tag]")) {
+      expect(tag.textContent).toBe(TEXT);
+    }
   });
 });

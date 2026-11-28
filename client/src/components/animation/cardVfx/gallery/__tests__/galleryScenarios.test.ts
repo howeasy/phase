@@ -29,6 +29,17 @@ describe("gallery scenarios", () => {
     expectConsistent(galleryBoard());
   });
 
+  it("shows Elvish Visionary's printed enters trigger", () => {
+    const state = galleryBoard();
+    for (const batch of GALLERY_SCENARIOS.enterWithTrigger.batches) batch(state);
+
+    const [entry] = state.stack;
+    expect(state.objects[entry.source_id].name).toBe("Elvish Visionary");
+    expect(entry.kind.type === "TriggeredAbility" && entry.kind.data.description).toBe(
+      "When this creature enters, draw a card.",
+    );
+  });
+
   it.each(Object.entries(GALLERY_SCENARIOS))("%s keeps every card in exactly its zone's list after each update", (_, scenario) => {
     let state = galleryBoard();
     for (const batch of scenario.batches) {

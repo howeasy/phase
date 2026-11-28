@@ -82,6 +82,7 @@ vi.mock("../../card/CardImage.tsx", () => ({
 const OBJECT = 1;
 const ATTACK_SLIDE = -30;
 
+// No printed card: the cases vary this textless body's power across the bands.
 function makeObject(power: number | null = 2): GameObject {
   return gameObjectFactory
     .creature()
@@ -89,7 +90,7 @@ function makeObject(power: number | null = 2): GameObject {
     .withPower(power)
     .colored("Green")
     .withId(OBJECT)
-    .named("Grizzly Bears")
+    .named("Lunge Test Creature")
     .build();
 }
 

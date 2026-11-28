@@ -44,7 +44,9 @@ const AIR_ELEMENTAL = 51;
 const OPPONENT_LANDS = [52, 53];
 const TOKEN = 60;
 /** A synthesized triggered ability's stack id: never an object id, so no zone list claims it. */
-const ELVES_TRIGGER = 70;
+const VISIONARY_TRIGGER = 70;
+/** Drawn by the story that needs a creature with an enters trigger. */
+const VISIONARY = 71;
 
 interface CardSpec {
   id: ObjectId;
@@ -219,21 +221,33 @@ export const GALLERY_SCENARIOS: Record<string, GalleryScenario> = {
   },
   enterWithTrigger: {
     title: "Enter with a triggered ability",
-    description: "Llanowar Elves enters the battlefield and its own enter-the-battlefield trigger is pushed in the same update.",
+    description:
+      "You draw Elvish Visionary, then it enters the battlefield and its enters trigger is pushed in the same update.",
     batches: [
       (state) => {
-        move(state, ELVES, "Battlefield");
+        state.objects[VISIONARY] = card({
+          id: VISIONARY,
+          name: "Elvish Visionary",
+          zone: "Hand",
+          colors: ["Green"],
+          creature: [1, 1],
+        });
+        state.players[YOU].hand.push(VISIONARY);
+        return [zoneChanged(VISIONARY, "Library", "Hand")];
+      },
+      (state) => {
+        move(state, VISIONARY, "Battlefield");
         state.stack.push(
           buildStackEntry({
-            id: ELVES_TRIGGER,
-            source_id: ELVES,
+            id: VISIONARY_TRIGGER,
+            source_id: VISIONARY,
             controller: YOU,
             kind: {
               type: "TriggeredAbility",
               data: {
-                source_id: ELVES,
-                source_name: "Llanowar Elves",
-                description: "When ~ enters, add {G}.",
+                source_id: VISIONARY,
+                source_name: "Elvish Visionary",
+                description: "When this creature enters, draw a card.",
                 ability: { targets: [] },
               },
             },
@@ -243,16 +257,16 @@ export const GALLERY_SCENARIOS: Record<string, GalleryScenario> = {
           ...(state.derived ?? {}),
           stack_entry_details: {
             ...(state.derived?.stack_entry_details ?? {}),
-            [String(ELVES_TRIGGER)]: {
-              source_name: "Llanowar Elves",
+            [String(VISIONARY_TRIGGER)]: {
+              source_name: "Elvish Visionary",
               kind_label: "Triggered",
               ability_kind: { type: "Triggered" },
             },
           },
         };
         return [
-          zoneChanged(ELVES, "Hand", "Battlefield"),
-          { type: "StackPushed", data: { object_id: ELVES_TRIGGER } },
+          zoneChanged(VISIONARY, "Hand", "Battlefield"),
+          { type: "StackPushed", data: { object_id: VISIONARY_TRIGGER } },
         ];
       },
     ],
