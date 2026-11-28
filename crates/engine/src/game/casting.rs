@@ -5173,19 +5173,23 @@ pub(super) fn selected_exile_alt_cost_permission_graveyard_replacement(
 /// A non-owner has only the grant and spends it. `GameAction::CastSpell`
 /// carries no permission selector.
 ///
-/// CR 712.11c + CR 712.8a + CR 601.2a: a cast that commits a modal card's BACK
-/// face spends no shared budget either. The grant's restriction ("a creature
-/// spell") was evaluated against the card's FRONT face when the permission was
-/// attached — the only face a modal card has in exile (CR 712.8a) — and the
-/// elected back face is never tested against it (CR 712.11c: only the face put
-/// onto the stack is evaluated). That back-face cast is therefore not the one
-/// cast the grant offers, and charging it would strip the sibling creature cast
-/// the grant does offer. This is main's observable behaviour for that path:
-/// main carried no budget at all, so the back-face cast never removed the
-/// sibling's cast. Admitting the back face through the grant in the first
-/// place is a pre-existing gap (the permission rides the object and the only
-/// cast-time constraint is the mana-value one), not something this carve-out
-/// widens. Only the budget read is carved out; the cast stays offered by
+/// CR 712.8a + CR 601.2a: a cast that commits a modal card's BACK face spends
+/// no shared budget either. The grant's restriction ("a creature spell") was
+/// evaluated against the card's FRONT face when the permission was attached —
+/// the only face a modal card has in exile (CR 712.8a) — and the elected back
+/// face is never tested against it. That is the gap: CR 712.11c says "Only the
+/// face that will be face up on the stack is evaluated to determine if it can
+/// be cast," and the engine does NOT apply it — the back face, not the front,
+/// should be the face judged. A noncreature back face is therefore admitted
+/// through a creature-only grant in the first place, a pre-existing gap (the
+/// permission rides the object and the only cast-time constraint is the
+/// mana-value one), not something this carve-out widens; the carve-out only
+/// stops that cast from spending the grant's budget. A creature back face —
+/// Alrund, God of the Cosmos // Hakka, Whispering Raven, made an Elf under
+/// Maskwood Nexus — likewise spends no budget here, because the carve-out keys
+/// on the elected face alone. This is main's behaviour (main has no budget):
+/// no back-face cast ever removed the sibling creature cast's budget. Only the
+/// budget read is carved out; the cast stays offered by
 /// `exile_alt_cost_permission_supports_cast`. A rider cast that elects an index
 /// through `selected_rider_zone_authority_permission_index` reaches this same
 /// read, so the rule lives here rather than at either caller.
@@ -5205,9 +5209,9 @@ pub(super) fn selected_exile_alt_cost_permission_single_use_group(
 ) -> Option<TrackedSetId> {
     let index = casting_permission_index?;
     let obj = state.objects.get(&object_id)?;
-    // CR 712.11c + CR 601.2a: the elected back face's characteristics were
-    // never tested against the grant's restriction, so its cast is not the one
-    // the grant offers. See the doc comment above.
+    // CR 712.8a + CR 601.2a: the elected back face was never tested against the
+    // grant's restriction (the pre-existing CR 712.11c gap documented above),
+    // so its cast is not treated as the one the grant offers.
     if obj.modal_back_face {
         return None;
     }

@@ -7,10 +7,14 @@
 //!
 //! A modal card's BACK-face cast through such a grant spends none of the
 //! budget: the grant's "creature spell" restriction was evaluated on the card's
-//! front face when the permission was attached (CR 712.11c), so the back-face
-//! cast is not the one cast the grant offers. This pins main's behaviour for
-//! that path, where no budget existed at all; admitting the back face through
-//! the grant in the first place is a pre-existing gap.
+//! front face when the permission was attached (CR 712.8a: in exile it has only
+//! its front face's characteristics), and the engine never tests the elected
+//! back face against that restriction (CR 712.11c says the face put onto the
+//! stack is the one evaluated, a rule the engine fails to apply here — a
+//! pre-existing gap), so the back-face cast is not the one cast the grant
+//! offers. This pins main's behaviour for that path, where no budget existed at
+//! all; admitting the back face through the grant in the first place is a
+//! pre-existing gap.
 //!
 //! A FREE grant (Idol of Endurance, "without paying its mana cost") carries no
 //! shared budget: every card in its pile stays castable through the grant after
@@ -830,9 +834,9 @@ fn soul_jar_two_activations_face_down_spend_one_group_per_cast() {
     );
 }
 
-/// The noncreature spell face of the synthetic modal DFC below. CR 712.11c:
-/// only the elected face is evaluated as the spell, so this face's
-/// characteristics — not the front creature's — are the ones the cast presents.
+/// The noncreature spell face of the synthetic modal DFC below. Once elected,
+/// this face's characteristics — not the front creature's — are the ones the
+/// cast presents (CR 712.11c).
 fn noncreature_modal_back_face() -> BackFaceData {
     let mut card_types = CardType::default();
     card_types.core_types.push(CoreType::Enchantment);
@@ -851,6 +855,20 @@ fn noncreature_modal_back_face() -> BackFaceData {
 /// noncreature spell, and a plain Elf creature. Both die to printed Murder, so
 /// the Jar's trigger — not a fixture — creates the linked exile the grant
 /// reads. Returns the runner, the Jar, the modal card, and the sibling.
+///
+/// Why the fixture is synthetic: no printed Elf has a noncreature modal back
+/// spell. Disciple of Freyalise // Garden of Freyalise is the only printed Elf
+/// creature front face with a noncreature back face, and that back face is a
+/// land, which the Jar's cast permission can never offer. The nearest printed
+/// card is Esika, God of the Tree // The Prismatic Bridge (Legendary Creature —
+/// God // Legendary Enchantment). Maskwood Nexus ("Creatures you control are
+/// every creature type. The same is true for creature spells you control and
+/// creature cards you own that aren't on the battlefield.") makes Esika an Elf,
+/// so Serpent's Soul-Jar's "Whenever an Elf you control dies, exile it" exiles
+/// it and the Jar's "you may cast a creature spell from among cards exiled with
+/// this artifact" offers it. The fixture stands the Nexus effect in with an Elf
+/// subtype on the front face because the engine integration support has no
+/// synthetic-MDFC helper (the back face is attached by hand below).
 fn soul_jar_modal_pile() -> (GameRunner, ObjectId, ObjectId, ObjectId) {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
@@ -910,15 +928,17 @@ fn soul_jar_modal_pile() -> (GameRunner, ObjectId, ObjectId, ObjectId) {
     (runner, jar, mdfc, sibling)
 }
 
-/// CR 712.11c + CR 712.8a + CR 608.2c: the grant's "creature spell" restriction
-/// was evaluated on the modal card's front face when the Jar stamped the
-/// permission (the only face a modal card has in exile), and the elected back
-/// face is never tested against it. A back-face cast through the grant is
-/// therefore not the one cast the grant offers: it must not spend the shared
-/// budget, and the sibling creature cast the grant does offer stays available.
+/// CR 712.8a + CR 608.2c: the grant's "creature spell" restriction was
+/// evaluated on the modal card's front face when the Jar stamped the permission
+/// (the only face a modal card has in exile), and the elected back face is
+/// never tested against it, though CR 712.11c says the elected face is the one
+/// evaluated. A back-face cast through the grant is therefore not the one cast
+/// the grant offers: it must not spend the shared budget, and the sibling
+/// creature cast the grant does offer stays available.
 /// This is main's observable behaviour for the path — main carried no budget at
 /// all — not a rules-ideal reading: admitting the back face through the grant
 /// in the first place is a pre-existing gap.
+/// Fixture rationale: see `soul_jar_modal_pile`.
 #[test]
 fn soul_jar_back_face_cast_spends_no_budget_so_the_sibling_creature_stays_castable() {
     let (mut runner, jar, mdfc, sibling) = soul_jar_modal_pile();
@@ -960,6 +980,7 @@ fn soul_jar_back_face_cast_spends_no_budget_so_the_sibling_creature_stays_castab
 /// on the elected back face, never on `cast_face_committed` (a front election
 /// sets that flag too) or on the card's layout. CR 712.11c: the front creature
 /// face is the spell evaluated; CR 608.2c: that cast is the grant's one spell.
+/// Fixture rationale: see `soul_jar_modal_pile`.
 #[test]
 fn soul_jar_front_face_cast_of_the_modal_card_still_spends_the_budget() {
     let (mut runner, jar, mdfc, sibling) = soul_jar_modal_pile();
