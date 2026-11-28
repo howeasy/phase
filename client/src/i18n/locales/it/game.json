@@ -3123,5 +3123,8 @@
       "laugh": "HA HA HA!",
       "flickCards": "thwip thwip!"
     }
+  },
+  "triggerTag": {
+    "more": "+{{n}} altri"
   }
 }

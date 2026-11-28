@@ -18,6 +18,7 @@ import { ExilePile } from "../../../zone/ExilePile.tsx";
 import { GraveyardPile } from "../../../zone/GraveyardPile.tsx";
 import { LibraryPile } from "../../../zone/LibraryPile.tsx";
 import { AnimationOverlay } from "../../AnimationOverlay.tsx";
+import { TriggerTagLayer } from "../../TriggerTagLayer.tsx";
 import { GALLERY_SCENARIOS, galleryBoard } from "./galleryScenarios.ts";
 
 export type GalleryScenarioId = keyof typeof GALLERY_SCENARIOS;
@@ -109,6 +110,7 @@ export function CardVfxGallery({ scenario, background }: CardVfxGalleryProps) {
             </div>
           </div>
           <AnimationOverlay containerRef={containerRef} />
+          <TriggerTagLayer />
         </>
       )}
       <GalleryToolbar title={title} description={description} playing={playing} onReplay={() => void play()} />

@@ -42,6 +42,8 @@ const HILL_GIANT = 50;
 const AIR_ELEMENTAL = 51;
 const OPPONENT_LANDS = [52, 53];
 const TOKEN = 60;
+/** A synthesized triggered ability's stack id: never an object id, so no zone list claims it. */
+const ELVES_TRIGGER = 70;
 
 interface CardSpec {
   id: ObjectId;
@@ -212,6 +214,46 @@ export const GALLERY_SCENARIOS: Record<string, GalleryScenario> = {
     batches: [
       cast(ELVES, YOU),
       moveAll([ELVES], "Stack", "Battlefield", (object_id) => ({ type: "StackResolved", data: { object_id } })),
+    ],
+  },
+  enterWithTrigger: {
+    title: "Enter with a triggered ability",
+    description: "Llanowar Elves enters the battlefield and its own enter-the-battlefield trigger is pushed in the same update.",
+    batches: [
+      (state) => {
+        move(state, ELVES, "Battlefield");
+        state.stack.push(
+          buildStackEntry({
+            id: ELVES_TRIGGER,
+            source_id: ELVES,
+            controller: YOU,
+            kind: {
+              type: "TriggeredAbility",
+              data: {
+                source_id: ELVES,
+                source_name: "Llanowar Elves",
+                description: "When ~ enters, add {G}.",
+                ability: { targets: [] },
+              },
+            },
+          }),
+        );
+        state.derived = {
+          ...(state.derived ?? {}),
+          stack_entry_details: {
+            ...(state.derived?.stack_entry_details ?? {}),
+            [String(ELVES_TRIGGER)]: {
+              source_name: "Llanowar Elves",
+              kind_label: "Triggered",
+              ability_kind: { type: "Triggered" },
+            },
+          },
+        };
+        return [
+          zoneChanged(ELVES, "Hand", "Battlefield"),
+          { type: "StackPushed", data: { object_id: ELVES_TRIGGER } },
+        ];
+      },
     ],
   },
   playLand: {

@@ -1,9 +1,9 @@
-import { motion, useReducedMotion } from "framer-motion";
+import { motion, useReducedMotion, type Easing } from "framer-motion";
 import type React from "react";
-import { memo, useCallback, useEffect, useId, useMemo, useRef } from "react";
+import { memo, useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 
-import type { GameObject, Keyword, ObjectId } from "../../adapter/types.ts";
+import type { GameEvent, GameObject, Keyword, ObjectId } from "../../adapter/types.ts";
 import { cardImageLookup, tokenFiltersForObject } from "../../services/cardImageLookup.ts";
 import { useCanActForWaitingState, usePlayerId } from "../../hooks/usePlayerId.ts";
 import { dispatchAction } from "../../game/dispatch.ts";
@@ -24,6 +24,7 @@ import { useLongPress } from "../../hooks/useLongPress.ts";
 import { useSpectatorMode } from "../../hooks/useSpectatorMode.ts";
 import { isUnbounded, pillsOf, useCounterDisplay } from "../../hooks/useCounterDisplay.ts";
 import { useAnimationStore } from "../../stores/animationStore.ts";
+import { attackLungeBand } from "../../animation/attackLunge.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { renderDescription } from "../../utils/description.ts";
 import { usePreferencesStore } from "../../stores/preferencesStore.ts";
@@ -86,6 +87,54 @@ const HOVERED_CARD_Z_INDEX = 60;
 const HOVERED_ATTACHMENT_HOST_Z_INDEX = 80;
 const EMPTY_KEYWORD_BADGES: Keyword[] = [];
 const EMPTY_LINKED_EXILE_IDS: ObjectId[] = [];
+
+/** Attack declarations already lunged, per committed update. */
+const lungedByUpdate = new WeakMap<GameEvent[], Set<ObjectId>>();
+
+/**
+ * Whether the committed update declares `id` attacking and no card has lunged
+ * for it yet; claims it. The events outlive the commit, so a later remount
+ * (a group expanding or collapsing) must find its declaration already spent.
+ */
+function claimDeclaredLunge(id: ObjectId): boolean {
+  const { events } = useGameStore.getState();
+  const declared = events.some(
+    (event) => event.type === "AttackersDeclared" && event.data.attacker_ids.includes(id),
+  );
+  if (!declared) return false;
+  const claimed = lungedByUpdate.get(events) ?? new Set<ObjectId>();
+  if (claimed.has(id)) return false;
+  lungedByUpdate.set(events, claimed.add(id));
+  return true;
+}
+
+/** Fraction of the lunge at which the wind-up position is reached. */
+const LUNGE_ARRIVAL = 0.18;
+/** Hold-to-thrust gap for the hanging bands; short next to the hold. */
+const LUNGE_SNAP = 0.12;
+/** Per-segment easing for a hanging lunge: pull out, hold, snap in, settle. */
+const LUNGE_HANG_EASE: Easing[] = ["easeOut", "linear", "easeIn", "easeOut"];
+
+interface CardLunge {
+  /** Frozen at the commit: later power changes cannot restart or reshape it. */
+  yKeyframes: number[];
+  scaleKeyframes: number[];
+  times: number[];
+  ease: Easing | Easing[];
+  durationMs: number;
+}
+
+/** The y translation currently painted on a card (its own transform, if any). */
+function currentTranslateY(element: HTMLElement | null): number {
+  if (!element || typeof window === "undefined") return 0;
+  const transform = window.getComputedStyle(element).transform;
+  if (!transform || transform === "none") return 0;
+  const match = /^matrix(3d)?\((.+)\)$/.exec(transform);
+  if (!match) return 0;
+  const values = match[2].split(",").map((value) => Number.parseFloat(value));
+  const offset = match[1] ? values[13] : values[5];
+  return Number.isFinite(offset) ? offset : 0;
+}
 
 // CR 602.5: display-only badge summarizing which of this permanent's activated
 // abilities are currently blocked, and why. Reads the engine-provided
@@ -511,6 +560,88 @@ export const PermanentCard = memo(function PermanentCard({
     showAttachmentFan();
   }, [showAttachmentFan]);
 
+  // Committed attackers lunge once, on the commit that adds them to combat.
+  // Declaring attackers can split a permanent group and remount a card within
+  // that commit, so a mount lunges only for a declaration in the committed
+  // events that no card has played yet. A restored session is never new.
+  const reduceMotion = useReducedMotion() === true;
+  const committedAttacker = committedAttackerIds.has(objectId);
+  const [lunge, setLunge] = useState<CardLunge | null>(null);
+  const sessionGeneration = useGameStore((s) => s.gameSessionGeneration);
+  const seenAttack = useRef<{ generation: number; committed: boolean } | null>(null);
+
+  useLayoutEffect(() => {
+    const committed = committedAttackerIds.has(objectId);
+    const seen = seenAttack.current;
+    seenAttack.current = { generation: sessionGeneration, committed };
+    if (!committed || (seen && seen.generation !== sessionGeneration)) {
+      setLunge(null);
+      return;
+    }
+    if (seen?.committed) return;
+    // A card that was already here lunges on the change itself, and claims it.
+    if (!claimDeclaredLunge(objectId) && !seen) return;
+    if (!obj) return;
+    const multiplier = usePreferencesStore.getState().animationSpeedMultiplier;
+    if (reduceMotion || !(multiplier > 0)) return;
+    const band = attackLungeBand(obj.power);
+    // Compact height uses its own smaller magnitude; an opponent's card mirrors
+    // the direction because its slide already points the other way.
+    const magnitude = isCompactHeight ? 12 : 30;
+    const direction = obj.controller === playerId ? -1 : 1;
+    const from = currentTranslateY(cardRef.current);
+    // Wind-up pulls back from wherever the card sits (it may already be slid
+    // forward from being selected); the thrust is measured from the card's slot,
+    // so a selected attacker reaches no further than an opponent's.
+    const windUp = from - direction * magnitude * band.windUp;
+    const thrust = direction * magnitude * band.thrust;
+    const rest = direction * magnitude;
+    const hanging = band.hang > 0;
+    setLunge({
+      // A hanging band repeats the wind-up frame with explicit times, then
+      // snaps to the thrust over a short, accelerating segment.
+      yKeyframes: hanging
+        ? [from, windUp, windUp, thrust, rest]
+        : [from, windUp, thrust, rest],
+      scaleKeyframes: hanging
+        ? [1, 1, 1, band.peakScale, 1]
+        : [1, 1, band.peakScale, 1],
+      times: hanging
+        ? [
+            0,
+            LUNGE_ARRIVAL,
+            LUNGE_ARRIVAL + band.hang,
+            LUNGE_ARRIVAL + band.hang + LUNGE_SNAP,
+            1,
+          ]
+        : [0, 0.35, 0.7, 1],
+      ease: hanging ? LUNGE_HANG_EASE : "easeInOut",
+      durationMs: band.durationMs * Math.min(multiplier, 1),
+    });
+  }, [committedAttackerIds, objectId, obj, isCompactHeight, playerId, reduceMotion, sessionGeneration]);
+
+  // The lunge is a finite keyframe run; after it, y is the resting slide again.
+  useEffect(() => {
+    if (!lunge) return;
+    const timer = window.setTimeout(() => setLunge(null), lunge.durationMs);
+    return () => window.clearTimeout(timer);
+  }, [lunge]);
+
+  const lungeY = lunge?.yKeyframes ?? null;
+  const lungeScale = lunge?.scaleKeyframes ?? null;
+  const cardTransition = useMemo(() => {
+    const spring = { type: "spring" as const, stiffness: 300, damping: 20 };
+    if (!lunge) return { rotate: spring, opacity: spring, y: spring, scale: spring };
+    // The spring stays on rotate/opacity (attackers tap while they slide); only
+    // y and scale run keyframes.
+    const keyframes = {
+      duration: lunge.durationMs / 1000,
+      times: lunge.times,
+      ease: lunge.ease,
+    };
+    return { rotate: spring, opacity: spring, y: keyframes, scale: keyframes };
+  }, [lunge]);
+
   if (!obj) return null;
 
   const isLand = obj.card_types.core_types.includes("Land");
@@ -577,7 +708,7 @@ export const PermanentCard = memo(function PermanentCard({
   // Combat state — check both UI selection and committed combat state
   const isSelectingAttacker =
     combatMode === "attackers" && selectedAttackers.includes(objectId);
-  const isCommittedAttacker = committedAttackerIds.has(objectId);
+  const isCommittedAttacker = committedAttacker;
   const isAttacking = isSelectingAttacker || isCommittedAttacker;
   const isBlocking =
     combatMode === "blockers" && blockerAssignments.has(objectId);
@@ -857,9 +988,10 @@ export const PermanentCard = memo(function PermanentCard({
       animate={{
         rotate: isRotatedFull ? tapAngle : 0,
         opacity: tapOpacity,
-        y: attackSlide,
+        y: lungeY ?? attackSlide,
+        ...(lungeScale ? { scale: lungeScale } : {}),
       }}
-      transition={{ type: "spring", stiffness: 300, damping: 20 }}
+      transition={cardTransition}
       onClick={handleClick}
       {...longPressHandlers}
       onPointerEnter={handlePointerEnter}

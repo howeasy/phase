@@ -20,6 +20,7 @@ import { useGameStore } from "../../stores/gameStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
 import { getWaitingForObjectChoiceIds } from "../../viewmodel/gameStateView.ts";
 import { renderDescription } from "../../utils/description.ts";
+import { stackEntryDescription } from "../../utils/stackEntryDescription.ts";
 import { ManaCostPips } from "../mana/ManaCostPips.tsx";
 import { getCardImageSrcSetProps } from "../card/cardImageSrcSet.ts";
 import { PopoverMenu } from "../menu/PopoverMenu.tsx";
@@ -178,12 +179,7 @@ export function StackEntry({ entry, choiceObjectId = entry.id, groupedObjectIds,
     : isTriggered && triggerSourceName
       ? t("stack.triggeredFrom", { source: displaySourceName })
       : t("stack.triggered"));
-  const triggerDescription =
-    details?.ability_description
-      ? renderDescription(details.ability_description, sourceName)
-      : entry.kind.type === "TriggeredAbility"
-        ? entry.kind.data.description && renderDescription(entry.kind.data.description, sourceName)
-        : undefined;
+  const triggerDescription = stackEntryDescription(entry, details, sourceName);
   const targetLabels = details?.targets?.map((target) => target.label) ?? [];
   const selectedModeLabels = isSpell ? details?.selected_mode_labels ?? [] : [];
   // The chosen {X} is a resolved value (like a chosen color), not just a cost —

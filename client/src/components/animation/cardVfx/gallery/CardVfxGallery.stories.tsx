@@ -37,6 +37,7 @@ export default meta;
 type Story = StoryObj<typeof meta>;
 
 export const CastAndResolve: Story = { args: { scenario: "castAndResolve" } };
+export const EnterWithTrigger: Story = { args: { scenario: "enterWithTrigger" } };
 export const PlayLand: Story = { args: { scenario: "playLand" } };
 export const Draw: Story = { args: { scenario: "draw" } };
 export const OpponentDraw: Story = { args: { scenario: "opponentDraw" } };

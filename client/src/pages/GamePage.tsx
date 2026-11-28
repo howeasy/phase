@@ -55,6 +55,7 @@ import { BetweenGamesSideboardModal } from "../components/multiplayer/BetweenGam
 import { audioManager } from "../audio/AudioManager.ts";
 import { useAudioContext } from "../audio/useAudioContext.ts";
 import { AnimationOverlay } from "../components/animation/AnimationOverlay.tsx";
+import { TriggerTagLayer } from "../components/animation/TriggerTagLayer.tsx";
 import { RevealOverlay } from "../components/animation/RevealOverlay.tsx";
 import { TurnBanner } from "../components/animation/TurnBanner.tsx";
 import { DiceRollOverlay } from "../components/animation/DiceRollOverlay.tsx";
@@ -2082,6 +2083,8 @@ function GamePageContent({
 
           {/* Animation overlay (above board, below modals) */}
           <AnimationOverlay containerRef={containerRef} />
+          {/* Committed triggered-ability tags on their battlefield sources */}
+          <TriggerTagLayer />
           {/* Multi-card top-of-library reveal (CR 701.20b), e.g. Lead the Stampede */}
           <RevealOverlay />
           <TurnBanner />
