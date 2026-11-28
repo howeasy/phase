@@ -834,43 +834,26 @@ pub(crate) fn try_parse_cost_modification(
     // Merge cast-from-zone restriction into the spell filter.
     // If zones were extracted, add InZone/InAnyZone to ensure the cost modification
     // only applies when the spell is being cast from the specified zone(s).
-    let spell_filter = if let Some(zone_prop) = origin_exclusion.or_else(|| {
-        (!cast_from_zones.is_empty()).then(|| {
-            if cast_from_zones.len() == 1 {
-                FilterProp::InZone {
-                    zone: cast_from_zones[0],
+    // `compose_cost_mod_property` covers all three shapes: a typed filter absorbs
+    // the prop directly; a non-Typed filter is And-wrapped with a card+prop leaf;
+    // with no type filter, the zone restriction alone is the constraint
+    // (e.g., "Spells ... cast from exile cost more").
+    let spell_filter = compose_cost_mod_property(
+        spell_filter,
+        origin_exclusion.or_else(|| {
+            (!cast_from_zones.is_empty()).then(|| {
+                if cast_from_zones.len() == 1 {
+                    FilterProp::InZone {
+                        zone: cast_from_zones[0],
+                    }
+                } else {
+                    FilterProp::InAnyZone {
+                        zones: cast_from_zones,
+                    }
                 }
-            } else {
-                FilterProp::InAnyZone {
-                    zones: cast_from_zones,
-                }
-            }
-        })
-    }) {
-        match spell_filter {
-            Some(TargetFilter::Typed(mut tf)) => {
-                tf.properties.push(zone_prop);
-                Some(TargetFilter::Typed(tf))
-            }
-            Some(other) => {
-                // Wrap non-Typed filters with an And that adds the zone constraint.
-                Some(TargetFilter::And {
-                    filters: vec![
-                        other,
-                        TargetFilter::Typed(TypedFilter::card().properties(vec![zone_prop])),
-                    ],
-                })
-            }
-            None => {
-                // No type filter, just zone restriction (e.g., "Spells ... cast from exile cost more")
-                Some(TargetFilter::Typed(
-                    TypedFilter::card().properties(vec![zone_prop]),
-                ))
-            }
-        }
-    } else {
-        spell_filter
-    };
+            })
+        }),
+    );
 
     // Detect dynamic "for each" count pattern
     // "for each artifact you control" → QuantityRef::ObjectCount
