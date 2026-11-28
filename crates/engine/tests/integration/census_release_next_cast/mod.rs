@@ -379,6 +379,16 @@ fn counters(r: &GameRunner, id: ObjectId, kind: CounterType) -> u32 {
         .unwrap_or(0)
 }
 
+/// The pending "enters with an additional counter" rows registered for `id`.
+fn pending(r: &GameRunner, id: ObjectId) -> Vec<(CounterType, u32)> {
+    r.state()
+        .pending_etb_counters
+        .iter()
+        .filter(|(pending_id, _, _)| *pending_id == id)
+        .map(|(_, kind, count)| (kind.clone(), *count))
+        .collect()
+}
+
 fn zone(r: &GameRunner, id: ObjectId) -> Zone {
     r.state().objects[&id].zone
 }
@@ -1097,10 +1107,8 @@ fn the_clone_saga_chapter_two_copies_a_creature_spell_nonlegendary() {
 /// A Saga chapter whose rider adds counters to the next creature spell: only the first of two
 /// Grizzly Bears gets them.
 ///
-/// Kumano Faces Kakkazan, Summon: Fenrir and Yuna, Grand Summoner keep their `wrong_duration`
-/// census rows: the pending counter rider is keyed by `ObjectId` and survives a zone change, so a
-/// creature that is Remanded and recast gets the counter (CR 400.7 says the recast object is new).
-/// These witnesses cover the first entry only; the recast case is the retained gap.
+/// The pending counter rider belongs to the creature spell it was registered for: the Remand
+/// witnesses below cover the recast of a spell that left the stack (CR 400.7).
 fn counter_rider_saga(name: &str, expected: u32) {
     let (mut s, saga) = saga_board(name);
     let first = card(&mut s, "Grizzly Bears", Zone::Hand);
@@ -1111,6 +1119,10 @@ fn counter_rider_saga(name: &str, expected: u32) {
     fund(&mut r, P0, ManaType::Green, 4);
     cast(&mut r, first, vec![]);
     assert_eq!(counters(&r, first, CounterType::Plus1Plus1), expected);
+    assert!(
+        r.state().pending_etb_counters.is_empty(),
+        "the first entry consumed the rider"
+    );
     cast(&mut r, second, vec![]);
     assert_eq!(
         counters(&r, second, CounterType::Plus1Plus1),
@@ -1154,8 +1166,526 @@ fn yuna_tap_for_mana_gives_the_next_creature_two_counters() {
     assert_eq!(delayed(&r), 1);
     cast(&mut r, first, vec![]);
     assert_eq!(counters(&r, first, CounterType::Plus1Plus1), 2);
+    assert!(
+        r.state().pending_etb_counters.is_empty(),
+        "the first entry consumed the rider"
+    );
     cast(&mut r, second, vec![]);
     assert_eq!(counters(&r, second, CounterType::Plus1Plus1), 0);
+    assert_idle(&r);
+}
+
+/// P0's next creature spell `bears` carries the pending counter rider (the delayed trigger has
+/// resolved), and P1 Remands it. The rider must not follow the card to hand: P0 recasts `bears`
+/// and it enters with no counters (CR 400.7: the recast card is a new object, CR 614.1c).
+fn remanded_creature_recast_has_no_counters(mut r: GameRunner, bears: ObjectId) {
+    let remand = r
+        .state()
+        .objects
+        .iter()
+        .find_map(|(id, o)| (o.name == "Remand" && o.owner == P1).then_some(*id))
+        .expect("P1 holds Remand");
+    fund(&mut r, P0, ManaType::Green, 4);
+    fund(&mut r, P1, ManaType::Blue, 2);
+    cast_action(&mut r, bears);
+    drive(&mut r, |s| !s.pending_etb_counters.is_empty(), vec![]);
+    assert_eq!(
+        zone(&r, bears),
+        Zone::Stack,
+        "the rider was registered for the spell on the stack"
+    );
+    assert!(matches!(r.state().waiting_for, WaitingFor::Priority { player } if player == P0));
+    r.act(GameAction::PassPriority).expect("P0 passes");
+    assert!(matches!(r.state().waiting_for, WaitingFor::Priority { player } if player == P1));
+    cast_action(&mut r, remand);
+    // Remand's only legal target is the creature spell, so the engine announces it itself.
+    play(&mut r, vec![]);
+    assert_eq!(
+        zone(&r, bears),
+        Zone::Hand,
+        "Remand returned the creature spell to its owner's hand"
+    );
+    assert!(
+        r.state().pending_etb_counters.is_empty(),
+        "the rider left with the spell"
+    );
+    cast(&mut r, bears, vec![]);
+    assert_eq!(zone(&r, bears), Zone::Battlefield);
+    assert_eq!(
+        counters(&r, bears, CounterType::Plus1Plus1),
+        0,
+        "the recast card is a new object"
+    );
+    assert_idle(&r);
+}
+
+fn remand_for_p1(s: &mut GameScenario) {
+    s.add_real_card(P1, "Remand", Zone::Hand, db());
+    pad_libraries(s);
+}
+
+/// Kumano Faces Kakkazan II, Summon: Fenrir II: a Remanded creature spell recast gets no counter.
+#[test]
+fn kumano_counter_rider_does_not_follow_a_remanded_creature() {
+    let (mut s, saga) = saga_board("Kumano Faces Kakkazan");
+    let bears = card(&mut s, "Grizzly Bears", Zone::Hand);
+    remand_for_p1(&mut s);
+    let mut r = s.build();
+    run_chapter(&mut r, saga, 2, vec![]);
+    remanded_creature_recast_has_no_counters(r, bears);
+}
+
+#[test]
+fn summon_fenrir_counter_rider_does_not_follow_a_remanded_creature() {
+    let (mut s, saga) = saga_board("Summon: Fenrir");
+    let bears = card(&mut s, "Grizzly Bears", Zone::Hand);
+    remand_for_p1(&mut s);
+    let mut r = s.build();
+    run_chapter(&mut r, saga, 2, vec![]);
+    remanded_creature_recast_has_no_counters(r, bears);
+}
+
+/// Yuna, Grand Summoner: the same for her two-counter rider.
+#[test]
+fn yuna_counter_rider_does_not_follow_a_remanded_creature() {
+    let mut s = main_phase();
+    let yuna = card(&mut s, "Yuna, Grand Summoner", Zone::Battlefield);
+    let bears = card(&mut s, "Grizzly Bears", Zone::Hand);
+    remand_for_p1(&mut s);
+    let mut r = s.build();
+    activate(
+        &mut r,
+        yuna,
+        0,
+        vec![Ask::Color {
+            actor: P0,
+            color: ManaType::Green,
+        }],
+    );
+    assert_eq!(delayed(&r), 1);
+    remanded_creature_recast_has_no_counters(r, bears);
+}
+
+/// A creature spell that is countered (stack to graveyard) leaves no rider row behind.
+#[test]
+fn kumano_counter_rider_row_leaves_with_a_countered_creature() {
+    let (mut s, saga) = saga_board("Kumano Faces Kakkazan");
+    let bears = card(&mut s, "Grizzly Bears", Zone::Hand);
+    let counterspell = s.add_real_card(P1, "Counterspell", Zone::Hand, db());
+    pad_libraries(&mut s);
+    let mut r = s.build();
+    run_chapter(&mut r, saga, 2, vec![]);
+    fund(&mut r, P0, ManaType::Green, 2);
+    fund(&mut r, P1, ManaType::Blue, 2);
+    cast_action(&mut r, bears);
+    drive(&mut r, |s| !s.pending_etb_counters.is_empty(), vec![]);
+    r.act(GameAction::PassPriority).expect("P0 passes");
+    cast_action(&mut r, counterspell);
+    play(&mut r, vec![]);
+    assert_eq!(zone(&r, bears), Zone::Graveyard);
+    assert!(r.state().pending_etb_counters.is_empty());
+    assert_idle(&r);
+}
+
+/// Remand answers the creature spell while the delayed trigger is still on the stack: the trigger
+/// resolves with its spell already gone, registers nothing, and the recast gets no counter
+/// (CR 603.7c, CR 400.7).
+#[test]
+fn kumano_counter_rider_is_not_registered_for_a_spell_remanded_in_response() {
+    let (mut s, saga) = saga_board("Kumano Faces Kakkazan");
+    let bears = card(&mut s, "Grizzly Bears", Zone::Hand);
+    remand_for_p1(&mut s);
+    let mut r = s.build();
+    run_chapter(&mut r, saga, 2, vec![]);
+    let remand = r
+        .state()
+        .objects
+        .iter()
+        .find_map(|(id, o)| (o.name == "Remand" && o.owner == P1).then_some(*id))
+        .expect("P1 holds Remand");
+    fund(&mut r, P0, ManaType::Green, 4);
+    fund(&mut r, P1, ManaType::Blue, 2);
+    cast_action(&mut r, bears);
+    assert_eq!(
+        r.state().stack.len(),
+        2,
+        "the Bears and the delayed trigger above it"
+    );
+    assert!(r.state().pending_etb_counters.is_empty());
+    r.act(GameAction::PassPriority).expect("P0 passes");
+    assert!(matches!(r.state().waiting_for, WaitingFor::Priority { player } if player == P1));
+    cast_action(&mut r, remand);
+    assert_eq!(
+        r.state().stack.len(),
+        3,
+        "the Bears, the trigger, and Remand"
+    );
+    play(&mut r, vec![]);
+    assert_eq!(zone(&r, bears), Zone::Hand);
+    assert!(
+        r.state().pending_etb_counters.is_empty(),
+        "the trigger resolved with its spell gone and registered no rider"
+    );
+    cast(&mut r, bears, vec![]);
+    assert_eq!(zone(&r, bears), Zone::Battlefield);
+    assert_eq!(counters(&r, bears, CounterType::Plus1Plus1), 0);
+    assert_idle(&r);
+}
+
+/// Two creature spells hold a pending counter rider at once. Kumano's delayed trigger registers one
+/// for the first spell, and Biophagus's mana spent on the second registers its own (CR 106.6 +
+/// CR 614.1c). P1 Remands only the second spell: that spell's rider ends with its stack exit
+/// (CR 400.7), while the first spell still resolves and enters with its counter.
+#[test]
+fn remanding_one_spell_keeps_the_other_spells_counter_rider() {
+    let (mut s, saga) = saga_board("Kumano Faces Kakkazan");
+    let biophagus = card(&mut s, "Biophagus", Zone::Battlefield);
+    let bears = card(&mut s, "Grizzly Bears", Zone::Hand);
+    let viper = card(&mut s, "Ambush Viper", Zone::Hand);
+    remand_for_p1(&mut s);
+    let mut r = s.build();
+    let remand = r
+        .state()
+        .objects
+        .iter()
+        .find_map(|(id, object)| (object.name == "Remand" && object.owner == P1).then_some(*id))
+        .expect("P1 holds Remand");
+    run_chapter(&mut r, saga, 2, vec![]);
+    assert_eq!(delayed(&r), 1, "the chapter's next-cast trigger waits");
+    fund(&mut r, P0, ManaType::Green, 1);
+    fund(&mut r, P0, ManaType::Colorless, 1);
+    fund(&mut r, P1, ManaType::Blue, 2);
+
+    // Plain green pays for the Bears, so only the Kumano rider is registered for it.
+    cast_action(&mut r, bears);
+    drive(&mut r, |s| !s.pending_etb_counters.is_empty(), vec![]);
+    assert_eq!(zone(&r, bears), Zone::Stack);
+    assert_eq!(pending(&r, bears), vec![(CounterType::Plus1Plus1, 1u32)]);
+    assert_eq!(pending(&r, viper), vec![]);
+    assert_eq!(delayed(&r), 0, "the next-cast trigger is spent");
+
+    // Ambush Viper (flash) is cast while the Bears spell is still on the stack. Biophagus's {T} is
+    // its only available green source, so the spent unit carries the mana-entry rider.
+    r.act(GameAction::ActivateAbility {
+        source_id: biophagus,
+        ability_index: 0,
+        payment_mode: CastPaymentMode::Auto,
+    })
+    .expect("Biophagus's mana ability is activated");
+    assert!(
+        matches!(r.state().waiting_for, WaitingFor::ChooseManaColor { .. }),
+        "any-color mana ability prompts, got {:?}",
+        r.state().waiting_for
+    );
+    r.act(GameAction::ChooseManaColor {
+        choice: ManaChoice::SingleColor(ManaType::Green),
+        count: 1,
+    })
+    .expect("Biophagus adds one green mana");
+    assert_eq!(
+        r.state().players[P0.0 as usize]
+            .mana_pool
+            .count_color(ManaType::Green),
+        1,
+        "the flash spell's green pip must come from Biophagus"
+    );
+    fund(&mut r, P0, ManaType::Colorless, 1);
+    cast_action(&mut r, viper);
+    assert_eq!(
+        r.state().stack.len(),
+        2,
+        "both creature spells are on the stack"
+    );
+    assert_eq!(zone(&r, bears), Zone::Stack);
+    assert_eq!(zone(&r, viper), Zone::Stack);
+    assert_eq!(
+        pending(&r, bears),
+        vec![(CounterType::Plus1Plus1, 1u32)],
+        "the first spell keeps its Kumano rider"
+    );
+    assert_eq!(
+        pending(&r, viper),
+        vec![(CounterType::Plus1Plus1, 1u32)],
+        "Biophagus's mana registered a second rider for the flash spell"
+    );
+    assert_eq!(
+        r.state().pending_etb_counters.len(),
+        2,
+        "each spell holds its own rider"
+    );
+
+    // Remand the flash spell. Its rider leaves with it; the Bears' rider must survive the exit.
+    r.act(GameAction::PassPriority).expect("P0 passes");
+    assert!(matches!(r.state().waiting_for, WaitingFor::Priority { player } if player == P1));
+    cast_action(&mut r, remand);
+    drive(
+        &mut r,
+        |s| s.stack.len() == 1 && s.stack[0].id == bears,
+        vec![Ask::Target {
+            actor: P1,
+            pick: TargetRef::Object(viper),
+        }],
+    );
+    assert_eq!(
+        zone(&r, viper),
+        Zone::Hand,
+        "Remand returned the flash spell to its owner's hand"
+    );
+    assert_eq!(
+        zone(&r, bears),
+        Zone::Stack,
+        "the other creature spell is still on the stack"
+    );
+    assert_eq!(
+        pending(&r, viper),
+        vec![],
+        "the Remanded spell's rider left with it"
+    );
+    assert_eq!(
+        r.state().pending_etb_counters.len(),
+        1,
+        "only the survivor's rider remains"
+    );
+    assert_eq!(
+        pending(&r, bears),
+        vec![(CounterType::Plus1Plus1, 1u32)],
+        "the other spell's rider was not cleared with it"
+    );
+
+    play(&mut r, vec![]);
+    assert_eq!(zone(&r, bears), Zone::Battlefield);
+    assert_eq!(
+        counters(&r, bears, CounterType::Plus1Plus1),
+        1,
+        "the surviving spell entered with its rider's counter"
+    );
+    assert_eq!(zone(&r, viper), Zone::Hand);
+    assert_eq!(counters(&r, viper, CounterType::Plus1Plus1), 0);
+    assert!(
+        r.state().pending_etb_counters.is_empty(),
+        "the survivor's entry consumed only its own rider"
+    );
+    assert_idle(&r);
+}
+
+/// A creature spell that merges (mutate) never enters the battlefield, so its rider is spent: after
+/// the merged permanent is bounced, the recast Gemrazer is a new object with no counter
+/// (CR 730.2b, CR 400.7).
+#[test]
+fn kumano_counter_rider_is_spent_by_a_mutate_merge() {
+    let (mut s, saga) = saga_board("Kumano Faces Kakkazan");
+    let host = card(&mut s, "Grizzly Bears", Zone::Battlefield);
+    let gemrazer = card(&mut s, "Gemrazer", Zone::Hand);
+    let unsummon = card(&mut s, "Unsummon", Zone::Hand);
+    pad_libraries(&mut s);
+    let mut r = s.build();
+    engine::game::rehydrate_game_from_card_db(r.state_mut(), db());
+    run_chapter(&mut r, saga, 2, vec![]);
+    fund(&mut r, P0, ManaType::Green, 3);
+    let offered = engine::ai_support::legal_actions(r.state())
+        .into_iter()
+        .find(|a| matches!(a, GameAction::CastSpell { object_id, .. } if *object_id == gemrazer))
+        .expect("the mutate cast is offered");
+    r.act(offered).expect("the mutate cast is accepted");
+    // The host is the only legal mutate target, so the engine announces it itself.
+    assert_eq!(
+        r.state().stack.iter().filter(|e| e.id == gemrazer).count(),
+        1
+    );
+    r.advance_until_stack_empty();
+    assert!(
+        matches!(r.state().waiting_for, WaitingFor::MutateMergeChoice { player, .. } if player == P0)
+    );
+    assert!(
+        r.state()
+            .pending_etb_counters
+            .iter()
+            .any(|(id, _, _)| *id == gemrazer),
+        "the rider was registered for the mutating spell"
+    );
+    r.act(GameAction::ChooseMutateMergeSide {
+        side: engine::game::merge::MergeSide::Top,
+    })
+    .expect("the merge placement is accepted");
+    r.advance_until_stack_empty();
+    assert_eq!(
+        r.state().objects[&host].merged_components.len(),
+        2,
+        "host and Gemrazer are one merged permanent"
+    );
+    assert!(
+        r.state().pending_etb_counters.is_empty(),
+        "the merged spell never entered, its rider is spent"
+    );
+    fund(&mut r, P0, ManaType::Blue, 1);
+    // The merged permanent is the only creature, so Unsummon's target is announced by the engine.
+    cast(&mut r, unsummon, vec![]);
+    assert_eq!(zone(&r, gemrazer), Zone::Hand);
+    fund(&mut r, P0, ManaType::Green, 6);
+    cast(&mut r, gemrazer, vec![]);
+    assert_eq!(zone(&r, gemrazer), Zone::Battlefield);
+    assert_eq!(counters(&r, gemrazer, CounterType::Plus1Plus1), 0);
+    assert_idle(&r);
+}
+
+/// A merge spends ONLY the merging spell's own rider: another creature spell waiting below it on
+/// the stack keeps its row and enters with its counter (CR 730.2b, CR 400.7, CR 614.1c).
+///
+/// The lower spell (Kumano II's one-counter rider) is cast first; Vedalken Orrery's "as though
+/// they had flash" then lets Gemrazer's mutate cast be announced in response, where Yuna's
+/// activated ability arms a two-counter rider for it. Gemrazer is above the lower spell, so the
+/// merge resolves first: its row must go and the lower spell's row must stay. A witness with one
+/// row cannot tell `retain` from a plain clear, which is why both rows are held at once here.
+#[test]
+fn mutate_merge_spends_only_the_merging_spells_counter_rider() {
+    let (mut s, saga) = saga_board("Kumano Faces Kakkazan");
+    let host = card(&mut s, "Grizzly Bears", Zone::Battlefield);
+    let yuna = card(&mut s, "Yuna, Grand Summoner", Zone::Battlefield);
+    let orrery = card(&mut s, "Vedalken Orrery", Zone::Battlefield);
+    let bears = card(&mut s, "Grizzly Bears", Zone::Hand);
+    let gemrazer = card(&mut s, "Gemrazer", Zone::Hand);
+    let mut r = s.build();
+    engine::game::rehydrate_game_from_card_db(r.state_mut(), db());
+    run_chapter(&mut r, saga, 2, vec![]);
+    assert_eq!(delayed(&r), 1, "the chapter's next-cast trigger waits");
+    assert_eq!(
+        zone(&r, orrery),
+        Zone::Battlefield,
+        "reach-guard: the flash permission source is on the battlefield"
+    );
+
+    // Plain green pays for the lower spell, so only the Kumano rider is registered for it, and it
+    // waits on the stack (its spell, not the battlefield host, is the eventual entrant).
+    fund(&mut r, P0, ManaType::Green, 1);
+    fund(&mut r, P0, ManaType::Colorless, 1);
+    cast_action(&mut r, bears);
+    drive(
+        &mut r,
+        |state| !state.pending_etb_counters.is_empty(),
+        vec![],
+    );
+    assert_eq!(zone(&r, bears), Zone::Stack);
+    assert_eq!(pending(&r, bears), vec![(CounterType::Plus1Plus1, 1u32)]);
+    assert_eq!(delayed(&r), 0, "the next-cast trigger is spent");
+
+    // Yuna's mana ability arms a second next-cast rider for the spell cast in response. It is a
+    // mana ability, so it resolves without draining the lower spell off the stack.
+    r.act(GameAction::ActivateAbility {
+        source_id: yuna,
+        ability_index: 0,
+        payment_mode: CastPaymentMode::Auto,
+    })
+    .expect("Yuna's mana ability is activated");
+    assert!(
+        matches!(r.state().waiting_for, WaitingFor::ChooseManaColor { .. }),
+        "any-color mana ability prompts, got {:?}",
+        r.state().waiting_for
+    );
+    r.act(GameAction::ChooseManaColor {
+        choice: ManaChoice::SingleColor(ManaType::Green),
+        count: 1,
+    })
+    .expect("Yuna adds one green mana");
+    assert_eq!(delayed(&r), 1, "Yuna's next-cast trigger waits");
+    assert_eq!(
+        pending(&r, bears),
+        vec![(CounterType::Plus1Plus1, 1u32)],
+        "arming the second rider left the lower spell's rider alone"
+    );
+
+    // Orrery supplies flash, so the mutate cast is offered in response; the pool holds three mana,
+    // so the printed {3}{G} is unaffordable and the unannounced cast is the mutate route
+    // ({1}{G}{G}) — the same sole-affordable-route shape as the witness above.
+    fund(&mut r, P0, ManaType::Green, 2);
+    let offered = engine::ai_support::legal_actions(r.state())
+        .into_iter()
+        .find(|a| matches!(a, GameAction::CastSpell { object_id, .. } if *object_id == gemrazer))
+        .expect("the mutate cast is offered in response");
+    r.act(offered).expect("the mutate cast is accepted");
+    drive(
+        &mut r,
+        |state| state.stack.len() == 2 && state.pending_etb_counters.len() == 2,
+        vec![],
+    );
+    assert_eq!(zone(&r, bears), Zone::Stack, "the lower spell still waits");
+    assert_eq!(zone(&r, gemrazer), Zone::Stack);
+    assert_eq!(
+        r.state().stack.iter().filter(|e| e.id == gemrazer).count(),
+        1
+    );
+    // Reach-guard: the one-counter Kumano row belongs to the lower spell, the two-counter Yuna row
+    // to the merging spell; both are live before anything resolves.
+    assert_eq!(pending(&r, bears), vec![(CounterType::Plus1Plus1, 1u32)]);
+    assert_eq!(pending(&r, gemrazer), vec![(CounterType::Plus1Plus1, 2u32)]);
+
+    // Gemrazer is above the lower spell, so the merge resolves first (the host is the only legal
+    // mutate target: Yuna is a Human, so the engine announces it itself).
+    r.advance_until_stack_empty();
+    assert!(
+        matches!(r.state().waiting_for, WaitingFor::MutateMergeChoice { player, .. } if player == P0)
+    );
+    r.act(GameAction::ChooseMutateMergeSide {
+        side: engine::game::merge::MergeSide::Top,
+    })
+    .expect("the merge placement is accepted");
+    assert_eq!(
+        r.state().objects[&host].merged_components.len(),
+        2,
+        "host and Gemrazer are one merged permanent"
+    );
+    assert_eq!(
+        pending(&r, gemrazer),
+        vec![],
+        "the merging spell's own rider is spent"
+    );
+    assert_eq!(
+        pending(&r, bears),
+        vec![(CounterType::Plus1Plus1, 1u32)],
+        "the lower spell's rider survives the merge"
+    );
+    assert_eq!(
+        r.state().pending_etb_counters.len(),
+        1,
+        "only the merging spell's row was removed"
+    );
+
+    // The lower creature spell then resolves and enters with exactly its own rider's counter.
+    play(&mut r, vec![]);
+    assert_eq!(zone(&r, bears), Zone::Battlefield);
+    assert_eq!(counters(&r, bears, CounterType::Plus1Plus1), 1);
+    assert!(
+        r.state().pending_etb_counters.is_empty(),
+        "the entry consumed the surviving row"
+    );
+    assert_idle(&r);
+}
+
+/// The rider is scoped to the next CREATURE spell: a noncreature spell cast while it waits
+/// registers no rider and leaves the trigger armed for the next creature spell.
+#[test]
+fn noncreature_spell_does_not_consume_the_counter_rider() {
+    let (mut s, saga) = saga_board("Kumano Faces Kakkazan");
+    let lightning_bolt = card(&mut s, BOLT, Zone::Hand);
+    let bears = card(&mut s, "Grizzly Bears", Zone::Hand);
+    let mut r = s.build();
+    run_chapter(&mut r, saga, 2, vec![]);
+    assert_eq!(delayed(&r), 1, "the chapter's next-cast trigger waits");
+    fund(&mut r, P0, ManaType::Red, 1);
+    let life = r.life(P1);
+    bolt(&mut r, lightning_bolt, 0);
+    assert_eq!(r.life(P1), life - 3);
+    assert!(
+        r.state().pending_etb_counters.is_empty(),
+        "a noncreature spell registers no rider"
+    );
+    assert_eq!(
+        delayed(&r),
+        1,
+        "the trigger still waits for a creature spell"
+    );
+    fund(&mut r, P0, ManaType::Green, 2);
+    cast(&mut r, bears, vec![]);
+    assert_eq!(counters(&r, bears, CounterType::Plus1Plus1), 1);
     assert_idle(&r);
 }
 
