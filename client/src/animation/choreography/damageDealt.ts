@@ -3,9 +3,12 @@ import {
   applyCardKnockback,
   applyCardSlam,
 } from "../../components/animation/CardSlamAnimation.tsx";
-import { CARD_SLAM_FLIGHT_MS } from "../types.ts";
+import { CARD_SLAM_FLIGHT_MS, type StepEffect } from "../types.ts";
 import type { Choreography } from "../presenters/types.ts";
 import { visiblePreEventSnapshot } from "./snapshots.ts";
+
+/** Hits whose card slam actually started, so a pair's return can follow it. */
+const slammedHits = new WeakSet<StepEffect>();
 
 export const presentDamageDealt: Choreography = (effect, context) => {
   const { event } = effect;
@@ -20,12 +23,14 @@ export const presentDamageDealt: Choreography = (effect, context) => {
     // For bidirectional pairs (combat or fight), only slam the first direction.
     // The second direction still gets its floating damage number below.
     const effectIndex = stepEffects.indexOf(effect);
-    const isPairedReturn = stepEffects.slice(0, effectIndex).some((e) => {
+    const pairedWith = stepEffects.slice(0, effectIndex).find((e) => {
       if (e.event.type !== "DamageDealt") return false;
       const other = e.event.data.target;
       if (!("Object" in other)) return false;
       return e.event.data.source_id === target.Object && other.Object === source_id;
     });
+
+    const isPairedReturn = pairedWith !== undefined;
 
     // Resolve via the group representative when this attacker is a
     // non-rendered member of a collapsed swarm (findCardElement).
@@ -64,6 +69,7 @@ export const presentDamageDealt: Choreography = (effect, context) => {
         )
       : false;
     if (slammed) {
+      slammedHits.add(effect);
       const impactDelayMs = (effect.strikeBand?.flightMs ?? CARD_SLAM_FLIGHT_MS) * pace;
       const slam = { amount, pace, startMs: slamStartMs, impactDelayMs };
       landBlow = cardVfx.presentBlow(
@@ -92,8 +98,9 @@ export const presentDamageDealt: Choreography = (effect, context) => {
         audioManager.playSfx("DamageDealt");
         classic.spawnFloat(pos, -amount, "#ef4444");
       };
-      // A combat pair is one exchange: its return lands when the slam does.
-      if (isPairedReturn && effect.strikeBand) {
+      // A combat pair is one exchange: its return lands when the slam does. With
+      // no slam to wait for, both numbers show at once.
+      if (pairedWith && effect.strikeBand && slammedHits.has(pairedWith)) {
         classic.scheduleStepTimeout(showHit, effect.strikeBand.flightMs * pace);
       } else {
         showHit();

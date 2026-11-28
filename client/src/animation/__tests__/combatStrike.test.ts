@@ -127,6 +127,17 @@ describe("normalizeEvents combat strike timing", () => {
     expect(step.duration).toBeGreaterThan(band.flightMs);
   });
 
+  it.each([0, 0.1, 0.25, 1, 2])("ends no strike step before its impact at combat pacing %s", (combat) => {
+    for (const power of [1, 3, 5, 9]) {
+      const [step] = normalizeEvents([combatHit(ATTACKER, { Object: DEFENDER })], {
+        preEventState: preState(power),
+        pacingMultipliers: { effects: 1, combat, banners: 1 },
+      });
+
+      expect(step.duration).toBeGreaterThan(step.effects[0].strikeBand?.flightMs ?? Infinity);
+    }
+  });
+
   it("paired blocker damage keeps the slamming direction's band and duration", () => {
     const steps = normalizeEvents(
       [

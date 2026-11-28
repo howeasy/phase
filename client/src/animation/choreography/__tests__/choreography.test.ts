@@ -421,38 +421,64 @@ describe("event choreographies under both presenters", () => {
   }
 });
 
+function boardObjectElement(): HTMLElement {
+  const element = document.createElement("div");
+  element.getBoundingClientRect = rect;
+  return element;
+}
+
 describe("a combat pair's returning hit", () => {
-  it("shows its number when the slam lands, not when the step starts", () => {
-    const band = { flightMs: 320, returnMs: 380, hang: true };
-    const strike = (source: number, target: number): StepEffect => ({
-      ...effectFor({
-        type: "DamageDealt",
-        data: { source_id: source, target: { Object: target }, amount: 3, is_combat: true },
-      }),
-      strikeBand: band,
-    });
+  const band = { flightMs: 320, returnMs: 380, hang: true };
+  const strike = (source: number, target: number): StepEffect => ({
+    ...effectFor({
+      type: "DamageDealt",
+      data: { source_id: source, target: { Object: target }, amount: 3, is_combat: true },
+    }),
+    strikeBand: band,
+  });
+
+  function present(cardElement: (objectId: number) => HTMLElement | null) {
+    const out = strike(X, Y);
     const back = strike(Y, X);
     const calls: string[] = [];
-    const delays: number[] = [];
+    const scheduled: { callback: () => void; delay: number }[] = [];
     const sfx = vi.spyOn(audioManager, "playSfx").mockImplementation(() => {});
-    presentEffect(back, {
-      stepEffects: [strike(X, Y), back],
+    const context: ChoreographyContext = {
+      stepEffects: [out, back],
       owningStepMs: 900,
       snapshotSeq: 1,
       pace: 0.5,
       vfxQuality: "full",
       reduceMotion: false,
       classic: {
-        ...recordingClassic(calls),
-        scheduleStepTimeout: (_callback, delay) => {
-          delays.push(delay);
+        ...recordingClassic(calls, cardElement),
+        scheduleStepTimeout: (callback, delay) => {
+          scheduled.push({ callback, delay });
         },
       },
       cardVfx: createCardVfxPresenter(() => null),
-    });
+    };
+    presentEffect(out, context);
+    const afterSlamStart = calls.length;
+    presentEffect(back, context);
     sfx.mockRestore();
+    const floats = () => calls.slice(afterSlamStart).filter((call) => call.startsWith("float"));
+    return { calls, scheduled, floats };
+  }
 
-    expect(calls.filter((call) => call.startsWith("float"))).toEqual([]);
-    expect(delays).toEqual([160]);
+  it("shows its number when the slam lands, not when the step starts", () => {
+    const { scheduled, floats } = present(() => boardObjectElement());
+
+    expect(floats()).toEqual([]);
+    expect(scheduled.map((timer) => timer.delay)).toEqual([160]);
+    scheduled[0].callback();
+    expect(floats()).toEqual(["float:-3:#ef4444"]);
+  });
+
+  it("shows both numbers at once when no card can slam", () => {
+    const { calls, scheduled } = present(() => null);
+
+    expect(scheduled).toEqual([]);
+    expect(calls.filter((call) => call.startsWith("float"))).toHaveLength(2);
   });
 });

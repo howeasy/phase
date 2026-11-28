@@ -55,6 +55,20 @@ export function combatStrikeBandForEvent(
   return combatStrikeBandForPower(preEventState.objects[String(event.data.source_id)]?.power);
 }
 
+/** How far past its impact a strike's step must reach, so the hit's own cues
+ *  (scheduled on the step) are never cancelled by a short combat pacing. */
+const STRIKE_SETTLE_FLOOR_MS = 80;
+
+/**
+ * A strike step's duration before pace. `pacedBaseMs` is the base duration under
+ * the combat pacing setting; the card slam does not follow that setting, so
+ * neither does the time a heavier strike adds, and the step never ends before
+ * the blow has landed.
+ */
+export function combatStrikeStepMs(band: CombatStrikeBand, pacedBaseMs: number): number {
+  return Math.max(pacedBaseMs + combatStrikeDurationBonusMs(band), band.flightMs + STRIKE_SETTLE_FLOOR_MS);
+}
+
 /** The extra step duration a band adds, before pace: flight plus return growth. */
 export function combatStrikeDurationBonusMs(band: CombatStrikeBand): number {
   return (band.flightMs - CARD_SLAM_FLIGHT_MS) + (band.returnMs - CARD_SLAM_RETURN_MS);
