@@ -2316,7 +2316,7 @@ fn only_for_spell_property_projects() {
         .iter()
         .map(|(name, oracle, expected)| {
             (
-                scenario.add_land_from_oracle(P0, *name, *oracle).id(),
+                scenario.add_land_from_oracle(P0, name, oracle).id(),
                 *name,
                 expected.clone(),
             )
