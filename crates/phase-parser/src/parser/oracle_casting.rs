@@ -1,26 +1,29 @@
 use crate::parser::oracle_nom::bridge::nom_on_lower;
 use crate::parser::oracle_nom::error::{OracleError, OracleResult};
 use nom::branch::alt;
-use nom::bytes::complete::{tag, take_until};
-use nom::combinator::{all_consuming, map, opt, rest, value};
+use nom::bytes::complete::{tag, tag_no_case, take_until};
+use nom::combinator::{all_consuming, map, opt, peek, rest, value, verify};
 use nom::multi::separated_list1;
 use nom::sequence::{preceded, separated_pair, terminated};
 use nom::Parser;
 
 use super::oracle_classifier::lower_starts_with;
-use super::oracle_cost::{parse_gerund_cost, parse_oracle_cost};
+use super::oracle_cost::{
+    parse_blight_operand, parse_gerund_cost, parse_oracle_cost, BlightOperand,
+};
 use super::oracle_modal::{
     label_names_rules_term, split_short_label_prefix, FLAVOR_WORD_COST_LABEL_MAX_WORDS,
 };
 use super::oracle_nom::condition::parse_you_cast_another_spell_filter_this_turn;
 use super::oracle_nom::primitives as nom_primitives;
+use super::oracle_quantity::parse_toughness_cap;
 use super::oracle_saga::is_saga_chapter;
 use super::oracle_util::{parse_mana_symbols, parse_ordinal, TextPair};
 use crate::parser::oracle_condition::parse_restriction_condition;
 use crate::types::ability::TurnWindow;
 use crate::types::ability::{
-    AbilityCost, AdditionalCost, CastingRestriction, Comparator, CountScope, ParsedCondition,
-    QuantityExpr, QuantityRef, SpellCastingOption, TargetFilter,
+    AbilityCost, AdditionalCost, BlightCount, CastingRestriction, Comparator, CountScope,
+    ParsedCondition, QuantityExpr, QuantityRef, SpellCastingOption, TargetFilter,
 };
 use crate::types::mana::ManaColor;
 
@@ -96,6 +99,29 @@ pub fn parse_additional_cost_line(lower: &str, raw: &str) -> Option<AdditionalCo
     let tp = tp.trim_end_matches('.');
     let body_lower = tp.lower;
     let body_raw = tp.original;
+
+    // CR 601.2b: Soul Immolation announces the bounded X while casting.
+    if names_this_spell && peek(parse_blight_x).parse(after_prefix).is_ok() {
+        let parsed = all_consuming(terminated(
+            separated_pair(
+                parse_blight_x,
+                tag(". "),
+                preceded(tag("x can't be greater than "), parse_toughness_cap),
+            ),
+            opt(tag(".")),
+        ))
+        .parse(after_prefix);
+        return Some(AdditionalCost::Required(match parsed {
+            Ok((_, (_, maximum))) => AbilityCost::Blight {
+                count: BlightCount::AnnouncedX {
+                    maximum: Box::new(maximum),
+                },
+            },
+            Err(_) => AbilityCost::Unimplemented {
+                description: body_raw.to_string(),
+            },
+        }));
+    }
 
     // CR 701.4a: A spelled-out "choose … you control or reveal … from your hand"
     // behold cost (Monstrous Emergence) is a single cohesive cost whose internal
@@ -219,6 +245,13 @@ pub fn parse_additional_cost_line(lower: &str, raw: &str) -> Option<AdditionalCo
     None
 }
 
+fn parse_blight_x(input: &str) -> OracleResult<'_, BlightOperand> {
+    verify(parse_blight_operand, |operand| {
+        *operand == BlightOperand::AnnouncedX
+    })
+    .parse(input)
+}
+
 /// CR 601.2b + CR 601.2h: Parse an additional-cost body that names alternative
 /// costs the caster chooses among, returning every alternative in printed order.
 ///
@@ -304,6 +337,25 @@ fn is_choose_behold_prefix(body_lower: &str) -> bool {
         Ok((i, ()))
     }
     parse(body_lower).is_ok()
+}
+
+/// A conditional payment to cast this spell replaces its mana cost (CR 118.9).
+/// Consume the entire line, including the condition and any final punctuation.
+pub(super) fn parse_conditional_self_payment(text: &str) -> Option<SpellCastingOption> {
+    let (_, (_, condition, _, cost, _, _)) = all_consuming((
+        tag_no_case::<_, _, OracleError<'_>>("as long as "),
+        take_until(", "),
+        tag_no_case(", you may pay "),
+        nom_primitives::parse_mana_cost,
+        tag_no_case(" to cast this spell"),
+        opt(tag(".")),
+    ))
+    .parse(text)
+    .ok()?;
+    Some(
+        SpellCastingOption::alternative_cost(AbilityCost::Mana { cost })
+            .condition(parse_restriction_condition(condition)?),
+    )
 }
 
 pub fn parse_spell_casting_option_line(text: &str, card_name: &str) -> Option<SpellCastingOption> {
@@ -1130,6 +1182,22 @@ mod tests {
     use crate::types::zones::Zone;
 
     #[test]
+    fn conditional_self_payment_reads_the_full_condition_price_and_sentence() {
+        assert!(parse_conditional_self_payment(
+            "As long as you've discarded a card this turn, you may pay {B/R} to cast this spell."
+        )
+        .is_some());
+        for line in [
+            "As long as you've discarded a card this turn and the moon is full, you may pay {B/R} to cast this spell.",
+            "As long as you've discarded a card this turn, you may pay {B/R}{unknown} to cast this spell.",
+            "As long as you've discarded a card this turn, you may pay {B/R} to cast this spell from exile.",
+            "As long as you've discarded a card this turn, you may pay {B/R} to cast this spell. Draw a card.",
+        ] {
+            assert!(parse_conditional_self_payment(line).is_none(), "{line}");
+        }
+    }
+
+    #[test]
     fn cant_spend_mana_to_cast_this_spell_parses() {
         // Hogaak, Arisen Necropolis (issue #1095).
         let restrictions =
@@ -1592,7 +1660,9 @@ Trample";
             assert_eq!(
                 result,
                 Some(AdditionalCost::Optional {
-                    cost: AbilityCost::Blight { count },
+                    cost: AbilityCost::Blight {
+                        count: BlightCount::Fixed(count),
+                    },
                     repeatability: crate::types::ability::AdditionalCostRepeatability::Once,
                 }),
                 "blight {count}"
@@ -1777,7 +1847,9 @@ Trample";
                 Some(AdditionalCost::Choice(costs)) => {
                     assert_eq!(costs.len(), 2);
                     match &costs[0] {
-                        AbilityCost::Blight { count } => {
+                        AbilityCost::Blight {
+                            count: BlightCount::Fixed(count),
+                        } => {
                             assert_eq!(*count, blight);
                         }
                         _ => panic!("Expected Blight as first choice"),
@@ -1809,7 +1881,9 @@ Trample";
         let result = parse_additional_cost_line(lower, raw);
         assert_eq!(
             result,
-            Some(AdditionalCost::Required(AbilityCost::Blight { count: 2 }))
+            Some(AdditionalCost::Required(AbilityCost::Blight {
+                count: BlightCount::Fixed(2),
+            }))
         );
     }
 
@@ -3055,7 +3129,7 @@ Trample";
                     assert!(
                         tf.properties
                             .iter()
-                            .any(|p| matches!(p, FilterProp::Attacking { defender: None })),
+                            .any(|p| matches!(p, FilterProp::Attacking { defender: None, .. })),
                         "expected Attacking filter, got {tf:?}"
                     );
                 } else {
@@ -3086,8 +3160,12 @@ Trample";
                 lhs: QuantityExpr::Ref {
                     qty: QuantityRef::ObjectCount {
                         filter: TargetFilter::Typed(
-                            crate::types::ability::TypedFilter::creature()
-                                .properties(vec![FilterProp::Attacking { defender: None }]),
+                            crate::types::ability::TypedFilter::creature().properties(vec![
+                                FilterProp::Attacking {
+                                    scope: Default::default(),
+                                    defender: None
+                                }
+                            ]),
                         ),
                     },
                 },
@@ -3144,7 +3222,7 @@ Trample";
                     assert!(
                         tf.properties
                             .iter()
-                            .any(|p| matches!(p, FilterProp::Attacking { defender: None })),
+                            .any(|p| matches!(p, FilterProp::Attacking { defender: None, .. })),
                         "expected Attacking filter, got {tf:?}"
                     );
                 } else {
@@ -3203,7 +3281,7 @@ Trample";
                     assert!(
                         tf.properties
                             .iter()
-                            .any(|p| matches!(p, FilterProp::Attacking { defender: None })),
+                            .any(|p| matches!(p, FilterProp::Attacking { defender: None, .. })),
                         "expected Attacking filter, got {tf:?}"
                     );
                 } else {

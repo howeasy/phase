@@ -263,6 +263,7 @@ fn issue_9884_token_entry_composite_stays_unbound_with_identity_control() {
             AbilityDefinition::new(
                 AbilityKind::Activated,
                 Effect::Token {
+                    enters_blocking: None,
                     name: "Classifier token".into(),
                     power: PtValue::Fixed(1),
                     toughness: PtValue::Fixed(1),
@@ -282,6 +283,7 @@ fn issue_9884_token_entry_composite_stays_unbound_with_identity_control() {
                         (CounterType::Plus1Plus1, mixed),
                         (CounterType::Time, other_count),
                     ],
+                    additional_members: Vec::new(),
                 },
             )
             .cost(AbilityCost::Tap),

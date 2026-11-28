@@ -52,6 +52,19 @@ pub enum ManaType {
     Colorless,
 }
 
+impl ManaType {
+    /// CR 106.1b: the six types of mana, in canonical order — the five colors
+    /// in WUBRG order (CR 105.1), then colorless.
+    pub const ALL: [ManaType; 6] = [
+        ManaType::White,
+        ManaType::Blue,
+        ManaType::Black,
+        ManaType::Red,
+        ManaType::Green,
+        ManaType::Colorless,
+    ];
+}
+
 impl From<ManaColor> for ManaType {
     fn from(color: ManaColor) -> Self {
         match color {
@@ -95,6 +108,27 @@ impl ManaTypeSet {
     /// mana that satisfies `self` also satisfies `other`.
     pub const fn is_subset_of(self, other: Self) -> bool {
         self.0 & !other.0 == 0
+    }
+
+    /// Every mana type in either set.
+    pub const fn union(self, other: Self) -> Self {
+        Self(self.0 | other.0)
+    }
+
+    /// CR 105.1: the colored members only. Colorless is a type of mana
+    /// (CR 106.1b) but not a color, so a clause that asks for mana *colors*
+    /// (Exotic Orchard, Fellwar Stone) never offers it.
+    pub const fn colors(self) -> Self {
+        Self(self.0 & !Self::of(ManaType::Colorless).0)
+    }
+
+    /// The members in canonical [`ManaType::ALL`] order (W, U, B, R, G, C), so
+    /// anything built from the set — a choice prompt, an LKI snapshot — is
+    /// deterministic.
+    pub fn iter(self) -> impl Iterator<Item = ManaType> {
+        ManaType::ALL
+            .into_iter()
+            .filter(move |mana_type| self.contains(*mana_type))
     }
 }
 
@@ -362,12 +396,12 @@ pub enum SpecialAction {
     /// activation, so mana restricted to spells or activated abilities MUST be
     /// rejected here, while special-action-restricted mana is eligible.
     Foretell,
+    /// CR 116.2f: Pay the printed Suspend cost to exile the card from hand.
+    Suspend,
 }
 
-/// CR 106.6: The ability-activation half of a "spend only to cast [X] spell or
-/// activate …" restriction. Parameterizes *which* ability activations the mana
-/// may also be spent on, so the spell-type + ability-activation OR restriction
-/// needs a single variant rather than a sibling per ability scope.
+/// CR 106.6: Non-spell payment eligibility for mana whose spell spending is
+/// limited to a named type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AbilityActivationScope {
     /// "… or activate abilities of [the spell's type]" — only abilities on a
@@ -377,6 +411,9 @@ pub enum AbilityActivationScope {
     /// "… or to activate an ability" — any ability activation is permitted
     /// (e.g. Sage of the Unknowable, "a colorless spell or to activate an ability").
     Any,
+    /// "This mana can't be spent to cast a non-[type] spell" — the prohibition
+    /// applies only to casts. All non-spell payments are permitted.
+    AnyNonSpellPayment,
 }
 
 /// CR 106.6 + CR 400.7: Whether a zone-gated spend restriction names the zone a
@@ -482,11 +519,10 @@ pub enum ManaRestriction {
     /// "Spend this mana only to cast a creature spell of the chosen type."
     /// The `String` is the chosen creature type (e.g., "Elf").
     OnlyForCreatureType(String),
-    /// CR 106.6: "Spend this mana only to cast creature spells or activate abilities of creatures."
-    /// Allows spending for spells of `spell_type` (checked via `allows_spell`) OR for ability
-    /// activations whose scope is described by `ability` (checked via `allows_activation`):
-    /// `OfSpellType` restricts to abilities of permanents of `spell_type`; `Any` permits any
-    /// ability activation ("… or to activate an ability").
+    /// CR 106.6: Allows spending for spells of `spell_type`. Positive
+    /// restrictions also allow activations of that type (`OfSpellType`) or of
+    /// any type (`Any`). A prohibition on casting spells outside that type
+    /// allows all other payments (`AnyNonSpellPayment`).
     OnlyForTypeSpellsOrAbilities {
         spell_type: String,
         ability: AbilityActivationScope,
@@ -800,7 +836,7 @@ impl ManaRestriction {
             // CR 106.6: The ability-activation half of the OR. `OfSpellType`
             // restricts to abilities of permanents whose type matches the
             // restriction ("Elemental sources" includes creature type Elemental —
-            // consult subtypes too); `Any` permits any ability activation.
+            // consult subtypes too). Both broader scopes permit any activation.
             ManaRestriction::OnlyForTypeSpellsOrAbilities {
                 spell_type,
                 ability,
@@ -809,7 +845,7 @@ impl ManaRestriction {
                     spell_type,
                     source_types.iter().chain(source_subtypes.iter()),
                 ),
-                AbilityActivationScope::Any => true,
+                AbilityActivationScope::Any | AbilityActivationScope::AnyNonSpellPayment => true,
             },
             // Activation-only mana always allows ability activation.
             ManaRestriction::OnlyForActivation => true,
@@ -843,6 +879,10 @@ impl ManaRestriction {
             } => self.allows_activation(source_types, source_subtypes, *ability_tag),
             PaymentContext::Effect => match self {
                 ManaRestriction::CannotCastSpellFromZone(_) => true,
+                ManaRestriction::OnlyForTypeSpellsOrAbilities { ability, .. } => match ability {
+                    AbilityActivationScope::AnyNonSpellPayment => true,
+                    AbilityActivationScope::OfSpellType | AbilityActivationScope::Any => false,
+                },
                 ManaRestriction::OnlyForAny(subs) => subs.iter().any(|r| r.allows(ctx)),
                 _ => false,
             },
@@ -863,13 +903,16 @@ impl ManaRestriction {
         match self {
             ManaRestriction::OnlyForSpecialAction(allowed) => *allowed == action,
             ManaRestriction::CannotCastSpellFromZone(_) => true,
+            ManaRestriction::OnlyForTypeSpellsOrAbilities { ability, .. } => match ability {
+                AbilityActivationScope::AnyNonSpellPayment => true,
+                AbilityActivationScope::OfSpellType | AbilityActivationScope::Any => false,
+            },
             ManaRestriction::OnlyForAny(subs) => {
                 subs.iter().any(|r| r.allows_special_action(action))
             }
             ManaRestriction::OnlyForSpell
             | ManaRestriction::OnlyForSpellType(_)
             | ManaRestriction::OnlyForCreatureType(_)
-            | ManaRestriction::OnlyForTypeSpellsOrAbilities { .. }
             | ManaRestriction::OnlyForActivation
             | ManaRestriction::OnlyForTaggedActivation(_)
             | ManaRestriction::OnlyForXCosts
@@ -2916,7 +2959,7 @@ mod tests {
 
     // CR 106.6: Hydraulic Helper — "{T}: Add {U}. This mana can't be spent to
     // cast a nonartifact spell." The negative phrasing lowers to
-    // `OnlyForTypeSpellsOrAbilities { spell_type: "Artifact", ability: Any }`:
+    // `OnlyForTypeSpellsOrAbilities` with `AnyNonSpellPayment`:
     // the produced {U} may pay for an artifact spell but not for any nonartifact
     // spell (here, an instant), while leaving EVERY ability activation payable.
     // This is the runtime half of the discriminating coverage — it exercises the
@@ -2929,7 +2972,7 @@ mod tests {
     fn hydraulic_helper_artifact_mana_casts_artifacts_and_pays_any_ability() {
         let restriction = ManaRestriction::OnlyForTypeSpellsOrAbilities {
             spell_type: "Artifact".to_string(),
-            ability: AbilityActivationScope::Any,
+            ability: AbilityActivationScope::AnyNonSpellPayment,
         };
         let artifact_spell = SpellMeta {
             types: vec!["Artifact".to_string()],

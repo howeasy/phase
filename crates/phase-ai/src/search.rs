@@ -1938,6 +1938,8 @@ pub fn fallback_action(
         | WaitingFor::WardDiscardChoice { .. }
         | WaitingFor::WardSacrificeChoice { .. }
         | WaitingFor::UnlessBounceChoice { .. } => issued_selection(contract),
+        WaitingFor::UnlessBlightChoice { .. } => issued_selection(contract)
+            .or(Some(GameAction::PayUnlessCost { pay: false })),
         // CR 701.4a + CR 608.2d: Behold requires EXACTLY one beholdable object —
         // an empty selection is illegal. Take the first candidate (any legal pick
         // resolves the prompt; the evaluated candidate enumerator picks properly).
@@ -2858,7 +2860,7 @@ pub fn fallback_action(
             Some(GameAction::ChooseKeptCreatures { kept })
         }
 
-        // CR 101.4 + CR 701.21a: choose a valid exact-size baseline subset.
+        // CR 101.4 + CR 701.21a: the first required_count eligible permanents are within min..=max for exact and up-to prompts alike.
         WaitingFor::KeepExactPermanentsChoice {
             eligible,
             required_count,
@@ -8099,7 +8101,7 @@ mod tests {
             },
             Effect::Sacrifice {
                 target: TargetFilter::SelfRef,
-                count: QuantityExpr::Fixed { value: 1 },
+                count: QuantityExpr::Fixed { value: 1 }.into(),
                 min_count: 0,
             },
         ] {

@@ -838,7 +838,14 @@
     "lethalBadge": "Letale",
     "planeswalkerLoyalty": "Planeswalker (lealtà: {{loyalty}})",
     "defendingPlayerTrample": "Giocatore in difesa (Travolgere)",
+    "attackTargetTrample": "{{name}} (Travolgere)",
     "pwControllerTrample": "Controllore del PW (Travolgere sul PW)",
+    "lethalButton": "Letale",
+    "clearButton": "Azzera",
+    "assignLethalTo": "Assegna danno letale a {{target}}",
+    "clearDamageFor": "Azzera il danno assegnato a {{target}}",
+    "lethalFirstButton": "Prima il danno letale",
+    "lethalFirstTitle": "Assegna danno letale a ogni creatura bloccante in ordine, poi assegna il resto",
     "assignRemainingButton": "+{{amount}}",
     "assignRemainingTo_few": "Assegna i {{count}} danni rimanenti a {{target}}",
     "assignRemainingTo_many": "Assegna i {{count}} danni rimanenti a {{target}}",
@@ -1283,6 +1290,7 @@
       "onlyForSpellColor": "Solo per magie del colore {{color}}.",
       "onlyForSpellFromZone": "Solo per magie {{polarity}} {{zone}}.",
       "cannotCastSpellFromZone": "Non può essere speso per lanciare magie da {{zone}}.",
+      "cannotCastSpellsOutsideType": "Non può essere speso per lanciare magie che non siano del tipo {{spellType}}.",
       "onlyForFaceDownSpell": "Solo per magie a faccia in giù.",
       "onlyForAny": "Solo per uno di questi usi: {{restrictions}}",
       "onlyForSpecialAction": "Solo per l'azione speciale {{action}}.",
@@ -1340,6 +1348,8 @@
         "Ticket": "ticket"
       },
       "generic": "un costo",
+      "blight": "Putrefazione {{count}}",
+      "blightBoundedX": "Putrefazione X (fino alla costituzione più alta tra le creature che controlli)",
       "pay": "Paga {{cost}}",
       "draw": "pesca una carta",
       "drawCount_one": "pesca {{count}} carta",
@@ -1439,6 +1449,9 @@
       "poisonCounters": "Segnalini veleno",
       "players": "Giocatori",
       "whoGoesFirst": "Chi inizia",
+      "archenemySeat": "Archenemy",
+      "archenemyYou": "Tu",
+      "archenemyOpponent": "Avversario {{number}}",
       "firstPlayer": {
         "random": "Casuale",
         "play": "Gioca",
@@ -2167,6 +2180,14 @@
     "attachments": "Con {{names}}"
   },
   "optionalCost": {
+    "replicate": {
+      "title": "Pagare il costo di replicare?",
+      "again": "Pagare di nuovo il costo di replicare? (Pagato {{times}} volte)",
+      "decline": "Fatto",
+      "tapSubtype": "Tappa un {{subtype}} STAPpato che controlli",
+      "tapCreature": "Tappa una creatura STAPpata",
+      "payEnergy": "Paga {{amount}} energia"
+    },
     "gift": {
       "title": "Promettere un dono?",
       "pay": "Prometti {{gift}}",
@@ -2332,6 +2353,13 @@
     "creatureFallback": "Creatura {{id}}"
   },
   "distributeAmong": {
+    "assignRemainingButton": "+{{amount}}",
+    "assignRemainingTo_few": "Assegna a {{target}} i {{count}} punti rimasti",
+    "assignRemainingTo_many": "Assegna a {{target}} i {{count}} punti rimasti",
+    "assignRemainingTo_one": "Assegna a {{target}} il {{count}} punto rimasto",
+    "assignRemainingTo_other": "Assegna a {{target}} i {{count}} punti rimasti",
+    "clearButton": "Azzera",
+    "clearTarget": "Azzera l’assegnazione a {{target}}",
     "unitCounter": "segnalino {{counter}}",
     "unitDamage": "danno",
     "unitLife": "vita",
@@ -2786,6 +2814,9 @@
       "single": "{{action}} a permanent",
       "exactCount_one": "{{action}} {{count}} permanent",
       "exactCount_other": "{{action}} {{count}} permanents",
+      "protectedObject": "Paga per proteggere {{object}}",
+      "blightCounters_one": "Metti un segnalino -1/-1 su una creatura che controlli",
+      "blightCounters_other": "Metti {{count}} segnalini -1/-1 su una creatura che controlli",
       "rangeCount_one": "{{action}} {{min}}-{{count}} permanent",
       "rangeCount_other": "{{action}} {{min}}-{{count}} permanents",
       "upToCount_one": "{{action}} up to {{count}} permanent",

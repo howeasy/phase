@@ -596,7 +596,7 @@ pub(crate) fn equip_ability_for_keyword(keyword: &Keyword) -> Option<AbilityDefi
         AbilityKind::Activated,
         Effect::Attach {
             attachment: TargetFilter::SelfRef,
-            target: TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
+            target: TargetFilter::equip_target(),
             // CR 702.6a: the keyword's "target" names the HOST (the equipped
             // creature); the attachment ("this permanent") is determined.
             selection: AttachSelection::AtResolution {
@@ -886,9 +886,11 @@ fn build_mobilize_trigger(qty: &QuantityExpr) -> TriggerDefinition {
         attach_to: None,
         enters_attacking: true,
         attack_destination: TokenAttackDestination::ControllerChooses,
+        enters_blocking: None,
         supertypes: vec![],
         static_abilities: vec![],
         enter_with_counters: vec![],
+        additional_members: Vec::new(),
     };
 
     let sacrifice_at_end_step = AbilityDefinition::new(
@@ -899,7 +901,7 @@ fn build_mobilize_trigger(qty: &QuantityExpr) -> TriggerDefinition {
                 AbilityKind::Spell,
                 Effect::Sacrifice {
                     target: TargetFilter::LastCreated,
-                    count: qty.clone(),
+                    count: crate::types::ability::SacrificeSelection::EntireReferent,
                     min_count: 0,
                 },
             )),
@@ -1046,9 +1048,11 @@ fn synthesize_etb_token_attach_keyword(
         attach_to: None,
         enters_attacking: false,
         attack_destination: TokenAttackDestination::ControllerChooses,
+        enters_blocking: None,
         supertypes: vec![],
         static_abilities: vec![],
         enter_with_counters: vec![],
+        additional_members: Vec::new(),
     };
 
     let attach_effect = AbilityDefinition::new(
@@ -2658,10 +2662,7 @@ pub(crate) fn replicate_copy_ability_definition_for_ordinal(
             starting_loyalty_from_casualty_sacrifice: false,
         },
     )
-    // CR 702.56a: "if a replicate cost was paid for it". With zero payments the
-    // count is also zero, but the condition keeps the trigger's resolution a
-    // no-op (no SpellCopied events) when replicate was declined, matching the
-    // intervening-if phrasing exactly.
+    // CR 702.56a and CR 603.4: Recheck the paid instance as the trigger resolves.
     .condition(AbilityCondition::AdditionalCostPaid {
         subject: ObjectScope::Source,
         source: AdditionalCostPaymentSource::NonKicker,
@@ -2715,15 +2716,10 @@ pub fn synthesize_replicate(face: &mut CardFace) {
     }
 
     // CR 702.56a: "As an additional cost to cast this spell, you may pay [cost]
-    // any number of times." Repeatable optional mana cost — the cast-time
+    // any number of times." Repeatable optional cost — the cast-time
     // payment loop records each payment in `additional_cost_payment_count`.
     if face.additional_cost.is_none() {
-        face.additional_cost = Some(AdditionalCost::Optional {
-            cost: AbilityCost::Mana {
-                cost: replicate_costs[0].clone(),
-            },
-            repeatability: crate::types::ability::AdditionalCostRepeatability::Repeatable,
-        });
+        face.additional_cost = Some(replicate_cost_instance(replicate_costs[0].clone(), 0).cost);
     }
 
     // CR 702.56a: "When you cast this spell, if a replicate cost was paid for
@@ -2731,7 +2727,15 @@ pub fn synthesize_replicate(face: &mut CardFace) {
     for (replicate_ordinal, _) in replicate_costs.iter().enumerate() {
         let replicate_ordinal = u32::try_from(replicate_ordinal).unwrap_or(u32::MAX);
         let execute = replicate_copy_ability_definition_for_ordinal(Some(replicate_ordinal));
-        let already_has_trigger = face.triggers.iter().any(|t| {
+        let condition = TriggerCondition::AdditionalCostPaid {
+            source: AdditionalCostPaymentSource::NonKicker,
+            origin: Some(AdditionalCostOrigin::Replicate),
+            origin_ordinal: Some(replicate_ordinal),
+            variant: None,
+            kicker_cost: None,
+            min_count: 1,
+        };
+        let existing = face.triggers.iter_mut().find(|t| {
             matches!(t.mode, TriggerMode::SpellCast)
                 && matches!(t.valid_card, Some(TargetFilter::SelfRef))
                 && t.trigger_zones.contains(&Zone::Stack)
@@ -2739,7 +2743,9 @@ pub fn synthesize_replicate(face: &mut CardFace) {
                     .as_deref()
                     .is_some_and(|ability| ability == &execute)
         });
-        if already_has_trigger {
+        if let Some(trigger) = existing {
+            // CR 603.4: Older exports carried the check only on the ability.
+            trigger.condition.get_or_insert(condition);
             continue;
         }
 
@@ -2747,6 +2753,7 @@ pub fn synthesize_replicate(face: &mut CardFace) {
             TriggerDefinition::new(TriggerMode::SpellCast)
                 .valid_card(TargetFilter::SelfRef)
                 .trigger_zones(vec![Zone::Stack])
+                .condition(condition)
                 .execute(execute)
                 .description(
                     "Replicate — copy this spell once for each time its replicate cost was paid"
@@ -2754,6 +2761,37 @@ pub fn synthesize_replicate(face: &mut CardFace) {
                 ),
         );
     }
+}
+
+pub(crate) fn replicate_cost_instance(
+    cost: crate::types::keywords::ReplicateCost,
+    ordinal: u32,
+) -> crate::types::ability::AdditionalCostInstance {
+    use crate::types::ability::{
+        AdditionalCostInstance, AdditionalCostRepeatability, TapCreaturesRequirement,
+    };
+    use crate::types::keywords::ReplicateCost;
+
+    let cost = match cost {
+        ReplicateCost::Mana(cost) => AbilityCost::Mana { cost },
+        ReplicateCost::TapOne(filter) => AbilityCost::TapCreatures {
+            requirement: TapCreaturesRequirement::count(1),
+            filter: *filter,
+        },
+        ReplicateCost::PayEnergy(amount) => AbilityCost::PayEnergy {
+            amount: QuantityExpr::Fixed {
+                value: amount.get(),
+            },
+        },
+    };
+    AdditionalCostInstance::new_with_ordinal(
+        AdditionalCostOrigin::Replicate,
+        ordinal,
+        AdditionalCost::Optional {
+            cost,
+            repeatability: AdditionalCostRepeatability::Repeatable,
+        },
+    )
 }
 
 /// CR 702.144a: The `AbilityDefinition` produced by a Demonstrate trigger — an
@@ -2907,13 +2945,27 @@ pub fn synthesize_conspire(face: &mut CardFace) {
         });
     }
 
-    // CR 702.78a: "When you cast this spell, if its conspire cost was paid, copy
-    // it." Idempotent against re-synthesis.
-    if !face.triggers.iter().any(is_conspire_copy_trigger) {
+    // CR 702.78a + CR 603.4: the spell's other costs cannot satisfy this trigger.
+    let paid = TriggerCondition::AdditionalCostPaid {
+        source: AdditionalCostPaymentSource::NonKicker,
+        origin: Some(AdditionalCostOrigin::Conspire),
+        origin_ordinal: Some(0),
+        variant: None,
+        kicker_cost: None,
+        min_count: 1,
+    };
+    if let Some(trigger) = face
+        .triggers
+        .iter_mut()
+        .find(|trigger| is_conspire_copy_trigger(trigger))
+    {
+        trigger.condition.get_or_insert(paid);
+    } else {
         face.triggers.push(
             TriggerDefinition::new(TriggerMode::SpellCast)
                 .valid_card(TargetFilter::SelfRef)
                 .trigger_zones(vec![Zone::Stack])
+                .condition(paid)
                 .execute(conspire_copy_ability_definition())
                 .description(
                     "CR 702.78a: Conspire — when you cast this spell, if its conspire cost was \
@@ -3393,7 +3445,7 @@ pub(crate) fn build_evoke_etb_sac_trigger() -> TriggerDefinition {
         AbilityKind::Spell,
         Effect::Sacrifice {
             target: TargetFilter::SelfRef,
-            count: QuantityExpr::Fixed { value: 1 },
+            count: QuantityExpr::Fixed { value: 1 }.into(),
             min_count: 0,
         },
     );
@@ -3893,9 +3945,11 @@ fn build_fabricate_trigger(n: u32) -> TriggerDefinition {
             attach_to: None,
             enters_attacking: false,
             attack_destination: TokenAttackDestination::ControllerChooses,
+            enters_blocking: None,
             supertypes: vec![],
             static_abilities: vec![],
             enter_with_counters: vec![],
+            additional_members: Vec::new(),
         },
     )
     .description(format!(
@@ -4533,9 +4587,11 @@ fn build_afterlife_trigger(count: u32) -> TriggerDefinition {
         attach_to: None,
         enters_attacking: false,
         attack_destination: TokenAttackDestination::ControllerChooses,
+        enters_blocking: None,
         supertypes: vec![],
         static_abilities: vec![],
         enter_with_counters: vec![],
+        additional_members: Vec::new(),
     };
 
     let execute = AbilityDefinition::new(AbilityKind::Spell, token_effect).description(format!(
@@ -5228,7 +5284,7 @@ fn build_echo_trigger(cost: EchoCost) -> TriggerDefinition {
         AbilityKind::Spell,
         Effect::Sacrifice {
             target: TargetFilter::SelfRef,
-            count: QuantityExpr::Fixed { value: 1 },
+            count: QuantityExpr::Fixed { value: 1 }.into(),
             min_count: 0,
         },
     );
@@ -5334,7 +5390,7 @@ pub(crate) fn build_cumulative_upkeep_trigger(base_cost: AbilityCost) -> Trigger
         AbilityKind::Spell,
         Effect::Sacrifice {
             target: TargetFilter::SelfRef,
-            count: QuantityExpr::Fixed { value: 1 },
+            count: QuantityExpr::Fixed { value: 1 }.into(),
             min_count: 0,
         },
     );
@@ -5391,7 +5447,7 @@ fn build_annihilator_trigger(n: u32) -> TriggerDefinition {
         target: TargetFilter::Typed(
             TypedFilter::permanent().controller(ControllerRef::DefendingPlayer),
         ),
-        count: QuantityExpr::Fixed { value: n as i32 },
+        count: QuantityExpr::Fixed { value: n as i32 }.into(),
         min_count: 0,
     };
 
@@ -5524,10 +5580,12 @@ pub(crate) fn enlist_tap_target_filter() -> TargetFilter {
                     ]),
             ),
             TargetFilter::Not {
-                filter: Box::new(TargetFilter::Typed(
-                    TypedFilter::creature()
-                        .properties(vec![FilterProp::Attacking { defender: None }]),
-                )),
+                filter: Box::new(TargetFilter::Typed(TypedFilter::creature().properties(
+                    vec![FilterProp::Attacking {
+                        scope: Default::default(),
+                        defender: None,
+                    }],
+                ))),
             },
         ],
     }
@@ -5792,7 +5850,10 @@ fn is_frenzy_trigger(t: &TriggerDefinition, n: u32) -> bool {
 fn battlecry_target_filter() -> TypedFilter {
     let mut tf = TypedFilter::creature();
     tf.properties = vec![
-        FilterProp::Attacking { defender: None },
+        FilterProp::Attacking {
+            scope: Default::default(),
+            defender: None,
+        },
         FilterProp::Another,
     ];
     tf
@@ -5989,7 +6050,7 @@ fn is_mentor_trigger(t: &TriggerDefinition) -> bool {
                     counter_type: CounterType::Plus1Plus1,
                     count: QuantityExpr::Fixed { value: 1 },
                     target: TargetFilter::Typed(tf),
-                } if tf.properties.contains(&FilterProp::Attacking { defender: None })
+                } if tf.properties.contains(&FilterProp::Attacking { scope: Default::default(), defender: None })
                     && tf.properties.iter().any(|prop| matches!(
                         prop,
                         FilterProp::PtComparison {
@@ -6011,7 +6072,10 @@ fn build_mentor_trigger() -> TriggerDefinition {
     let mut target_filter = TypedFilter::creature();
     target_filter.properties = vec![
         // CR 702.134a: only attacking creatures are legal Mentor targets.
-        FilterProp::Attacking { defender: None },
+        FilterProp::Attacking {
+            scope: Default::default(),
+            defender: None,
+        },
         // CR 702.134a + CR 208.1: Mentor targets a creature with power
         // strictly less than the source creature's current power.
         FilterProp::PtComparison {
@@ -6483,10 +6547,8 @@ fn build_dethrone_trigger() -> TriggerDefinition {
     )
     .description("Put a +1/+1 counter on this creature".to_string());
 
-    // CR 702.105a: "attacks the player with the most life or tied for most
-    // life". The defending player's life total must be >= the maximum life
-    // total among all players. This is an intervening-if condition checked
-    // at both detection and resolution per CR 603.4.
+    // CR 702.105a + CR 603.2: the life comparison qualifies the attack event.
+    // Once Dethrone triggers, subsequent changes in life totals cannot stop it.
     let condition = TriggerCondition::QuantityComparison {
         lhs: QuantityExpr::Ref {
             qty: QuantityRef::LifeTotal {
@@ -6506,7 +6568,9 @@ fn build_dethrone_trigger() -> TriggerDefinition {
 
     let mut trigger = TriggerDefinition::new(TriggerMode::Attacks)
         .valid_card(TargetFilter::SelfRef)
-        .condition(condition)
+        .condition(TriggerCondition::EventTime {
+            condition: Box::new(condition),
+        })
         .execute(put_counter)
         .description(
             "CR 702.105a: Dethrone — whenever ~ attacks the player with the most life or tied for most life, put a +1/+1 counter on ~."
@@ -7070,7 +7134,7 @@ fn build_fading_upkeep_trigger() -> TriggerDefinition {
         AbilityKind::Spell,
         Effect::Sacrifice {
             target: TargetFilter::SelfRef,
-            count: QuantityExpr::Fixed { value: 1 },
+            count: QuantityExpr::Fixed { value: 1 }.into(),
             min_count: 0,
         },
     )
@@ -7112,7 +7176,7 @@ fn build_vanishing_sacrifice_trigger() -> TriggerDefinition {
         AbilityKind::Spell,
         Effect::Sacrifice {
             target: TargetFilter::SelfRef,
-            count: QuantityExpr::Fixed { value: 1 },
+            count: QuantityExpr::Fixed { value: 1 }.into(),
             min_count: 0,
         },
     );
@@ -8155,7 +8219,9 @@ fn is_champion_self_sacrifice_ability(ability: &AbilityDefinition) -> bool {
         &*ability.effect,
         Effect::Sacrifice {
             target: TargetFilter::SelfRef,
-            count: QuantityExpr::Fixed { value: 1 },
+            count: crate::types::ability::SacrificeSelection::Count(QuantityExpr::Fixed {
+                value: 1
+            }),
             ..
         }
     )
@@ -8234,7 +8300,7 @@ fn build_champion_etb_trigger(type_str: &str) -> TriggerDefinition {
         AbilityKind::Spell,
         Effect::Sacrifice {
             target: TargetFilter::SelfRef,
-            count: QuantityExpr::Fixed { value: 1 },
+            count: QuantityExpr::Fixed { value: 1 }.into(),
             min_count: 0,
         },
     )
@@ -8832,6 +8898,7 @@ fn type_filter_noun(filter: &TypeFilter, plural: bool) -> String {
         TypeFilter::Planeswalker => "planeswalker",
         TypeFilter::Battle => "battle",
         TypeFilter::Kindred => "kindred",
+        TypeFilter::Scheme => "scheme",
         TypeFilter::Permanent => "permanent",
         TypeFilter::Card => "card",
         TypeFilter::Any => "permanent",
@@ -8945,7 +9012,8 @@ pub fn synthesize_devour(face: &mut CardFace) {
                             TypedFilter::new(quality.clone()).controller(ControllerRef::You),
                         ),
                     },
-                }),
+                })
+                .into(),
                 min_count: 0,
             },
         )
@@ -9204,19 +9272,16 @@ fn is_amplify_etb_replacement(replacement: &ReplacementDefinition, expected_n: u
     *counter_type == CounterType::Plus1Plus1 && *count == amplify_counter_quantity(expected_n)
 }
 
-/// CR 702.62a: Suspend N—{cost} synthesizes three abilities for every face
-/// carrying `Keyword::Suspend { count, cost }`:
+/// CR 702.62a: Each face carrying `Keyword::Suspend { count, cost }` gets two exile triggers.
+/// A fixed count also gets a hand ability.
 ///
-///   1. **Hand-activated alt-cost** ("Rather than cast this card from your hand,
+///   1. **Hand special action** (fixed counts only, CR 116.2f)
+///      ("Rather than cast this card from your hand,
 ///      you may pay [cost] and exile it with N time counters on it. This action
 ///      doesn't use the stack."). Modeled as an activated ability with
 ///      `activation_zone = Hand` and `ActivationRestriction::MatchesCardCastTiming`
 ///      (CR 702.62a "if you could begin to cast this card by putting it onto the
-///      stack from your hand"). Cost is composite (mana + exile self from hand);
-///      effect is a Time-counter `PutCounter` on the now-exiled SelfRef. The
-///      synthesized activation does land on the stack as an activated ability,
-///      which is a controlled approximation of the rule's "doesn't use the stack"
-///      — no card today interacts with that distinction.
+///      stack from your hand"). Cost is composite (mana + exile self from hand).
 ///
 ///   2. **Upkeep counter-removal trigger** ("At the beginning of your upkeep,
 ///      if this card is suspended, remove a time counter from it.") fires from
@@ -9253,8 +9318,6 @@ pub fn synthesize_suspend(face: &mut CardFace) {
         return;
     };
 
-    // CR 702.62a: Activated ability — pay [cost], exile self from hand, then
-    // place N time counters on it. Composite cost mirrors `synthesize_cycling`.
     let already_has_activation = face.abilities.iter().any(|a| {
         a.activation_zone == Some(Zone::Hand)
             && a.activation_restrictions
@@ -9265,7 +9328,9 @@ pub fn synthesize_suspend(face: &mut CardFace) {
                     if *counter_type == CounterType::Time
             )
     });
-    if !already_has_activation {
+    // CR 702.62a: no card prints suspend 0 ("X can't be 0", Aeon Chronicler); a count of 0 is
+    // the placeholder for an unread X, whose cost reads {0} too.
+    if time_counters > 0 && !already_has_activation {
         let composite_cost = AbilityCost::Composite {
             costs: vec![
                 AbilityCost::Mana {
@@ -14310,7 +14375,7 @@ mod annihilator_synthesis_tests {
         };
         let Effect::Sacrifice {
             target,
-            count,
+            count: crate::types::ability::SacrificeSelection::Count(count),
             min_count,
         } = &*execute.effect
         else {
@@ -14391,12 +14456,14 @@ mod annihilator_synthesis_tests {
         // Both N=1 and N=3 must be present from the first pass.
         let ns: Vec<i32> = triggers
             .iter()
-            .filter_map(|t| match t.execute.as_deref().map(|a| &*a.effect) {
-                Some(Effect::Sacrifice {
-                    count: QuantityExpr::Fixed { value },
-                    ..
-                }) => Some(*value),
-                _ => None,
+            .filter_map(|t| {
+                let Effect::Sacrifice { count, .. } = t.execute.as_deref()?.effect.as_ref() else {
+                    return None;
+                };
+                let QuantityExpr::Fixed { value } = count.count_expr()? else {
+                    return None;
+                };
+                Some(*value)
             })
             .collect();
         assert!(ns.contains(&1) && ns.contains(&3));
@@ -14915,8 +14982,10 @@ mod mentor_synthesis_tests {
             panic!("counter target must be a TypedFilter");
         };
         assert!(
-            tf.properties
-                .contains(&FilterProp::Attacking { defender: None }),
+            tf.properties.contains(&FilterProp::Attacking {
+                scope: Default::default(),
+                defender: None
+            }),
             "target must be an attacking creature (CR 702.134a)"
         );
         // CR 702.134a + CR 208.1: power strictly less than this creature's power.
@@ -15338,7 +15407,10 @@ mod battlecry_synthesis_tests {
         assert_eq!(
             tf.properties,
             vec![
-                FilterProp::Attacking { defender: None },
+                FilterProp::Attacking {
+                    scope: Default::default(),
+                    defender: None
+                },
                 FilterProp::Another
             ]
         );
@@ -16302,7 +16374,7 @@ mod riot_synthesis_tests {
 #[cfg(test)]
 mod dethrone_tests {
     //! CR 702.105a: Dethrone synthesis tests. The synthesized trigger must be
-    //! `TriggerMode::Attacks` with `valid_card = SelfRef`, an intervening-if
+    //! `TriggerMode::Attacks` with `valid_card = SelfRef`, an event-time
     //! condition comparing the defending player's life total against the maximum
     //! life total among all players, and execute body `Effect::PutCounter` with
     //! a single +1/+1 counter on `SelfRef`.
@@ -16352,8 +16424,12 @@ mod dethrone_tests {
         assert!(matches!(count, QuantityExpr::Fixed { value: 1 }));
         assert!(matches!(target, TargetFilter::SelfRef));
         assert!(
-            trigger.condition.is_some(),
-            "dethrone trigger must have an intervening-if condition"
+            matches!(
+                trigger.condition.as_ref(),
+                Some(TriggerCondition::EventTime { condition })
+                    if matches!(condition.as_ref(), TriggerCondition::QuantityComparison { .. })
+            ),
+            "dethrone must compare life totals at the attack event"
         );
     }
 
@@ -19046,7 +19122,7 @@ mod idempotency_tests {
                 match &*effect.effect {
                     Effect::Sacrifice {
                         target: TargetFilter::LastCreated,
-                        count: QuantityExpr::Fixed { value: 2 },
+                        count: crate::types::ability::SacrificeSelection::EntireReferent,
                         ..
                     } => {}
                     other => panic!("expected LastCreated Sacrifice, got {other:?}"),
@@ -20682,7 +20758,9 @@ mod replicate_synthesis_tests {
             shards: vec![ManaCostShard::Blue],
         };
         let mut face = CardFace {
-            keywords: vec![Keyword::Replicate(replicate_cost.clone())],
+            keywords: vec![Keyword::Replicate(
+                crate::types::keywords::ReplicateCost::Mana(replicate_cost.clone()),
+            )],
             ..CardFace::default()
         };
 
@@ -20738,10 +20816,12 @@ mod replicate_synthesis_tests {
     #[test]
     fn synthesize_replicate_is_idempotent() {
         let mut face = CardFace {
-            keywords: vec![Keyword::Replicate(ManaCost::Cost {
-                generic: 2,
-                shards: vec![],
-            })],
+            keywords: vec![Keyword::Replicate(
+                crate::types::keywords::ReplicateCost::Mana(ManaCost::Cost {
+                    generic: 2,
+                    shards: vec![],
+                }),
+            )],
             ..CardFace::default()
         };
 
@@ -20760,14 +20840,18 @@ mod replicate_synthesis_tests {
     fn synthesize_replicate_emits_one_trigger_per_instance() {
         let mut face = CardFace {
             keywords: vec![
-                Keyword::Replicate(ManaCost::Cost {
-                    generic: 1,
-                    shards: vec![],
-                }),
-                Keyword::Replicate(ManaCost::Cost {
-                    generic: 2,
-                    shards: vec![],
-                }),
+                Keyword::Replicate(crate::types::keywords::ReplicateCost::Mana(
+                    ManaCost::Cost {
+                        generic: 1,
+                        shards: vec![],
+                    },
+                )),
+                Keyword::Replicate(crate::types::keywords::ReplicateCost::Mana(
+                    ManaCost::Cost {
+                        generic: 2,
+                        shards: vec![],
+                    },
+                )),
             ],
             ..CardFace::default()
         };
@@ -23799,7 +23883,7 @@ mod devour_synthesis_tests {
         // Parent effect: ranged "sacrifice up to N of your creatures".
         let Effect::Sacrifice {
             target,
-            count,
+            count: crate::types::ability::SacrificeSelection::Count(count),
             min_count,
         } = &*execute.effect
         else {
@@ -24785,7 +24869,9 @@ mod fading_vanishing_tests {
             &*sacrifice.effect,
             Effect::Sacrifice {
                 target: TargetFilter::SelfRef,
-                count: QuantityExpr::Fixed { value: 1 },
+                count: crate::types::ability::SacrificeSelection::Count(QuantityExpr::Fixed {
+                    value: 1
+                }),
                 min_count: 0,
             }
         ));

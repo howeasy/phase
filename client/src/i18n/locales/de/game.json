@@ -838,7 +838,14 @@
     "lethalBadge": "Tödlich",
     "planeswalkerLoyalty": "Planeswalker (Loyalität: {{loyalty}})",
     "defendingPlayerTrample": "Verteidigender Spieler (Trampelschaden)",
+    "attackTargetTrample": "{{name}} (Trampelschaden)",
     "pwControllerTrample": "PW-Beherrscher (Trampelschaden über PW)",
+    "lethalButton": "Tödlich",
+    "clearButton": "Zurücksetzen",
+    "assignLethalTo": "{{target}} tödlichen Schaden zuweisen",
+    "clearDamageFor": "Schadenszuweisung für {{target}} zurücksetzen",
+    "lethalFirstButton": "Tödlicher Schaden zuerst",
+    "lethalFirstTitle": "Weise der Reihe nach jedem Blocker tödlichen Schaden zu, dann den restlichen Schaden",
     "assignRemainingButton": "+{{amount}}",
     "assignRemainingTo_few": "Die verbleibenden {{count}} Schaden {{target}} zuteilen",
     "assignRemainingTo_many": "Die verbleibenden {{count}} Schaden {{target}} zuteilen",
@@ -1283,6 +1290,7 @@
       "onlyForSpellColor": "Nur für Zaubersprüche der Farbe {{color}}.",
       "onlyForSpellFromZone": "Nur für Zaubersprüche {{polarity}} {{zone}}.",
       "cannotCastSpellFromZone": "Kann nicht für Zaubersprüche aus {{zone}} ausgegeben werden.",
+      "cannotCastSpellsOutsideType": "Dieses Mana kann nicht zum Wirken von Zaubersprüchen ausgegeben werden, die nicht den Typ {{spellType}} haben.",
       "onlyForFaceDownSpell": "Nur für verdeckte Zaubersprüche.",
       "onlyForAny": "Nur für eine dieser Verwendungen: {{restrictions}}",
       "onlyForSpecialAction": "Nur für die Sonderaktion {{action}}.",
@@ -1340,6 +1348,8 @@
         "Ticket": "Ticket"
       },
       "generic": "Kosten",
+      "blight": "Verheerung {{count}}",
+      "blightBoundedX": "Verheerung X (bis zur höchsten Widerstandskraft unter den Kreaturen, die du kontrollierst)",
       "pay": "{{cost}} bezahlen",
       "draw": "ziehe eine Karte",
       "drawCount_one": "ziehe {{count}} Karte",
@@ -1439,6 +1449,9 @@
       "poisonCounters": "Giftmarken",
       "players": "Spieler",
       "whoGoesFirst": "Wer beginnt",
+      "archenemySeat": "Archenemy",
+      "archenemyYou": "Du",
+      "archenemyOpponent": "Gegner {{number}}",
       "firstPlayer": {
         "random": "Zufällig",
         "play": "Spielen",
@@ -2167,6 +2180,14 @@
     "attachments": "Mit {{names}}"
   },
   "optionalCost": {
+    "replicate": {
+      "title": "Reproduktion bezahlen?",
+      "again": "Reproduktion erneut bezahlen? ({{times}}× bezahlt)",
+      "decline": "Fertig",
+      "tapSubtype": "Tappe einen ungetappten {{subtype}}, den du kontrollierst",
+      "tapCreature": "Tappe eine ungetappte Kreatur",
+      "payEnergy": "Bezahle {{amount}} Energie"
+    },
     "gift": {
       "title": "Ein Geschenk versprechen?",
       "pay": "{{gift}} versprechen",
@@ -2332,6 +2353,13 @@
     "creatureFallback": "Kreatur {{id}}"
   },
   "distributeAmong": {
+    "assignRemainingButton": "+{{amount}}",
+    "assignRemainingTo_few": "Die verbleibenden {{count}} Punkte {{target}} zuweisen",
+    "assignRemainingTo_many": "Die verbleibenden {{count}} Punkte {{target}} zuweisen",
+    "assignRemainingTo_one": "Den verbleibenden {{count}} Punkt {{target}} zuweisen",
+    "assignRemainingTo_other": "Die verbleibenden {{count}} Punkte {{target}} zuweisen",
+    "clearButton": "Zurücksetzen",
+    "clearTarget": "Zuweisung für {{target}} zurücksetzen",
     "unitCounter": "{{counter}}-Marke",
     "unitDamage": "Schaden",
     "unitLife": "Leben",
@@ -2786,6 +2814,9 @@
       "single": "{{action}} a permanent",
       "exactCount_one": "{{action}} {{count}} permanent",
       "exactCount_other": "{{action}} {{count}} permanents",
+      "protectedObject": "Bezahle, um {{object}} zu schützen",
+      "blightCounters_one": "Lege eine -1/-1-Marke auf eine Kreatur, die du kontrollierst",
+      "blightCounters_other": "Lege {{count}} -1/-1-Marken auf eine Kreatur, die du kontrollierst",
       "rangeCount_one": "{{action}} {{min}}-{{count}} permanent",
       "rangeCount_other": "{{action}} {{min}}-{{count}} permanents",
       "upToCount_one": "{{action}} up to {{count}} permanent",

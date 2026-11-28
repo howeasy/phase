@@ -17,12 +17,13 @@ import type { DraftPodHostConfig, DraftPodHostEvent, DraftPodListing } from "../
 import { DraftPodGuestAdapter } from "../draftPodGuestAdapter";
 import type { DraftPodGuestEvent } from "../draftPodGuestAdapter";
 import type { DraftPlayerView, RestorableDraftSessionVerdict } from "../draft-adapter";
-import { admitDraft27HostValue } from "../draft-compatibility";
+import { classifyDraft27Compatibility } from "../draft-compatibility";
 import {
   loadDraftHostSession,
   type DraftHostSessionLoadResult,
   type PersistedDraftHostSession,
 } from "../../services/draftPersistence";
+import type { ActiveDraftPointerTxn } from "../../services/draftPersistence";
 import type { DraftWorkspaceState } from "../../components/draft/workspace/types";
 import type { BrokerClient } from "../../services/brokerClient";
 
@@ -184,7 +185,7 @@ function mockView(status: string): DraftPlayerView {
 }
 
 function admittedHostSession(session: PersistedDraftHostSession): DraftHostSessionLoadResult {
-  return { type: "admitted", session, raw: session };
+  return { type: "admitted", session };
 }
 
 /**
@@ -306,7 +307,7 @@ describe("DraftPodHostAdapter", () => {
       tournamentFormat: session.tournamentFormat,
       podPolicy: session.podPolicy,
       persistenceId: session.persistenceId,
-      recovery: { session, raw: session },
+      recovery: { session },
     })).rejects.toMatchObject({ name: "Draft27IncompatibilityError" });
 
     expect(hostRoom).not.toHaveBeenCalled();
@@ -341,7 +342,7 @@ describe("DraftPodHostAdapter", () => {
       tournamentFormat: session.tournamentFormat,
       podPolicy: session.podPolicy,
       persistenceId: session.persistenceId,
-      recovery: { session, raw: session, isCurrent: () => false },
+      recovery: { session, isCurrent: () => false },
     })).rejects.toThrow("initialization aborted");
 
     expect(hostRoom).not.toHaveBeenCalled();
@@ -374,14 +375,14 @@ describe("DraftPodHostAdapter", () => {
       tournamentFormat: session.tournamentFormat,
       podPolicy: session.podPolicy,
       persistenceId: session.persistenceId,
-      recovery: { session, raw: session },
+      recovery: { session },
       signal,
     });
 
     it("refuses a recovery the engine refuses before hostRoom or host allocation", async () => {
       const { hostRoom } = await import("../../network/connection");
       // Reach: the client's top-level check admits the saved session.
-      expect(admitDraft27HostValue(session).ok).toBe(true);
+      expect(classifyDraft27Compatibility(session).ok).toBe(true);
       mockCheckRestorableSession.mockResolvedValueOnce({ type: "Incompatible" });
 
       await expect(adapter.initialize(recovering())).rejects.toMatchObject({
@@ -398,7 +399,7 @@ describe("DraftPodHostAdapter", () => {
     it("rejects with the check's own error before hostRoom when the engine cannot answer", async () => {
       const { hostRoom } = await import("../../network/connection");
       // Reach: the client's top-level check admits the saved session.
-      expect(admitDraft27HostValue(session).ok).toBe(true);
+      expect(classifyDraft27Compatibility(session).ok).toBe(true);
       mockCheckRestorableSession.mockRejectedValueOnce(new Error("draft engine unavailable"));
 
       await expect(adapter.initialize(recovering())).rejects.toThrow("draft engine unavailable");
@@ -1588,6 +1589,18 @@ describe("DraftPodGuestAdapter", () => {
     await adapter.initialize({ kind: "new", roomCode: "ABCDE", displayName: "Alice" });
 
     const guestEventHandler = mockGuestOnEvent.mock.calls[0][0];
+
+    // A committed recovery pointer passes through verbatim, with the
+    // transaction's capability it was handed with and no status change.
+    const pointer = { roomCode: "ABCDE", displayName: "Alice", hostPeerId: "host-peer", capabilityId: "cap-1" };
+    const recovery = {} as ActiveDraftPointerTxn;
+    const statusBeforePointer = adapter.status;
+    const eventsBeforePointer = events.length;
+    guestEventHandler({ type: "recoveryCommitted", pointer, recovery });
+    expect(events.slice(eventsBeforePointer)).toEqual([{ type: "recoveryCommitted", pointer, recovery }]);
+    const reemitted = events[eventsBeforePointer] as Extract<DraftPodGuestEvent, { type: "recoveryCommitted" }>;
+    expect(reemitted.recovery).toBe(recovery);
+    expect(adapter.status).toBe(statusBeforePointer);
 
     // Simulate join
     guestEventHandler({ type: "joined", seatIndex: 3, draftCode: "draft-001" });

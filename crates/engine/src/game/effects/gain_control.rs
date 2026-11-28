@@ -1682,6 +1682,7 @@ mod tests {
         );
         let create_treasures = ResolvedAbility::new(
             Effect::Token {
+                enters_blocking: None,
                 name: "Treasure".to_string(),
                 power: PtValue::Fixed(0),
                 toughness: PtValue::Fixed(0),
@@ -1703,6 +1704,7 @@ mod tests {
                 supertypes: vec![],
                 static_abilities: vec![],
                 enter_with_counters: vec![],
+                additional_members: Vec::new(),
             },
             vec![],
             purse,

@@ -292,26 +292,20 @@ pub(crate) fn is_wide_payoff_parts(triggers: &[TriggerDefinition]) -> bool {
 
 /// True if the effect creates a creature token. CR 111.1.
 fn effect_is_creature_token(e: &&Effect) -> bool {
-    matches!(e, Effect::Token { types, .. } if types.iter().any(|s| s == "Creature"))
+    e.token_creation_members().any(|member| matches!(member, Effect::Token { types, .. } if types.iter().any(|s| s == "Creature")))
 }
 
 /// True if the effect creates ≥2 creature tokens (mass generator). CR 111.1.
 fn effect_is_mass_token(e: &&Effect) -> bool {
-    match e {
-        Effect::Token { types, count, .. } => {
-            if !types.iter().any(|s| s == "Creature") {
-                return false;
-            }
+    e.token_creation_members().any(|member| match member {
+        Effect::Token { types, count, .. } if types.iter().any(|s| s == "Creature") => {
             match count {
-                // Fixed count ≥ 2 is unambiguously mass.
                 QuantityExpr::Fixed { value } => *value >= 2,
-                // Non-Fixed (Ref, HalfRounded, Offset, Multiply) — dynamic
-                // quantity, treat as mass since it can exceed 1. CR 111.1.
                 _ => true,
             }
         }
         _ => false,
-    }
+    })
 }
 
 /// True if the static definition is an anthem: Continuous mode, affected
@@ -413,6 +407,7 @@ mod tests {
 
     fn creature_token_effect(count: QuantityExpr) -> Effect {
         Effect::Token {
+            enters_blocking: None,
             name: "Saproling".to_string(),
             power: engine::types::ability::PtValue::Fixed(1),
             toughness: engine::types::ability::PtValue::Fixed(1),
@@ -428,11 +423,13 @@ mod tests {
             supertypes: Vec::new(),
             static_abilities: Vec::new(),
             enter_with_counters: Vec::new(),
+            additional_members: Vec::new(),
         }
     }
 
     fn treasure_token_effect() -> Effect {
         Effect::Token {
+            enters_blocking: None,
             name: "Treasure".to_string(),
             power: engine::types::ability::PtValue::Fixed(0),
             toughness: engine::types::ability::PtValue::Fixed(0),
@@ -448,6 +445,7 @@ mod tests {
             supertypes: Vec::new(),
             static_abilities: Vec::new(),
             enter_with_counters: Vec::new(),
+            additional_members: Vec::new(),
         }
     }
 

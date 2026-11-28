@@ -599,7 +599,7 @@ fn a_delayed_trigger_is_stripped_only_while_it_acts_on_grown_objects_alone() {
             Box::new(|a| {
                 a.effect = Effect::Sacrifice {
                     target: TargetFilter::Typed(TypedFilter::creature()),
-                    count: QuantityExpr::Fixed { value: 1 },
+                    count: QuantityExpr::Fixed { value: 1 }.into(),
                     min_count: 0,
                 }
             }),
@@ -4762,8 +4762,10 @@ fn the_history_cover_refuses_a_grown_attack_history_a_live_static_reads() {
         "reach: the comparand refuses the grown history"
     );
     assert!(history_covers_for_tests(&prior, &current));
-    let [prior, current] = charger_frames("Moraug, Fury of Akoum", db);
-    assert!(!history_covers_for_tests(&prior, &current));
+    for reader in ["Moraug, Fury of Akoum", "Aurelia, the Warleader"] {
+        let [prior, current] = charger_frames(reader, db);
+        assert!(!history_covers_for_tests(&prior, &current), "{reader}");
+    }
 }
 
 /// CR 601.3 + CR 702.170d + CR 732.2a: the history cover reads a casting-permission grant by its

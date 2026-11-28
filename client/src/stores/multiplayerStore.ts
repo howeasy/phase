@@ -26,7 +26,7 @@ import { AdapterError, AdapterErrorCode, U8_MAX, isCustomGameFormat } from "../a
 import { isFormatConfigShape } from "../adapter/format-config-shape";
 import { findSavedCustomFormat } from "../services/customFormats";
 import { AI_DIFFICULTIES } from "../constants/ai";
-import { FORMAT_REGISTRY, isPlanechaseFamilyFormat } from "../data/formatRegistry";
+import { FORMAT_REGISTRY, isArchenemyFamilyFormat, isPlanechaseFamilyFormat } from "../data/formatRegistry";
 import {
   MIN_LOBBY_PROTOCOL_FOR_MATCH_TYPE,
   MIN_LOBBY_PROTOCOL_FOR_RECOVERABLE_ROTATION,
@@ -122,12 +122,6 @@ import {
   nativeEngineKeyForCurrentOrigin,
 } from "../services/nativeEngine";
 import type { P2PHostAdapter } from "../adapter/p2p-adapter";
-import {
-  ServerDraftAdapter,
-  type CreateDraftSettings,
-  type DraftPhase,
-} from "../adapter/server-draft-adapter";
-import type { DraftPlayerView } from "../adapter/draft-adapter";
 import type {
   DeckChoice,
   DeckListData,
@@ -1674,10 +1668,6 @@ interface MultiplayerState {
   // null before the first hello; updated when the hosting WS or the game WS
   // completes its handshake.
   serverInfo: ServerInfo | null;
-  // Server-hosted draft session (ephemeral — not persisted)
-  draftAdapter: ServerDraftAdapter | null;
-  draftView: DraftPlayerView | null;
-  draftPhase: DraftPhase | null;
 }
 
 interface MultiplayerActions {
@@ -1894,24 +1884,6 @@ interface MultiplayerActions {
   subscribeAmbientLobby: (
     onFrame: (frame: AmbientLobbyFrame, source: LobbySource) => void,
   ) => () => void;
-  /**
-   * Join a server-hosted draft room. Creates a ServerDraftAdapter and uses
-   * its joinDraft method, then stores the adapter and initial view.
-   */
-  joinServerDraft: (
-    serverUrl: string,
-    draftCode: string,
-    displayName: string,
-    password?: string,
-  ) => Promise<void>;
-  /**
-   * Create a new server-hosted draft pod. Opens a ServerDraftAdapter and
-   * calls createDraft with the given settings.
-   */
-  createServerDraft: (
-    serverUrl: string,
-    settings: CreateDraftSettings,
-  ) => Promise<void>;
 }
 
 function disposeActiveP2PHost(): void {
@@ -2421,6 +2393,12 @@ function normalizeBuiltInHostConfig(
     && isU8(storedFormatConfig.poison_counter_threshold)
       ? storedFormatConfig.poison_counter_threshold
       : defaults.poison_counter_threshold;
+  const archenemyPlayer =
+    isArchenemyFamilyFormat(format)
+    && isU8(storedFormatConfig.archenemy_player)
+    && storedFormatConfig.archenemy_player < defaults.max_players
+      ? storedFormatConfig.archenemy_player
+      : defaults.archenemy_player;
   const formatConfig: FormatConfig = {
     ...defaults,
     deck_size: deckSize,
@@ -2429,6 +2407,7 @@ function normalizeBuiltInHostConfig(
       : defaults.starting_life,
     commander_damage_threshold: commanderDamageThreshold,
     poison_counter_threshold: poisonCounterThreshold,
+    archenemy_player: archenemyPlayer,
     allow_debug_actions: typeof storedFormatConfig.allow_debug_actions === "boolean"
       ? storedFormatConfig.allow_debug_actions
       : defaults.allow_debug_actions,
@@ -2484,9 +2463,17 @@ function finalizeRememberedHostConfig(
     }
   }
 
+  // A remembered archenemy seat strands when the resolved table is smaller
+  // than the seat it names. Clamp to the last seat, like the live form does
+  // when the table shrinks.
+  const clampedFormatConfig =
+    isArchenemyFamilyFormat(format) && (formatConfig.archenemy_player ?? 0) >= playerCount
+      ? { ...formatConfig, archenemy_player: playerCount - 1 }
+      : formatConfig;
+
   return {
     format,
-    formatConfig,
+    formatConfig: clampedFormatConfig,
     savedCustomFormatId,
     playerCount,
     matchType: playerCount === 2 && persisted.matchType === "Bo3" ? "Bo3" : "Bo1",
@@ -2979,9 +2966,6 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
       hostSession: null,
       pendingGameRoute: null,
       serverInfo: null,
-      draftAdapter: null,
-      draftView: null,
-      draftPhase: null,
 
       setServerInfo: (info) => set({ serverInfo: info }),
       setDisplayName: (name) => set({ displayName: name }),
@@ -3884,22 +3868,6 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
             releaseReservationToken: opts?.releaseReservationToken,
           }),
         ),
-
-      joinServerDraft: async (serverUrl, draftCode, displayName, password) => {
-        // Dispose any previous draft adapter before creating a new one.
-        get().draftAdapter?.dispose();
-        const adapter = new ServerDraftAdapter(serverUrl);
-        const view = await adapter.joinDraft(draftCode, displayName, password);
-        set({ draftAdapter: adapter, draftView: view, draftPhase: adapter.currentPhase });
-      },
-
-      createServerDraft: async (serverUrl, settings) => {
-        // Dispose any previous draft adapter before creating a new one.
-        get().draftAdapter?.dispose();
-        const adapter = new ServerDraftAdapter(serverUrl);
-        await adapter.createDraft(settings);
-        set({ draftAdapter: adapter, draftView: null, draftPhase: "lobby" });
-      },
 
       subscribeAmbientLobby: (onFrame) => {
         ambientSubscribers.add(onFrame);

@@ -1,15 +1,24 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import type {
+  ActiveDraftPointerTxn,
+  loadDraftGuestCapability,
+  withActiveDraftPointer,
+} from "../../services/draftPersistence";
 
 const persistenceMocks = vi.hoisted(() => ({
   saveDraftHostSession: vi.fn(async () => {}),
   clearDraftHostSession: vi.fn(async () => {}),
   saveDraftGuestSession: vi.fn(async () => {}),
-  saveActiveDraftGuest: vi.fn(),
   loadDraftDeckSubmission: vi.fn(async () => null),
   saveDraftDeckSubmission: vi.fn(async () => {}),
   clearDraftDeckSubmission: vi.fn(async () => {}),
   clearDraftGuestRecovery: vi.fn(async () => {}),
-  clearDraftGuestSession: vi.fn(async () => {}),
+  // No stored record owns this token unless a test answers otherwise.
+  loadDraftGuestCapability: vi.fn<typeof loadDraftGuestCapability>(async () => null),
+  // With no lock manager the real transaction runs its body at the call.
+  withActiveDraftPointer: vi.fn<typeof withActiveDraftPointer>(
+    async (body) => ({ status: "committed", value: body({} as ActiveDraftPointerTxn) }),
+  ),
 }));
 
 vi.mock("../../services/draftPersistence", () => persistenceMocks);
@@ -162,6 +171,9 @@ type SessionStub = {
 describe("P2P draft workspace persistence", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    // `clearAllMocks` clears calls, not queued once-answers.
+    persistenceMocks.loadDraftGuestCapability.mockReset();
+    persistenceMocks.loadDraftGuestCapability.mockResolvedValue(null);
   });
 
   it("serializes guest and host workspace updates with the authoritative mutation queue", async () => {
@@ -628,8 +640,12 @@ describe("P2P draft workspace persistence", () => {
     privateHost.adapter = { importSession: vi.fn(() => importedView.promise), getViewForSeat: vi.fn() };
     privateHost.persistSession = vi.fn();
     privateHost.recoverSettlementOutbox = vi.fn(async () => {});
+    const recordedSortLayouts = { deck: { sort: "color", columnCount: 2, columns: { colorless: 1 } } } as const;
     const restore = host.restoreFromPersisted(persisted({
-      0: workspace({ stale: { zone: "deck", row: 0, column: 0, order: 0 } }),
+      0: {
+        ...workspace({ stale: { zone: "deck", row: 0, column: 0, order: 0 } }),
+        recordedSortLayouts,
+      },
       1: workspace(),
     }));
 
@@ -639,6 +655,7 @@ describe("P2P draft workspace persistence", () => {
     expect(host.getHostWorkspaceState()?.placements).toEqual({
       fresh: { zone: "deck", row: 0, column: 0, order: 0 },
     });
+    expect(host.getHostWorkspaceState()?.recordedSortLayouts).toEqual(recordedSortLayouts);
     expect(privateHost.perSeatWorkspaceSnapshots.has(1)).toBe(true);
     expect(privateHost.persistSession).toHaveBeenCalledOnce();
   });
@@ -823,8 +840,8 @@ describe("P2P draft workspace persistence", () => {
     await Promise.all([received, initialized]);
 
     expect(events).toEqual(kind === "new"
-      ? ["workspaceRestored:true", "joined:", "viewUpdated:"]
-      : ["workspaceRestored:false", "reconnected:", "viewUpdated:"]);
+      ? ["recoveryCommitted:", "workspaceRestored:true", "joined:", "viewUpdated:"]
+      : ["recoveryCommitted:", "workspaceRestored:false", "reconnected:", "viewUpdated:"]);
     expect(eventsAtReplay).toEqual(events);
     guest.dispose();
   });
@@ -832,9 +849,13 @@ describe("P2P draft workspace persistence", () => {
   it("restores an exact host-owned update through reconnect to the guest", async () => {
     const host = makeHost();
     const privateHost = host as unknown as PrivateHost;
-    const state = workspace({
+    const initial = workspace({
       card: { zone: "sideboard", row: 1, column: 5, order: 0 },
     });
+    const state: DraftWorkspaceState = {
+      ...initial,
+      recordedSortLayouts: { deck: { sort: "color", columnCount: 2, columns: { colorless: 1 } } },
+    };
     privateHost.adapter = {
       setSeatConnected: vi.fn(async () => {}),
       getViewForSeat: vi.fn(async () => view("card")),
@@ -842,9 +863,14 @@ describe("P2P draft workspace persistence", () => {
     privateHost.persistSessionStrict = vi.fn(async () => {});
     await privateHost.handleGuestMessage(1, {
       type: "draft_workspace_update",
+      workspaceState: initial,
+    });
+    await privateHost.handleGuestMessage(1, {
+      type: "draft_workspace_update",
       workspaceState: state,
     });
     await privateHost.mutationQueue;
+    expect(privateHost.persistSessionStrict).toHaveBeenCalledTimes(2);
     privateHost.draftStarted = true;
     privateHost.seatTokens.set(1, "seat-1-token");
     privateHost.disconnectedSeats.set(1, { disconnectedAt: 0, timer: null });

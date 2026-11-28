@@ -432,6 +432,9 @@
     "prompt": {
       "exactCount_one": "{{action}}{{count}}个永久物",
       "exactCount_other": "{{action}}{{count}}个永久物",
+      "protectedObject": "支付以保护{{object}}",
+      "blightCounters_one": "在一个由你操控的生物上放置一个-1/-1指示物",
+      "blightCounters_other": "在一个由你操控的生物上放置{{count}}个-1/-1指示物",
       "rangeCount_one": "{{action}}{{min}}-{{count}}个永久物",
       "rangeCount_other": "{{action}}{{min}}-{{count}}个永久物",
       "single": "{{action}}一个永久物",
@@ -1136,6 +1139,12 @@
     "assignDamageButton": "分配伤害",
     "assignDamageSubtitle": "{{name}} —— 剩余：{{remaining}}",
     "assignDamageTitle": "分配{{amount}}点战斗伤害",
+    "lethalButton": "致命",
+    "clearButton": "清除",
+    "assignLethalTo": "向{{target}}分配致命伤害",
+    "clearDamageFor": "清除分配给{{target}}的伤害",
+    "lethalFirstButton": "优先分配致命伤害",
+    "lethalFirstTitle": "按顺序向每个阻挡生物分配致命伤害，再分配剩余伤害",
     "assignRemainingButton": "+{{amount}}",
     "assignRemainingTo_few": "将剩余的{{count}}点伤害分配给{{target}}",
     "assignRemainingTo_many": "将剩余的{{count}}点伤害分配给{{target}}",
@@ -1157,6 +1166,7 @@
     "confirmAttackers": "确认攻击者（{{count}}）",
     "confirmBlockers": "确认阻挡者（{{count}}）",
     "defendingPlayerTrample": "防御牌手（践踏）",
+    "attackTargetTrample": "{{name}}（践踏）",
     "lethalBadge": "致命",
     "lethalLabel": "致命：{{amount}}",
     "menaceRequirement": "必须被{{count}}个生物阻挡，否则不能被阻挡",
@@ -1408,6 +1418,13 @@
     "title": "{{name}}已断开连接"
   },
   "distributeAmong": {
+    "assignRemainingButton": "+{{amount}}",
+    "assignRemainingTo_few": "将剩余的{{count}}分配给{{target}}",
+    "assignRemainingTo_many": "将剩余的{{count}}分配给{{target}}",
+    "assignRemainingTo_one": "将剩余的{{count}}分配给{{target}}",
+    "assignRemainingTo_other": "将剩余的{{count}}分配给{{target}}",
+    "clearButton": "清除",
+    "clearTarget": "清除分配给{{target}}的数值",
     "subtitle": "每个目标至少分配1{{unit}}。剩余：{{remaining}}",
     "subtitleAnyNumber": "可选择任意数量，每个选中的对象至少分配1{{unit}}。剩余：{{remaining}}",
     "title": "分配{{total}}{{unit}}",
@@ -1527,6 +1544,8 @@
       "discardCard": "弃一张牌",
       "energy": "{{amount}}点能量",
       "generic": "一项费用",
+      "blight": "衰萎 {{count}}",
+      "blightBoundedX": "衰萎 X (至多为由你操控的生物中的最大防御力)",
       "life": "{{amount}}点生命",
       "pay": "支付{{cost}}",
       "playerCounterKind": {
@@ -1589,6 +1608,7 @@
     "manaRestrictions": {
       "anySpell": "任意",
       "cannotCastSpellFromZone": "不能用于从{{zone}}施放咒语。",
+      "cannotCastSpellsOutsideType": "不能用于施放类别不属于{{spellType}}的咒语。",
       "convokePayment": "仅可用于本次召集支付。",
       "hasXInCostCriterion": "费用中包含 X",
       "impossible": "此法术力无法被使用。",
@@ -1752,7 +1772,10 @@
       },
       "players": "牌手",
       "startingLife": "起始生命",
-      "whoGoesFirst": "谁先手"
+      "whoGoesFirst": "谁先手",
+      "archenemySeat": "Archenemy",
+      "archenemyYou": "你",
+      "archenemyOpponent": "对手{{number}}"
     },
     "deckNotLegal": "套牌在{{format}}中不合法。",
     "deckPreview": {
@@ -2166,6 +2189,14 @@
     "viewBoardThenTarget": "查看{{name}}的战场（再次点击以{{name}}为目标）"
   },
   "optionalCost": {
+    "replicate": {
+      "title": "支付复诵费用？",
+      "again": "再次支付复诵费用？（已支付{{times}}次）",
+      "decline": "完成",
+      "tapSubtype": "横置一个由你操控且未横置的{{subtype}}",
+      "tapCreature": "横置一个未横置的生物",
+      "payEnergy": "支付{{amount}}点能量"
+    },
     "gift": {
       "decline": "不承诺施放",
       "kind": {

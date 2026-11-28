@@ -11,7 +11,7 @@
 
 import type { DraftPlayerView, SeatPublicView, SharedStackPileDecision } from "./draft-adapter";
 import {
-  admitDraft27GuestView,
+  classifyDraft27Compatibility,
   type Draft27CompatibilityError,
   Draft27IncompatibilityError,
 } from "./draft-compatibility";
@@ -40,10 +40,18 @@ import type {
 import {
   saveDraftGuestSession,
   clearDraftGuestRecovery,
-  saveActiveDraftGuest,
   clearDraftDeckSubmission,
   loadDraftDeckSubmission,
+  loadDraftGuestCapability,
   saveDraftDeckSubmission,
+  withActiveDraftPointer,
+  ActiveDraftPointerUnavailableError,
+} from "../services/draftPersistence";
+import type {
+  ActiveDraftGuestMeta,
+  ActiveDraftPointerTxn,
+  DraftGuestCapability,
+  DraftGuestCapabilityOwner,
 } from "../services/draftPersistence";
 import type {
   DraftIntergameCommand,
@@ -56,7 +64,17 @@ import {
 
 // ── Types ──────────────────────────────────────────────────────────────
 
+/**
+ * The public pointer to a committed private recovery record. Only the
+ * lifecycle owner publishes it; the guest hands it over, with the
+ * recovery-pointer transaction it holds, and never writes it.
+ */
+export type DraftGuestRecoveryPointer = Readonly<Pick<ActiveDraftGuestMeta, "roomCode" | "displayName" | "hostPeerId">> & {
+  readonly capabilityId: string;
+};
+
 export type DraftGuestEvent =
+  | { type: "recoveryCommitted"; pointer: DraftGuestRecoveryPointer; recovery: ActiveDraftPointerTxn }
   | { type: "joined"; seatIndex: number; draftCode: string }
   | { type: "reconnected"; seatIndex: number }
   | { type: "workspaceRestored"; workspaceState: DraftWorkspaceState | null }
@@ -112,6 +130,15 @@ type DraftGuestEventListener = (event: DraftGuestEvent) => void;
 
 /** Whether a deck-submission send is the awaited caller action or a reconnect's durable replay. */
 type DeckSubmissionOrigin = "caller" | "replay";
+
+/**
+ * What a handshake rejection does with its session: retire it, or leave it to
+ * a caller that retires it after settling the work the session still carries.
+ */
+type HandshakeSessionAction = "retire" | "callerRetires";
+
+/** Which host message admitted the guest's durable records. */
+type RecoveryAdmission = "welcome" | "reconnect";
 
 const RECONNECT_BACKOFF_MS = [1_000, 2_000, 4_000, 8_000, 15_000, 30_000, 60_000];
 const RECONNECT_STEADY_STATE_MS = 60_000;
@@ -193,6 +220,8 @@ export class P2PDraftGuest {
    * transport attempt but should retain recovery for a refreshed client.
    */
   private recoveryRevoked = false;
+  /** The one capability this guest's durable records belong to, bound once its private record is written. */
+  private capability: DraftGuestCapability | null = null;
   private currentView: DraftPlayerView | null = null;
   private handshake: DraftHandshake | null = null;
   private reconnecting = false;
@@ -320,9 +349,9 @@ export class P2PDraftGuest {
     const session = this.attachSession(conn, route);
     await new Promise<void>((resolve, reject) => {
       const timer = setTimeout(() => {
-        this.rejectHandshake(session, new Error("Draft host did not acknowledge connection"));
+        this.rejectHandshake(session, new Error("Draft host did not acknowledge connection"), "retire");
       }, FIRST_CONTACT_TIMEOUT_MS);
-      const onAbort = () => this.rejectHandshake(session, abortError());
+      const onAbort = () => this.rejectHandshake(session, abortError(), "retire");
       signal?.addEventListener("abort", onAbort, { once: true });
       this.handshake = {
         session,
@@ -335,7 +364,7 @@ export class P2PDraftGuest {
         },
       };
       void this.sendFirstContact(session, reconnect)
-        .catch((err: unknown) => this.rejectHandshake(session, asError(err)));
+        .catch((err: unknown) => this.rejectHandshake(session, asError(err), "retire"));
     });
   }
 
@@ -368,12 +397,12 @@ export class P2PDraftGuest {
     handshake.resolve();
   }
 
-  private rejectHandshake(session: DraftPeerSession, reason: Error, retire = true): void {
+  private rejectHandshake(session: DraftPeerSession, reason: Error, action: HandshakeSessionAction): void {
     const handshake = this.handshake;
     if (!handshake || handshake.session !== session) return;
     this.handshake = null;
     handshake.cleanup();
-    if (retire) this.retireSession(session);
+    if (action === "retire") this.retireSession(session);
     handshake.reject(reason);
   }
 
@@ -390,7 +419,7 @@ export class P2PDraftGuest {
     this.failLandSuggestionWaiters("Draft host disconnected", session);
     route.session = null;
     if (this.handshake?.session === session) {
-      this.rejectHandshake(session, new Error("Draft host disconnected before acknowledging"));
+      this.rejectHandshake(session, new Error("Draft host disconnected before acknowledging"), "retire");
     } else {
       if (this.leaveAcknowledgement?.session === session) {
         this.leaveAcknowledgement.reject(new Error("Draft host disconnected before acknowledging leave"));
@@ -635,7 +664,7 @@ export class P2PDraftGuest {
 
   /** Returns true when the raw draft27 view was rejected before any carrier effects. */
   private rejectIncompatibleView(rawView: unknown, session: DraftPeerSession): boolean {
-    const admission = admitDraft27GuestView(rawView);
+    const admission = classifyDraft27Compatibility(rawView);
     if (admission.ok) return false;
     this.rejectIncompatibleDelivery(session, new Draft27IncompatibilityError(admission.error));
     return true;
@@ -664,7 +693,7 @@ export class P2PDraftGuest {
     this.reconnecting = false;
 
     if (route.retryWait) this.settleRetryWait(route, route.retryWait, { kind: "reject", reason });
-    this.rejectHandshake(session, reason, false);
+    this.rejectHandshake(session, reason, "callerRetires");
     this.failDeckSubmissionWaiters(reason, session, route);
     if (this.leaveAcknowledgement?.session === session) {
       const leave = this.leaveAcknowledgement;
@@ -686,7 +715,7 @@ export class P2PDraftGuest {
         const reason = `Draft protocol mismatch: host v${msg.draftProtocolVersion}, client v${DRAFT_PROTOCOL_VERSION}. Refresh both windows.`;
         console.error("[P2PDraftGuest]", reason);
         this.terminated = true;
-        this.rejectHandshake(session, new Error(reason));
+        this.rejectHandshake(session, new Error(reason), "retire");
         this.emit({
           type: "reconnectFailed",
           failure: { kind: "incompatible", message: reason },
@@ -704,15 +733,18 @@ export class P2PDraftGuest {
         this.currentView = msg.view;
 
         try {
-          // The IDB capability must commit before its local-storage locator is
-          // published; otherwise a reload can observe a dead recovery route.
-          await this.persistRecoveryIdentity({
+          // The pointer to the committed record goes to the lifecycle owner
+          // inside the admission, so a refused publication fails it exactly
+          // like a refused private write.
+          const pointer = await this.persistRecoveryIdentity({
             draftToken: msg.draftToken,
             seatIndex: msg.seatIndex,
             draftCode: msg.draftCode,
-          });
+          }, "welcome", session);
+          if (pointer === null || this.session !== session) return;
+          if (!(await this.handOverRecoveryPointer(pointer, session))) return;
         } catch (err) {
-          this.rejectHandshake(session, asError(err));
+          this.rejectHandshake(session, asError(err), "retire");
           this.emit({ type: "error", message: "Could not save draft recovery details" });
           break;
         }
@@ -735,13 +767,15 @@ export class P2PDraftGuest {
 
         if (this.draftToken) {
           try {
-            await this.persistRecoveryIdentity({
+            const pointer = await this.persistRecoveryIdentity({
               draftToken: this.draftToken,
               seatIndex: msg.seatIndex,
               draftCode: msg.draftCode,
-            });
+            }, "reconnect", session);
+            if (pointer === null || this.session !== session) return;
+            if (!(await this.handOverRecoveryPointer(pointer, session))) return;
           } catch (err) {
-            this.rejectHandshake(session, asError(err));
+            this.rejectHandshake(session, asError(err), "retire");
             this.emit({ type: "error", message: "Could not save draft recovery details" });
             break;
           }
@@ -757,7 +791,7 @@ export class P2PDraftGuest {
       }
 
       case "draft_reconnect_rejected": {
-        this.rejectHandshake(session, new Error(msg.reason));
+        this.rejectHandshake(session, new Error(msg.reason), "retire");
         if (msg.kind === "Kicked" || msg.kind === "UnknownToken") {
           this.terminated = true;
           await this.revokeRecovery();
@@ -795,7 +829,8 @@ export class P2PDraftGuest {
       case "draft_deck_submit_ack": {
         if (this.rejectIncompatibleView(msg.view, session)) break;
         this.currentView = msg.view;
-        await clearDraftDeckSubmission(this.hostPeerId, msg.submissionId);
+        const outboxOwner = this.recoveryOwner();
+        if (outboxOwner) await clearDraftDeckSubmission(outboxOwner, msg.submissionId);
         const ackWaiter = this.deckSubmissionWaiters.get(msg.submissionId);
         ackWaiter?.resolve();
         if (ackWaiter && !ackWaiter.acknowledged) {
@@ -840,7 +875,8 @@ export class P2PDraftGuest {
           const waiter = this.deckSubmissionWaiters.get(msg.submissionId);
           if (waiter) {
             if (msg.submissionDisposition !== "Retryable") {
-              await clearDraftDeckSubmission(this.hostPeerId, msg.submissionId);
+              const outboxOwner = this.recoveryOwner();
+              if (outboxOwner) await clearDraftDeckSubmission(outboxOwner, msg.submissionId);
             }
             waiter.reject(new Error(msg.reason));
           }
@@ -1040,7 +1076,7 @@ export class P2PDraftGuest {
     if (this.recoveryRoute) this.cancelRecoveryRoute(this.recoveryRoute, abortError());
     this.failDeckSubmissionWaiters(new Error("Draft connection disposed"));
     this.failLandSuggestionWaiters("Draft connection disposed");
-    if (this.handshake) this.rejectHandshake(this.handshake.session, abortError());
+    if (this.handshake) this.rejectHandshake(this.handshake.session, abortError(), "retire");
     if (this.session) {
       this.retireSession(this.session);
       this.session = null;
@@ -1134,24 +1170,101 @@ export class P2PDraftGuest {
   }
 
   private async revokeRecovery(): Promise<void> {
+    const owner = this.recoveryOwner();
+    let capability = this.capability;
+    if (!capability && owner) {
+      // Only a revocation that arrives before any admission was persisted holds
+      // no capability; its token then names the record it owns, if any.
+      try {
+        capability = (await loadDraftGuestCapability(owner)) ?? null;
+      } catch {
+        capability = null;
+      }
+    }
     await Promise.allSettled([
-      clearDraftGuestRecovery(this.hostPeerId),
-      clearDraftDeckSubmission(this.hostPeerId),
+      capability ? clearDraftGuestRecovery(capability) : Promise.resolve(),
+      owner ? clearDraftDeckSubmission(owner) : Promise.resolve(),
     ]);
     this.recoveryRevoked = true;
   }
 
-  private async persistRecoveryIdentity(data: { draftToken: string; seatIndex: number; draftCode: string }): Promise<void> {
+  /** The owner of this guest's durable records, once it holds a token for a parseable room. */
+  private recoveryOwner(): DraftGuestCapabilityOwner | null {
+    if (!this.draftToken || !parseRoomCode(this.connection.roomCode)) return null;
+    return {
+      hostPeerId: this.hostPeerId,
+      draftToken: this.draftToken,
+      roomCode: this.connection.roomCode,
+      displayName: this.connection.displayName,
+    };
+  }
+
+  private async admissionCapabilityId(
+    owner: DraftGuestCapabilityOwner,
+    admission: RecoveryAdmission,
+  ): Promise<string> {
+    switch (admission) {
+      case "welcome":
+        return crypto.randomUUID();
+      case "reconnect": {
+        const held = this.capability;
+        if (held?.draftToken === owner.draftToken && held.capabilityId !== null) return held.capabilityId;
+        // A record written before records carried a name gains one here, once.
+        return (await loadDraftGuestCapability(owner))?.capabilityId ?? crypto.randomUUID();
+      }
+    }
+  }
+
+  /**
+   * Commits the private record and returns the pointer the owner publishes; writes no pointer.
+   * Returns null, writing nothing, when the admitting session was retired or this guest was
+   * terminated while it looked up its capability's name.
+   */
+  private async persistRecoveryIdentity(
+    data: { draftToken: string; seatIndex: number; draftCode: string },
+    admission: RecoveryAdmission,
+    session: DraftPeerSession,
+  ): Promise<DraftGuestRecoveryPointer | null> {
+    const owner: DraftGuestCapabilityOwner = {
+      hostPeerId: this.hostPeerId,
+      draftToken: data.draftToken,
+      roomCode: this.connection.roomCode,
+      displayName: this.connection.displayName,
+    };
+    const capabilityId = await this.admissionCapabilityId(owner, admission);
+    if (this.session !== session || this.terminated) return null;
     await saveDraftGuestSession(this.hostPeerId, {
       ...data,
-      roomCode: this.connection.roomCode,
-      displayName: this.connection.displayName,
+      roomCode: owner.roomCode,
+      displayName: owner.displayName,
+      capabilityId,
     });
-    saveActiveDraftGuest({
-      roomCode: this.connection.roomCode,
-      displayName: this.connection.displayName,
-      hostPeerId: this.hostPeerId,
+    this.capability = { ...owner, capabilityId };
+    return {
+      roomCode: owner.roomCode,
+      displayName: owner.displayName,
+      hostPeerId: owner.hostPeerId,
+      capabilityId,
+    };
+  }
+
+  /**
+   * Hands the committed pointer to the lifecycle owner inside one
+   * recovery-pointer transaction this guest holds, so the owner's publication
+   * is ordered against every other tab's pointer step. A session retired while
+   * the transaction waited hands over nothing and returns false. A transaction
+   * that cannot run, or whose result cannot be recorded, throws, as a refused
+   * write does.
+   */
+  private async handOverRecoveryPointer(pointer: DraftGuestRecoveryPointer, session: DraftPeerSession): Promise<boolean> {
+    const handedOver = await withActiveDraftPointer((recovery) => {
+      if (this.session !== session) return false;
+      this.emit({ type: "recoveryCommitted", pointer, recovery });
+      return true;
     });
+    if (handedOver.status === "skipped") throw new ActiveDraftPointerUnavailableError(handedOver.reason);
+    if (handedOver.status === "reverted") throw new ActiveDraftPointerUnavailableError("result-unrecorded");
+    return handedOver.value;
   }
 
   private cancelRecoveryRoute(route: GuestRecoveryRoute, reason: Error): void {
@@ -1164,7 +1277,7 @@ export class P2PDraftGuest {
     if (this.session === session) this.session = null;
     if (route.retryWait) this.settleRetryWait(route, route.retryWait, { kind: "reject", reason });
     if (this.handshake?.route === route) {
-      this.rejectHandshake(this.handshake.session, reason);
+      this.rejectHandshake(this.handshake.session, reason, "retire");
     } else if (session) {
       session.close("Draft recovery route cancelled");
     }

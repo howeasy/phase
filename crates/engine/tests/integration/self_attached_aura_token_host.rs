@@ -286,6 +286,7 @@ fn for_each_role_tokens_enchant_their_own_iteration_host() {
 
 fn role_token_effect(attach_to: TargetFilter) -> Effect {
     Effect::Token {
+        enters_blocking: None,
         name: "Monster Role".to_string(),
         power: PtValue::Fixed(0),
         toughness: PtValue::Fixed(0),
@@ -305,6 +306,7 @@ fn role_token_effect(attach_to: TargetFilter) -> Effect {
         supertypes: Vec::new(),
         static_abilities: Vec::new(),
         enter_with_counters: Vec::new(),
+        additional_members: Vec::new(),
     }
 }
 
@@ -318,6 +320,7 @@ fn role_token_effect(attach_to: TargetFilter) -> Effect {
 /// restriction the Aura has no stated player host and cannot legally enchant one.
 fn curse_token_effect(attach_to: TargetFilter) -> Effect {
     Effect::Token {
+        enters_blocking: None,
         name: "Selenia's Curse".to_string(),
         power: PtValue::Fixed(0),
         toughness: PtValue::Fixed(0),
@@ -341,6 +344,7 @@ fn curse_token_effect(attach_to: TargetFilter) -> Effect {
                 keyword: Keyword::Enchant(TargetFilter::Player),
             }])],
         enter_with_counters: Vec::new(),
+        additional_members: Vec::new(),
     }
 }
 

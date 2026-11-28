@@ -19,7 +19,8 @@ use engine::game::combat::AttackTarget;
 use engine::game::engine::{apply_interaction_for_simulation, EngineError};
 use engine::game::priority;
 use engine::game::turn_control;
-use engine::types::game_state::{ManaChoice, ManaChoicePrompt};
+use engine::types::ability::{AbilityCost, AdditionalCost, AdditionalCostOrigin};
+use engine::types::game_state::{CostResume, ManaChoice, ManaChoicePrompt};
 use engine::types::{
     CoreType, GameAction, GameState, ObjectId, PayCostKind, Phase, PlayerId, WaitingFor,
 };
@@ -401,9 +402,19 @@ fn resolve_choice(
     // none of its `waiting_for` arms, and its parked-cost-move fallback returns
     // `NotAffiliated` when no root is parked), so this fast path can never steal
     // a window the payment witness below owns.
-    if let WaitingFor::Priority { player } = state.waiting_for {
-        if priority::pass_priority_structurally_legal(state, player) {
-            return Ok((acting, GameAction::PassPriority, false, None));
+    if let WaitingFor::Priority { .. } = state.waiting_for {
+        // CR 805.5b: pass the first unpassed decision owner — re-issuing the
+        // parked holder's pass never advances a shared team and eddies to the
+        // step cap. Individual seats are their own whole team, so the holder
+        // keeps its fast path exactly.
+        if let Some(owner) = turn_control::decision_owners(state)
+            .into_iter()
+            .find(|owner| {
+                !state.priority_passes.contains(owner)
+                    && priority::pass_priority_structurally_legal(state, *owner)
+            })
+        {
+            return Ok((owner, GameAction::PassPriority, false, None));
         }
     }
 
@@ -483,6 +494,24 @@ fn resolve_choice(
                 })?
         }
 
+        // CR 118.3 + CR 702.56a: reserve the engine-issued singleton for the
+        // Replicate cost currently being announced.
+        WaitingFor::PayCost {
+            kind: PayCostKind::TapCreatures { .. },
+            resume: CostResume::Spell { spell } | CostResume::SpellCost { spell, .. },
+            ..
+        } if spell
+            .additional_cost_queue
+            .first()
+            .is_some_and(|instance| instance.origin == AdditionalCostOrigin::Replicate) =>
+        {
+            actions
+                .iter()
+                .find(|action| matches!(action, GameAction::SelectCards { .. }))
+                .cloned()
+                .ok_or(BailReason::NoLegalManaPayment)?
+        }
+
         // CR 118.3 + CR 605.3b: ReturnToHand, Behold, and TapCreatures cost
         // payments project as "first legal payment" (matching the pre-collapse
         // behavior — Discard / Sacrifice / Exile / RemoveCounter PayCost kinds
@@ -549,6 +578,182 @@ fn resolve_choice(
             .last()
             .cloned()
             .ok_or(BailReason::NoLegalManaPayment)?,
+
+        // CR 702.56a: project an issued non-mana Replicate election.
+        WaitingFor::OptionalCostChoice {
+            origin: AdditionalCostOrigin::Replicate,
+            cost:
+                AdditionalCost::Optional {
+                    cost: AbilityCost::TapCreatures { .. } | AbilityCost::PayEnergy { .. },
+                    ..
+                },
+            ..
+        } => actions
+            .iter()
+            .filter_map(|action| match action {
+                GameAction::DecideOptionalCost { index } => Some((*index, action)),
+                GameAction::PassPriority
+                | GameAction::ChooseMeldPair { .. }
+                | GameAction::ChooseEntryAttackTarget { .. }
+                | GameAction::PlayLand { .. }
+                | GameAction::CastSpell { .. }
+                | GameAction::Foretell { .. }
+                | GameAction::ActivateAbility { .. }
+                | GameAction::DeclareAttackers { .. }
+                | GameAction::DeclareBlockers { .. }
+                | GameAction::ChooseUntap { .. }
+                | GameAction::ChooseExert { .. }
+                | GameAction::ChooseEnlist { .. }
+                | GameAction::ChooseClashOpponent { .. }
+                | GameAction::ChooseZoneOpponentChooser { .. }
+                | GameAction::ChoosePileOpponent { .. }
+                | GameAction::ChooseAnnouncingOpponent { .. }
+                | GameAction::ChooseGiftRecipient { .. }
+                | GameAction::ChooseAssistPlayer { .. }
+                | GameAction::CommitAssistPayment { .. }
+                | GameAction::MulliganDecision { .. }
+                | GameAction::ReorderHand { .. }
+                | GameAction::TapLandForMana { .. }
+                | GameAction::ActivateManaSource { .. }
+                | GameAction::BackToManaPayment
+                | GameAction::UntapLandForMana { .. }
+                | GameAction::SpendPoolMana { .. }
+                | GameAction::UnspendPoolMana { .. }
+                | GameAction::SelectCards { .. }
+                | GameAction::ChooseRemoveCounterCostDistribution { .. }
+                | GameAction::SelectCoinFlips { .. }
+                | GameAction::SelectDieRolls { .. }
+                | GameAction::ChooseOutsideGameCards { .. }
+                | GameAction::SelectTargets { .. }
+                | GameAction::ChooseTarget { .. }
+                | GameAction::ChooseReplacement { .. }
+                | GameAction::ChooseReplacementAndRemember { .. }
+                | GameAction::SetReplacementAutoChoice { .. }
+                | GameAction::ChooseEntryController { .. }
+                | GameAction::OrderTriggers { .. }
+                | GameAction::OrderCostReductions { .. }
+                | GameAction::CancelCast
+                | GameAction::Equip { .. }
+                | GameAction::CrewVehicle { .. }
+                | GameAction::ActivateStation { .. }
+                | GameAction::SaddleMount { .. }
+                | GameAction::Transform { .. }
+                | GameAction::PlayFaceDown { .. }
+                | GameAction::TurnFaceUp { .. }
+                | GameAction::SubmitSideboard { .. }
+                | GameAction::ChoosePlayDraw { .. }
+                | GameAction::ChooseStartingPlayer { .. }
+                | GameAction::ChooseOption { .. }
+                | GameAction::SubmitVoteCandidate { .. }
+                | GameAction::SubmitSpellbookDraft { .. }
+                | GameAction::SubmitPilePartition { .. }
+                | GameAction::ChoosePile { .. }
+                | GameAction::ChooseBranch { .. }
+                | GameAction::SubmitLifeRedistribution { .. }
+                | GameAction::ChooseDamageSource { .. }
+                | GameAction::SelectModes { .. }
+                | GameAction::ChooseAdventureFace { .. }
+                | GameAction::ChooseModalFace { .. }
+                | GameAction::ChooseAlternativeCast { .. }
+                | GameAction::ChooseCastingVariant { .. }
+                | GameAction::KeepAllCopyTargets
+                | GameAction::ChoosePermanentTypeSlot { .. }
+                | GameAction::ActivateNinjutsu { .. }
+                | GameAction::CastSpellAsSneak { .. }
+                | GameAction::CastSpellAsWebSlinging { .. }
+                | GameAction::CastSpellForFree { .. }
+                | GameAction::CastSpellAsMiracle { .. }
+                | GameAction::CastSpellAsMadness { .. }
+                | GameAction::DecideOptionalEffect { .. }
+                | GameAction::ChooseResolutionOptionalPaymentBranch { .. }
+                | GameAction::RespondToSpliceOffer { .. }
+                | GameAction::DecideOptionalEffectAndRemember { .. }
+                | GameAction::PayUnlessCost { .. }
+                | GameAction::ChooseUnlessCostBranch { .. }
+                | GameAction::ChooseActivationCostBranch { .. }
+                | GameAction::PayCombatTax { .. }
+                | GameAction::ChooseRingBearer { .. }
+                | GameAction::ChoosePair { .. }
+                | GameAction::ChooseDungeon { .. }
+                | GameAction::ChooseDungeonRoom { .. }
+                | GameAction::UnlockRoomDoor { .. }
+                | GameAction::RollPlanarDie
+                | GameAction::ChooseRoomDoor { .. }
+                | GameAction::TapForConvoke { .. }
+                | GameAction::HarmonizeTap { .. }
+                | GameAction::ChooseSecretAgendaNames { .. }
+                | GameAction::DeclareCompanion { .. }
+                | GameAction::CompanionToHand
+                | GameAction::DiscoverChoice { .. }
+                | GameAction::GraveyardPaidCastChoice { .. }
+                | GameAction::CascadeChoice { .. }
+                | GameAction::RippleChoice { .. }
+                | GameAction::FreeCastWindowChoice { .. }
+                | GameAction::ChooseTopOrBottom { .. }
+                | GameAction::ChooseMutateMergeSide { .. }
+                | GameAction::CipherEncode { .. }
+                | GameAction::ChooseLegend { .. }
+                | GameAction::ChooseBattleProtector { .. }
+                | GameAction::SetAutoPass { .. }
+                | GameAction::CancelAutoPass
+                | GameAction::SetPhaseStops { .. }
+                | GameAction::SetPriorityPassingMode { .. }
+                | GameAction::SetPriorityYield { .. }
+                | GameAction::SetMayTriggerAutoChoice { .. }
+                | GameAction::UnAction { .. }
+                | GameAction::SetTriggerOrderTemplate { .. }
+                | GameAction::AssignCombatDamage { .. }
+                | GameAction::AssignBlockerDamage { .. }
+                | GameAction::DistributeAmong { .. }
+                | GameAction::ChooseCounterMoveDistribution { .. }
+                | GameAction::ChooseCountersToRemove { .. }
+                | GameAction::SubmitPayAmount { .. }
+                | GameAction::RetargetSpell { .. }
+                | GameAction::LearnDecision { .. }
+                | GameAction::SelectCategoryPermanents { .. }
+                | GameAction::ChooseKeptCreatures { .. }
+                | GameAction::ChooseKeptPermanents { .. }
+                | GameAction::ChooseX { .. }
+                | GameAction::SubmitPhyrexianChoices { .. }
+                | GameAction::ChooseManaColor { .. }
+                | GameAction::PayManaAbilityMana { .. }
+                | GameAction::CastPreparedCopy { .. }
+                | GameAction::ChooseSpecializeColor { .. }
+                | GameAction::CastParadigmCopy { .. }
+                | GameAction::PassParadigmOffer
+                | GameAction::Debug(..)
+                | GameAction::GrantDebugPermission { .. }
+                | GameAction::RevokeDebugPermission { .. }
+                | GameAction::Concede { .. }
+                | GameAction::DeclareShortcut { .. }
+                | GameAction::RespondToShortcut { .. }
+                | GameAction::DeclineShortcut
+                | GameAction::PrecastCopyShortcut { .. }
+                | GameAction::EndContinuousEffect { .. }
+                | GameAction::BeginResolveAll { .. }
+                | GameAction::RespondResolveAllConsent { .. }
+                | GameAction::RevokeResolveAllConsent { .. } => None,
+            })
+            .min_by_key(|(index, _)| *index)
+            .map(|(_, action)| action.clone())
+            .ok_or(BailReason::NoLegalManaPayment)?,
+
+        // CR 601.2c: finish announcing targets after reserving a Replicate cost.
+        WaitingFor::TargetSelection { pending_cast, .. }
+            if pending_cast.unpaid_replicate_energy > 0
+                || pending_cast
+                    .deferred_tapped_permanents
+                    .iter()
+                    .any(|tap| tap.replicate_ordinal.is_some()) =>
+        {
+            actions
+                .iter()
+                .find(|action| matches!(action, GameAction::ChooseTarget { .. }))
+                .cloned()
+                .ok_or_else(|| BailReason::NoLegalAction {
+                    waiting_for: format!("{:?}", state.waiting_for),
+                })?
+        }
 
         WaitingFor::ResolutionOptionalPaymentChoice { .. }
         | WaitingFor::OptionalEffectChoice { .. }
@@ -742,6 +947,7 @@ pub(crate) mod projection_fixtures {
     use super::*;
     use engine::game::scenario::GameScenario;
     use engine::game::zones::create_object;
+    use engine::types::format::FormatConfig;
     use engine::types::identifiers::CardId;
     use engine::types::triggers::TriggerMode;
     use engine::types::zones::Zone;
@@ -911,6 +1117,48 @@ pub(crate) mod projection_fixtures {
         // authority.
         state.combat = Some(engine::game::combat::CombatState::default());
         state.waiting_for = engine::game::combat::build_declare_attackers_waiting_for(&state);
+        state
+    }
+
+    /// A 2HG state at the AI team's precombat main from which `project_to`
+    /// must cross the shared-team priority windows to
+    /// `ProjectionHorizon::OpponentAttackersDeclared` on P2's turn, with
+    /// `ai_player = P0` and `target_opponent = P2`.
+    ///
+    /// Traversal: P0 passes, P1 passes (the team window completes instead of
+    /// eddying on P0), empty-hand phases advance, P2's turn runs its draw
+    /// from a stocked library, and P2 declares its bear. Without the
+    /// per-owner fast path the first window re-passes P0 256 times and bails
+    /// `StepCapExceeded`.
+    ///
+    /// Libraries are stocked for all four seats: the traversal crosses the
+    /// P2-team draw step, and an empty library there would end the game
+    /// (CR 704.5b) and bail `GameOverDuringProjection` — a red positive arm
+    /// for the wrong reason. P0's team holds no creatures, so its combat
+    /// skips declaration (CR 508.8) without policy branches of its own.
+    pub(crate) fn two_headed_giant_precombat_fixture() -> GameState {
+        let mut state = GameState::new(FormatConfig::two_headed_giant(), 4, 42);
+        state.turn_number = 2;
+        state.active_player = PlayerId(0);
+        state.phase = Phase::PreCombatMain;
+        state.priority_player = PlayerId(0);
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+        state.stack.clear();
+        state.creatures_attacked_this_turn.clear();
+        spawn_vanilla_creature(&mut state, PlayerId(2), "Projection Bear", 2, 2);
+        for player in [0u8, 1, 2, 3] {
+            for i in 0..5u64 {
+                create_object(
+                    &mut state,
+                    CardId(900 + u64::from(player) * 10 + i),
+                    PlayerId(player),
+                    format!("Filler {i}"),
+                    Zone::Library,
+                );
+            }
+        }
         state
     }
 
@@ -1232,6 +1480,54 @@ mod tests {
         );
     }
 
+    /// CR 805.5b: the projection fast path passes each unpassed team member
+    /// in turn instead of re-issuing the parked holder's pass to the step
+    /// cap, and `project_to` crosses a shared-team window to its horizon
+    /// with every living member recorded passed.
+    #[test]
+    fn project_to_crosses_a_shared_team_window_with_every_member_passed() {
+        let base = projection_fixtures::two_headed_giant_precombat_fixture();
+
+        // Fast-path unit level: the second choice passes the teammate, not P0
+        // again — re-issuing P0's pass is the eddy this test kills.
+        let mut state = base.clone();
+        let (seat, action, _, _) = resolve_choice(&state, PlayerId(0), PlayerId(2))
+            .expect("a parked team window offers a pass");
+        assert_eq!(seat, PlayerId(0));
+        assert!(matches!(action, GameAction::PassPriority));
+        let submitter = turn_control::authorized_submitter_for_player(&state, seat);
+        apply_interaction_for_simulation(&mut state, submitter, seat, action)
+            .expect("the holder's pass applies");
+        assert!(
+            matches!(
+                state.waiting_for,
+                WaitingFor::Priority { player } if player == PlayerId(0)
+            ),
+            "the team must still hold priority after one pass, got {:?}",
+            state.waiting_for
+        );
+        let (seat, action, _, _) = resolve_choice(&state, PlayerId(0), PlayerId(2))
+            .expect("the teammate still owes a pass");
+        assert_eq!(
+            seat,
+            PlayerId(1),
+            "the fast path must advance to the unpassed teammate, not re-pass P0"
+        );
+        let submitter = turn_control::authorized_submitter_for_player(&state, seat);
+        apply_interaction_for_simulation(&mut state, submitter, seat, action)
+            .expect("the teammate's pass applies");
+        assert!(state.priority_passes.contains(&PlayerId(0)));
+        assert!(state.priority_passes.contains(&PlayerId(1)));
+
+        // End to end: the horizon traversal completes instead of eddy-bailing.
+        projection_fixtures::assert_traverses_to(
+            &base,
+            PlayerId(0),
+            PlayerId(2),
+            ProjectionHorizon::OpponentAttackersDeclared,
+        );
+    }
+
     #[test]
     fn projection_declines_optional_loop_shortcut_from_legal_actions() {
         let mut state = GameState::new_two_player(42);
@@ -1318,6 +1614,114 @@ mod tests {
             projected.waiting_for,
             WaitingFor::ResolutionOptionalPaymentChoice { .. }
         ));
+    }
+
+    #[test]
+    fn projects_printed_tap_replicate_through_the_fixed_selection() {
+        use engine::types::game_state::CastPaymentMode;
+
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        for _ in 0..3 {
+            scenario.add_basic_land(P0, ManaColor::Black);
+        }
+        let dalek = scenario
+            .add_creature(P0, "Dalek", 1, 1)
+            .with_subtypes(vec!["Dalek"])
+            .id();
+        scenario.add_creature(PlayerId(1), "Opponent's creature", 2, 2);
+        let spell = scenario
+            .add_spell_to_hand_from_oracle(
+                P0,
+                "Exterminate!",
+                false,
+                "Replicate—Tap an untapped Dalek you control. (When you cast this spell, copy it for each time you paid its replicate cost. You may choose new targets for the copies.)\nDestroy target creature. Its controller loses 3 life.",
+            )
+            .with_mana_cost(ManaCost::Cost {
+                shards: vec![ManaCostShard::Black],
+                generic: 2,
+            })
+            .id();
+        let mut runner = scenario.build();
+        runner
+            .act(GameAction::CastSpell {
+                object_id: spell,
+                card_id: runner.state().objects[&spell].card_id,
+                targets: Vec::new(),
+                payment_mode: CastPaymentMode::Auto,
+            })
+            .unwrap();
+        let (payer, pay, _, _) = resolve_choice(runner.state(), P0, PlayerId(1)).unwrap();
+        assert_eq!(payer, P0);
+        assert_eq!(pay, GameAction::DecideOptionalCost { index: 0 });
+        runner.act(pay).unwrap();
+
+        let (payer, selection, _, _) = resolve_choice(runner.state(), P0, PlayerId(1)).unwrap();
+        assert_eq!(payer, P0);
+        assert_eq!(selection, GameAction::SelectCards { cards: vec![dalek] });
+        runner.act(selection).unwrap();
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::TargetSelection { .. }
+        ));
+        assert!(!runner.state().objects[&dalek].tapped);
+    }
+
+    #[test]
+    fn projects_printed_energy_replicate_until_the_offer_is_exhausted() {
+        use engine::types::game_state::CastPaymentMode;
+
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        scenario.add_basic_land(P0, ManaColor::Red);
+        scenario.add_basic_land(P0, ManaColor::Red);
+        let target = scenario
+            .add_creature(PlayerId(1), "Opponent's creature", 2, 2)
+            .id();
+        let other_target = scenario
+            .add_creature(PlayerId(1), "Another opponent creature", 3, 3)
+            .id();
+        let spell = scenario
+            .add_spell_to_hand_from_oracle(
+                P0,
+                "Reiterating Bolt",
+                false,
+                "Replicate—Pay {E}{E}{E}. (When you cast this spell, copy it for each time you paid its replicate cost. You may choose new targets for the copies.)\nReiterating Bolt deals 3 damage to target creature or planeswalker.",
+            )
+            .with_mana_cost(ManaCost::Cost {
+                shards: vec![ManaCostShard::Red],
+                generic: 1,
+            })
+            .id();
+        let mut runner = scenario.build();
+        runner.state_mut().players[P0.0 as usize].energy = 5;
+        runner
+            .act(GameAction::CastSpell {
+                object_id: spell,
+                card_id: runner.state().objects[&spell].card_id,
+                targets: Vec::new(),
+                payment_mode: CastPaymentMode::Auto,
+            })
+            .unwrap();
+        let (payer, pay, _, _) = resolve_choice(runner.state(), P0, PlayerId(1)).unwrap();
+        assert_eq!(payer, P0);
+        assert_eq!(pay, GameAction::DecideOptionalCost { index: 0 });
+        runner.act(pay).unwrap();
+        assert_eq!(runner.state().players[P0.0 as usize].energy, 5);
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::TargetSelection { .. }
+        ));
+
+        let (_, choose_target, _, _) = resolve_choice(runner.state(), P0, PlayerId(1)).unwrap();
+        assert!(matches!(
+            &choose_target,
+            GameAction::ChooseTarget {
+                target: Some(engine::types::ability::TargetRef::Object(id)),
+            } if [target, other_target].contains(id)
+        ));
+        runner.act(choose_target).unwrap();
+        assert_eq!(runner.state().players[P0.0 as usize].energy, 2);
     }
 
     fn precast_offer_state() -> GameState {

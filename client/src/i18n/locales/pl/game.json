@@ -838,7 +838,14 @@
     "lethalBadge": "Śmiertelne",
     "planeswalkerLoyalty": "Wędrowiec (lojalność: {{loyalty}})",
     "defendingPlayerTrample": "Broniący gracz (Tratowanie)",
+    "attackTargetTrample": "{{name}} (Tratowanie)",
     "pwControllerTrample": "Kontroler wędrowca (Tratowanie przez wędrowca)",
+    "lethalButton": "Śmiertelne",
+    "clearButton": "Wyczyść",
+    "assignLethalTo": "Przydziel śmiertelne obrażenia celowi {{target}}",
+    "clearDamageFor": "Wyczyść obrażenia przydzielone celowi {{target}}",
+    "lethalFirstButton": "Najpierw śmiertelne obrażenia",
+    "lethalFirstTitle": "Przydziel po kolei śmiertelne obrażenia każdemu blokującemu, a potem przydziel resztę",
     "assignRemainingButton": "+{{amount}}",
     "assignRemainingTo_few": "Przydziel pozostałe {{count}} obrażenia do: {{target}}",
     "assignRemainingTo_many": "Przydziel pozostałych {{count}} obrażeń do: {{target}}",
@@ -1283,6 +1290,7 @@
       "onlyForSpellColor": "Tylko na czary w kolorze {{color}}.",
       "onlyForSpellFromZone": "Tylko na czary {{polarity}} {{zone}}.",
       "cannotCastSpellFromZone": "Nie można wydać na rzucanie czarów z {{zone}}.",
+      "cannotCastSpellsOutsideType": "Nie można wydać tej many na rzucanie czarów, które nie są typu {{spellType}}.",
       "onlyForFaceDownSpell": "Tylko na czary zakryte.",
       "onlyForAny": "Tylko do jednego z tych zastosowań: {{restrictions}}",
       "onlyForSpecialAction": "Tylko do specjalnej akcji {{action}}.",
@@ -1340,6 +1348,8 @@
         "Ticket": "biletu"
       },
       "generic": "koszt",
+      "blight": "Blight {{count}}",
+      "blightBoundedX": "Blight X (do najwyższej wytrzymałości wśród stworów, które kontrolujesz)",
       "pay": "Zapłać {{cost}}",
       "draw": "dobierz kartę",
       "drawCount_one": "dobierz {{count}} kartę",
@@ -1439,6 +1449,9 @@
       "poisonCounters": "Znaczniki trucizny",
       "players": "Gracze",
       "whoGoesFirst": "Kto zaczyna",
+      "archenemySeat": "Archenemy",
+      "archenemyYou": "Ty",
+      "archenemyOpponent": "Przeciwnik {{number}}",
       "firstPlayer": {
         "random": "Losowo",
         "play": "Zagrywanie",
@@ -2167,6 +2180,14 @@
     "attachments": "Z: {{names}}"
   },
   "optionalCost": {
+    "replicate": {
+      "title": "Zapłacić koszt replikacji?",
+      "again": "Ponownie zapłacić koszt replikacji? (Zapłacono {{times}} razy)",
+      "decline": "Gotowe",
+      "tapSubtype": "Przekręć nieprzekręconą istotę typu {{subtype}}, którą kontrolujesz",
+      "tapCreature": "Przekręć nieprzekręconą istotę",
+      "payEnergy": "Zapłać {{amount}} energii"
+    },
     "gift": {
       "title": "Obiecać prezent?",
       "pay": "Obiecaj {{gift}}",
@@ -2332,6 +2353,13 @@
     "creatureFallback": "Stwór {{id}}"
   },
   "distributeAmong": {
+    "assignRemainingButton": "+{{amount}}",
+    "assignRemainingTo_few": "Przydziel pozostałe {{count}} punkty celowi {{target}}",
+    "assignRemainingTo_many": "Przydziel {{count}} pozostałych punktów celowi {{target}}",
+    "assignRemainingTo_one": "Przydziel pozostały {{count}} punkt celowi {{target}}",
+    "assignRemainingTo_other": "Przydziel {{count}} pozostałych punktów celowi {{target}}",
+    "clearButton": "Wyczyść",
+    "clearTarget": "Wyczyść przydział dla celu {{target}}",
     "unitCounter": "znacznik {{counter}}",
     "unitDamage": "obrażeń",
     "unitLife": "życia",
@@ -2786,6 +2814,9 @@
       "single": "{{action}} a permanent",
       "exactCount_one": "{{action}} {{count}} permanent",
       "exactCount_other": "{{action}} {{count}} permanents",
+      "protectedObject": "Zapłać, aby ochronić {{object}}",
+      "blightCounters_one": "Połóż znacznik -1/-1 na stworze, którego kontrolujesz",
+      "blightCounters_other": "Połóż {{count}} znaczników -1/-1 na stworze, którego kontrolujesz",
       "rangeCount_one": "{{action}} {{min}}-{{count}} permanent",
       "rangeCount_other": "{{action}} {{min}}-{{count}} permanents",
       "upToCount_one": "{{action}} up to {{count}} permanent",

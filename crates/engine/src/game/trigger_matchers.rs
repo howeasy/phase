@@ -965,7 +965,13 @@ fn player_matches_filter_as(
             .chosen_attributes
             .iter()
             .any(|choice| matches!(choice, crate::types::ability::ChosenAttribute::Player(chosen) if *chosen == player_id)),
-        TargetFilter::AttachedTo => {
+        // CR 303.4b + CR 303.4m: "enchanted player" is the player the source
+        // permanent is attached to.
+        TargetFilter::AttachedTo
+        | TargetFilter::Typed(TypedFilter {
+            controller: Some(ControllerRef::EnchantedPlayer),
+            ..
+        }) => {
             source_context
                 .source_read(state)
                 .attached_to()
@@ -1822,17 +1828,35 @@ pub(super) fn match_changes_zone_all(
 
 // CR 603.6d: DamageDone trigger fires on damage dealt events.
 
+// CR 603.2c + CR 510.2: the plural player-recipient watcher observes the
+// simultaneous combat damage step through its per-player aggregate records.
+pub(super) fn is_whole_step_player_combat_damage(trigger: &TriggerDefinition) -> bool {
+    trigger.mode == TriggerMode::DamageDoneOnce
+        && trigger.batched
+        && trigger.damage_kind == DamageKindFilter::CombatOnly
+        && trigger.valid_target == Some(TargetFilter::Player)
+        && trigger.damage_amount.is_none()
+        && matches!(
+            &trigger.valid_source,
+            Some(TargetFilter::Typed(source))
+                if source.type_filters == [crate::types::ability::TypeFilter::Creature]
+                    && source.controller == Some(ControllerRef::You)
+                    && source.properties.is_empty()
+        )
+}
+
 /// CR 510.2 + CR 603.2: Source-filtered observers whose source is not the
 /// trigger source itself listen on the aggregate `CombatDamageDealtToPlayer`
 /// event. Self/no-source creature triggers already fire on per-source
 /// `DamageDealt` events emitted during the combat damage step; matching them
 /// again on the aggregate event double-fires.
 pub(super) fn listens_on_aggregate_combat_damage_done(trigger: &TriggerDefinition) -> bool {
-    trigger.mode == TriggerMode::DamageDone
-        && matches!(
-            trigger.valid_source,
-            Some(ref filter) if !matches!(filter, TargetFilter::SelfRef)
-        )
+    is_whole_step_player_combat_damage(trigger)
+        || (trigger.mode == TriggerMode::DamageDone
+            && matches!(
+                trigger.valid_source,
+                Some(ref filter) if !matches!(filter, TargetFilter::SelfRef)
+            ))
 }
 
 fn matching_combat_damage_to_player_sources(
@@ -1917,6 +1941,16 @@ pub(super) fn match_damage_done(
     source_context: &TriggerSourceContext,
     state: &GameState,
 ) -> bool {
+    if is_whole_step_player_combat_damage(trigger) {
+        return matches!(event, GameEvent::CombatDamageDealtToPlayer { .. })
+            && matching_damage_done_once_by_controller_event(
+                event,
+                trigger,
+                source_context,
+                state,
+            )
+            .is_some();
+    }
     if let GameEvent::DamageDealt {
         source_id: dmg_source,
         source_incarnation,
@@ -2041,7 +2075,9 @@ pub(super) fn matching_damage_done_events(
     source_context: &TriggerSourceContext,
     state: &GameState,
 ) -> Vec<GameEvent> {
-    if !listens_on_aggregate_combat_damage_done(trigger) {
+    if !listens_on_aggregate_combat_damage_done(trigger)
+        || is_whole_step_player_combat_damage(trigger)
+    {
         return Vec::new();
     }
 
@@ -2605,10 +2641,83 @@ pub(super) fn attack_firings(
             .find_map(|(attacker_id, target)| (*attacker_id == id).then_some(*target))
             .unwrap_or(crate::game::combat::AttackTarget::Player(*defending_player))
     };
+    let matches_declaration_ordinal = |id| {
+        trigger.attack_declaration_ordinal.is_none_or(|ordinal| {
+            let source = source_context.identity.reference;
+            let incarnation = if source.object_id == id {
+                Some(source.incarnation)
+            } else {
+                state.objects.get(&id).map(|object| object.incarnation)
+            };
+            declaration_records.iter().any(|record| {
+                record.object_id == id
+                    && record.incarnation == incarnation
+                    && record.ordinal_this_turn == Some(ordinal)
+            })
+        })
+    };
     let player_scope = trigger
         .valid_source
         .as_ref()
         .filter(|filter| filter.is_player_scope());
+    if let Some(filter) = player_scope.filter(|_| !trigger.batched) {
+        use crate::types::triggers::AttackTargetFilter;
+
+        // CR 508.3d + CR 508.3e + CR 805.10b: a combined declaration can contain
+        // multiple actors. A named defending player adds a second grouping
+        // axis. Keep the full admitted set for each actor's event conditions.
+        let binds_defender = combat_filter(trigger).is_some()
+            || matches!(
+                trigger.attack_target_filter,
+                Some(
+                    AttackTargetFilter::Player
+                        | AttackTargetFilter::Monarch
+                        | AttackTargetFilter::PlayerOrPlaneswalker
+                )
+            );
+        let mut groups = indexmap::IndexMap::new();
+        for &id in attacker_ids {
+            let Some(actor) =
+                super::targeting::attack_declaration_controller(state, declaration_records, id)
+            else {
+                continue;
+            };
+            let target = attack_target_of(id);
+            if !matches_declaration_ordinal(id)
+                || !player_matches_filter(filter, state, actor, source_context)
+                || !attack_target_matches(trigger, state, target, *defending_player, source_context)
+            {
+                continue;
+            }
+            let defender =
+                super::combat::defending_player_for_target_or(state, target, *defending_player);
+            let key = (actor, binds_defender.then_some(defender));
+            groups
+                .entry(key)
+                .or_insert_with(|| (defender, Vec::new()))
+                .1
+                .push((id, target));
+        }
+        return groups
+            .into_values()
+            .map(|(defending_player, attacks)| {
+                let attacker_ids: Vec<_> = attacks.iter().map(|&(id, _)| id).collect();
+                let context = GameEvent::AttackersDeclared {
+                    declaration_records: super::triggers::declaration_records_for_attackers(
+                        event,
+                        &attacker_ids,
+                    ),
+                    attacker_ids,
+                    defending_player,
+                    attacks,
+                };
+                AttackFiring {
+                    admitted: context.clone(),
+                    context,
+                }
+            })
+            .collect();
+    }
     if let Some(filter) = player_scope {
         // CR 508.3d + CR 508.5a: "[player] attacks [opponent]" triggers
         // once per attacked defending player, not once per attacking
@@ -2637,8 +2746,9 @@ pub(super) fn attack_firings(
     let accepted: Vec<(ObjectId, crate::game::combat::AttackTarget, PlayerId)> = attacker_ids
         .iter()
         .filter_map(|id| {
-            if player_scope.is_none()
-                && !attack_declaration_attacker_matches(trigger, state, *id, source_context)
+            if !matches_declaration_ordinal(*id)
+                || (player_scope.is_none()
+                    && !attack_declaration_attacker_matches(trigger, state, *id, source_context))
             {
                 return None;
             }
@@ -2740,6 +2850,7 @@ fn attack_declaration_attacker_matches(
 /// per attacker, so such a trigger answers false. A `valid_target` beside an
 /// attacker-side filter ("whenever this creature attacks the player with the
 /// most life") is checked per attacker like any other.
+/// A declaration ordinal is checked against this attacker's next declaration.
 pub fn attack_trigger_matches_attack(
     state: &GameState,
     source: &crate::game::game_object::GameObject,
@@ -2762,26 +2873,24 @@ pub fn attack_trigger_matches_attack(
         return false;
     };
     let source_context = super::triggers::trigger_source_context_for_latch(state, source);
-    attack_declaration_attacker_matches(trigger, state, attacker, &source_context)
+    trigger.attack_declaration_ordinal.is_none_or(|ordinal| {
+        state.objects.get(&attacker).is_some_and(|object| {
+            super::combat::next_attack_declaration_ordinal(state, object) == ordinal
+        })
+    }) && attack_declaration_attacker_matches(trigger, state, attacker, &source_context)
         && attack_target_matches(trigger, state, target, defending_player, &source_context)
 }
 
-/// CR 508.3d + CR 508.5a: expand one `AttackersDeclared` event into one
-/// narrowed context per ATTACKED player, each carrying that player's complete
-/// matching attacker set — the antecedent of the followed clause's "those
-/// creatures" and the referent of "defending player" / "that player"
-/// ("Whenever one or more creatures attack one of your opponents, if any of
-/// those creatures have power or toughness equal to the chosen number, Squall
-/// deals damage equal to its power to defending player."). Wizards' Neyali,
-/// the Plumecrest release note states the same occurrence grammar for
-/// "attack <player>" ("triggers for each player you are attacking with one or
-/// more tokens"): the attacked player is the grouping axis, so one declaration
-/// against two opponents is TWO occurrences, each with its own attacker set —
-/// never one combined set answered by the first defender. An attacked player
-/// with no matching attacker produces no group. The player-subject branch of
-/// [`matching_attack_events`] already narrows one context per attacked player
-/// (the subject there is the attacking player), so it is reused as-is.
-pub(super) fn matching_attack_events_by_defending_player(
+/// CR 508.1b + CR 603.2c: expand a declaration into one occurrence per
+/// qualifying destination named by the trigger. For "attack one of your
+/// opponents or a planeswalker they control", a planeswalker is its own
+/// destination. Its controller determines whether the attack qualifies.
+/// Player-only heads group by attacked player, which also supplies the
+/// "defending player" referent (CR 508.5a). Each occurrence carries the
+/// corresponding attacker set for "those creatures".
+/// The player-subject branch of [`matching_attack_events`] already narrows
+/// one context per attacked player, so reuse it here.
+pub(super) fn matching_attack_events_by_destination(
     event: &GameEvent,
     trigger: &TriggerDefinition,
     source_context: &TriggerSourceContext,
@@ -2803,8 +2912,12 @@ pub(super) fn matching_attack_events_by_defending_player(
     {
         return matching_attack_events(event, trigger, source_context, state);
     }
-    let mut groups: Vec<(PlayerId, Vec<(ObjectId, crate::game::combat::AttackTarget)>)> =
-        Vec::new();
+    use crate::game::combat::AttackTarget;
+    use crate::types::triggers::AttackTargetFilter;
+
+    let groups_by_destination =
+        trigger.attack_target_filter == Some(AttackTargetFilter::PlayerOrPlaneswalker);
+    let mut groups: Vec<(AttackTarget, Vec<(ObjectId, AttackTarget)>)> = Vec::new();
     for id in attacker_ids {
         if !attack_declaration_attacker_matches(trigger, state, *id, source_context) {
             continue;
@@ -2812,23 +2925,27 @@ pub(super) fn matching_attack_events_by_defending_player(
         let target = attacks
             .iter()
             .find_map(|(attacker_id, target)| (*attacker_id == *id).then_some(*target))
-            .unwrap_or(crate::game::combat::AttackTarget::Player(*defending_player));
+            .unwrap_or(AttackTarget::Player(*defending_player));
         if !attack_target_matches(trigger, state, target, *defending_player, source_context) {
             continue;
         }
-        let event_defending_player =
-            crate::game::combat::defending_player_for_target_or(state, target, *defending_player);
-        match groups
-            .iter_mut()
-            .find(|(player, _)| *player == event_defending_player)
-        {
+        let destination = if groups_by_destination {
+            target
+        } else {
+            AttackTarget::Player(crate::game::combat::defending_player_for_target_or(
+                state,
+                target,
+                *defending_player,
+            ))
+        };
+        match groups.iter_mut().find(|(key, _)| *key == destination) {
             Some((_, members)) => members.push((*id, target)),
-            None => groups.push((event_defending_player, vec![(*id, target)])),
+            None => groups.push((destination, vec![(*id, target)])),
         }
     }
     groups
         .into_iter()
-        .map(|(event_defending_player, members)| {
+        .map(|(destination, members)| {
             let attacker_ids: Vec<ObjectId> = members.iter().map(|(id, _)| *id).collect();
             GameEvent::AttackersDeclared {
                 declaration_records: super::triggers::declaration_records_for_attackers(
@@ -2836,7 +2953,11 @@ pub(super) fn matching_attack_events_by_defending_player(
                     &attacker_ids,
                 ),
                 attacker_ids,
-                defending_player: event_defending_player,
+                defending_player: crate::game::combat::defending_player_for_target_or(
+                    state,
+                    destination,
+                    *defending_player,
+                ),
                 attacks: members,
             }
         })
@@ -3990,6 +4111,7 @@ pub(super) fn match_mana_ability_produced(
         player_id,
         source_id,
         produced,
+        resolution,
         ..
     } = event
     else {
@@ -4008,7 +4130,8 @@ pub(super) fn match_mana_ability_produced(
             .is_some_and(|color| {
                 produced.contains(&crate::game::mana_sources::mana_color_to_type(&color))
             }),
-        None => true,
+        // CR 603.2c + CR 608.2p: Observe each resolution once.
+        None => !resolution.is_recipient_only(),
     }
 }
 
@@ -6130,6 +6253,13 @@ pub(super) fn match_planeswalked(
 /// CR 904.9 / CR 701.32b: "When you set this scheme in motion" — fires for the
 /// scheme set in motion; "you" resolves to the archenemy via the scheme's
 /// controller (stamped in `archenemy::set_in_motion`).
+///
+/// Watching form (My Laughter Echoes: "whenever you set a non-ongoing scheme
+/// in motion") — when `valid_card` is set (self-triggers never set it), the
+/// trigger fires for any set-in-motion event whose scheme passes the filter,
+/// mirroring `ChangesZone`: no source-identity check, so the filter alone
+/// decides self-inclusion (Laughter Echoes' own ongoing scheme fails its own
+/// `NotSupertype{Ongoing}` leg).
 pub(super) fn match_set_in_motion(
     event: &GameEvent,
     trigger: &TriggerDefinition,
@@ -6137,9 +6267,20 @@ pub(super) fn match_set_in_motion(
     state: &GameState,
 ) -> bool {
     let source_id = source_event_subject_id(source_context);
-    matches!(event, GameEvent::SchemeSetInMotion { scheme_id, player_id }
-        if *scheme_id == source_id
-        && valid_player_matches(trigger, state, *player_id, source_context))
+    match event {
+        GameEvent::SchemeSetInMotion {
+            scheme_id,
+            player_id,
+        } if valid_player_matches(trigger, state, *player_id, source_context) => {
+            match &trigger.valid_card {
+                // Self form: the event names this scheme.
+                None => *scheme_id == source_id,
+                // Watching form: the event names a scheme passing the filter.
+                Some(_) => valid_card_matches(trigger, state, *scheme_id, source_context),
+            }
+        }
+        _ => false,
+    }
 }
 
 /// CR 701.33b: "When you abandon this scheme" — fires for the abandoned scheme.
@@ -6802,7 +6943,9 @@ fn stack_entry_targets_any(
     let source_controller = Some(source_context.source_read(state).controller());
     let ctx = super::filter::FilterContext::from_trigger_source(source_context);
     targets.iter().any(|t| match t {
-        TargetRef::Object(id) => super::filter::matches_target_filter(state, *id, constraint, &ctx),
+        TargetRef::Object(id) => {
+            super::filter::matches_stack_entry_object_target(state, *id, constraint, &ctx)
+        }
         TargetRef::Player(pid) => super::filter::player_matches_target_filter_in_state(
             state,
             constraint,
@@ -8856,6 +8999,8 @@ mod tests {
             controller: PlayerId(0),
             object_id: ObjectId(10),
             cast_mana_value: None,
+            cast_mana_spent: None,
+            cast_incarnation: None,
         };
         assert!(match_play_card(
             &spell_event,
@@ -8930,6 +9075,8 @@ mod tests {
             controller: PlayerId(1),
             object_id: ObjectId(10),
             cast_mana_value: None,
+            cast_mana_spent: None,
+            cast_incarnation: None,
         };
         assert!(!match_play_card(
             &opponent_spell,
@@ -9306,6 +9453,7 @@ mod tests {
                     trigger_state: crate::types::events::ActivationTriggerState::Pending,
                     stack_entry: None,
                     activation_cost: BoundActivationCost::Cost(Box::new(AbilityCost::Tap)),
+                    loyalty_counters_removed: None,
                 },
                 trigger,
                 &test_trigger_source_context(&state, source),
@@ -9354,6 +9502,7 @@ mod tests {
                 trigger_state: crate::types::events::ActivationTriggerState::Pending,
                 stack_entry: None,
                 activation_cost: crate::types::events::BoundActivationCost::Unknown,
+                loyalty_counters_removed: None,
             },
             &trigger,
             &test_trigger_source_context(&state, source),
@@ -9369,6 +9518,7 @@ mod tests {
                 trigger_state: crate::types::events::ActivationTriggerState::Pending,
                 stack_entry: None,
                 activation_cost: crate::types::events::BoundActivationCost::Unknown,
+                loyalty_counters_removed: None,
             },
             &trigger,
             &test_trigger_source_context(&state, source),
@@ -9411,6 +9561,7 @@ mod tests {
                 trigger_state: crate::types::events::ActivationTriggerState::Pending,
                 stack_entry: None,
                 activation_cost: crate::types::events::BoundActivationCost::Unknown,
+                loyalty_counters_removed: None,
             },
             &trigger,
             &test_trigger_source_context(&state, source),
@@ -9426,6 +9577,7 @@ mod tests {
                 trigger_state: crate::types::events::ActivationTriggerState::Pending,
                 stack_entry: None,
                 activation_cost: crate::types::events::BoundActivationCost::Unknown,
+                loyalty_counters_removed: None,
             },
             &trigger,
             &test_trigger_source_context(&state, source),
@@ -9470,6 +9622,7 @@ mod tests {
                     },
                 stack_entry: None,
                 activation_cost: crate::types::events::BoundActivationCost::Unknown,
+                loyalty_counters_removed: None,
             };
             assert!(!match_ability_activated(
                 &collected, &trigger, &context, &state
@@ -9509,6 +9662,8 @@ mod tests {
                 controller: PlayerId(1),
                 object_id: ObjectId(99),
                 cast_mana_value: None,
+                cast_mana_spent: None,
+                cast_incarnation: None,
             },
             &trigger,
             &test_trigger_source_context(&state, source),
@@ -9568,6 +9723,7 @@ mod tests {
                 trigger_state: crate::types::events::ActivationTriggerState::Pending,
                 stack_entry: None,
                 activation_cost: crate::types::events::BoundActivationCost::Unknown,
+                loyalty_counters_removed: None,
             },
             &trigger,
             &test_trigger_source_context(&state, regulator),
@@ -9601,6 +9757,7 @@ mod tests {
                 trigger_state: crate::types::events::ActivationTriggerState::Pending,
                 stack_entry: None,
                 activation_cost: crate::types::events::BoundActivationCost::Unknown,
+                loyalty_counters_removed: None,
             },
             &trigger,
             &test_trigger_source_context(&state, source),
@@ -9615,6 +9772,7 @@ mod tests {
                 trigger_state: crate::types::events::ActivationTriggerState::Pending,
                 stack_entry: None,
                 activation_cost: crate::types::events::BoundActivationCost::Unknown,
+                loyalty_counters_removed: None,
             },
             &trigger,
             &test_trigger_source_context(&state, source),
@@ -9648,6 +9806,7 @@ mod tests {
                 trigger_state: crate::types::events::ActivationTriggerState::Pending,
                 stack_entry: None,
                 activation_cost: crate::types::events::BoundActivationCost::Unknown,
+                loyalty_counters_removed: None,
             },
             &trigger,
             &test_trigger_source_context(&state, regulator),
@@ -9683,6 +9842,7 @@ mod tests {
                 trigger_state: crate::types::events::ActivationTriggerState::Pending,
                 stack_entry: None,
                 activation_cost: crate::types::events::BoundActivationCost::Unknown,
+                loyalty_counters_removed: None,
             },
             &trigger,
             &test_trigger_source_context(&state, regulator),
@@ -9719,6 +9879,7 @@ mod tests {
                 trigger_state: crate::types::events::ActivationTriggerState::Pending,
                 stack_entry: None,
                 activation_cost: crate::types::events::BoundActivationCost::Unknown,
+                loyalty_counters_removed: None,
             },
             &trigger,
             &test_trigger_source_context(&state, regulator),
@@ -9770,6 +9931,7 @@ mod tests {
                     trigger_state: crate::types::events::ActivationTriggerState::Pending,
                     stack_entry: None,
                     activation_cost: crate::types::events::BoundActivationCost::Unknown,
+                    loyalty_counters_removed: None,
                 };
                 assert_eq!(
                     match_loyalty_ability_activated(&event, &trigger, &context, state),
@@ -9858,6 +10020,7 @@ mod tests {
                 trigger_state: crate::types::events::ActivationTriggerState::Pending,
                 stack_entry: None,
                 activation_cost: crate::types::events::BoundActivationCost::Unknown,
+                loyalty_counters_removed: None,
             };
             let matches = |state: &GameState, player, source| {
                 match_loyalty_ability_activated(
@@ -11968,6 +12131,67 @@ mod tests {
     }
 
     #[test]
+    fn plural_player_combat_damage_aggregate_keeps_savanti_on_the_raw_route() {
+        use crate::types::card_type::CoreType;
+
+        let mut state = setup();
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Combat watcher".into(),
+            Zone::Battlefield,
+        );
+        let ninja = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Attacking Ninja".into(),
+            Zone::Battlefield,
+        );
+        let object = state.objects.get_mut(&ninja).unwrap();
+        object.card_types.core_types.push(CoreType::Creature);
+        object.card_types.subtypes.push("Ninja".into());
+        let pin = ObjectIncarnationRef::of(ninja, object.incarnation);
+        let aggregate = GameEvent::CombatDamageDealtToPlayer {
+            player_id: PlayerId(1),
+            source_amounts: vec![(ninja, 3)],
+            total_damage: 3,
+            source_incarnations: vec![pin],
+        };
+        let context = test_trigger_source_context(&state, source);
+        let mut trigger = make_trigger(TriggerMode::DamageDoneOnce);
+        trigger.batched = true;
+        trigger.damage_kind = DamageKindFilter::CombatOnly;
+        trigger.valid_target = Some(TargetFilter::Player);
+        trigger.valid_source = Some(TargetFilter::Typed(
+            TypedFilter::creature().controller(ControllerRef::You),
+        ));
+        assert!(match_damage_done(&aggregate, &trigger, &context, &state));
+
+        // Savanti's injected Ninja/Opponent shape matches the individual leg.
+        trigger.valid_target = Some(TargetFilter::Opponent);
+        trigger.valid_source = Some(TargetFilter::Typed(
+            TypedFilter::creature()
+                .controller(ControllerRef::You)
+                .subtype("Ninja".into()),
+        ));
+        assert!(!match_damage_done(&aggregate, &trigger, &context, &state));
+        let raw = matching_damage_done_events(
+            &aggregate,
+            &TriggerDefinition::new(TriggerMode::DamageDone).valid_source(TargetFilter::Typed(
+                TypedFilter::creature().controller(ControllerRef::You),
+            )),
+            &context,
+            &state,
+        );
+        let [leg] = raw.as_slice() else {
+            panic!("expected one raw Ninja combat leg");
+        };
+        assert!(match_damage_done(leg, &trigger, &context, &state));
+    }
+
+    #[test]
     fn matching_damage_done_events_does_not_expand_once_modes() {
         let mut state = setup();
         let watcher = create_object(
@@ -12646,6 +12870,8 @@ mod tests {
             controller: PlayerId(0),
             object_id: ObjectId(10),
             cast_mana_value: None,
+            cast_mana_spent: None,
+            cast_incarnation: None,
         };
         assert!(match_spell_cast(
             &event,
@@ -12720,6 +12946,8 @@ mod tests {
             controller: opponent,
             object_id: spell_id,
             cast_mana_value: None,
+            cast_mana_spent: None,
+            cast_incarnation: None,
         };
         assert!(!match_spell_cast(
             &event,
@@ -12759,6 +12987,8 @@ mod tests {
             controller: opponent,
             object_id: spell_id,
             cast_mana_value: None,
+            cast_mana_spent: None,
+            cast_incarnation: None,
         };
         assert!(match_spell_cast(
             &event,
@@ -12794,6 +13024,8 @@ mod tests {
             controller: caster,
             object_id: gy_id,
             cast_mana_value: None,
+            cast_mana_spent: None,
+            cast_incarnation: None,
         };
         assert!(match_spell_cast(
             &event,
@@ -12810,6 +13042,8 @@ mod tests {
             controller: caster,
             object_id: hand_id,
             cast_mana_value: None,
+            cast_mana_spent: None,
+            cast_incarnation: None,
         };
         assert!(!match_spell_cast(
             &event,

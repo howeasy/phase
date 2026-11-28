@@ -102,12 +102,18 @@ vi.mock("../../services/draftPersistence", async (importOriginal) => {
   };
 });
 
-import { DRAFT_OFFLINE_ERROR, useMultiplayerDraftStore } from "../multiplayerDraftStore";
+import {
+  DRAFT_OFFLINE_ERROR,
+  DRAFT_RECOVERY_CONNECTION_ERROR,
+  DRAFT_RECOVERY_INCOMPATIBLE_ERROR,
+  currentDraftOwnerGeneration,
+  useMultiplayerDraftStore,
+} from "../multiplayerDraftStore";
 import { isHostedPodRecoveryFailureCurrent, useDraftPodStore } from "../draftPodStore";
 import { useConnectivityStore } from "../connectivityStore";
 import { DraftPodHostAdapter } from "../../adapter/draftPodHostAdapter";
 import { P2PDraftHost } from "../../adapter/p2p-draft-host";
-import { Draft27IncompatibilityError, admitDraft27GuestView } from "../../adapter/draft-compatibility";
+import { Draft27IncompatibilityError, classifyDraft27Compatibility } from "../../adapter/draft-compatibility";
 import { inspectActiveDraftPod } from "../../services/draftPersistence";
 import type { PersistedDraftHostSession } from "../../services/draftPersistence";
 
@@ -183,7 +189,7 @@ function holdAfterImport(): { release: () => void; reached: Promise<void> } {
 
 /** The typed refusal a restore raises for a draft this client does not admit. */
 function incompatibleRestore(): Draft27IncompatibilityError {
-  const refusal = admitDraft27GuestView({ status: "Review" });
+  const refusal = classifyDraft27Compatibility({ status: "Review" });
   if (refusal.ok) throw new Error("A Review draft must be refused");
   return new Draft27IncompatibilityError(refusal.error);
 }
@@ -305,6 +311,7 @@ describe("multiplayerDraftStore recovered-host persistence fence", () => {
   describe("a recovery whose draft engine check refuses or cannot answer", () => {
     afterEach(() => {
       vi.restoreAllMocks();
+      checkRestorableSession.mockReset();
     });
 
     const recovered: PersistedDraftHostSession = {
@@ -349,7 +356,7 @@ describe("multiplayerDraftStore recovered-host persistence fence", () => {
           podPolicy: recovered.podPolicy,
           persistenceId: recovered.persistenceId,
           preferredRoomCode: recovered.roomCode,
-          recovery: { session: recovered, raw: recovered },
+          recovery: { session: recovered },
         },
         isCurrent: () => true,
       });
@@ -367,6 +374,44 @@ describe("multiplayerDraftStore recovered-host persistence fence", () => {
       expect(installedPeer.destroy).not.toHaveBeenCalled();
       expect(useMultiplayerDraftStore.getState()).toMatchObject({ role: "host", hostPersistenceId: "installed-owner" });
       expect(checkRestorableSession).toHaveBeenCalledWith(recovered.draftSessionJson);
+    });
+
+    it("reports an unreadable saved session as unreadable before it builds a host or touches the installed one", async () => {
+      // The draft engine answers one session text alike at every check.
+      checkRestorableSession.mockResolvedValue({ type: "Unreadable" });
+
+      const { outcome, initialize, installedPeer } = await recoverBesideInstalledHost();
+
+      expect(outcome).toBe("unreadable");
+      expect(initialize).not.toHaveBeenCalled();
+      // The installed host's own peer is the only one allocated.
+      expect(hostRoom).toHaveBeenCalledOnce();
+      expect(installedPeer.destroy).not.toHaveBeenCalled();
+      expect(useMultiplayerDraftStore.getState()).toMatchObject({ role: "host", hostPersistenceId: "installed-owner" });
+      expect(checkRestorableSession).toHaveBeenCalledOnce();
+      expect(checkRestorableSession).toHaveBeenCalledWith(recovered.draftSessionJson);
+    });
+
+    it("reports an unreadable answer at the host wrapper's own check as unreadable before it allocates a peer", async () => {
+      // The draft engine's check reads no state, so two answers for one session
+      // text cannot occur in production. This row admits the session at the
+      // lifecycle's check to drive the host wrapper's own check, which is its
+      // own boundary.
+      checkRestorableSession
+        .mockResolvedValueOnce({ type: "Admitted" })
+        .mockResolvedValueOnce({ type: "Unreadable" });
+
+      const { outcome, initialize, installedPeer } = await recoverBesideInstalledHost();
+
+      expect(outcome).toBe("unreadable");
+      // Reach: the host wrapper ran its own check.
+      expect(initialize).toHaveBeenCalledOnce();
+      expect(checkRestorableSession).toHaveBeenCalledTimes(2);
+      expect(checkRestorableSession).toHaveBeenNthCalledWith(2, recovered.draftSessionJson);
+      // The installed host's own peer is the only one allocated.
+      expect(hostRoom).toHaveBeenCalledOnce();
+      expect(installedPeer.destroy).not.toHaveBeenCalled();
+      expect(useMultiplayerDraftStore.getState()).toMatchObject({ role: "host", hostPersistenceId: "installed-owner" });
     });
 
     it("reports an unanswered check as an initialization failure before it builds a host or touches the installed one", async () => {
@@ -409,7 +454,7 @@ describe("multiplayerDraftStore recovered-host persistence fence", () => {
           persistenceId: recoveredHost.persistenceId,
           preferredRoomCode: recoveredHost.roomCode,
           signal: options.signal,
-          recovery: { session: recoveredHost, raw: recoveredHost },
+          recovery: { session: recoveredHost },
         },
         isCurrent: options.isCurrent ?? (() => true),
         routeSignal: new AbortController().signal,
@@ -520,6 +565,115 @@ describe("multiplayerDraftStore recovered-host persistence fence", () => {
 
       expect(installedOwner()).toEqual({ role: "host", onOwnSession: true });
     });
+
+    /** Holds the next peer allocation until released, and returns the room it then answers with. */
+    function holdNextRoom() {
+      const room = {
+        roomCode: "BBBBB",
+        peerId: "host-BBBBB-held",
+        peer: { destroy: vi.fn() } as never,
+        onGuestConnected: vi.fn(() => vi.fn()),
+        destroy: vi.fn(),
+      };
+      let release!: () => void;
+      hostRoom.mockImplementationOnce(() => new Promise((resolve) => {
+        release = () => resolve(room);
+      }));
+      return { room, release: () => release() };
+    }
+
+    async function untilRoomRequests(count: number) {
+      for (let turn = 0; turn < 50 && hostRoom.mock.calls.length < count; turn++) {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      }
+    }
+
+    it.each([
+      ["", false],
+      [", keeping its own recovery", true],
+    ] as const)("a leave beside an installed host ends a recovery still allocating its peer%s", async (_label, preserveRecovery) => {
+      await startInstalledHost();
+      const held = holdNextRoom();
+      const outcome = recover();
+      await untilRoomRequests(2);
+      // Reach: A's peer and B's held peer were both requested.
+      expect(hostRoom).toHaveBeenCalledTimes(2);
+
+      await useMultiplayerDraftStore.getState().leave(preserveRecovery);
+      held.release();
+
+      await expect(outcome).resolves.toBe("superseded");
+      expect(useMultiplayerDraftStore.getState()).toMatchObject({ role: null, phase: "idle" });
+      expect(engine.imports).toEqual([]);
+      expect(held.room.destroy).toHaveBeenCalledOnce();
+    });
+
+    it("a second recovery started during the first's peer allocation supersedes it and keeps the installed host until its own handover", async () => {
+      const initialized = vi.spyOn(DraftPodHostAdapter.prototype, "initialize");
+      await startInstalledHost();
+      const held = holdNextRoom();
+      const first = recover();
+      await untilRoomRequests(2);
+      // Reach: B's peer allocation is held.
+      expect(hostRoom).toHaveBeenCalledTimes(2);
+      expect(initialized).toHaveBeenCalledTimes(2);
+      const installedA = initialized.mock.contexts[0];
+      const provisionalB = initialized.mock.contexts[1];
+      expect(provisionalB).not.toBe(installedA);
+      const disposals: { receiver: DraftPodHostAdapter; generation: number }[] = [];
+      const dispose = DraftPodHostAdapter.prototype.dispose;
+      vi.spyOn(DraftPodHostAdapter.prototype, "dispose").mockImplementation(function (
+        this: DraftPodHostAdapter,
+        ...args: Parameters<DraftPodHostAdapter["dispose"]>
+      ) {
+        disposals.push({ receiver: this, generation: currentDraftOwnerGeneration() });
+        return dispose.apply(this, args);
+      });
+
+      const second = recover();
+      // Reach: C's sweep ended B, which is disposed while C is still provisional.
+      await vi.waitFor(() => expect(disposals).toHaveLength(1));
+      // Identity, not equality: two adapters can be deep-equal.
+      expect(disposals[0]!.receiver).toBe(provisionalB);
+      const beforeHandover = currentDraftOwnerGeneration();
+      expect(useMultiplayerDraftStore.getState()).toMatchObject({ role: "host", hostPersistenceId: "installed-owner" });
+
+      held.release();
+      await expect(first).resolves.toBe("superseded");
+      await expect(second).resolves.toBe("resumed");
+      // A is disposed once, and only after C's handover retired it.
+      const disposalsOfA = disposals.filter(({ receiver }) => receiver === installedA);
+      expect(disposalsOfA).toHaveLength(1);
+      expect(disposalsOfA[0]!.generation).toBeGreaterThan(beforeHandover);
+      expect(disposals.filter(({ receiver }) => receiver === provisionalB)).toHaveLength(1);
+      expect(engine.imports).toEqual([recoveredSession]);
+      expect(useMultiplayerDraftStore.getState()).toMatchObject({ role: "host", hostPersistenceId: "recovered-b", error: null });
+    });
+
+    it("a recovery's commit is seen whole once its synchronous block ends", async () => {
+      await startInstalledHost();
+      const held = holdAfterImport();
+      let sawRecovered = false;
+      let roomCodeAfterCommit: string | null | undefined;
+      const unsubscribe = useMultiplayerDraftStore.subscribe((state) => {
+        if (sawRecovered || state.hostPersistenceId !== "recovered-b") return;
+        sawRecovered = true;
+        queueMicrotask(() => {
+          roomCodeAfterCommit = useMultiplayerDraftStore.getState().roomCode;
+        });
+      });
+      try {
+        const outcome = recover();
+        await held.reached;
+        // Reach: a subscriber saw B installed.
+        expect(sawRecovered).toBe(true);
+        expect(roomCodeAfterCommit).toBe("ABCDE");
+        held.release();
+        await outcome;
+      } finally {
+        unsubscribe();
+      }
+    });
   });
 
   describe("the pod store's recovery of a saved host whose record carries a draft session", () => {
@@ -560,7 +714,7 @@ describe("multiplayerDraftStore recovered-host persistence fence", () => {
       checkRestorableSession.mockResolvedValue({ type: "Admitted" });
       loadDraftHostSession.mockImplementation(async (...args: unknown[]) => (
         args[0] === recoveredHost.persistenceId
-          ? { type: "admitted", session: recoveredHost, raw: recoveredHost }
+          ? { type: "admitted", session: recoveredHost }
           : { type: "absent" }
       ));
       hostRoom.mockImplementation(async (_signal: AbortSignal | undefined, options: { preferredRoomCode?: string } = {}) => {
@@ -607,13 +761,17 @@ describe("multiplayerDraftStore recovered-host persistence fence", () => {
       localStorage.clear();
     });
 
-    /** What the pod page reads after a recovery on one route. */
+    /** What a recovery failure records: its kind and the attempt that showed it. */
+    const failureKeys = ["capture", "kind", "orchestrationGeneration", "routeToken"];
+
+    /** What the pod page reads after a recovery on one route, and what the failure records. */
     function afterRecovery(routeToken: number) {
       const pod = useDraftPodStore.getState();
       const record = inspectActiveDraftPod();
       return {
         failureKind: pod.hostRecoveryFailure?.kind ?? null,
         failureCurrent: isHostedPodRecoveryFailureCurrent(pod.hostRecoveryFailure, routeToken),
+        failureKeys: pod.hostRecoveryFailure ? Object.keys(pod.hostRecoveryFailure).sort() : null,
         configError: pod.configError,
         recordNames: record.type === "present" ? record.capture.id : record.type,
       };
@@ -626,7 +784,7 @@ describe("multiplayerDraftStore recovered-host persistence fence", () => {
           engine.importFailure = new Error("Invalid draft snapshot: restore refused");
         },
         "initializationFailure",
-        "podError.connection",
+        DRAFT_RECOVERY_CONNECTION_ERROR,
       ],
       [
         "the import rejects as incompatible",
@@ -634,7 +792,7 @@ describe("multiplayerDraftStore recovered-host persistence fence", () => {
           engine.importFailure = incompatibleRestore();
         },
         "incompatible",
-        "podError.incompatible",
+        DRAFT_RECOVERY_INCOMPATIBLE_ERROR,
       ],
       [
         "the host start fails after the restore",
@@ -642,7 +800,7 @@ describe("multiplayerDraftStore recovered-host persistence fence", () => {
           startFailure = new Error("Host start failed");
         },
         "initializationFailure",
-        "podError.connection",
+        DRAFT_RECOVERY_CONNECTION_ERROR,
       ],
     ] as const)("reports a failure after the handover, with its retry, when %s", async (_label, arrange, kind, configError) => {
       arrange();
@@ -653,7 +811,13 @@ describe("multiplayerDraftStore recovered-host persistence fence", () => {
       expect(engine.imports).toEqual([recoveredSession]);
       expect(outcome).toBe(kind);
       expect(lifecycleOutcomes).toEqual([kind]);
-      expect(afterRecovery(1)).toEqual({ failureKind: kind, failureCurrent: true, configError, recordNames: "recovered-b" });
+      expect(afterRecovery(1)).toEqual({
+        failureKind: kind,
+        failureCurrent: true,
+        failureKeys,
+        configError,
+        recordNames: "recovered-b",
+      });
       expect(useMultiplayerDraftStore.getState().hostPersistenceId).not.toBe("recovered-b");
       expect(clearDraftHostSession).not.toHaveBeenCalled();
     });
@@ -671,6 +835,7 @@ describe("multiplayerDraftStore recovered-host persistence fence", () => {
       expect(afterRecovery(2)).toEqual({
         failureKind: null,
         failureCurrent: false,
+        failureKeys: null,
         configError: DRAFT_OFFLINE_ERROR,
         recordNames: "recovered-b",
       });
@@ -704,7 +869,8 @@ describe("multiplayerDraftStore recovered-host persistence fence", () => {
       expect(afterRecovery(3)).toEqual({
         failureKind: "initializationFailure",
         failureCurrent: true,
-        configError: "podError.connection",
+        failureKeys,
+        configError: DRAFT_RECOVERY_CONNECTION_ERROR,
         recordNames: "recovered-b",
       });
       expect(useMultiplayerDraftStore.getState().hostPersistenceId).not.toBe("recovered-b");
@@ -737,6 +903,40 @@ describe("multiplayerDraftStore recovered-host persistence fence", () => {
       expect(useMultiplayerDraftStore.getState()).toMatchObject({ role: "host", hostPersistenceId: "recovered-b" });
       expect(useDraftPodStore.getState()).toMatchObject({ hostRecoveryFailure: null, config: { setCode: "TST" } });
       expect(engine.imports).toEqual([recoveredSession, recoveredSession]);
+    });
+
+    it("a guest reconnect started during a recovery's peer allocation keeps the tab, and neither store records a failure", async () => {
+      let releaseRoom!: () => void;
+      roomGate = new Promise<void>((resolve) => {
+        releaseRoom = resolve;
+      });
+      const pending = useDraftPodStore.getState().resumeHostedPod({ entry: "host", routeToken: 7 });
+      for (let turn = 0; turn < 50 && roomRequests.length === 0; turn++) {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      }
+      // Reach: the recovery's peer was requested for B's room code.
+      expect(roomRequests).toEqual(["BBBBB"]);
+
+      joinRoom.mockImplementationOnce(async () => ({
+        conn: { peer: "host-CCCCC" },
+        peer: { id: "guest-peer", destroy: vi.fn() },
+        closeConn: vi.fn(),
+        destroyPeer: vi.fn(),
+      }));
+      await expect(useMultiplayerDraftStore.getState().joinDraft({
+        kind: "reconnect",
+        roomCode: "CCCCC",
+        displayName: "Alice",
+        hostPeerId: "host-CCCCC",
+        draftToken: "seat-token",
+      })).resolves.toEqual({ status: "opened" });
+      releaseRoom();
+
+      await expect(pending).resolves.toBe("superseded");
+      expect(lifecycleOutcomes).toEqual(["superseded"]);
+      expect(engine.imports).toEqual([]);
+      expect(useMultiplayerDraftStore.getState()).toMatchObject({ role: "guest", error: null, guestRecoveryFailure: null });
+      expect(useDraftPodStore.getState()).toMatchObject({ hostRecoveryFailure: null, configError: null });
     });
 
     it.each(["released", "rejected"] as const)("supersedes a recovery whose saved pod record is rewritten before the handover, the peer then %s", async (end) => {

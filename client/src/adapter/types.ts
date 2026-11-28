@@ -1205,7 +1205,7 @@ export type KeywordKind = string;
 
 export type Comparator = "GT" | "LT" | "GE" | "LE" | "EQ" | "NE";
 
-export type AbilityActivationScope = "OfSpellType" | "Any";
+export type AbilityActivationScope = "OfSpellType" | "Any" | "AnyNonSpellPayment";
 
 export type AbilityTag = {
   type:
@@ -1239,7 +1239,8 @@ export type SpecialAction =
   // CR 116.2c: pay a continuous effect's printed termination cost to end it.
   | "EndContinuousEffect"
   // CR 116.2h: pay {2} to exile a card with foretell from hand face down.
-  | "Foretell";
+  | "Foretell"
+  | "Suspend";
 
 export type ManaRestriction =
   // "Spend this mana only to cast spells."
@@ -2483,11 +2484,14 @@ export interface ResolvedAbility {
 
 // ── Stack ────────────────────────────────────────────────────────────────
 
+/** A legacy journal entry may retain a bare id. Restoring a pending Equip requires both pins. */
+type EquipPin = ObjectIncarnationRef | ObjectId;
+
 export type KeywordAction =
-  | { Equip: { equipment_id: ObjectId; target_creature_id: ObjectId } }
-  | { Crew: { vehicle_id: ObjectId; paid_creature_ids: ObjectId[] } }
-  | { Saddle: { mount_id: ObjectId; paid_creature_ids: ObjectId[] } }
-  | { Station: { spacecraft_id: ObjectId; paid_creature_id: ObjectId; snapshot_power: number } };
+  | { type: "Equip"; data: { equipment: EquipPin; target_creature: EquipPin } }
+  | { type: "Crew"; data: { vehicle_id: ObjectId; paid_creature_ids: ObjectId[] } }
+  | { type: "Saddle"; data: { mount_id: ObjectId; paid_creature_ids: ObjectId[] } }
+  | { type: "Station"; data: { spacecraft_id: ObjectId; paid_creature_id: ObjectId; snapshot_power: number } };
 
 export type StackEntryKind =
   | { type: "Spell"; data: { card_id: CardId; ability?: ResolvedAbility; actual_mana_spent?: number } }
@@ -2598,12 +2602,16 @@ export interface PendingCast {
   ability: ResolvedAbility;
   cost: ManaCost;
   activation_cost?: SerializedAbilityCost;
+  // Engine marker that `cost` holds the mana leg and `activation_cost` holds
+  // the unpaid tail. The default `None` is omitted on the wire.
+  activation_residual?: "XMana" | "ManaLeg";
   activation_ability_index?: number;
   target_constraints?: Array<{ type: string }>;
   deferred_sacrificed_permanents?: DeferredSpellSacrifice[];
   // CR 601.2b + CR 601.2h: creatures selected before targets for a spell tap
   // cost, tapped at the payment commit. Absent when none.
-  deferred_tapped_permanents?: { object_ids: ObjectId[]; cost: SerializedAbilityCost }[];
+  deferred_tapped_permanents?: { object_ids: ObjectId[]; cost: SerializedAbilityCost; replicate_ordinal?: number }[];
+  unpaid_replicate_energy?: number;
   // CR 118.3a: pip ids the caster pinned to direct payment. `#[serde(default,
   // skip_serializing_if = "Vec::is_empty")]` — absent when no pin is recorded.
   pinned_pool_units?: number[];
@@ -2782,7 +2790,11 @@ export type AdditionalCost =
   | { type: "Choice"; data: SerializedAbilityCost[] };
 
 /** Mirrors Rust AbilityCost serialization (serde tag = "type"). */
-export type SerializedAbilityCost = { type: string; [key: string]: unknown };
+export type SerializedAbilityCost = { type: string; tap_display?: TapOneDisplay; [key: string]: unknown };
+
+export type TapOneDisplay =
+  | { type: "ControlledSubtype"; subtype: string }
+  | { type: "Creature" };
 
 /**
  * CR 601.2 + CR 115.10a: why the caster is choosing an opponent in
@@ -3142,7 +3154,7 @@ export type WaitingFor =
   | { type: "CopyTargetChoice"; data: { player: PlayerId; source_id: ObjectId; valid_targets: ObjectId[]; max_mana_value?: number | null; purpose?: { type: "BecomeCopy" | "PersistChosenAttribute" | "CopyTokenSource" } } }
   | { type: "ExploreChoice"; data: { player: PlayerId; source_id: ObjectId; choosable: ObjectId[]; remaining: ObjectId[]; pending_effect: unknown } }
   | { type: "ReturnAsAuraTarget"; data: { player: PlayerId; source_id: ObjectId; returned_id: ObjectId; legal_targets: TargetRef[]; pending_effect: unknown } }
-  | { type: "ChooseTokenHost"; data: { player: PlayerId; source_id: ObjectId; legal_targets: TargetRef[]; pending_ability: unknown } }
+  | { type: "ChooseTokenHost"; data: { player: PlayerId; source_id: ObjectId; legal_targets: TargetRef[]; pending_ability: unknown; chosen_hosts?: (TargetRef | null)[] } }
   | { type: "EquipTarget"; data: { player: PlayerId; equipment_id: ObjectId; valid_targets: ObjectId[] } }
   | { type: "CrewVehicle"; data: { player: PlayerId; vehicle_id: ObjectId; crew_power: number; eligible_creatures: ObjectId[]; contributions?: number[] } }
   | { type: "StationTarget"; data: { player: PlayerId; spacecraft_id: ObjectId; eligible_creatures: ObjectId[] } }
@@ -3264,6 +3276,7 @@ export type WaitingFor =
   | { type: "WardDiscardChoice"; data: { player: PlayerId; cards: ObjectId[]; pending_effect: unknown; remaining: number; filter?: unknown } }
   | { type: "WardSacrificeChoice"; data: { player: PlayerId; permanents: ObjectId[]; pending_effect: unknown; remaining: number; min_total_power?: number | null; trigger_event?: unknown } }
   | { type: "UnlessBounceChoice"; data: { player: PlayerId; permanents: ObjectId[]; pending_effect: unknown; remaining: number } }
+  | { type: "UnlessBlightChoice"; data: { player: PlayerId; counters: number; creatures: ObjectId[]; pending_effect: unknown; cost: SerializedAbilityCost; trigger_event?: unknown; effect_description?: string | null; remaining: PlayerId[]; affected_object?: ObjectId | null } }
   | { type: "ChooseRingBearer"; data: { player: PlayerId; candidates: ObjectId[] } }
   | { type: "RevealUntilKeptChoice"; data: { player: PlayerId; hit_card: ObjectId; source_id: ObjectId; accept_zone: string; decline_zone: string; enter_tapped: boolean; enters_attacking: boolean; revealed_misses: ObjectId[]; rest_destination: string } }
   | { type: "RepeatDecision"; data: { player: PlayerId; ability: unknown } }
@@ -3434,6 +3447,8 @@ export type WaitingFor =
       target_player: PlayerId;
       eligible: ObjectId[];
       required_count: number;
+      // Fewest to keep; absent means exactly required_count (an "up to" keeper sends 0).
+      minimum_count?: number | null;
       // CR 608.2c + CR 122.1: the printed keeper mark, already resolved (CR 608.2h).
       keeper_counter?: [CounterType, number] | null;
       choose_filter?: TargetFilter;
@@ -4013,13 +4028,13 @@ export type GameEvent =
   | { type: "PhaseChanged"; data: { phase: Phase } }
   | { type: "PhaseChangedFor"; data: { phase: Phase; player: PlayerId } }
   | { type: "PriorityPassed"; data: { player_id: PlayerId } }
-  | { type: "SpellCast"; data: { card_id: CardId; controller: PlayerId; object_id: ObjectId; cast_mana_value?: number } }
+  | { type: "SpellCast"; data: { card_id: CardId; controller: PlayerId; object_id: ObjectId; cast_mana_value?: number; cast_mana_spent?: number; cast_incarnation?: number } }
   | { type: "XValueChosen"; data: { player: PlayerId; object_id: ObjectId; value: number } }
   // `kind` is the engine's activated-ability kind (CR 605.1a / 606.1); it is
   // omitted by legacy payloads, which mean "Normal". `departed_source_lki`,
   // `trigger_state`, `stack_entry` and `activation_cost` are engine-internal
   // trigger authority the UI never renders.
-  | { type: "AbilityActivated"; data: { player_id: PlayerId; source_id: ObjectId; kind?: ActivatedAbilityKind } }
+  | { type: "AbilityActivated"; data: { player_id: PlayerId; source_id: ObjectId; kind?: ActivatedAbilityKind; loyalty_counters_removed?: number } }
   | { type: "ExhaustAbilityActivated"; data: { player_id: PlayerId; source_id: ObjectId; is_mana_ability: boolean } }
   // `from` is null for an object that enters from no zone (a created token).
   | { type: "ZoneChanged"; data: { object_id: ObjectId; from: Zone | null; to: Zone } }
@@ -4664,10 +4679,31 @@ export interface UnlessDrawCostView {
   stage: UnlessDrawPaymentStage;
 }
 
+/**
+ * CR 723.5 + CR 805.8: one pending decision's semantic owner paired with the
+ * seat authorized to submit it. Mirrors
+ * `engine::game::turn_control::DecisionBinding` (serde snake_case keys).
+ */
+export interface DecisionBinding {
+  semantic_owner: PlayerId;
+  authorized_actor: PlayerId;
+}
+
 export interface DerivedViews {
   /** Chooser-private printed creature types, ranked by deck frequency. */
   named_choice_suggestions?: string[];
   unique_authorized_submitter?: PlayerId;
+  /**
+   * CR 805.5a + CR 723.5: each living seat entitled to answer the live
+   * priority window that has not passed it yet — the parked representative
+   * plus unpassed teammates on a shared-team window — paired with its
+   * authorized actor. Absent on non-priority windows, when the owners would
+   * name only the holder (always so for individual seats), and on wire
+   * paths without derived views; consumers then fall back to
+   * `priority_player`. Mirrors
+   * `engine::game::derived_views::DerivedViews::priority_decision_bindings`.
+   */
+  priority_decision_bindings?: DecisionBinding[];
   /** Engine-owned Scry prompt identity for this viewer, independent of opportunities. */
   scry_prompt_id?: InteractionId;
   /** Opaque engine-issued identity of this viewer's prompt, excluding display-only data. */
@@ -4954,6 +4990,19 @@ export interface DerivedViews {
    * or battle. Mirrors `engine::game::derived_views::DerivedViews::attack_targets`.
    */
   attack_targets?: Record<string, AttackTarget>;
+  /**
+   * The engine's lethal-first default for the open AssignCombatDamage prompt,
+   * derived from live combat state. Advisory only and absent outside that prompt.
+   * Mirrors `engine::game::derived_views::DerivedViews::combat_damage_suggestion`.
+   */
+  combat_damage_suggestion?: CombatDamageSplit;
+}
+
+/** Mirrors `engine::types::game_state::CombatDamageSplit`. */
+export interface CombatDamageSplit {
+  assignments: [ObjectId, number][];
+  trample_damage: number;
+  controller_damage: number;
 }
 
 /** Mirrors `engine::game::derived_views::UnblockedAttackPreview`. */

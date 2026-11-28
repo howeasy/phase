@@ -30,15 +30,20 @@ use engine::types::ability::{AbilityKind, EffectKind};
 use engine::types::actions::GameAction;
 use engine::types::counter::CounterType;
 use engine::types::events::GameEvent;
-use engine::types::game_state::{ReplacementChoiceKind, WaitingFor};
+use engine::types::game_state::{
+    PersistedGameState, PersistedRestoreFinalization, ReplacementChoiceKind, WaitingFor,
+};
 use engine::types::identifiers::ObjectId;
 use engine::types::keywords::Keyword;
 use engine::types::mana::{ManaType, ManaUnit};
 use engine::types::phase::Phase;
+use engine::types::proposed_event::ProposedEvent;
+use engine::types::resolution::RESOLUTION_STATE_WIRE_VERSION;
 use engine::types::zones::Zone;
 
 // Verbatim Oracle text (MTGJSON).
 const CHATTERFANG: &str = "Forestwalk (This creature can't be blocked as long as defending player controls a Forest.)\nIf one or more tokens would be created under your control, those tokens plus that many 1/1 green Squirrel creature tokens are created instead.\n{B}, Sacrifice X Squirrels: Target creature gets +X/-X until end of turn.";
+const JINNIE_FAY: &str = "If you would create one or more tokens, you may instead create that many 2/2 green Cat creature tokens with haste or that many 3/1 green Dog creature tokens with vigilance.";
 const PARALLEL_LIVES: &str = "If an effect would create one or more tokens under your control, it creates twice that many of those tokens instead.";
 const HALVING_SEASON: &str = "If an opponent would create one or more tokens, they create half that many of each of those kinds of tokens instead, rounded down.\nIf an opponent would put one or more counters on a permanent or player, they put half that many of each of those kinds of counters on that permanent or player instead, rounded down.";
 const LEGION_WARBOSS: &str = "Mentor (Whenever this creature attacks, put a +1/+1 counter on target attacking creature with lesser power.)\nAt the beginning of combat on your turn, create a 1/1 red Goblin creature token. That token gains haste until end of turn and attacks this combat if able.";
@@ -277,6 +282,56 @@ fn finish_at_end_step(runner: &mut GameRunner) {
     }
     assert_eq!(runner.state().phase, Phase::End);
     runner.advance_until_stack_empty();
+}
+
+#[test]
+fn token_order_can_matter_only_after_a_third_replacement() {
+    for (first, second, soldiers) in [
+        ("Parallel Lives", None, 1),
+        ("Halving Season", Some("Halving Season"), 0),
+    ] {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let doubler = scenario
+            .add_enchantment_from_oracle(P0, "Parallel Lives", PARALLEL_LIVES)
+            .id();
+        let first_halver = scenario
+            .add_enchantment_from_oracle(P1, "Halving Season", HALVING_SEASON)
+            .id();
+        let second_halver = scenario
+            .add_enchantment_from_oracle(P1, "Halving Season", HALVING_SEASON)
+            .id();
+        let spell = scenario
+            .add_spell_to_hand_from_oracle(P0, "Raise the Alarm", false, RAISE_THE_ALARM)
+            .id();
+        let mut runner = scenario.build();
+        runner.cast(spell).resolve();
+
+        // CR 616.1e + CR 616.1f: each pair commutes from two Soldiers, but the
+        // full sequences can yield either 2 → 4 → 2 → 1 or 2 → 1 → 0.
+        let WaitingFor::ReplacementChoice { candidates, .. } = &runner.state().waiting_for else {
+            panic!(
+                "expected an initial order choice, got {:?}",
+                runner.state().waiting_for
+            );
+        };
+        let mut sources: Vec<_> = candidates
+            .iter()
+            .map(|candidate| candidate.source_id)
+            .collect();
+        sources.sort_unstable();
+        assert_eq!(sources, [doubler, first_halver, second_halver]);
+        answer(&mut runner, order(3, first));
+        let remaining: Vec<_> = second.into_iter().map(|source| order(2, source)).collect();
+        settle(&mut runner, &remaining, Until::StackEmpty);
+        assert!(runner.state().stack.is_empty());
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { .. }
+        ));
+        assert_eq!(tokens(&runner, "Soldier").len(), soldiers);
+        assert_eq!(ledger(&runner).len(), soldiers);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1230,8 +1285,8 @@ fn copy_on_entry_after_chatterfang_copies_every_token() {
 }
 
 /// CR 616.1g + CR 616.1: two creation-replacement prompts (Chatterfang, then
-/// Parallel Lives; P1's Halving Season last) settle the event as two Soldiers
-/// plus two Squirrels before Mystic Reflection, a replacement of the contained
+/// Parallel Lives; P1's Halving Season last) settle the event as one Saproling
+/// plus one Squirrel before Mystic Reflection, a replacement of the contained
 /// entry, can be chosen; it then makes every one of them a copy of Colossal
 /// Dreadmaw. Neither prompt offers it.
 #[test]
@@ -1245,7 +1300,12 @@ fn contained_copy_reaches_every_batch_after_outer_prompts() {
         .add_spell_to_hand_from_oracle(P0, "Mystic Reflection", true, MYSTIC_REFLECTION)
         .id();
     let spell = scenario
-        .add_spell_to_hand_from_oracle(P0, "Raise the Alarm", true, RAISE_THE_ALARM)
+        .add_spell_to_hand_from_oracle(
+            P0,
+            "Sprout",
+            true,
+            "Create a 1/1 green Saproling creature token.",
+        )
         .id();
     let mut runner = scenario.build();
     runner.cast(mystic).target_object(dreadmaw).resolve();
@@ -1261,12 +1321,12 @@ fn contained_copy_reaches_every_batch_after_outer_prompts() {
 
     assert_eq!(
         tokens_named(&runner, "Colossal Dreadmaw").len(),
-        4,
-        "2 + 2, doubled, then halved: all four enter as Dreadmaw copies"
+        2,
+        "1 + 1, doubled, then halved: both enter as Dreadmaw copies"
     );
     assert!(tokens(&runner, "Squirrel").is_empty());
-    assert!(tokens(&runner, "Soldier").is_empty());
-    assert_eq!(ledger(&runner).len(), 4);
+    assert!(tokens(&runner, "Saproling").is_empty());
+    assert_eq!(ledger(&runner).len(), 2);
 }
 
 /// Grumgully added before or after Chatterfang; Raise the Alarm.
@@ -1502,4 +1562,376 @@ fn academy_manufactor_batches_follow_a_tapped_creation() {
             "the {subtype} enters tapped"
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// Released-shape compound parks (save-compat)
+// ---------------------------------------------------------------------------
+
+/// P0: Chatterfang on the battlefield, Jinnie Fay cast from hand (so her entry
+/// precedes the park), Raise the Alarm in hand. Returns the runner, the Raise
+/// spell, and Chatterfang.
+fn jinnie_chatterfang_board() -> (GameRunner, ObjectId, ObjectId) {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let chatterfang = scenario
+        .add_creature_from_oracle(P0, "Chatterfang, Squirrel General", 3, 3, CHATTERFANG)
+        .id();
+    let jinnie = scenario
+        .add_creature_to_hand_from_oracle(P0, "Jinnie Fay, Jetmir's Second", 3, 4, JINNIE_FAY)
+        .id();
+    let raise = scenario
+        .add_spell_to_hand_from_oracle(P0, "Raise the Alarm", true, RAISE_THE_ALARM)
+        .id();
+    let mut runner = scenario.build();
+    let outcome = runner.cast(jinnie).resolve();
+    assert!(
+        matches!(outcome.final_waiting_for(), WaitingFor::Priority { .. }),
+        "Jinnie Fay must resolve to Priority, got {:?}",
+        outcome.final_waiting_for()
+    );
+    assert!(
+        outcome.state().stack.is_empty(),
+        "Jinnie Fay must leave an empty stack"
+    );
+    assert_eq!(
+        outcome.state().objects[&jinnie].zone,
+        Zone::Battlefield,
+        "Jinnie Fay must be on the battlefield"
+    );
+    (runner, raise, chatterfang)
+}
+
+/// Pass priority until the engine parks on a replacement prompt.
+fn drive_to_replacement_prompt(runner: &mut GameRunner) {
+    for _ in 0..20 {
+        match &runner.state().waiting_for {
+            WaitingFor::ReplacementChoice { .. } => return,
+            WaitingFor::Priority { .. } => {
+                runner
+                    .act(GameAction::PassPriority)
+                    .expect("passing priority is legal");
+            }
+            other => panic!("expected a replacement prompt, got {other:?}"),
+        }
+    }
+    panic!(
+        "no replacement prompt surfaced: {:?}",
+        runner.state().waiting_for
+    );
+}
+
+/// Assert the live prompt is P0's Jinnie Fay accept/decline, without answering it.
+fn assert_jinnie_optional_prompt(runner: &GameRunner) {
+    let WaitingFor::ReplacementChoice {
+        player,
+        candidates,
+        kind,
+        ..
+    } = runner.state().waiting_for.clone()
+    else {
+        panic!(
+            "expected the Jinnie Fay optional prompt, got {:?}",
+            runner.state().waiting_for
+        );
+    };
+    assert_eq!(player, P0, "P0 decides Jinnie Fay");
+    assert_eq!(
+        kind,
+        ReplacementChoiceKind::OptionalBranch,
+        "accept/decline, got {candidates:?}"
+    );
+    assert_eq!(candidates.len(), 2, "accept + decline, got {candidates:?}");
+    assert_eq!(candidates[0].source_name, "Jinnie Fay, Jetmir's Second");
+    assert_eq!(candidates[1].description, "Decline");
+}
+
+/// Decline Jinnie Fay, then answer any re-offered ordering the way it was
+/// ordered (Chatterfang first), until Priority with an empty stack. With the
+/// migration no further prompt raises; without it Chatterfang re-offers once
+/// on the un-migrated Squirrel batch.
+fn decline_and_finish(runner: &mut GameRunner) {
+    answer(runner, DECLINE);
+    for _ in 0..200 {
+        match runner.state().waiting_for.clone() {
+            WaitingFor::ReplacementChoice {
+                player,
+                candidates,
+                kind,
+                ..
+            } => {
+                assert_eq!(player, P0, "P0 makes the choice");
+                assert_eq!(
+                    kind,
+                    ReplacementChoiceKind::Order,
+                    "a re-offer orders, got {candidates:?}"
+                );
+                let index = candidates
+                    .iter()
+                    .position(|c| c.source_name == "Chatterfang, Squirrel General")
+                    .expect("Chatterfang re-offers");
+                runner
+                    .act(GameAction::ChooseReplacement { index })
+                    .expect("the choice is accepted");
+            }
+            WaitingFor::Priority { .. } if runner.state().stack.is_empty() => break,
+            WaitingFor::Priority { .. } => {
+                runner
+                    .act(GameAction::PassPriority)
+                    .expect("passing priority is legal");
+            }
+            other => panic!("unexpected decision {other:?}"),
+        }
+    }
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+    assert!(runner.state().stack.is_empty());
+}
+
+/// CR 614.5 + CR 616.1 + CR 614.6 (save-compat): a released-shape compound
+/// park (v15, key-less batches) restores through production persistence, and
+/// declining Jinnie Fay yields exactly the uninterrupted result: 2 Soldiers
+/// and 2 Squirrels. Without the v15→v16 migration the Squirrel batch restores
+/// with an empty applied set, Chatterfang re-offers, and the Squirrels double.
+#[test]
+fn released_compound_token_park_restores_applied_sets_through_jinnie_decline() {
+    // The uninterrupted twin: identical board, no save (the reference reading).
+    let (mut twin, twin_raise, _) = jinnie_chatterfang_board();
+    twin.cast(twin_raise).resolve();
+    answer(&mut twin, order(2, "Chatterfang, Squirrel General"));
+    drive_to_replacement_prompt(&mut twin);
+    decline_and_finish(&mut twin);
+    assert_eq!(tokens(&twin, "Soldier").len(), 2);
+    assert_eq!(tokens(&twin, "Squirrel").len(), 2);
+
+    // The save/restore path.
+    let (mut runner, raise, chatterfang) = jinnie_chatterfang_board();
+    runner.cast(raise).resolve();
+    answer(&mut runner, order(2, "Chatterfang, Squirrel General"));
+    drive_to_replacement_prompt(&mut runner);
+    assert_jinnie_optional_prompt(&runner);
+    // The migration source is real: Chatterfang — and only Chatterfang — has
+    // been applied to the compound event.
+    let pending = runner
+        .state()
+        .pending_replacement
+        .as_ref()
+        .expect("parked at the Jinnie prompt");
+    let ProposedEvent::CreateToken {
+        applied, appended, ..
+    } = &pending.proposed
+    else {
+        panic!(
+            "expected a compound CreateToken park, got {:?}",
+            pending.proposed
+        );
+    };
+    assert!(
+        !applied.is_empty(),
+        "Chatterfang has been applied to the event"
+    );
+    assert!(
+        applied.iter().all(|key| key.source() == chatterfang),
+        "only Chatterfang has been applied, got {applied:?}"
+    );
+    assert_eq!(appended.len(), 1, "Chatterfang appended one Squirrel batch");
+
+    // Save through production persistence, then downgrade to the released
+    // shape: no per-batch key anywhere, version 15 (v0.131.0).
+    let mut saved = serde_json::to_value(PersistedGameState::Raw(Box::new(runner.state().clone())))
+        .expect("the park serializes");
+    assert_eq!(
+        saved["resolution_state_version"],
+        RESOLUTION_STATE_WIRE_VERSION
+    );
+    let batches = saved["pending_replacement"]["proposed"]["CreateToken"]["appended"]
+        .as_array_mut()
+        .expect("appended batches");
+    let mut stripped = 0;
+    for batch in batches.iter_mut() {
+        if batch
+            .as_object_mut()
+            .expect("a batch object")
+            .remove("applied")
+            .is_some()
+        {
+            stripped += 1;
+        }
+    }
+    assert_eq!(
+        stripped, 1,
+        "the current writer emits the per-batch key we strip"
+    );
+    saved["resolution_state_version"] = serde_json::json!(15);
+    assert!(
+        saved["pending_replacement"]["proposed"]["CreateToken"]["appended"]
+            .as_array()
+            .expect("batches")
+            .iter()
+            .all(|batch| batch.get("applied").is_none()),
+        "the downgraded payload inputs legacy bytes"
+    );
+
+    // Restore through production persistence and re-assert the identical park.
+    let mut runner = GameRunner::from_state(
+        serde_json::from_value::<PersistedGameState>(saved)
+            .expect("the released-shape save deserializes")
+            .prepare_for_restore(PersistedRestoreFinalization::Immediate)
+            .expect("the released-shape save prepares")
+            .finalize_immediately()
+            .expect("the released-shape save finalizes"),
+    );
+    assert_jinnie_optional_prompt(&runner);
+    decline_and_finish(&mut runner);
+    assert_eq!(tokens(&runner, "Soldier").len(), 2);
+    assert_eq!(tokens(&runner, "Squirrel").len(), 2);
+    assert!(tokens(&runner, "Cat").is_empty());
+    assert!(tokens(&runner, "Dog").is_empty());
+}
+
+fn assert_commuting_soldier_entry(grumgully: bool) {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.add_enchantment_from_oracle(
+        P1,
+        "Authority of the Consuls",
+        "Creatures your opponents control enter tapped.\nWhenever a creature an opponent controls enters, you gain 1 life.",
+    );
+    scenario.add_enchantment_from_oracle(
+        P1,
+        "Blind Obedience",
+        "Extort (Whenever you cast a spell, you may pay {W/B}. If you do, each opponent loses 1 life and you gain that much life.)\nArtifacts and creatures your opponents control enter tapped.",
+    );
+    scenario.add_enchantment_from_oracle(
+        P1,
+        "Kismet",
+        "Artifacts, creatures, and lands your opponents control enter tapped.",
+    );
+    scenario.add_creature_from_oracle(
+        P1,
+        "Thalia, Heretic Cathar",
+        3,
+        2,
+        "First strike\nCreatures and nonbasic lands your opponents control enter tapped.",
+    );
+    if grumgully {
+        scenario.add_creature_from_oracle(P0, "Grumgully, the Generous", 3, 3, GRUMGULLY);
+    } else {
+        scenario.add_artifact_from_oracle(P1, "Orb of Dreams", "Permanents enter tapped.");
+    }
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(P0, "Raise the Alarm", true, RAISE_THE_ALARM)
+        .id();
+
+    let mut runner = scenario.build();
+    runner.cast(spell).resolve();
+    settle(&mut runner, &[], Until::StackEmpty);
+
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+    assert!(runner.state().stack.is_empty());
+    assert_tapped_soldiers(&runner, 2, u32::from(grumgully));
+}
+
+fn assert_tapped_soldiers(runner: &GameRunner, count: usize, counters: u32) {
+    let soldiers = tokens(runner, "Soldier");
+    assert_eq!(soldiers.len(), count);
+    for soldier in soldiers {
+        assert_eq!(soldier.controller, P0);
+        assert!(soldier.tapped);
+        assert_eq!(plus_counters(runner, soldier.id), counters);
+    }
+}
+
+#[test]
+fn commuting_soldier_entry_with_five_tap_effects() {
+    assert_commuting_soldier_entry(false);
+}
+
+#[test]
+fn commuting_soldier_entry_with_four_tap_effects_and_counters() {
+    assert_commuting_soldier_entry(true);
+}
+
+fn assert_soldier_entry_orders_over_budget(
+    tap_effects: usize,
+    double_tokens: bool,
+    taps_before_grumgully: usize,
+) {
+    const TAP_SOURCES: [&str; 16] = [
+        "Test Tap Enchantment 1",
+        "Test Tap Enchantment 2",
+        "Test Tap Enchantment 3",
+        "Test Tap Enchantment 4",
+        "Test Tap Enchantment 5",
+        "Test Tap Enchantment 6",
+        "Test Tap Enchantment 7",
+        "Test Tap Enchantment 8",
+        "Test Tap Enchantment 9",
+        "Test Tap Enchantment 10",
+        "Test Tap Enchantment 11",
+        "Test Tap Enchantment 12",
+        "Test Tap Enchantment 13",
+        "Test Tap Enchantment 14",
+        "Test Tap Enchantment 15",
+        "Test Tap Enchantment 16",
+    ];
+    let tap_sources = &TAP_SOURCES[..tap_effects];
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    if double_tokens {
+        scenario.add_enchantment_from_oracle(P0, "Parallel Lives", PARALLEL_LIVES);
+    }
+    // Synthetic permanents provide distinct mandatory replacements with identical writes.
+    for &source in tap_sources {
+        scenario.add_enchantment_from_oracle(
+            P1,
+            source,
+            "Creatures your opponents control enter tapped.",
+        );
+    }
+    scenario.add_creature_from_oracle(P0, "Grumgully, the Generous", 3, 3, GRUMGULLY);
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(P0, "Raise the Alarm", true, RAISE_THE_ALARM)
+        .id();
+    let mut runner = scenario.build();
+    runner.cast(spell).resolve();
+    // Parallel Lives spends one of the 16 live passes before entry ordering.
+    let entry_passes = 16 - usize::from(double_tokens);
+    let (before, after) = tap_sources.split_at(taps_before_grumgully);
+    let prompts: Vec<_> = before
+        .iter()
+        .copied()
+        .chain(std::iter::once("Grumgully, the Generous"))
+        .chain(after.iter().copied())
+        .take(entry_passes)
+        .enumerate()
+        .map(|(index, source)| order(tap_effects + 1 - index, source))
+        .collect();
+    settle(&mut runner, &prompts, Until::StackEmpty);
+    assert!(runner.state().stack.is_empty());
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+    assert_tapped_soldiers(&runner, if double_tokens { 4 } else { 2 }, 1);
+}
+
+#[test]
+fn soldier_entry_over_pass_budget_offers_grumgully_first() {
+    assert_soldier_entry_orders_over_budget(16, false, 0);
+}
+
+#[test]
+fn soldier_entry_over_remaining_pass_budget_offers_grumgully_first() {
+    assert_soldier_entry_orders_over_budget(15, true, 0);
+}
+
+#[test]
+fn soldier_entry_over_remaining_pass_budget_offers_grumgully_after_three_taps() {
+    assert_soldier_entry_orders_over_budget(16, false, 3);
 }

@@ -356,6 +356,7 @@ fn human_response_model(waiting_for: &WaitingFor, semantic_owner: PlayerId) -> H
         | WaitingFor::MiracleReveal { .. }
         | WaitingFor::OpponentMayChoice { .. }
         | WaitingFor::UnlessPayment { .. }
+        | WaitingFor::UnlessBlightChoice { .. }
         | WaitingFor::UnlessPaymentChooseCost { .. }
         | WaitingFor::ChooseRoomDoor { .. }
         | WaitingFor::ChooseDungeon { .. }
@@ -615,6 +616,7 @@ fn classify_waiting_for(waiting_for: &WaitingFor) -> WaitingClassification {
         | WaitingFor::OpponentMayChoice { .. }
         | WaitingFor::PrecastCopyShortcutOffer { .. }
         | WaitingFor::RespondToPrecastCopyShortcut { .. }
+        | WaitingFor::UnlessBlightChoice { .. }
         | WaitingFor::UnlessPaymentChooseCost { .. }
         | WaitingFor::ChooseRoomDoor { .. }
         | WaitingFor::ChooseDungeon { .. }
@@ -700,12 +702,26 @@ fn semantic_slots(state: &GameState) -> Vec<(PlayerId, InteractionSlotKind)> {
                     .collect()
             })
             .unwrap_or_default(),
-        _ => state
-            .waiting_for
-            .acting_players()
-            .into_iter()
-            .map(|player| (player, slot_kind))
-            .collect(),
+        // CR 805.5a: A player may cast a spell, activate an ability, or take a
+        // special action when their team has priority. The priority window is
+        // parked on the team's representative, but every living member needs
+        // their own interaction slot so each teammate can submit.
+        _ => {
+            if let WaitingFor::Priority { player } = &state.waiting_for {
+                if super::topology::side_takes_shared_turn(state, *player) {
+                    return super::topology::team_members(state, *player)
+                        .into_iter()
+                        .map(|member| (member, slot_kind))
+                        .collect();
+                }
+            }
+            state
+                .waiting_for
+                .acting_players()
+                .into_iter()
+                .map(|player| (player, slot_kind))
+                .collect()
+        }
     }
 }
 
@@ -4595,7 +4611,8 @@ fn selection_projection(
         | WaitingFor::HarmonizeTapChoice {
             eligible_creatures, ..
         } => eligible_creatures.len(),
-        WaitingFor::BlightChoice { creatures, .. } => creatures.len(),
+        WaitingFor::BlightChoice { creatures, .. }
+        | WaitingFor::UnlessBlightChoice { creatures, .. } => creatures.len(),
         WaitingFor::ChooseRingBearer { candidates, .. } => candidates.len(),
         WaitingFor::ChooseUntapSubset { group, .. } => group.len(),
         WaitingFor::ScryChoice { cards, .. }
@@ -4716,14 +4733,20 @@ fn selection_projection(
             action: SelectionAction::KeepWithinPower,
             source_id: Some(*source_id),
         }),
+        // CR 101.4 + CR 701.21a: exact (`minimum_count == None`) or up-to
+        // keeper; the engine publishes both bounds.
         WaitingFor::KeepExactPermanentsChoice {
             eligible,
             required_count,
+            minimum_count,
             source_id,
             ..
         } => Some(SelectionProjection {
             object_ids: eligible.clone(),
-            constraint: count_constraint(*required_count, *required_count),
+            constraint: count_constraint(
+                minimum_count.unwrap_or(*required_count),
+                *required_count,
+            ),
             confirm: ConfirmSemantics::Explicit,
             intent: InteractionIntentCode::Keep,
             action: SelectionAction::KeepExact,
@@ -5292,6 +5315,7 @@ fn selection_projection(
         | WaitingFor::PrecastCopyShortcutOffer { .. }
         | WaitingFor::RespondToPrecastCopyShortcut { .. }
         | WaitingFor::UnlessPayment { .. }
+        | WaitingFor::UnlessBlightChoice { .. }
         | WaitingFor::UnlessPaymentChooseCost { .. }
         | WaitingFor::ChooseRoomDoor { .. }
         | WaitingFor::ChooseDungeon { .. }
@@ -5602,6 +5626,9 @@ fn interaction_mana_ability_activation_scope(
     match scope {
         AbilityActivationScope::OfSpellType => InteractionManaAbilityActivationScope::OfSpellType,
         AbilityActivationScope::Any => InteractionManaAbilityActivationScope::Any,
+        AbilityActivationScope::AnyNonSpellPayment => {
+            InteractionManaAbilityActivationScope::AnyNonSpellPayment
+        }
     }
 }
 
@@ -5614,6 +5641,7 @@ fn interaction_mana_special_action(action: SpecialAction) -> InteractionManaSpec
         SpecialAction::RollPlanarDie => InteractionManaSpecialAction::RollPlanarDie,
         SpecialAction::EndContinuousEffect => InteractionManaSpecialAction::EndContinuousEffect,
         SpecialAction::Foretell => InteractionManaSpecialAction::Foretell,
+        SpecialAction::Suspend => InteractionManaSpecialAction::Suspend,
     }
 }
 
@@ -12185,6 +12213,35 @@ mod tests {
     use crate::types::ability::{Effect, QuantityExpr, ResolvedAbility, TargetFilter};
     use crate::types::game_state::{DistributionScope, DistributionUnit};
 
+    #[test]
+    fn typed_mana_restriction_preserves_non_spell_payment_scope() {
+        for (ability, serialized_scope) in [
+            (AbilityActivationScope::Any, "any"),
+            (
+                AbilityActivationScope::AnyNonSpellPayment,
+                "anyNonSpellPayment",
+            ),
+        ] {
+            let projected =
+                interaction_mana_restriction(&ManaRestriction::OnlyForTypeSpellsOrAbilities {
+                    spell_type: "Artifact".to_string(),
+                    ability,
+                });
+            let wire = serde_json::to_value(&projected).unwrap();
+            assert_eq!(
+                wire,
+                serde_json::json!({
+                    "type": "onlyForTypeSpellsOrAbilities",
+                    "data": { "spellType": "Artifact", "ability": serialized_scope }
+                })
+            );
+            assert_eq!(
+                serde_json::from_value::<InteractionManaRestriction>(wire).unwrap(),
+                projected
+            );
+        }
+    }
+
     /// V5i: CR 608.2d — a resolution-time division is among ANY number of its
     /// candidates, so a response assigning the whole total to a strict subset
     /// materializes; CR 601.2d — the announce-time sibling still requires every
@@ -12433,6 +12490,7 @@ mod tests {
             keep_is_distinct: Vec::new(),
             player: PlayerId(0),
             stack_entry_index: 0,
+            stack_entry_id: None,
             scope: crate::types::game_state::RetargetScope::Single,
             current_targets: vec![object_a.clone()],
             slots: vec![crate::types::game_state::RetargetSlotAddress {
@@ -12464,6 +12522,7 @@ mod tests {
             keep_is_distinct: Vec::new(),
             player: PlayerId(0),
             stack_entry_index: 0,
+            stack_entry_id: None,
             scope: crate::types::game_state::RetargetScope::Single,
             current_targets: vec![object_a.clone()],
             slots: vec![],

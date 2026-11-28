@@ -838,7 +838,14 @@
     "lethalBadge": "Létal",
     "planeswalkerLoyalty": "Planeswalker (loyauté : {{loyalty}})",
     "defendingPlayerTrample": "Joueur défenseur (Piétinement)",
+    "attackTargetTrample": "{{name}} (Piétinement)",
     "pwControllerTrample": "Contrôleur du PW (Piétinement sur PW)",
+    "lethalButton": "Létal",
+    "clearButton": "Effacer",
+    "assignLethalTo": "Assigner des blessures létales à {{target}}",
+    "clearDamageFor": "Effacer les blessures assignées à {{target}}",
+    "lethalFirstButton": "Blessures létales d’abord",
+    "lethalFirstTitle": "Assignez des blessures létales à chaque bloqueur dans l’ordre, puis assignez le reste",
     "assignRemainingButton": "+{{amount}}",
     "assignRemainingTo_few": "Assigner les {{count}} blessures restantes à {{target}}",
     "assignRemainingTo_many": "Assigner les {{count}} blessures restantes à {{target}}",
@@ -1283,6 +1290,7 @@
       "onlyForSpellColor": "Uniquement pour les sorts de la couleur {{color}}.",
       "onlyForSpellFromZone": "Uniquement pour les sorts {{polarity}} {{zone}}.",
       "cannotCastSpellFromZone": "Ne peut pas être dépensé pour lancer des sorts depuis {{zone}}.",
+      "cannotCastSpellsOutsideType": "Ce mana ne peut pas être dépensé pour lancer des sorts qui ne sont pas du type {{spellType}}.",
       "onlyForFaceDownSpell": "Uniquement pour les sorts face cachée.",
       "onlyForAny": "Uniquement pour l'un de ces usages : {{restrictions}}",
       "onlyForSpecialAction": "Uniquement pour l'action spéciale {{action}}.",
@@ -1340,6 +1348,8 @@
         "Ticket": "ticket"
       },
       "generic": "un coût",
+      "blight": "Flétrissure {{count}}",
+      "blightBoundedX": "Flétrissure X (jusqu’à la plus grande endurance parmi les créatures que vous contrôlez)",
       "pay": "Payer {{cost}}",
       "draw": "piochez une carte",
       "drawCount_one": "piochez {{count}} carte",
@@ -1439,6 +1449,9 @@
       "poisonCounters": "Marqueurs poison",
       "players": "Joueurs",
       "whoGoesFirst": "Qui commence",
+      "archenemySeat": "Archenemy",
+      "archenemyYou": "Vous",
+      "archenemyOpponent": "Adversaire {{number}}",
       "firstPlayer": {
         "random": "Aléatoire",
         "play": "Jouer",
@@ -2167,6 +2180,14 @@
     "attachments": "Avec {{names}}"
   },
   "optionalCost": {
+    "replicate": {
+      "title": "Payer le coût de duplication ?",
+      "again": "Payer à nouveau le coût de duplication ? (Payé {{times}} fois)",
+      "decline": "Terminer",
+      "tapSubtype": "Engagez un {{subtype}} dégagé que vous contrôlez",
+      "tapCreature": "Engagez une créature dégagée",
+      "payEnergy": "Payez {{amount}} énergies"
+    },
     "gift": {
       "title": "Promettre un cadeau ?",
       "pay": "Promettre {{gift}}",
@@ -2332,6 +2353,13 @@
     "creatureFallback": "Créature {{id}}"
   },
   "distributeAmong": {
+    "assignRemainingButton": "+{{amount}}",
+    "assignRemainingTo_few": "Assigner les {{count}} restants à {{target}}",
+    "assignRemainingTo_many": "Assigner les {{count}} restants à {{target}}",
+    "assignRemainingTo_one": "Assigner le {{count}} restant à {{target}}",
+    "assignRemainingTo_other": "Assigner les {{count}} restants à {{target}}",
+    "clearButton": "Effacer",
+    "clearTarget": "Effacer l’assignation à {{target}}",
     "unitCounter": "marqueur {{counter}}",
     "unitDamage": "blessures",
     "unitLife": "points de vie",
@@ -2786,6 +2814,9 @@
       "single": "{{action}} a permanent",
       "exactCount_one": "{{action}} {{count}} permanent",
       "exactCount_other": "{{action}} {{count}} permanents",
+      "protectedObject": "Payez pour protéger {{object}}",
+      "blightCounters_one": "Mettez un marqueur -1/-1 sur une créature que vous contrôlez",
+      "blightCounters_other": "Mettez {{count}} marqueurs -1/-1 sur une créature que vous contrôlez",
       "rangeCount_one": "{{action}} {{min}}-{{count}} permanent",
       "rangeCount_other": "{{action}} {{min}}-{{count}} permanents",
       "upToCount_one": "{{action}} up to {{count}} permanent",
