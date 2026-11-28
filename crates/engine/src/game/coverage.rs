@@ -8632,10 +8632,10 @@ fn blank_gap_text(gap: &GapDetail, lines: &[String], dropped: &[&str]) -> String
     // The report never emits these two deck-only labels, so nothing else here
     // has ever described them; say what the projection limit means.
     if gap.handler == ENTRY_PROJECTION_GAP {
-        return "As this permanent enters, the engine cannot yet apply the changes its entering choice makes to other permanents (CR 614.12)".to_string();
+        return "As this permanent enters, the engine cannot yet apply all the changes its own static abilities make to its characteristics, so an entry consumer may see unprojected values (CR 614.12)".to_string();
     }
     if gap.handler == ENTRY_CONSUMER_GAP {
-        return "An effect here reads an entering permanent's characteristics before the engine can project them (CR 614.12)".to_string();
+        return "This permanent's entry replacement or enters-with-counters static reads a characteristic of an entering permanent that the entrant's own static abilities write but the engine's entry projection does not apply, so the read may see an unprojected value (CR 614.12)".to_string();
     }
     if gap.handler.starts_with("SilentDrop:") && !dropped.is_empty() {
         return dropped.join(" / ");
@@ -8677,8 +8677,8 @@ fn blank_gap_text(gap: &GapDetail, lines: &[String], dropped: &[&str]) -> String
 /// Show WHAT a confirmed misparse got wrong, in the standard gap shape: the
 /// census-cited clauses become the gap's `source_text` and one typed
 /// `GapDiagnosis::Misparse` each. The runtime gap label stays prose-free
-/// (`MisparseClass::handler`); only the published report carries the clauses,
-/// looked up by the exact export key.
+/// (`MisparseClass::handler`). The coverage report and the deck compatibility
+/// verdict both carry the clauses, looked up by the exact export key.
 fn attach_misparse_clauses(key: &str, face: &CardFace, gap_details: &mut [GapDetail]) {
     let Some(class) = face.metadata.confirmed_misparse else {
         return;

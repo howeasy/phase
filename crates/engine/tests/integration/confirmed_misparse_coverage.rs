@@ -1295,11 +1295,44 @@ fn deck_compatibility_entry_projection_gap_is_deck_only_and_explained() {
     assert_eq!(
         arcane.gap_details[0].source_text.as_deref(),
         Some(
-            "As this permanent enters, the engine cannot yet apply the changes its entering \
-             choice makes to other permanents (CR 614.12)"
+            "As this permanent enters, the engine cannot yet apply all the changes its own \
+             static abilities make to its characteristics, so an entry consumer may see \
+             unprojected values (CR 614.12)"
         ),
         "the deck-only gap carries a specific explanation: {:?}",
         arcane.gap_details[0]
+    );
+
+    // Voice of All reaches the same gap through an `AddKeyword` static
+    // (protection from the chosen colour) instead of an allowlisted chosen-
+    // subtype write: the unprojected ability write is one entry consumers read,
+    // so the verdict publishes the same explanation.
+    let voice_db = printed_pool(&["voice of all"]);
+    let voice = verdict_coverage(&voice_db, &["Voice of All"]);
+    assert_eq!(voice.total_unique, 1);
+    let voice_card = unsupported_named(&voice, "Voice of All");
+    assert!(
+        voice_card
+            .gaps
+            .iter()
+            .any(|gap| gap.as_str() == ENTRY_PROJECTION_GAP),
+        "Voice of All publishes the entry-projection gap: {:?}",
+        voice_card.gaps
+    );
+    let projection = voice_card
+        .gap_details
+        .iter()
+        .find(|detail| detail.handler == ENTRY_PROJECTION_GAP)
+        .expect("Voice of All carries the entry-projection gap detail");
+    assert_eq!(
+        projection.source_text.as_deref(),
+        Some(
+            "As this permanent enters, the engine cannot yet apply all the changes its own \
+             static abilities make to its characteristics, so an entry consumer may see \
+             unprojected values (CR 614.12)"
+        ),
+        "Voice of All carries the entry-projection explanation: {:?}",
+        projection
     );
 
     let report = report(&db);

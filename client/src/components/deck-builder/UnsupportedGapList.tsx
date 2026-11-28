@@ -27,6 +27,7 @@ export function UnsupportedGapList({ card }: { card: UnsupportedCard }) {
       </div>
       <ul
         data-testid="unsupported-gap-list"
+        role="list"
         aria-labelledby={headingId}
         className="flex flex-col gap-1 break-words"
       >
