@@ -88,6 +88,8 @@
     "unsupportedExpand_other": "{{count}} nicht unterstützte Mechaniken; Details aufklappen",
     "unsupportedTitle_one": "{{count}} nicht unterstützte Mechanik — zum Aufklappen klicken",
     "unsupportedTitle_other": "{{count}} nicht unterstützte Mechaniken — zum Aufklappen klicken",
+    "unsupportedReasonsHeading": "Warum diese Karte nicht unterstützt wird",
+    "parseItemUnsupported": "Nicht unterstützt",
     "moveToTarget": "Ein {{name}} in {{target}} verschieben"
   },
   "grid": {

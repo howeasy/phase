@@ -45,6 +45,7 @@ import {
   setPoolGroupIncluded,
 } from "../../../services/randomPoolSelection";
 import { evaluateDeckCompatibilityBatch } from "../../../services/deckCompatibility";
+import type { DeckCompatibilityResult } from "../../../services/deckCompatibility";
 import { setCachedFeed } from "../../../services/feedPersistence";
 import { loadPreconDeckMap, useDecks } from "../../../hooks/useDecks";
 import type { DeckMap } from "../../../hooks/useDecks";
@@ -73,7 +74,8 @@ vi.mock("../../../hooks/useSetSymbols", () => ({
   useSetSymbol,
 }));
 
-vi.mock("../../../services/deckCompatibility", () => ({
+vi.mock("../../../services/deckCompatibility", async (importOriginal) => ({
+  ...await importOriginal<typeof import("../../../services/deckCompatibility")>(),
   evaluateDeckCompatibilityBatch: vi.fn(),
 }));
 
@@ -434,6 +436,65 @@ describe("MyDecks", () => {
     expect(screen.queryByText("CMD")).not.toBeInTheDocument();
     expect(await screen.findByText("BO3", { selector: "span" })).toBeInTheDocument();
     expect(await screen.findByText("Unknown 1")).toBeInTheDocument();
+  });
+
+  it("describes an unsupported card with the engine's gap clause and handler in the coverage tooltip", async () => {
+    saveDeck("Coverage Deck", { main: [{ name: "Island", count: 60 }], sideboard: [] });
+
+    const fullResult: DeckCompatibilityResult = {
+      standard: { compatible: true, reasons: [] },
+      commander: { compatible: false, reasons: [] },
+      bo3_ready: false,
+      unknown_cards: [],
+      selected_format_compatible: true,
+      selected_format_reasons: [],
+      color_identity: ["U"],
+      color_distribution: [],
+      coverage: {
+        total_unique: 1,
+        supported_unique: 0,
+        unsupported_cards: [{
+          name: "Arcane Adaptation",
+          gaps: ["Replacement:as_enters_projection"],
+          copies: 2,
+          gap_details: [{
+            handler: "Replacement:as_enters_projection",
+            source_text: "As this permanent enters, the engine cannot yet apply all the changes its own static abilities make to its characteristics, so an entry consumer may see unprojected values (CR 614.12)",
+          }],
+        }],
+      },
+    };
+    // The component requests a summary first (a cold summary carries no
+    // coverage) and only then runs the full scan, which delivers each result
+    // through onResult as well as the batch return.
+    vi.mocked(evaluateDeckCompatibilityBatch).mockImplementation(async (decks, options) => {
+      const name = decks[0]?.name ?? "Coverage Deck";
+      if (options?.summaryOnly) {
+        const summary: DeckCompatibilityResult = { ...fullResult };
+        delete summary.coverage;
+        return { [name]: summary };
+      }
+      options?.onResult?.(name, fullResult);
+      return { [name]: fullResult };
+    });
+
+    render(
+      <MyDecks
+        mode="select"
+        selectedFormat="Standard"
+        activeDeckName="Coverage Deck"
+        onSelectDeck={vi.fn()}
+        onConfirmSelection={vi.fn()}
+      />,
+    );
+
+    const tooltip = (await screen.findByTitle(/Unsupported \(1 unique, 2 copies\)/)).getAttribute("title") ?? "";
+    expect(tooltip).toContain(
+      "As this permanent enters, the engine cannot yet apply all the changes its own static abilities make to its characteristics, so an entry consumer may see unprojected values (CR 614.12)",
+    );
+    expect(tooltip).toContain("[Replacement:as_enters_projection]");
+    expect(tooltip).toContain("2x Arcane Adaptation");
+    expect(tooltip).toContain("2 copies");
   });
 
   it("uses supported game formats as deck filters without offering BO3 as a format", async () => {

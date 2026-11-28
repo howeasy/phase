@@ -1,6 +1,7 @@
-import { fireEvent, cleanup, render, screen } from "@testing-library/react";
+import { fireEvent, cleanup, render, screen, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+import type { UnsupportedCard } from "../../../services/deckCompatibility";
 import { MoveList } from "../MoveList";
 
 afterEach(cleanup);
@@ -117,5 +118,59 @@ describe("MoveList", () => {
     expect(
       screen.queryByRole("button", { name: /remove one counterspell/i }),
     ).not.toBeInTheDocument();
+  });
+});
+
+describe("MoveList unsupported coverage lookup", () => {
+  const CLAUSE =
+    "If you control a Demon, each opponent loses 2 life and you gain 2 life.";
+
+  // The engine reports coverage per resolved CardFace, so a Room names only its
+  // front face ("Unholy Annex") while the deck entry keeps the composite
+  // spelling. The row must still surface the engine's explanation.
+  const unsupportedMap: Map<string, UnsupportedCard> = new Map([
+    [
+      "Unholy Annex",
+      {
+        name: "Unholy Annex",
+        gaps: ["Effect:Unimplemented"],
+        copies: 1,
+        oracle_text: "Enchantment — Room",
+        parse_details: [],
+        gap_details: [{ handler: "Effect:Unimplemented", source_text: CLAUSE }],
+      },
+    ],
+  ]);
+
+  it("matches a composite entry to its front-face coverage entry", () => {
+    const { container } = render(
+      <MoveList
+        section="main"
+        title="Main"
+        entries={[
+          { count: 1, name: "Unholy Annex // Ritual Chamber" },
+          { count: 1, name: "Plains" },
+        ]}
+        onMove={vi.fn()}
+        unsupportedMap={unsupportedMap}
+      />,
+    );
+
+    const compositeRow = container.querySelector(
+      '[data-card-name="unholy annex // ritual chamber"]',
+    );
+    expect(compositeRow).not.toBeNull();
+    const row = compositeRow as HTMLElement;
+    fireEvent.click(within(row).getByRole("button", { name: /1 unsupported mechanic/i }));
+    expect(within(row).getByText(CLAUSE)).toBeInTheDocument();
+    expect(within(row).getByText("Effect:Unimplemented")).toBeInTheDocument();
+
+    const plainsRow = container.querySelector('[data-card-name="plains"]');
+    expect(plainsRow).not.toBeNull();
+    const plains = plainsRow as HTMLElement;
+    expect(
+      within(plains).queryByRole("button", { name: /unsupported mechanic/i }),
+    ).not.toBeInTheDocument();
+    expect(within(plains).queryByText(CLAUSE)).not.toBeInTheDocument();
   });
 });

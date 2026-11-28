@@ -11,6 +11,22 @@ function totalCards(entries: DeckEntry[]): number {
   return entries.reduce((sum, e) => sum + e.count, 0);
 }
 
+/** Engine coverage reports a multi-face card under its front-face name
+ *  (`UnsupportedCard.name` is the resolved `CardFace.name`, see
+ *  `crates/engine/src/game/deck_validation.rs::evaluate_deck_coverage`), while
+ *  deck entries keep the canonical composite spelling ("A // B"). Look up the
+ *  whole entry name first, then fall back to its front face. Split only on the
+ *  canonical spaced separator: a glued "//" can be part of a single face name. */
+function unsupportedFor(
+  map: Map<string, UnsupportedCard> | undefined,
+  name: string,
+): UnsupportedCard | undefined {
+  const direct = map?.get(name);
+  if (direct) return direct;
+  const separator = name.indexOf(" // ");
+  return separator === -1 ? undefined : map?.get(name.slice(0, separator));
+}
+
 export interface MoveListProps {
   section: "main" | "sideboard";
   title: string;
@@ -111,7 +127,7 @@ export function MoveList({
             onIncrement={onIncrement}
             canIncrement={canIncrement}
             onCardHover={onCardHover}
-            unsupported={unsupportedMap?.get(entry.name)}
+            unsupported={unsupportedFor(unsupportedMap, entry.name)}
             onChooseArt={onChooseArt}
             onSetAsCommander={onSetAsCommander}
             isCommanderEligible={isCommanderEligible}

@@ -426,6 +426,24 @@ pub struct DeckCompatibilityResult {
 pub struct UnsupportedCard {
     pub name: String,
     pub gaps: Vec<String>,
+    /// The same gaps as `gaps`, in the order and shape the coverage report uses,
+    /// each with the printed clause or unhandled feature that makes the card
+    /// unsupported. The deck editor shows these as the reasons. Built by the
+    /// report's own authority (`CardFaceCoverage::explained_gap_details`), so for
+    /// a face the two are equal except for the deck-only entry-projection gaps
+    /// (`ENTRY_PROJECTION_GAP`, `ENTRY_CONSUMER_GAP`), which the verdict lists
+    /// and the report omits by policy. Those two carry the engine's own
+    /// plain-English explanation of the projection limit, not a printed clause.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub gap_details: Vec<crate::game::coverage::GapDetail>,
+    /// Every deck-request spelling (main, sideboard, commander, signature
+    /// spell, companion) that resolves to this card, sorted and deduplicated,
+    /// byte-exact as requested. The deck editor keys its unsupported-reason
+    /// lookup by the entry spelling the user typed, so a composite, glued or
+    /// alias spelling ("Fire//Ice", "Fire/Ice", "Nazgul") must be listed here
+    /// to reach the same card as its resolved face name.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub entry_names: Vec<String>,
     /// Number of copies of this card in the deck (main + sideboard + commander).
     #[serde(default = "default_one")]
     pub copies: usize,
@@ -3961,9 +3979,17 @@ fn evaluate_deck_coverage(db: &CardDatabase, request: &DeckCompatibilityRequest)
     // entry counted once — not N entries each claiming the full copy count.
     let mut copy_counts: HashMap<String, usize> = HashMap::new();
     let mut unique_names: HashMap<String, &str> = HashMap::new();
+    // Every requested spelling per canonical key, keyed by the same
+    // `canonical_deck_count_key` as `unique_names`, so an unsupported card can
+    // state the spellings the deck editor must key its reason lookup by.
+    let mut spellings: HashMap<String, BTreeSet<String>> = HashMap::new();
     for name in all_deck_cards(request) {
         let canonical = canonical_deck_count_key(db, name);
         *copy_counts.entry(canonical.clone()).or_insert(0) += 1;
+        spellings
+            .entry(canonical.clone())
+            .or_default()
+            .insert(name.to_string());
         unique_names.entry(canonical).or_insert(name);
     }
 
@@ -3992,7 +4018,14 @@ fn evaluate_deck_coverage(db: &CardDatabase, request: &DeckCompatibilityRequest)
                 let copies = copy_counts.get(canonical).copied().unwrap_or(1);
                 unsupported_cards.push(UnsupportedCard {
                     name: face.name.clone(),
+                    entry_names: spellings
+                        .get(canonical)
+                        .map(|names| names.iter().cloned().collect())
+                        .unwrap_or_default(),
                     gaps: coverage.gap_handlers(),
+                    // The census is looked up by the database export key, which
+                    // `lookup_key` resolves for an alias or composite spelling too.
+                    gap_details: coverage.explained_gap_details(&db.lookup_key(name), face),
                     oracle_text: face.oracle_text.clone(),
                     parse_details: coverage.parse_details,
                     copies,

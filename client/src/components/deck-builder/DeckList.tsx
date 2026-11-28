@@ -12,6 +12,10 @@ import type { DeckCompatibilityResult, UnsupportedCard } from "../../services/de
 import type { ScryfallCard } from "../../services/scryfall";
 
 import { MoveList } from "./MoveList";
+import {
+  UnsupportedExpandButton,
+  UnsupportedReasonPanel,
+} from "./CardEntryRow";
 import { mouseHoverPreview } from "./hoverPreview";
 import type { CardHoverHandler } from "./hoverPreview";
 import { groupAccent, groupKey, groupOrder, type GroupMode } from "./deckGrouping";
@@ -57,6 +61,63 @@ interface DeckListProps {
 
 function totalCards(entries: DeckEntry[]): number {
   return entries.reduce((sum, e) => sum + e.count, 0);
+}
+
+interface CommanderRowProps {
+  name: string;
+  unsupported?: UnsupportedCard;
+  scryfallId?: string;
+  onCardHover?: CardHoverHandler;
+  onRemoveCommander?: (name: string) => void;
+}
+
+/** One pinned commander row. A component (not inline JSX) so each row owns its
+ *  expand state; the reason button/panel are the same ones `CardEntryRow`
+ *  renders, so an unsupported commander's explanation reads identically to a
+ *  main-deck row's. The lookup stays by the commander's own spelling —
+ *  `unsupportedMap` carries every `entry_names` spelling the engine reports. */
+function CommanderRow({
+  name,
+  unsupported,
+  scryfallId,
+  onCardHover,
+  onRemoveCommander,
+}: CommanderRowProps) {
+  const { t } = useTranslation(["deck-builder", "common"]);
+  const [expanded, setExpanded] = useState(false);
+  const hoverInfo = { name, scryfallId };
+  return (
+    <div data-card-name={name.toLowerCase()}>
+      <div className="group flex items-center justify-between py-0.5 text-sm">
+        <span
+          className={`text-fuchsia-50 ${onCardHover ? "cursor-pointer" : ""}`}
+          onClick={() => onCardHover?.(hoverInfo)}
+          {...mouseHoverPreview(onCardHover, hoverInfo)}
+        >
+          {name}
+          {unsupported && (
+            <UnsupportedExpandButton
+              unsupported={unsupported}
+              expanded={expanded}
+              onToggle={() => setExpanded((value) => !value)}
+            />
+          )}
+        </span>
+        {onRemoveCommander && (
+          <button
+            type="button"
+            onClick={() => onRemoveCommander(name)}
+            className="ml-2 h-9 w-9 rounded text-red-400 hover:bg-red-900/40 lg:h-7 lg:w-7"
+            aria-label={t("deckList.removeCommander", { name })}
+            title={t("deckList.removeCommander", { name })}
+          >
+            -
+          </button>
+        )}
+      </div>
+      {expanded && unsupported && <UnsupportedReasonPanel unsupported={unsupported} />}
+    </div>
+  );
 }
 
 
@@ -139,9 +200,18 @@ export function DeckList({
   }, [sideboardPolicy, sideTotal, t]);
 
   const unsupportedMap = useMemo(() => {
+    const cards = compatibility?.coverage?.unsupported_cards ?? [];
     const map = new Map<string, UnsupportedCard>();
-    for (const card of compatibility?.coverage?.unsupported_cards ?? []) {
+    // Two passes: every resolved face name first, then the deck's own
+    // spellings. A spelling already keyed by another card's exact name is
+    // never overwritten, so the engine's face-name association always wins.
+    for (const card of cards) {
       map.set(card.name, card);
+    }
+    for (const card of cards) {
+      for (const spelling of card.entry_names ?? []) {
+        if (!map.has(spelling)) map.set(spelling, card);
+      }
     }
     return map;
   }, [compatibility?.coverage?.unsupported_cards]);
@@ -232,35 +302,14 @@ export function DeckList({
             {t("deckList.commanderHeading")}
           </div>
           {commanders.map((name) => (
-            <div
+            <CommanderRow
               key={name}
-              data-card-name={name.toLowerCase()}
-              className="group flex items-center justify-between py-0.5 text-sm"
-            >
-              <span
-                className={`text-fuchsia-50 ${onCardHover ? "cursor-pointer" : ""}`}
-                onClick={() =>
-                  onCardHover?.({ name, scryfallId: cardDataCache.get(name)?.id })
-                }
-                {...mouseHoverPreview(onCardHover, {
-                  name,
-                  scryfallId: cardDataCache.get(name)?.id,
-                })}
-              >
-                {name}
-              </span>
-              {onRemoveCommander && (
-                <button
-                  type="button"
-                  onClick={() => onRemoveCommander(name)}
-                  className="ml-2 h-9 w-9 rounded text-red-400 hover:bg-red-900/40 lg:h-7 lg:w-7"
-                  aria-label={t("deckList.removeCommander", { name })}
-                  title={t("deckList.removeCommander", { name })}
-                >
-                  -
-                </button>
-              )}
-            </div>
+              name={name}
+              unsupported={unsupportedMap.get(name)}
+              scryfallId={cardDataCache.get(name)?.id}
+              onCardHover={onCardHover}
+              onRemoveCommander={onRemoveCommander}
+            />
           ))}
         </div>
       )}

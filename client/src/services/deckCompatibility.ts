@@ -18,12 +18,28 @@ export interface ParsedItem {
   children?: ParsedItem[];
 }
 
+/** One engine-authored reason a card is unsupported: a gap-kind handler
+ *  label (e.g. "Misparse:wrong_object") plus the printed clause or feature
+ *  that produced it, when the engine sends one. Extra engine fields are
+ *  ignored. */
+export interface GapDetail {
+  handler: string;
+  source_text?: string;
+}
+
 export interface UnsupportedCard {
   name: string;
   gaps: string[];
   copies?: number;
   oracle_text?: string;
   parse_details?: ParsedItem[];
+  /** Per-gap detail (handler + clause) from newer engines; older builds omit it. */
+  gap_details?: GapDetail[];
+  /** Every deck-request spelling that resolves to this card, in engine order
+   *  (sorted, byte-exact as requested). Newer engines send it; older builds
+   *  omit it, in which case `MoveList.unsupportedFor`'s composite fallback
+   *  still covers the canonical "A // B" spelling. */
+  entry_names?: string[];
 }
 
 export interface DeckCoverage {
@@ -99,6 +115,18 @@ interface EvaluateOptions {
   onResult?: (name: string, result: DeckCompatibilityResult) => void;
   onStatus?: (status: "starting-worker" | "loading-card-database" | "checking-deck", name?: string) => void;
   playerCount?: number;
+}
+
+/** Plain-text one-liner for tooltips: joins engine-authored gap strings
+ *  verbatim — no game logic. Uses gap_details (clause + handler) when the
+ *  engine sent it, falling back to the plain handler labels in `gaps`. */
+export function describeUnsupportedGaps(card: UnsupportedCard): string {
+  if (card.gap_details && card.gap_details.length > 0) {
+    return card.gap_details
+      .map((gap) => (gap.source_text ? `${gap.source_text} [${gap.handler}]` : `[${gap.handler}]`))
+      .join("; ");
+  }
+  return card.gaps.join(", ");
 }
 
 const fullCompatibilityCache = new Map<string, DeckCompatibilityResult>();

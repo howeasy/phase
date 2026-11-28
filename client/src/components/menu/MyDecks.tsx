@@ -42,6 +42,7 @@ import { ManaSymbol } from "../mana/ManaSymbol";
 import { useCardImage } from "../../hooks/useCardImage";
 import type { DeckVisualIdentity } from "../../services/deckParser";
 import {
+  describeUnsupportedGaps,
   evaluateDeckCompatibilityBatch,
   type DeckCompatibilityResult,
 } from "../../services/deckCompatibility";
@@ -467,7 +468,7 @@ const DeckTile = memo(function DeckTile({ deckName, isActive, compatibility, onC
                 title={t("deckTile.unsupportedTitle", {
                   unique: unsupported_cards.length,
                   copies: totalCopiesAffected,
-                  cards: unsupported_cards.map((c) => `${(c.copies ?? 1) > 1 ? `${c.copies}x ` : ""}${c.name}: ${c.gaps.join(", ")}`).join("\n"),
+                  cards: unsupported_cards.map((c) => `${(c.copies ?? 1) > 1 ? `${c.copies}x ` : ""}${c.name}: ${describeUnsupportedGaps(c)}`).join("\n"),
                 })}
                 onMouseEnter={() => setCoverageHovered(true)}
                 onMouseLeave={() => setCoverageHovered(false)}

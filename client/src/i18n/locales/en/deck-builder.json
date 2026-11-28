@@ -88,7 +88,9 @@
     "unsupportedExpand_one": "{{count}} unsupported mechanic; expand details",
     "unsupportedExpand_other": "{{count}} unsupported mechanics; expand details",
     "unsupportedTitle_one": "{{count}} unsupported mechanic — click to expand",
-    "unsupportedTitle_other": "{{count}} unsupported mechanics — click to expand"
+    "unsupportedTitle_other": "{{count}} unsupported mechanics — click to expand",
+    "unsupportedReasonsHeading": "Why this card is unsupported",
+    "parseItemUnsupported": "Unsupported"
   },
   "grid": {
     "allFormats": "All",

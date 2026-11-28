@@ -372,7 +372,9 @@ pub enum ParseCategory {
 pub struct GapDetail {
     /// Handler key in "Category:label" format (e.g., "Effect:unknown", "Trigger:ChangesZone").
     pub handler: String,
-    /// The Oracle text fragment that produced this gap.
+    /// The Oracle text fragment that produced this gap; for the deck-only
+    /// entry-projection labels, which no printed clause produces, the engine's
+    /// plain-English explanation instead.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source_text: Option<String>,
     /// Typed reasons for this gap, one per contributing verdict. Omitted from the JSON
@@ -7855,8 +7857,7 @@ pub fn analyze_coverage(card_db: &CardDatabase) -> CoverageSummary {
             &valid_subtypes,
         );
         let supported = coverage.is_supported();
-        let mut gap_details = public_gap_details(&coverage.gaps);
-        explain_blank_gaps(key, face, &coverage.parse_details, &mut gap_details);
+        let gap_details = coverage.explained_gap_details(key, face);
         let gap_count = gap_details.len();
 
         for gap in &coverage.gaps {
@@ -8327,6 +8328,17 @@ impl CardFaceCoverage {
     pub fn gap_handlers(&self) -> Vec<String> {
         self.gaps.iter().map(|gap| gap.handler.clone()).collect()
     }
+
+    /// The gaps in the published-report shape, each naming WHAT is unsupported:
+    /// the printed clause, the census-cited misparse clauses, or the unhandled
+    /// feature ([`explain_blank_gaps`]). `key` is the face's export key, the one
+    /// the confirmed-misparse list is looked up by. Shared by the coverage report
+    /// and the deck-compatibility verdict, so both say the same thing.
+    pub fn explained_gap_details(&self, key: &str, face: &CardFace) -> Vec<GapDetail> {
+        let mut details = public_gap_details(&self.gaps);
+        explain_blank_gaps(key, face, &self.parse_details, &mut details);
+        details
+    }
 }
 
 /// Whether the CR 614.12 entry-projection check participates in a coverage verdict.
@@ -8610,13 +8622,45 @@ fn clause_from_lines<'a>(lines: impl Iterator<Item = &'a str>) -> Option<String>
 }
 
 /// The text that says what a gap with no recorded source fragment concerns, most
-/// specific first: the printed lines a silent drop left uncovered; the phrase or
-/// feature its own diagnosis names; the printed line holding the text in its
-/// handler's argument (`Static:Unrecognized(...)`) or its label (`Keyword:X`);
-/// and last the handler itself, so the text is never empty.
+/// specific first: the engine's plain-English explanation for the deck-only
+/// entry-projection labels (they name no printed clause); the printed lines a
+/// silent drop left uncovered, with die-result table rows left out (the parse
+/// may handle them, but in an order or form the engine does not run faithfully,
+/// so naming one, or calling it unhandled, would show a false reason) — when
+/// nothing but table rows was dropped, a note says they are not applied as
+/// written; the phrase or feature its own diagnosis names;
+/// the printed line holding the text in its handler's argument
+/// (`Static:Unrecognized(...)`) or its label (`Keyword:X`); and last the
+/// handler itself, so the text is never empty.
 fn blank_gap_text(gap: &GapDetail, lines: &[String], dropped: &[&str]) -> String {
+    // The report never emits these two deck-only labels, so nothing else here
+    // has ever described them; say what the projection limit means.
+    if gap.handler == ENTRY_PROJECTION_GAP {
+        return "This permanent makes a choice as it enters (such as a creature type) and has \
+                static abilities that may write the chosen value into a characteristic (such \
+                as adding the chosen creature type to creatures you control, or a chosen \
+                colour's protection), a change the engine's entry projection cannot yet \
+                prove, so an entry consumer may see unprojected values (CR 614.12)"
+            .to_string();
+    }
+    if gap.handler == ENTRY_CONSUMER_GAP {
+        return "This permanent's entry replacement or enters-with-counters static reads a characteristic of an entering permanent (such as power or toughness) that the engine's entry projection does not yet apply, so an entrant's own static abilities may change it unseen (CR 614.12)".to_string();
+    }
+    // A die-result table row is reported uncovered even when the parser
+    // attributed it in the wrong order, so naming one would show a false
+    // reason, and calling it unhandled would be equally false. Show the real
+    // dropped clauses when there are any; only when the drop is nothing but
+    // table rows does the note stand in for them.
     if gap.handler.starts_with("SilentDrop:") && !dropped.is_empty() {
-        return dropped.join(" / ");
+        let (table_rows, others): (Vec<&str>, Vec<&str>) = dropped
+            .iter()
+            .copied()
+            .partition(|&line| is_die_result_row(line));
+        if !others.is_empty() {
+            return others.join(" / ");
+        }
+        debug_assert!(!table_rows.is_empty(), "non-empty drop has no lines");
+        return "A printed result-table row is not applied as written: the parse may handle it, but in an order or form the engine does not run faithfully".to_string();
     }
     if let Some(phrase) = gap.diagnoses.iter().find_map(GapDiagnosis::phrase) {
         return phrase.to_string();
@@ -8652,11 +8696,23 @@ fn blank_gap_text(gap: &GapDetail, lines: &[String], dropped: &[&str]) -> String
     }
 }
 
+/// Whether `line` is a die-result result-table row written in pipe form: a line
+/// with a " | " separator whose left side is neither an attraction "N—M" row
+/// nor a level-up "N+" / "N-M" row, so the pipe separates a printed die result
+/// from its instruction (Druid of the Emerald Grove's "9 or less | …").
+fn is_die_result_row(line: &str) -> bool {
+    if !line.contains(" | ") {
+        return false;
+    }
+    let lower = line.to_lowercase();
+    !is_attraction_line(&lower) && !is_level_effect_line(&lower)
+}
+
 /// Show WHAT a confirmed misparse got wrong, in the standard gap shape: the
 /// census-cited clauses become the gap's `source_text` and one typed
 /// `GapDiagnosis::Misparse` each. The runtime gap label stays prose-free
-/// (`MisparseClass::handler`); only the published report carries the clauses,
-/// looked up by the exact export key.
+/// (`MisparseClass::handler`). The coverage report and the deck compatibility
+/// verdict both carry the clauses, looked up by the exact export key.
 fn attach_misparse_clauses(key: &str, face: &CardFace, gap_details: &mut [GapDetail]) {
     let Some(class) = face.metadata.confirmed_misparse else {
         return;
@@ -29905,6 +29961,47 @@ mod blank_gap_text_tests {
     }
 
     #[test]
+    fn silent_drop_does_not_name_a_die_result_table_row() {
+        // A table row the parser did handle in the wrong order reads uncovered,
+        // but naming it would claim a clause is unhandled when it is not.
+        let text = blank_gap_text(
+            &gap("SilentDrop:1_of_2", vec![]),
+            &lines(),
+            &["9 or less | Put those cards into your hand, then shuffle."],
+        );
+        assert_eq!(
+            text,
+            "A printed result-table row is not applied as written: the parse may handle it, but in an order or form the engine does not run faithfully"
+        );
+    }
+
+    #[test]
+    fn silent_drop_shows_real_clauses_beside_a_table_row() {
+        // The table row is omitted, but the other dropped clause is still the
+        // reason the gap exists and must be named.
+        let text = blank_gap_text(
+            &gap("SilentDrop:1_of_2", vec![]),
+            &lines(),
+            &[
+                "9 or less | Put those cards into your hand, then shuffle.",
+                "Flying",
+            ],
+        );
+        assert_eq!(text, "Flying");
+    }
+
+    #[test]
+    fn silent_drop_names_an_attraction_row() {
+        // An attraction row is not a die-result row, so it keeps its line.
+        let text = blank_gap_text(
+            &gap("SilentDrop:1_of_2", vec![]),
+            &lines(),
+            &["2\u{2014}9 | Gain 2 life."],
+        );
+        assert_eq!(text, "2\u{2014}9 | Gain 2 life.");
+    }
+
+    #[test]
     fn resolver_gap_names_its_family_and_feature() {
         let diagnosis = GapDiagnosis::Resolver {
             family: ResolverFeatureFamily::StaticCondition,
@@ -29931,6 +30028,18 @@ mod blank_gap_text_tests {
     fn handler_label_is_matched_case_insensitively_against_lines() {
         let text = blank_gap_text(&gap("Keyword:flying", vec![]), &lines(), &[]);
         assert_eq!(text, "Flying");
+    }
+
+    #[test]
+    fn deck_only_entry_gaps_carry_a_specific_explanation() {
+        for handler in [ENTRY_PROJECTION_GAP, ENTRY_CONSUMER_GAP] {
+            let text = blank_gap_text(&gap(handler, vec![]), &lines(), &[]);
+            assert!(text.contains("CR 614.12"), "{handler}: {text}");
+            assert!(
+                !text.contains(handler),
+                "{handler} must not fall back to its handler label: {text}"
+            );
+        }
     }
 
     #[test]
