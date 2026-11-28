@@ -446,4 +446,48 @@ describe("DeckList unsupported card reasons", () => {
       }),
     ).toBeNull();
   });
+
+  it("keeps a card's own reason when another card aliases its exact name", () => {
+    // Two-pass unsupportedMap: every exact name is keyed before any entry_names
+    // spelling, so a face name is never handed another card's gap. Lim-Dûl's
+    // Paladin (B) lists Unholy Annex's exact name as an alias; with B listed
+    // first, a first-write single pass over the cards would key "Unholy Annex"
+    // to the Paladin. The mirrored order below pins the other naive shape,
+    // last-write, which would let B's alias overwrite A when B is listed second.
+    const annexCard = {
+      name: "Unholy Annex",
+      gaps: [annexGap.handler],
+      gap_details: [annexGap],
+      entry_names: ["Unholy Annex"],
+    };
+    const paladinCard = {
+      name: "Lim-Dûl's Paladin",
+      gaps: [paladinGap.handler],
+      gap_details: [paladinGap],
+      entry_names: ["Unholy Annex", "Lim-Dul's Paladin", "Lim-Dûl's Paladin"],
+    };
+    const names = ["Unholy Annex", "Lim-Dûl's Paladin"];
+
+    const paladinFirst = renderWithCompatibility(
+      compatibilityResult({
+        total_unique: 2,
+        supported_unique: 0,
+        unsupported_cards: [paladinCard, annexCard],
+      }),
+      names,
+    );
+    expectReasons(paladinFirst, "Unholy Annex", /each opponent loses 2 life/i);
+    expectReasons(paladinFirst, "Lim-Dûl's Paladin", /assigns no combat damage/i);
+
+    const annexFirst = renderWithCompatibility(
+      compatibilityResult({
+        total_unique: 2,
+        supported_unique: 0,
+        unsupported_cards: [annexCard, paladinCard],
+      }),
+      names,
+    );
+    expectReasons(annexFirst, "Unholy Annex", /each opponent loses 2 life/i);
+    expectReasons(annexFirst, "Lim-Dûl's Paladin", /assigns no combat damage/i);
+  });
 });
