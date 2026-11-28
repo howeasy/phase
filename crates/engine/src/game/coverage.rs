@@ -8625,7 +8625,9 @@ fn clause_from_lines<'a>(lines: impl Iterator<Item = &'a str>) -> Option<String>
 /// specific first: the engine's plain-English explanation for the deck-only
 /// entry-projection labels (they name no printed clause); the printed lines a
 /// silent drop left uncovered, unless one of them is a die-result table row
-/// (naming it would show a false reason); the phrase or feature its own diagnosis names;
+/// (the parse may handle it, but in an order or form the engine does not run
+/// faithfully, so naming it, or calling it unhandled, would show a false reason);
+/// the phrase or feature its own diagnosis names;
 /// the printed line holding the text in its handler's argument
 /// (`Static:Unrecognized(...)`) or its label (`Keyword:X`); and last the
 /// handler itself, so the text is never empty.
@@ -8640,11 +8642,12 @@ fn blank_gap_text(gap: &GapDetail, lines: &[String], dropped: &[&str]) -> String
     }
     // A die-result table row is reported uncovered even when the parser
     // attributed it in the wrong order, so naming it would show a false reason;
-    // leave it to the fallbacks below, which name the handler instead.
-    if gap.handler.starts_with("SilentDrop:")
-        && !dropped.is_empty()
-        && !dropped.iter().any(|line| line.contains(" | "))
-    {
+    // say instead that it is not applied as written, because calling it
+    // unhandled would be equally false.
+    if gap.handler.starts_with("SilentDrop:") && !dropped.is_empty() {
+        if dropped.iter().any(|line| line.contains(" | ")) {
+            return "A printed result-table row is not applied as written: the parse may handle it, but in an order or form the engine does not run faithfully".to_string();
+        }
         return dropped.join(" / ");
     }
     if let Some(phrase) = gap.diagnoses.iter().find_map(GapDiagnosis::phrase) {
@@ -29942,7 +29945,10 @@ mod blank_gap_text_tests {
             &lines(),
             &["9 or less | Put those cards into your hand, then shuffle."],
         );
-        assert_eq!(text, "No engine handler for SilentDrop:1_of_2");
+        assert_eq!(
+            text,
+            "A printed result-table row is not applied as written: the parse may handle it, but in an order or form the engine does not run faithfully"
+        );
     }
 
     #[test]

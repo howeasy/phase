@@ -934,6 +934,12 @@ fn deck_compatibility_gap_details_name_every_gap_source() {
                     "{name}: the die-table row the parser did handle must not be named \
                      as the dropped clause: {text}"
                 );
+                assert_eq!(
+                    text,
+                    "A printed result-table row is not applied as written: the parse may \
+                     handle it, but in an order or form the engine does not run faithfully",
+                    "{name}: the die-table gap must say the row is not applied as written"
+                );
             }
         }
     }
