@@ -8624,10 +8624,11 @@ fn clause_from_lines<'a>(lines: impl Iterator<Item = &'a str>) -> Option<String>
 /// The text that says what a gap with no recorded source fragment concerns, most
 /// specific first: the engine's plain-English explanation for the deck-only
 /// entry-projection labels (they name no printed clause); the printed lines a
-/// silent drop left uncovered, unless one of them is a die-result table row
-/// (the parse may handle it, but in an order or form the engine does not run
-/// faithfully, so naming it, or calling it unhandled, would show a false reason);
-/// the phrase or feature its own diagnosis names;
+/// silent drop left uncovered, with die-result table rows left out (the parse
+/// may handle them, but in an order or form the engine does not run faithfully,
+/// so naming one, or calling it unhandled, would show a false reason) — when
+/// nothing but table rows was dropped, a note says they are not applied as
+/// written; the phrase or feature its own diagnosis names;
 /// the printed line holding the text in its handler's argument
 /// (`Static:Unrecognized(...)`) or its label (`Keyword:X`); and last the
 /// handler itself, so the text is never empty.
@@ -8641,14 +8642,20 @@ fn blank_gap_text(gap: &GapDetail, lines: &[String], dropped: &[&str]) -> String
         return "This permanent's entry replacement or enters-with-counters static reads a characteristic of an entering permanent (such as power or toughness) that the engine's entry projection does not yet apply, so an entrant's own static abilities may change it unseen (CR 614.12)".to_string();
     }
     // A die-result table row is reported uncovered even when the parser
-    // attributed it in the wrong order, so naming it would show a false reason;
-    // say instead that it is not applied as written, because calling it
-    // unhandled would be equally false.
+    // attributed it in the wrong order, so naming one would show a false
+    // reason, and calling it unhandled would be equally false. Show the real
+    // dropped clauses when there are any; only when the drop is nothing but
+    // table rows does the note stand in for them.
     if gap.handler.starts_with("SilentDrop:") && !dropped.is_empty() {
-        if dropped.iter().any(|line| line.contains(" | ")) {
-            return "A printed result-table row is not applied as written: the parse may handle it, but in an order or form the engine does not run faithfully".to_string();
+        let (table_rows, others): (Vec<&str>, Vec<&str>) = dropped
+            .iter()
+            .copied()
+            .partition(|&line| is_die_result_row(line));
+        if !others.is_empty() {
+            return others.join(" / ");
         }
-        return dropped.join(" / ");
+        debug_assert!(!table_rows.is_empty(), "non-empty drop has no lines");
+        return "A printed result-table row is not applied as written: the parse may handle it, but in an order or form the engine does not run faithfully".to_string();
     }
     if let Some(phrase) = gap.diagnoses.iter().find_map(GapDiagnosis::phrase) {
         return phrase.to_string();
@@ -8682,6 +8689,18 @@ fn blank_gap_text(gap: &GapDetail, lines: &[String], dropped: &[&str]) -> String
         Some(argument) => format!("{argument} (no engine handler)"),
         None => format!("No engine handler for {}", gap.handler),
     }
+}
+
+/// Whether `line` is a die-result result-table row written in pipe form: a line
+/// with a " | " separator whose left side is neither an attraction "N—M" row
+/// nor a level-up "N+" / "N-M" row, so the pipe separates a printed die result
+/// from its instruction (Druid of the Emerald Grove's "9 or less | …").
+fn is_die_result_row(line: &str) -> bool {
+    if !line.contains(" | ") {
+        return false;
+    }
+    let lower = line.to_lowercase();
+    !is_attraction_line(&lower) && !is_level_effect_line(&lower)
 }
 
 /// Show WHAT a confirmed misparse got wrong, in the standard gap shape: the
@@ -29949,6 +29968,32 @@ mod blank_gap_text_tests {
             text,
             "A printed result-table row is not applied as written: the parse may handle it, but in an order or form the engine does not run faithfully"
         );
+    }
+
+    #[test]
+    fn silent_drop_shows_real_clauses_beside_a_table_row() {
+        // The table row is omitted, but the other dropped clause is still the
+        // reason the gap exists and must be named.
+        let text = blank_gap_text(
+            &gap("SilentDrop:1_of_2", vec![]),
+            &lines(),
+            &[
+                "9 or less | Put those cards into your hand, then shuffle.",
+                "Flying",
+            ],
+        );
+        assert_eq!(text, "Flying");
+    }
+
+    #[test]
+    fn silent_drop_names_an_attraction_row() {
+        // An attraction row is not a die-result row, so it keeps its line.
+        let text = blank_gap_text(
+            &gap("SilentDrop:1_of_2", vec![]),
+            &lines(),
+            &["2\u{2014}9 | Gain 2 life."],
+        );
+        assert_eq!(text, "2\u{2014}9 | Gain 2 life.");
     }
 
     #[test]
