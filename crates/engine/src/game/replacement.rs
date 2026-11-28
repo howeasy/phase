@@ -14473,8 +14473,20 @@ fn apply_single_replacement(
                             to,
                             cause,
                             library_placement,
+                            enter_with_counters,
                             ..
                         } => {
+                            // CR 614.6 + CR 614.1c + CR 122.6a: an event replaced by
+                            // a move to another zone never happens, so a "enters with
+                            // ... counters" entry modifier is never applied — the
+                            // object never enters the battlefield. A battlefield-bound
+                            // event's counters are entry counters by definition;
+                            // counters an instruction puts on a non-battlefield
+                            // destination ("exile it with three time counters") have
+                            // `to` outside the battlefield already and are untouched.
+                            if *to == Zone::Battlefield && zone != Zone::Battlefield {
+                                enter_with_counters.clear();
+                            }
                             *to = zone;
                             // CR 614.6: the replacement destination supersedes the
                             // original placement, even when both name Library.
@@ -14575,10 +14587,18 @@ fn apply_single_replacement(
                 // CR 614.1c: Applied branch carries ETB counter data; add to the zone change.
                 if !modifiers.etb_counters.is_empty() {
                     match &mut new_event {
+                        // CR 614.6 + CR 122.6a: these are entry counters, so an
+                        // event this same replacement redirected away from the
+                        // battlefield never receives them — it never enters.
                         ProposedEvent::ZoneChange {
+                            to,
                             enter_with_counters,
                             ..
-                        } => enter_with_counters.extend(modifiers.etb_counters.iter().cloned()),
+                        } => {
+                            if *to == Zone::Battlefield {
+                                enter_with_counters.extend(modifiers.etb_counters.iter().cloned());
+                            }
+                        }
                         ProposedEvent::TokenEntry {
                             enter_with_counters,
                             ..
