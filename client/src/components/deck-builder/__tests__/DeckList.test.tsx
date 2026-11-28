@@ -1,7 +1,8 @@
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { GameFormat } from "../../../adapter/types";
+import type { DeckCompatibilityResult } from "../../../services/deckCompatibility";
 import { DeckList } from "../DeckList";
 
 const mocks = vi.hoisted(() => ({
@@ -246,5 +247,150 @@ describe("DeckList export", () => {
 
     expect(screen.getByRole("button", { name: "Import" })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /export/i })).not.toBeInTheDocument();
+  });
+});
+
+describe("DeckList unsupported card reasons", () => {
+  const annexGap = {
+    handler: "Misparse:wrong_player",
+    source_text: "If you control a Demon, each opponent loses 2 life and you gain 2 life.",
+  };
+  const nazgulGap = {
+    handler: "Misparse:wrong_count",
+    source_text: "Nazgûl's reason text.",
+  };
+
+  function compatibilityResult(
+    coverage: DeckCompatibilityResult["coverage"],
+  ): DeckCompatibilityResult {
+    return {
+      standard: { compatible: true, reasons: [] },
+      commander: { compatible: true, reasons: [] },
+      bo3_ready: true,
+      unknown_cards: [],
+      selected_format_reasons: [],
+      color_identity: [],
+      color_distribution: [],
+      coverage,
+    };
+  }
+
+  const withEntryNames = compatibilityResult({
+    total_unique: 6,
+    supported_unique: 4,
+    unsupported_cards: [
+      {
+        name: "Unholy Annex",
+        gaps: [annexGap.handler],
+        gap_details: [annexGap],
+        entry_names: [
+          "Unholy Annex",
+          "Unholy Annex // Ritual Chamber",
+          "Unholy Annex//Ritual Chamber",
+          "Unholy Annex/Ritual Chamber",
+        ],
+      },
+      {
+        name: "Nazgûl",
+        gaps: [nazgulGap.handler],
+        gap_details: [nazgulGap],
+        entry_names: ["Nazgul", "Nazgûl"],
+      },
+    ],
+  });
+
+  function renderWithCompatibility(
+    compatibility: DeckCompatibilityResult,
+    names: string[],
+  ): HTMLElement {
+    const { container } = render(
+      <DeckList
+        deck={{ main: names.map((name) => ({ name, count: 1 })), sideboard: [] }}
+        onRemoveCard={vi.fn()}
+        onIncrementCard={vi.fn()}
+        canIncrementCard={() => true}
+        onMoveCard={vi.fn()}
+        onImport={vi.fn()}
+        compatibility={compatibility}
+        cardDataCache={new Map()}
+        groupMode="type"
+      />,
+    );
+    return container;
+  }
+
+  function row(container: HTMLElement, name: string): HTMLElement {
+    const element = container.querySelector(`[data-card-name="${name.toLowerCase()}"]`);
+    if (!element) throw new Error(`the row for ${name} is rendered`);
+    return element as HTMLElement;
+  }
+
+  function expectReasons(container: HTMLElement, name: string, reason: RegExp): void {
+    const element = row(container, name);
+    const expand = within(element).getByRole("button", { name: /expand details/i });
+    fireEvent.click(expand);
+    expect(within(element).getByText(reason)).toBeInTheDocument();
+  }
+
+  it("keys reasons by every entry spelling the engine reports", () => {
+    // Glued "A//B", slash "A/B" and the accent-less alias fail without the
+    // engine's entry_names: the fallback splits only the spaced separator and
+    // knows only the resolved face name. The plain and spaced rows are the
+    // positive controls, and the Lightning Bolt row is the reach guard that
+    // the others are not rendering a reason by accident.
+    const container = renderWithCompatibility(withEntryNames, [
+      "Unholy Annex",
+      "Unholy Annex // Ritual Chamber",
+      "Unholy Annex//Ritual Chamber",
+      "Unholy Annex/Ritual Chamber",
+      "Nazgul",
+      "Lightning Bolt",
+    ]);
+
+    for (const spelling of [
+      "Unholy Annex",
+      "Unholy Annex // Ritual Chamber",
+      "Unholy Annex//Ritual Chamber",
+      "Unholy Annex/Ritual Chamber",
+    ]) {
+      expectReasons(container, spelling, /each opponent loses 2 life/i);
+    }
+    expectReasons(container, "Nazgul", /Nazgûl's reason text/i);
+
+    expect(
+      within(row(container, "Lightning Bolt")).queryByRole("button", {
+        name: /expand details/i,
+      }),
+    ).toBeNull();
+  });
+
+  it("still resolves the canonical spaced composite on an older engine", () => {
+    // Older engines omit entry_names; 393's fallback must keep the canonical
+    // "A // B" spelling working, and nothing else.
+    const olderEngine = compatibilityResult({
+      total_unique: 2,
+      supported_unique: 1,
+      unsupported_cards: [
+        {
+          name: "Unholy Annex",
+          gaps: [annexGap.handler],
+          gap_details: [annexGap],
+        },
+      ],
+    });
+    const container = renderWithCompatibility(olderEngine, [
+      "Unholy Annex",
+      "Unholy Annex // Ritual Chamber",
+      "Unholy Annex//Ritual Chamber",
+    ]);
+
+    for (const spelling of ["Unholy Annex", "Unholy Annex // Ritual Chamber"]) {
+      expectReasons(container, spelling, /each opponent loses 2 life/i);
+    }
+    expect(
+      within(row(container, "Unholy Annex//Ritual Chamber")).queryByRole("button", {
+        name: /expand details/i,
+      }),
+    ).toBeNull();
   });
 });

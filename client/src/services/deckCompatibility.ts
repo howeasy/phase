@@ -35,6 +35,11 @@ export interface UnsupportedCard {
   parse_details?: ParsedItem[];
   /** Per-gap detail (handler + clause) from newer engines; older builds omit it. */
   gap_details?: GapDetail[];
+  /** Every deck-request spelling that resolves to this card, in engine order
+   *  (sorted, byte-exact as requested). Newer engines send it; older builds
+   *  omit it, in which case `MoveList.unsupportedFor`'s composite fallback
+   *  still covers the canonical "A // B" spelling. */
+  entry_names?: string[];
 }
 
 export interface DeckCoverage {

@@ -139,9 +139,18 @@ export function DeckList({
   }, [sideboardPolicy, sideTotal, t]);
 
   const unsupportedMap = useMemo(() => {
+    const cards = compatibility?.coverage?.unsupported_cards ?? [];
     const map = new Map<string, UnsupportedCard>();
-    for (const card of compatibility?.coverage?.unsupported_cards ?? []) {
+    // Two passes: every resolved face name first, then the deck's own
+    // spellings. A spelling already keyed by another card's exact name is
+    // never overwritten, so the engine's face-name association always wins.
+    for (const card of cards) {
       map.set(card.name, card);
+    }
+    for (const card of cards) {
+      for (const spelling of card.entry_names ?? []) {
+        if (!map.has(spelling)) map.set(spelling, card);
+      }
     }
     return map;
   }, [compatibility?.coverage?.unsupported_cards]);

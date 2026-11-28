@@ -1035,6 +1035,36 @@ fn unsupported_card_gap_details_are_additive_on_the_wire() {
     assert_eq!(reserialized["name"], "Hinder");
 }
 
+/// `entry_names` is the spelling list the deck editor keys by: absent from a
+/// legacy payload (deserialises empty), omitted from the wire while empty, and
+/// present as an array once the engine fills it.
+#[test]
+fn unsupported_card_entry_names_are_additive_on_the_wire() {
+    let legacy = serde_json::json!({
+        "name": "Hinder",
+        "gaps": ["Swallow:Replacement_Instead"],
+    });
+    let mut card: UnsupportedCard =
+        serde_json::from_value(legacy).expect("the pre-entry_names shape still deserializes");
+    assert!(card.entry_names.is_empty());
+    let wire = serde_json::to_value(&card).expect("UnsupportedCard serializes");
+    assert!(
+        wire.get("entry_names").is_none(),
+        "an empty entry_names list is omitted: {wire}"
+    );
+
+    card.entry_names = vec!["Hinder".to_string(), "Hinder//A".to_string()];
+    let wire = serde_json::to_value(&card).expect("UnsupportedCard serializes");
+    assert_eq!(
+        wire["entry_names"],
+        serde_json::json!(["Hinder", "Hinder//A"]),
+        "the requested spellings reach the wire: {wire}"
+    );
+    let round_trip: UnsupportedCard =
+        serde_json::from_value(wire).expect("entry_names round-trips");
+    assert_eq!(round_trip.entry_names, card.entry_names);
+}
+
 // ---------------------------------------------------------------------------
 // Deck compatibility gap details: printed-card witnesses
 //
@@ -1082,6 +1112,18 @@ fn unsupported_named<'a>(coverage: &'a DeckCoverage, name: &str) -> &'a Unsuppor
                     .collect::<Vec<_>>()
             )
         })
+}
+
+/// The card's JSON with the spelling-dependent `entry_names` removed, so two
+/// verdicts for one card under different spellings can be compared on every
+/// other field.
+fn without_entry_names(card: &UnsupportedCard) -> Value {
+    let mut value = serde_json::to_value(card).expect("UnsupportedCard serializes");
+    value
+        .as_object_mut()
+        .expect("UnsupportedCard serializes as an object")
+        .remove("entry_names");
+    value
 }
 
 fn printed_oracle(db: &CardDatabase, name: &str) -> String {
@@ -1243,21 +1285,41 @@ fn deck_compatibility_census_clauses_survive_alias_and_composite_spellings() {
         MisparseClass::WrongPlayer,
         &ANNEX_CLAUSES,
     );
+    assert_eq!(
+        exact_paladin.unsupported_cards[0].entry_names,
+        ["Lim-Dûl's Paladin"],
+        "the exact deck states its own spelling"
+    );
+    assert_eq!(
+        exact_annex.unsupported_cards[0].entry_names,
+        ["Unholy Annex"],
+        "the exact deck states its own spelling"
+    );
 
     // Unaccented alias: `fold_card_name_key` resolves it to the accented key.
     let alias = verdict_coverage(&db, &["Lim-Dul's Paladin"]);
     assert_eq!(alias.unsupported_cards.len(), 1);
     assert_eq!(
-        serde_json::to_value(&alias.unsupported_cards[0]).unwrap(),
-        serde_json::to_value(&exact_paladin.unsupported_cards[0]).unwrap(),
+        alias.unsupported_cards[0].entry_names,
+        ["Lim-Dul's Paladin"],
+        "an alias deck states its own spelling"
+    );
+    assert_eq!(
+        without_entry_names(&alias.unsupported_cards[0]),
+        without_entry_names(&exact_paladin.unsupported_cards[0]),
         "an alias spelling publishes the same unsupported card"
     );
     // Composite spelling: the front face names the stored face.
     let composite = verdict_coverage(&db, &["Unholy Annex // Ritual Chamber"]);
     assert_eq!(composite.unsupported_cards.len(), 1);
     assert_eq!(
-        serde_json::to_value(&composite.unsupported_cards[0]).unwrap(),
-        serde_json::to_value(&exact_annex.unsupported_cards[0]).unwrap(),
+        composite.unsupported_cards[0].entry_names,
+        ["Unholy Annex // Ritual Chamber"],
+        "a composite deck states its own spelling"
+    );
+    assert_eq!(
+        without_entry_names(&composite.unsupported_cards[0]),
+        without_entry_names(&exact_annex.unsupported_cards[0]),
         "a composite spelling publishes the same unsupported card"
     );
 
@@ -1280,6 +1342,76 @@ fn deck_compatibility_census_clauses_survive_alias_and_composite_spellings() {
     assert_eq!(unknown.total_unique, 1);
     assert_eq!(unknown.unsupported_cards.len(), 1);
     assert_eq!(unknown.unsupported_cards[0].name, "Lim-Dûl's Paladin");
+}
+
+/// Every spelling the engine's name resolution accepts reaches one unsupported
+/// card, and that card states each requested spelling so the deck editor can
+/// key its reason lookup by the entry the user typed. The four spellings are
+/// the whole name, the spaced composite, the glued composite and the
+/// single-slash composite — the route is resolution, not layout. Ritual
+/// Chamber, the Room's other printed door, is supported, so its absence below
+/// is a budget result and not an upstream short circuit.
+#[test]
+fn deck_compatibility_entry_names_cover_every_spelling_of_a_double_named_card() {
+    let db = printed_pool(&["unholy annex", "ritual chamber"]);
+    let spellings = [
+        "Unholy Annex",
+        "Unholy Annex // Ritual Chamber",
+        "Unholy Annex//Ritual Chamber",
+        "Unholy Annex/Ritual Chamber",
+    ];
+    let deck: Vec<&str> = spellings.into_iter().chain(["Ritual Chamber"]).collect();
+    let coverage = verdict_coverage(&db, &deck);
+    // Reach: the supported door resolved and counted in the same coverage.
+    assert_eq!((coverage.total_unique, coverage.supported_unique), (2, 1));
+    assert!(
+        !coverage
+            .unsupported_cards
+            .iter()
+            .any(|card| card.name == "Ritual Chamber"),
+        "Ritual Chamber is supported, so it carries no reason row"
+    );
+    assert_eq!(coverage.unsupported_cards.len(), 1);
+    let annex = unsupported_named(&coverage, "Unholy Annex");
+    assert_eq!(annex.copies, 4, "four listing rows, one card");
+    let expected: Vec<String> = spellings
+        .iter()
+        .map(|spelling| spelling.to_string())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    assert_eq!(
+        annex.entry_names, expected,
+        "every requested spelling, sorted, byte-exact"
+    );
+}
+
+/// The alias route: an unaccented alias, the exact accented name, and a
+/// composite whose front segment is the alias all resolve to one card, and the
+/// unsupported row lists all three requested spellings.
+#[test]
+fn deck_compatibility_entry_names_cover_alias_and_composite_alias_spellings() {
+    let db = printed_pool(&["plains", "lim-dûl's paladin"]);
+    let spellings = [
+        "Lim-Dul's Paladin",
+        "Lim-Dûl's Paladin",
+        "Lim-Dul's Paladin // Plains",
+    ];
+    let coverage = verdict_coverage(&db, &spellings);
+    assert_eq!((coverage.total_unique, coverage.supported_unique), (1, 0));
+    assert_eq!(coverage.unsupported_cards.len(), 1);
+    let paladin = unsupported_named(&coverage, "Lim-Dûl's Paladin");
+    assert_eq!(paladin.copies, 3, "three listing rows, one card");
+    let expected: Vec<String> = spellings
+        .iter()
+        .map(|spelling| spelling.to_string())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    assert_eq!(
+        paladin.entry_names, expected,
+        "the alias, exact and composite-alias spellings are all stated"
+    );
 }
 
 /// The one intended divergence from the report: entry-projection gaps (CR 614.12,
