@@ -237,6 +237,15 @@ pub(crate) fn can_sacrifice_for_ability(
 /// illegal option would sacrifice nothing while the "When you do" rider still
 /// fires (Cornered Crook with only a Treasure token Quark bars, CR 701.21a).
 ///
+/// CR 608.2d + CR 609.3: a mandatory count is also infeasible when the pool
+/// holds FEWER permanents than the resolved count — "you may sacrifice three
+/// nonland permanents" cannot be paid with a two-permanent partial sacrifice,
+/// so its "If you do" reward must not follow (mirrors `discard.rs`'s
+/// `optional_discard_is_infeasible`). The count is resolved exactly as
+/// [`resolve`] resolves it (peel `UpTo`, clamp non-negative). "Up to N" may
+/// pick fewer and stays feasible on any non-empty pool; a count of zero
+/// imposes no requirement.
+///
 /// The candidate pool is consulted only for filters whose subject is a class of
 /// battlefield permanents. Referent filters (`TriggeringSource`, `ParentTarget`,
 /// `CostPaidObject`, …) name one bound object and are resolved by
@@ -311,8 +320,35 @@ pub(crate) fn optional_sacrifice_is_infeasible(
         .first()
         .copied()
         .unwrap_or(ability.controller);
-    let first_candidate = sacrifice_candidates(state, ability, &filter, chooser).next();
-    first_candidate.is_none()
+    // CR 608.2d + CR 609.3: resolve the required count exactly as [`resolve`]
+    // does before judging the pool, so an exact "sacrifice N" is infeasible
+    // when N legal candidates do not exist. `EntireReferent` (no count) keeps
+    // the pre-existing empty-pool rule.
+    let Effect::Sacrifice { count, .. } = &ability.effect else {
+        return false;
+    };
+    let required = count.count_expr().map(|expression| {
+        let (count_expr, up_to) = expression.peel_up_to();
+        (
+            resolve_quantity_with_targets(state, count_expr, ability).max(0) as usize,
+            up_to,
+        )
+    });
+    // CR 608.2d: an exact instruction can only be carried out in full, so a
+    // short pool makes the option impossible. CR 609.3: "up to N" — and a count
+    // of zero, which demands nothing — is feasible whenever a candidate exists.
+    let (bound, exact) = match required {
+        Some((count, false)) if count > 0 => (count, true),
+        _ => (1, false),
+    };
+    let available = sacrifice_candidates(state, ability, &filter, chooser)
+        .take(bound)
+        .count();
+    if exact {
+        available < bound
+    } else {
+        available == 0
+    }
 }
 
 /// CR 608.2d: True when `filter`'s subject is a class of permanents on the
@@ -819,6 +855,12 @@ pub fn resolve(
     }
 
     let mut selections = Vec::new();
+    // CR 701.21a + CR 608.2d: a referent this ability is barred from making its
+    // controller sacrifice is an impossible option. Track that exact refusal so
+    // an empty result can suppress the "If you do" rider (Foot Chopper naming a
+    // Treasure token Quark bars) instead of letting it read as a performed
+    // sacrifice. Any other skip reason keeps its own semantics.
+    let mut refused_by_sacrifice_bar = false;
     for obj_id in targeted_objects {
         // CR 609.3 / CR 608.2b + CR 111.7: a member of this set that no longer
         // exists is a normal outcome, not an error. Which rule says so depends
@@ -888,10 +930,18 @@ pub fn resolve(
         let player_id = obj.controller;
 
         if !can_sacrifice_for_ability(state, ability, obj_id, player_id) {
+            refused_by_sacrifice_bar = true;
             continue;
         }
 
         selections.push((player_id, vec![obj_id]));
+    }
+
+    // CR 701.21a + CR 608.2d: nothing was sacrificed because the only named
+    // referent was barred — the same "gated action didn't happen" signal the
+    // empty-pool arm sets, so a conditional rider does not fire.
+    if selections.is_empty() && refused_by_sacrifice_bar {
+        state.cost_payment_failed_flag = true;
     }
 
     let completion = PendingPlayerScopeSacrificeCompletion {
@@ -925,13 +975,13 @@ mod tests {
     use crate::types::ability::{
         AbilityCondition, AbilityKind, AggregateFunction, Comparator, ControllerRef,
         CostPaidObjectSnapshot, Effect, FilterProp, ObjectProperty, PtStat, PtValue, PtValueScope,
-        QuantityRef, SubAbilityLink, TargetFilter, TypedFilter,
+        QuantityRef, SubAbilityLink, TargetFilter, TypeFilter, TypedFilter,
     };
     use crate::types::actions::GameAction;
     use crate::types::card_type::CoreType;
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::player::PlayerId;
-    use crate::types::statics::StaticMode;
+    use crate::types::statics::{ProhibitionScope, StaticMode};
     use crate::types::StaticDefinition;
 
     fn make_sacrifice_ability(target: ObjectId) -> ResolvedAbility {
@@ -2941,6 +2991,178 @@ mod tests {
         assert!(
             state.battlefield.contains(&bystander) && state.battlefield.contains(&spare),
             "only the referent may be sacrificed"
+        );
+    }
+
+    /// CR 608.2d + CR 609.3: "sacrifice three nonland permanents" is one
+    /// instruction the player can only carry out in full. Two matching
+    /// permanents make the option impossible (its "If you do" reward must not
+    /// follow a partial sacrifice); three satisfy it. "Up to three" may pick
+    /// fewer and stays feasible on the same two-permanent pool.
+    #[test]
+    fn optional_sacrifice_exact_count_requires_a_full_pool() {
+        let mut state = GameState::new_two_player(42);
+        let filter = TargetFilter::Typed(
+            TypedFilter::permanent()
+                .with_type(TypeFilter::Non(Box::new(TypeFilter::Land)))
+                .controller(ControllerRef::You),
+        );
+        let ability_with = |count: QuantityExpr| {
+            ResolvedAbility::new(
+                Effect::Sacrifice {
+                    target: filter.clone(),
+                    count: count.into(),
+                    min_count: 0,
+                },
+                vec![],
+                ObjectId(100),
+                PlayerId(0),
+            )
+        };
+
+        let add_nonland = |state: &mut GameState, card: u64| {
+            let id = create_object(
+                state,
+                CardId(card),
+                PlayerId(0),
+                format!("Nonland Permanent {card}"),
+                Zone::Battlefield,
+            );
+            state.objects.get_mut(&id).unwrap().card_types.core_types = vec![CoreType::Artifact];
+            id
+        };
+        add_nonland(&mut state, 1);
+        add_nonland(&mut state, 2);
+
+        assert!(
+            optional_sacrifice_is_infeasible(
+                &state,
+                &ability_with(QuantityExpr::Fixed { value: 3 }),
+            ),
+            "two permanents cannot pay a mandatory three-permanent sacrifice"
+        );
+        assert!(
+            !optional_sacrifice_is_infeasible(
+                &state,
+                &ability_with(QuantityExpr::up_to(QuantityExpr::Fixed { value: 3 })),
+            ),
+            "\"up to three\" is feasible with two permanents"
+        );
+
+        add_nonland(&mut state, 3);
+        assert!(
+            !optional_sacrifice_is_infeasible(
+                &state,
+                &ability_with(QuantityExpr::Fixed { value: 3 }),
+            ),
+            "three permanents satisfy the exact count"
+        );
+    }
+
+    /// Quark, Humble Proprietor's "You can't sacrifice Treasure tokens." as a
+    /// player-scoped static on a battlefield source controlled by P0.
+    fn quark_cant_sacrifice_treasure(state: &mut GameState) -> ObjectId {
+        let quark = create_object(
+            state,
+            CardId(90),
+            PlayerId(0),
+            "Quark, Humble Proprietor".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&quark).unwrap();
+            obj.card_types.core_types = vec![CoreType::Creature];
+            obj.static_definitions
+                .push(StaticDefinition::new(StaticMode::CantSacrifice {
+                    who: ProhibitionScope::Controller,
+                    filter: TargetFilter::Typed(
+                        TypedFilter::default().subtype("Treasure".to_string()),
+                    ),
+                }));
+        }
+        quark
+    }
+
+    fn artifact_permanent(
+        state: &mut GameState,
+        card: u64,
+        name: &str,
+        treasure: bool,
+    ) -> ObjectId {
+        let id = create_object(
+            state,
+            CardId(card),
+            PlayerId(0),
+            name.to_string(),
+            Zone::Battlefield,
+        );
+        let obj = state.objects.get_mut(&id).unwrap();
+        obj.card_types.core_types = vec![CoreType::Artifact];
+        if treasure {
+            obj.is_token = true;
+            obj.card_types.subtypes.push("Treasure".to_string());
+        }
+        id
+    }
+
+    /// CR 701.21a + CR 608.2d: "you may sacrifice it" naming a Treasure token
+    /// Quark bars is an impossible option. The targeted path must leave the
+    /// token on the battlefield AND signal that nothing happened, so an "If you
+    /// do" rider cannot fire off an empty sacrifice.
+    #[test]
+    fn targeted_sacrifice_barred_referent_survives_and_fails_the_gate() {
+        let mut state = GameState::new_two_player(42);
+        quark_cant_sacrifice_treasure(&mut state);
+        let treasure = artifact_permanent(&mut state, 1, "Treasure Token", true);
+        let ability = make_sacrifice_ability(treasure);
+        let mut events = Vec::new();
+
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert!(
+            state.battlefield.contains(&treasure),
+            "a Treasure the controller can't sacrifice must stay on the battlefield"
+        );
+        assert!(
+            !state.players[0].graveyard.contains(&treasure),
+            "nothing may be sacrificed when the only named referent is barred"
+        );
+        assert!(
+            state.cost_payment_failed_flag,
+            "the gated action did not happen, so a conditional rider must not fire"
+        );
+    }
+
+    /// Control for the test above: the same Quark prohibition and board, but
+    /// the named referent is an unbarred artifact. It is sacrificed and the
+    /// failure flag stays clear — the bar is per permanent, not a blanket
+    /// suppression.
+    #[test]
+    fn targeted_sacrifice_unbarred_referent_is_sacrificed() {
+        let mut state = GameState::new_two_player(42);
+        quark_cant_sacrifice_treasure(&mut state);
+        let sol_ring = artifact_permanent(&mut state, 1, "Sol Ring", false);
+        let treasure = artifact_permanent(&mut state, 2, "Treasure Token", true);
+        let ability = make_sacrifice_ability(sol_ring);
+        let mut events = Vec::new();
+
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert!(
+            !state.battlefield.contains(&sol_ring),
+            "an unbarred referent must be sacrificed"
+        );
+        assert!(
+            state.players[0].graveyard.contains(&sol_ring),
+            "the sacrificed artifact moves to its owner's graveyard"
+        );
+        assert!(
+            state.battlefield.contains(&treasure),
+            "the barred Treasure is not the named referent and must survive"
+        );
+        assert!(
+            !state.cost_payment_failed_flag,
+            "a performed sacrifice must not signal failure"
         );
     }
 }
