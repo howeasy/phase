@@ -1178,7 +1178,10 @@ fn if_you_do_look_anchor(clauses: &[ClauseIr], condition: &AbilityCondition) -> 
 ///
 /// CR 118.12: a linked-exile assimilate whose entry is replaced (Containment
 /// Priest) was still started, so its "if you can't" rider keeps the generic
-/// zone-change guard and the fallback does not run.
+/// zone-change guard and the fallback does not run. The rule: "The 'If [a
+/// player] [does, doesn't, or can't]' clause checks whether the player chose to
+/// pay an optional cost or started to pay a mandatory cost, regardless of what
+/// events actually occurred."
 fn rewrite_cant_rider_for_non_zone_change_parent(
     condition: Option<AbilityCondition>,
     clauses: &[ClauseIr],
@@ -41409,8 +41412,8 @@ fn try_parse_cast_effect(lower: &str, ctx: &ParseContext) -> Option<Effect> {
     // Locthwain) deliberately does NOT take that budget: it stays the per-object
     // permission it was on the base commit, unchanged. The engine offers no player
     // election between the free grant and a pile card's own cast-from-exile
-    // permission (ticket 370), so charging a shared group would strip the rest of
-    // the pile; the printed cap therefore stays unenforced, a known rules deviation
+    // permission, so charging a shared group would strip the rest of the pile;
+    // the printed cap therefore stays unenforced, a known rules deviation
     // from CR 608.2c's "a spell" = one cast, exactly as on the base.
     //
     // KNOWN RESIDUAL (pre-existing, deliberately NOT closed here): the singular
@@ -41454,7 +41457,7 @@ fn try_parse_cast_effect(lower: &str, ctx: &ParseContext) -> Option<Effect> {
         // (`SharedSingleCast`, chosen through the pairing authority). A FREE grant
         // ("without paying its mana cost" — Idol of Endurance, Court of Locthwain)
         // stays per-object, unchanged from the base: the engine cannot elect
-        // between it and a pile card's own cast-from-exile permission (ticket 370),
+        // between it and a pile card's own cast-from-exile permission,
         // and a shared group would strip the rest of the pile. Every other shape
         // keeps the per-object permission; see the residual above.
         let driver = if mode == CardPlayMode::Cast

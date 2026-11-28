@@ -25,14 +25,16 @@
 //! `mana_spend_permission` by `attach_mana_spend_permission_to_prior_cast_grant`.
 //! Where the conjunct stays inside the grant's own sentence, the inline
 //! recognizers gained the objects they were missing ("… to cast it", the
-//! comma before "and mana of any …") — the sentence in Court of Locthwain's text (#8481),
-//! which used to be swallowed by the catch-all with the grant. Court's free pile grant
-//! parses per-object, unchanged from main (ticket 370), so no test here claims its cap;
-//! its text is used only as the recognizer's input.
-//! The tests here drive the real resolution (`GameScenario` / `GameRunner` /
+//! comma before "and mana of any …") — the sentence in Court of Locthwain's
+//! text (#8481), which used to be swallowed by the catch-all with the grant.
+//! Court's free pile grant is per-object, as on main, because the engine offers
+//! no election between a free pile grant and a pile card's own cast-from-exile
+//! permission, so the printed cap stays unenforced; the tests here pin main's
+//! observable behaviour, including the monarch's free cast of each pile card.
+//! The tests drive the real resolution (`GameScenario` / `GameRunner` /
 //! `GameAction`) end to end: no optional prompt, the recorded permission
 //! carries the concession, and the granted card is actually cast with
-//! off-color lands.
+//! off-color lands (or, for the monarch, for free).
 //!
 //! Payment: "any type" (CR 118.14) also covers colorless mana — a colored
 //! mana may pay a `{C}` requirement through an any-type grant, never through
@@ -60,12 +62,18 @@ const MATTER_RESHAPER_ORACLE: &str = "({C} represents colorless mana.)\n\
 When this creature dies, reveal the top card of your library. You may put that card onto the battlefield \
 if it's a permanent card with mana value 3 or less. Otherwise, put that card into your hand.";
 
-/// Court of Locthwain's printed text, used only for its inline "and mana of any
-/// type can be spent to cast it" conjunct. The card's free pile grant parses
-/// per-object, unchanged from main (ticket 370), so
-/// `SHARED_BUDGET_PILE_ELECTION_GAP` does not fire for it; no test here claims
-/// the free cast over the pile works.
-const INLINE_CONJUNCT_ORACLE: &str = "When this enchantment enters, you become the monarch.\n\
+/// Court of Locthwain's printed text, used for its inline "and mana of any type
+/// can be spent to cast it" conjunct and, through `COURT_OF_LOCTHWAIN` below,
+/// for the free-monarch cast tests. The card's free pile grant is per-object,
+/// unchanged from main, so `SHARED_BUDGET_PILE_ELECTION_GAP` does not fire for
+/// it: the engine offers no election between a free pile grant and a pile
+/// card's own cast-from-exile permission.
+const INLINE_CONJUNCT_ORACLE: &str = COURT_OF_LOCTHWAIN;
+
+/// The same printed text, as the Court's own card input for the free-monarch
+/// cast tests (`court_of_locthwains_*`): its free pile grant is per-object as on
+/// main, so those tests pin main's observable behaviour, not a printed cap.
+const COURT_OF_LOCTHWAIN: &str = "When this enchantment enters, you become the monarch.\n\
 At the beginning of your upkeep, exile the top card of target opponent's library. You may play that \
 card for as long as it remains exiled, and mana of any type can be spent to cast it. If you're the \
 monarch, until end of turn, you may cast a spell from among cards exiled with this enchantment \
@@ -359,13 +367,14 @@ fn bloodsoaked_insights_any_type_rider_is_scoped_to_the_exiled_cards() {
 
 /// The inline conjunct "You may play that card for as long as it remains
 /// exiled, and mana of any type can be spent to cast it." (CR 609.4b), fed with
-/// Court of Locthwain's printed text. Its free pile grant parses per-object,
-/// unchanged from main (ticket 370), so `SHARED_BUDGET_PILE_ELECTION_GAP` does
-/// not fire for it: this test pins only the parser's inline-conjunct recognizer
-/// and the permission recorded on the play grant through P0's own upkeep trigger,
-/// not the card. The free cast over the pile and the monarch condition are not
-/// exercised and nothing here promises their outcome. Pre-fix the whole sentence
-/// was captured by the catch-all static and no permission existed at all.
+/// Court of Locthwain's printed text. Its free pile grant is per-object,
+/// unchanged from main, so `SHARED_BUDGET_PILE_ELECTION_GAP` does not fire for
+/// it: this test pins only the parser's inline-conjunct recognizer and the
+/// permission recorded on the play grant through P0's own upkeep trigger.
+/// Pre-fix the whole sentence was captured by the catch-all static and no
+/// permission existed at all. The free-monarch cast of each pile card is pinned
+/// by `court_of_locthwains_exiled_card_is_free_for_the_monarch` and
+/// `court_of_locthwains_older_linked_card_is_free_for_the_monarch` below.
 #[test]
 fn inline_any_type_conjunct_records_the_concession_on_the_play_grant() {
     let mut scenario = GameScenario::new_n_player(2, 42);
@@ -449,6 +458,164 @@ fn inline_any_type_conjunct_records_the_concession_on_the_play_grant() {
     );
     let tapped = cast_granted_card(&mut runner, green, &swamps);
     assert_eq!(tapped, 1, "exactly one Swamp paid for {{G}}");
+}
+
+/// Court of Locthwain (#8481): "You may play that card for as long as it
+/// remains exiled, and mana of any type can be spent to cast it." — the inline
+/// conjunct with "… to cast it". Pre-fix the whole sentence was captured by the
+/// catch-all static and no permission existed at all: the exiled card was never
+/// offered ("won't even give me the option to pay to cast"). Driven through P0's
+/// own upkeep so the trigger, its player target, the exile, the recorded
+/// permission and the cast are all real. `monarch` exercises the card's other
+/// half — "If you're the monarch, until end of turn, you may cast a spell from
+/// among cards exiled with this enchantment without paying its mana cost" —
+/// which the report also names ("as the monarch it should be free to cast").
+fn court_of_locthwain(monarch: bool) {
+    court_of_locthwain_with_older_link(monarch, false);
+}
+
+/// `older_link` pre-links a {G} card exiled by an EARLIER trigger to the Court.
+fn court_of_locthwain_with_older_link(monarch: bool, older_link: bool) {
+    let mut scenario = GameScenario::new_n_player(2, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    let deeper = scenario.add_card_to_library_top(P1, "Deeper");
+    let green = {
+        let mut b = scenario.add_spell_to_library_top(P1, "Green Sorcery", false);
+        b.with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Green],
+            generic: 0,
+        });
+        b.id()
+    };
+    // P1 draws once while their turn is crossed: a filler on top keeps the
+    // {G} card as P1's top card at P0's upkeep. P0 draws from filler too.
+    let p1_draw = scenario.add_card_to_library_top(P1, "P1 Draw");
+    for _ in 0..4 {
+        scenario.add_card_to_library_top(P0, "P0 Filler");
+    }
+    let swamps = [
+        scenario.add_basic_land(P0, ManaColor::Black),
+        scenario.add_basic_land(P0, ManaColor::Black),
+    ];
+    let court = scenario
+        .add_enchantment_from_oracle(P0, "Court of Locthwain", COURT_OF_LOCTHWAIN)
+        .id();
+    let older = older_link.then(|| {
+        let mut b = scenario.add_spell_to_exile(P0, "Older Sorcery", false);
+        b.with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Green],
+            generic: 0,
+        });
+        b.id()
+    });
+    let mut runner = scenario.build();
+    if let Some(older) = older {
+        runner
+            .state_mut()
+            .exile_links
+            .push(engine::types::game_state::ExileLink {
+                exiled_id: older,
+                source_id: court,
+                kind: engine::types::game_state::ExileLinkKind::TrackedBySource,
+                // CR 607.2a: no ability made this exile; the link only records
+                // which Court card the older card is exiled with.
+                supplier: None,
+            });
+    }
+    if monarch {
+        // Court's own ETB made its controller the monarch when it entered;
+        // the enchantment starts on the battlefield here, so set the crown.
+        runner.state_mut().monarch = Some(P0);
+    }
+
+    // Cross P1's turn into P0's next upkeep; the auto-advance stops at the
+    // trigger's target prompt.
+    runner.advance_to_phase(Phase::Upkeep);
+    runner.advance_to_phase(Phase::PreCombatMain);
+    runner.advance_to_phase(Phase::Upkeep);
+    assert_eq!(runner.state().active_player, P0, "back in P0's turn");
+    assert_eq!(runner.state().phase, Phase::Upkeep);
+    // Reach guard: the upkeep trigger is on the stack (its single legal player
+    // target, P1, was announced on the way).
+    assert_eq!(
+        runner.state().stack.len(),
+        1,
+        "Court's upkeep trigger is waiting to resolve"
+    );
+    assert_eq!(runner.state().stack[0].source_id, court);
+
+    let drive = settle(&mut runner);
+    // DISCRIMINATOR: no prompt beyond passing priority. Pre-fix the swallowed
+    // sentence surfaced an `OptionalEffectChoice` here.
+    assert_eq!(
+        drive.prompts,
+        vec!["Priority", "Priority"],
+        "resolving the trigger asks nothing"
+    );
+    assert_eq!(
+        runner.state().objects[&p1_draw].zone,
+        Zone::Hand,
+        "P1 drew the filler"
+    );
+    assert_eq!(
+        runner.state().objects[&green].zone,
+        Zone::Exile,
+        "top card exiled"
+    );
+    assert_eq!(runner.state().objects[&deeper].zone, Zone::Library);
+
+    // The paid permission carries the concession in both cases; the monarch's
+    // free grant adds a per-object permission with no concession (its free
+    // cast shows in the cast below, where no land is tapped).
+    assert_eq!(
+        recorded_concessions(&runner, green)[0],
+        Some(ManaSpendPermission::AnyTypeOrColor),
+        "\"any type\" rides onto the granted permission"
+    );
+    // Move to P0's main phase and cast the {G} card. `pass_priority_to`, not
+    // `advance_to_phase`: that driver re-enters the upkeep and would put a
+    // second Court trigger on the stack (see its doc below).
+    pass_priority_to(&mut runner, Phase::PreCombatMain);
+    assert_eq!(runner.state().active_player, P0);
+    let untapped_before = swamps
+        .iter()
+        .filter(|land| !runner.state().objects[land].tapped)
+        .count();
+    assert_eq!(
+        untapped_before, 2,
+        "both Swamps untapped after P0's untap step"
+    );
+    let tapped = cast_granted_card(&mut runner, green, &swamps);
+    if monarch {
+        assert_eq!(tapped, 0, "the monarch casts for free — no Swamp tapped");
+    } else {
+        assert_eq!(tapped, 1, "exactly one Swamp paid for {{G}}");
+    }
+    if let Some(older) = older {
+        // CR 406.6: the monarch's window covers every card exiled with the
+        // Court, including one linked before this trigger resolved.
+        let tapped = cast_granted_card(&mut runner, older, &swamps);
+        assert_eq!(
+            tapped,
+            usize::from(!monarch),
+            "older linked card: free only for the monarch"
+        );
+    }
+}
+
+#[test]
+fn court_of_locthwains_older_linked_card_is_free_for_the_monarch() {
+    court_of_locthwain_with_older_link(true, true);
+}
+
+#[test]
+fn court_of_locthwains_exiled_card_is_castable_with_any_mana() {
+    court_of_locthwain(false);
+}
+
+#[test]
+fn court_of_locthwains_exiled_card_is_free_for_the_monarch() {
+    court_of_locthwain(true);
 }
 
 /// Pass priority with real actions until the game reaches `phase`. Not

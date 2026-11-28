@@ -63707,7 +63707,8 @@ fn shared_exile_alt_cost_budget_is_spent_only_by_the_elected_permission() {
 /// own permission, so charging the grant would spend the pile's one cast on a
 /// cast the own permission also authorized. The cast spends nothing and the
 /// grant stays available for the rest of the pile — main's observable
-/// behaviour (ticket 370), not a rules-ideal reading.
+/// behaviour, not a rules-ideal reading: the engine offers no election between
+/// the pile grant and the card's own cast-from-exile permission.
 #[test]
 fn shared_exile_alt_cost_budget_is_not_spent_by_an_own_exile_permission_card() {
     use crate::types::ability::ExileGrantCostProvenance::NormalCost;

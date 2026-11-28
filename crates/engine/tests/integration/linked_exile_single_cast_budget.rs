@@ -9,17 +9,17 @@
 //! shared budget: every card in its pile stays castable through the grant after
 //! the first cast. This is UNCHANGED FROM MAIN, not a rules-correct cap: the
 //! engine cannot offer the player election between the free grant and a pile
-//! card's own cast-from-exile permission (ticket 370), so charging a shared
-//! group there would strip the rest of the pile. The printed cap of one cast
+//! card's own cast-from-exile permission, so charging a shared group there
+//! would strip the rest of the pile. The printed cap of one cast
 //! (CR 608.2c: "a spell" is one cast) therefore stays unenforced for a free
 //! grant. These witnesses pin main's observable behaviour, not its correctness.
 //!
 //! A NORMAL-COST grant gets the same carve-out for the pile card that carries
 //! its own "you may cast this card from exile" permission (Eternal Scourge):
 //! the engine cannot distinguish a Jar cast of that card from its own
-//! permission (ticket 370), so the cast spends none of the shared budget and
-//! the grant stays available for the rest of the pile. A Jar cast of the
-//! Scourge followed by one of Grizzly Bears therefore both happen, exactly as
+//! permission, so the cast spends none of the shared budget and the grant
+//! stays available for the rest of the pile. A Jar cast of the Scourge
+//! followed by one of Grizzly Bears therefore both happen, exactly as
 //! on main. Pinned as main-compatible, not as rules-ideal.
 //!
 //! Oracle (verbatim, MTGJSON 5.3.0+20261115):
@@ -101,8 +101,9 @@ fn tapped_count(runner: &GameRunner, lands: &[ObjectId]) -> usize {
 /// Idol of Endurance exiles two creature cards from its controller's graveyard
 /// when it enters; its free activation grant is per-object and uncapped,
 /// unchanged from main, so every card in the pile is castable for free before
-/// and after the first cast. Witness, not a correctness claim: see the module
-/// doc (ticket 370).
+/// and after the first cast. Witness, not a correctness claim: the free grant
+/// stays per-object because the engine offers no election between it and a pile
+/// card's own cast-from-exile permission; see the module doc.
 #[test]
 fn idol_of_endurance_free_grant_is_per_object_unchanged_from_main() {
     let mut scenario = GameScenario::new();
@@ -178,7 +179,9 @@ fn idol_of_endurance_free_grant_is_per_object_unchanged_from_main() {
 /// and uncapped, unchanged from main, so both pile cards stay castable for free
 /// (the second activation adds no second cap). Voltaic Key's printed
 /// "{1}, {T}: Untap target artifact." is what frees the Idol for the second
-/// activation. Witness, not a correctness claim (ticket 370).
+/// activation. Witness, not a correctness claim: the free grant is per-object
+/// because the engine offers no election between it and a pile card's own
+/// cast-from-exile permission.
 #[test]
 fn idol_of_endurance_two_activations_leave_the_free_grant_uncapped_as_on_main() {
     let mut scenario = GameScenario::new();
@@ -272,7 +275,9 @@ fn idol_scourge_pile() -> (GameRunner, ObjectId, ObjectId, ObjectId, Vec<ObjectI
 /// Idol's free grant both authorize the same card. Casting the Scourge free
 /// through the grant spends no shared budget (the free grant is per-object and
 /// uncapped, unchanged from main), so the other pile card stays castable for
-/// free. Witness, not a correctness claim (ticket 370).
+/// free. Witness, not a correctness claim: the engine offers no election
+/// between the free grant and the Scourge's own cast-from-exile permission, so
+/// the grant carries no shared budget.
 #[test]
 fn idol_of_endurance_free_cast_spends_no_shared_slot_unchanged_from_main() {
     let (mut runner, idol, scourge, bears, lands) = idol_scourge_pile();
@@ -306,7 +311,7 @@ fn idol_of_endurance_free_cast_spends_no_shared_slot_unchanged_from_main() {
 /// Casting the Bears first leaves the Scourge castable for free: the free grant
 /// is per-object and uncapped, unchanged from main, so it survives the first
 /// cast, and the Scourge's own route remains as well. Witness, not a correctness
-/// claim (ticket 370).
+/// claim: the free grant is per-object, so no cast spends a shared budget.
 #[test]
 fn idol_of_endurance_bears_first_keeps_the_scourge_castable_unchanged_from_main() {
     let (mut runner, idol, scourge, bears, lands) = idol_scourge_pile();
@@ -517,8 +522,9 @@ fn soul_jar_scourge_pile() -> (GameRunner, ObjectId, ObjectId, ObjectId, Vec<Obj
 /// "you may cast this card from exile" route, so the cast spends no shared
 /// budget and the same Jar activation still authorizes Grizzly Bears. A Jar
 /// cast of the Scourge plus a Jar cast of the Bears is therefore exactly main's
-/// two-cast outcome — a compatibility witness (ticket 370), not a rules-ideal
-/// reading.
+/// two-cast outcome — a compatibility witness, not a rules-ideal reading: the
+/// engine cannot tell a Jar cast of the Scourge from the Scourge's own
+/// cast-from-exile route.
 #[test]
 fn soul_jar_scourge_first_keeps_the_bears_castable_through_the_grant() {
     let (mut runner, jar, scourge, bears, forests) = soul_jar_scourge_pile();
@@ -556,7 +562,8 @@ fn soul_jar_scourge_first_keeps_the_bears_castable_through_the_grant() {
 /// spends the shared budget; Eternal Scourge stays castable through its own
 /// "you may cast this card from exile" route and is cast for its printed {3}.
 /// The two casts (Bears through the grant, Scourge through its own route) are
-/// main's observable behaviour (ticket 370), not a rules-ideal claim.
+/// main's observable behaviour, not a rules-ideal claim: the engine offers no
+/// election between the two routes.
 #[test]
 fn soul_jar_bears_first_spends_the_grant_but_the_scourge_keeps_its_own_route() {
     let (mut runner, jar, scourge, bears, forests) = soul_jar_scourge_pile();

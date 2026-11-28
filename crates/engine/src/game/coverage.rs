@@ -8908,7 +8908,7 @@ fn check_shared_source_graveyard_slot(face: &CardFace, missing: &mut Vec<String>
 /// (`casting::selected_object_cast_permission_index`, `actions.rs`) would spend a
 /// shared budget before the player can pay the ordinary cost, and that sequence
 /// is lost. A face with that typed shape fails closed until the engine can offer
-/// the election (ticket 370).
+/// the election through `GameAction::CastSpell`.
 ///
 /// No printed face currently writes a shared-budget FREE cast: the parser stamps
 /// `SharedSingleCast` only on a normal-cost grant, and a free grant keeps the

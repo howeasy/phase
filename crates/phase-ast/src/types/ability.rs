@@ -2934,8 +2934,8 @@ pub enum LingeringCastBudget {
     /// parser stamps this budget only on a NORMAL-COST grant: a grant that casts
     /// without paying its mana cost keeps `PerObject`, unchanged from the base,
     /// because the engine offers no player election between the free grant and a
-    /// pile card's own cast-from-exile permission (ticket 370), so its printed
-    /// cap stays unenforced.
+    /// pile card's own cast-from-exile permission, so its printed cap stays
+    /// unenforced.
     SharedSingleCast,
 }
 
@@ -3174,7 +3174,7 @@ impl CastFromZoneDriver {
     /// | mechanism | bounds it can enforce | why |
     /// |---|---|---|
     /// | [`CastMechanism::LingeringPermission`] with `PerObject` | unbounded only | `record_lingering_permissions` writes an independent `CastingPermission` per object, with no grant-scoped cap. |
-    /// | [`CastMechanism::LingeringPermission`] with `SharedSingleCast` | exactly one cast, normal-cost grant only | the permissions one resolution writes share a `single_use_group` budget, so one cast under any of them voids the rest. The parser pairs a free cast with `PerObject` instead, unchanged from the base: a free grant is not capped, because the engine offers no election between it and a pile card's own cast-from-exile permission (ticket 370). |
+    /// | [`CastMechanism::LingeringPermission`] with `SharedSingleCast` | exactly one cast, normal-cost grant only | the permissions one resolution writes share a `single_use_group` budget, so one cast under any of them voids the rest. The parser pairs a free cast with `PerObject` instead, unchanged from the base: a free grant is not capped, because the engine offers no election between it and a pile card's own cast-from-exile permission. |
     /// | [`CastMechanism::SingleCardDuringResolution`] | exactly one cast | `initiate_cast_during_resolution` puts exactly one card on the stack. It cannot reach `N > 1`, and it cannot honor an unbounded clause either. |
     /// | [`CastMechanism::ResolutionTimePrivateZonePick`] | exactly one cast | `open_private_zone_cast_selection` opens `EffectZoneChoice { count: 1, up_to: true }`. Same one-card ceiling, enforced by the private-zone tail rather than by the driver. |
     /// | [`CastMechanism::ResolutionWindow`] | any bounds | `Effect::FreeCastFromZones`' stop-early loop reads `ResolutionCastWindow` directly. |
@@ -5502,7 +5502,9 @@ pub enum CastingPermission {
         /// which strips the rest. The parser stamps this budget only on a
         /// NORMAL-COST grant; a free grant ("without paying its mana cost")
         /// keeps `PerObject`, unchanged from the base, so its cap is not
-        /// enforced at runtime (ticket 370). The id is a fresh `TrackedSetId`
+        /// enforced at runtime: the engine offers no election between the free
+        /// grant and a pile card's own cast-from-exile permission. The id is a
+        /// fresh `TrackedSetId`
         /// that names no
         /// published set (a grant identity, not a membership list). `None` for
         /// every other grant, which keeps its independent per-object permission.

@@ -75093,7 +75093,7 @@ fn cast_from_zone_in_chain(ability: &AbilityDefinition) -> Option<&AbilityDefini
 /// the grant rather than becoming an accept/decline prompt (Serpent's Soul-Jar).
 /// A FREE grant ("without paying its mana cost") keeps the per-object permission,
 /// unchanged from the base: the engine cannot elect between it and a pile card's
-/// own cast-from-exile permission (ticket 370), so its printed cap stays
+/// own cast-from-exile permission, so its printed cap stays
 /// unenforced. A plural clause, or one stating no duration (Jeleva, Nephalia's
 /// Scourge), also keeps the per-object permission.
 #[test]
@@ -75112,8 +75112,8 @@ fn a_normal_cost_spell_from_linked_exile_under_a_duration_shares_one_budget() {
     // Court of Locthwain: the third sentence, behind the monarch condition. It is
     // FREE, so it keeps the per-object permission unchanged from the base even
     // though it states a duration: only a normal-cost grant is promoted to the
-    // shared budget (a free grant cannot be capped without the player election of
-    // ticket 370).
+    // shared budget (a free grant cannot be capped because the engine offers no
+    // election between it and a pile card's own cast-from-exile permission).
     let court = parse_oracle_text(
         "When this enchantment enters, you become the monarch.\n\
          At the beginning of your upkeep, exile the top card of target opponent's library. You may \
@@ -75144,8 +75144,8 @@ fn a_normal_cost_spell_from_linked_exile_under_a_duration_shares_one_budget() {
 
     // Idol of Endurance: the activated form, free. Per-object as on the base: a
     // FREE grant is deliberately NOT budgeted — the engine cannot offer the
-    // election between the grant and a pile card's own cast-from-exile permission
-    // (ticket 370), so its printed cap stays unenforced, unchanged from the base.
+    // election between the grant and a pile card's own cast-from-exile permission,
+    // so its printed cap stays unenforced, unchanged from the base.
     // This pins the pre-existing behaviour, not its rules correctness.
     let idol = parse_oracle_text(
         "When this artifact enters, exile all creature cards with mana value 3 or less from \

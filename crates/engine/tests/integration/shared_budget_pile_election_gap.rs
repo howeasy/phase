@@ -6,8 +6,9 @@
 //! ("You may play that card for as long as it remains exiled, and mana of any type can be spent to
 //! cast it. If you're the monarch, until end of turn, you may cast a spell from among cards
 //! exiled with this enchantment without paying its mana cost"), but its free grant parses to the
-//! per-object permission unchanged from main (ticket 370), so it writes no shared-budget route and
-//! this typed gap does not fire for it. No printed face currently writes a shared-budget FREE
+//! per-object permission unchanged from main — the engine offers no election between the two
+//! routes — so it writes no shared-budget route and this typed gap does not fire for it. No
+//! printed face currently writes a shared-budget FREE
 //! cast: only a normal-cost grant is stamped `SharedSingleCast`, and Serpent's Soul-Jar has no
 //! second route, so it carries no election gap either. The gap remains a typed-shape guard,
 //! unit-tested with constructed faces in `game::coverage`. The remaining cards write no cast
@@ -93,7 +94,8 @@ fn carries_gap(face: &CardFace) -> bool {
 }
 
 /// Court of Locthwain prints a free pile cast beside an ordinary play route, but
-/// the free grant is per-object and uncapped, unchanged from main (ticket 370).
+/// the free grant is per-object and uncapped, unchanged from main: the engine
+/// offers no election between it and the ordinary play route.
 /// No shared budget is written, so the election gap does not fire — the typed
 /// guard remains, unit-tested with constructed faces in `game::coverage`.
 #[test]

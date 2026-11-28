@@ -3145,8 +3145,10 @@ fn record_lingering_permissions(
     // free grant's slot, and charging a shared group there would strip the rest
     // of the pile. Left unbudgeted, the free grant keeps the base behaviour —
     // every card in the pile stays castable through it, a known rules deviation
-    // from CR 608.2c (ticket 370). The `ExileWithAltAbilityCost` form (Nashi)
-    // stores no group: its permission carries no budget field.
+    // from CR 608.2c, because the engine offers no election between the free
+    // grant and a pile card's own cast-from-exile permission. The
+    // `ExileWithAltAbilityCost` form (Nashi) stores no group: its permission
+    // carries no budget field.
     let single_use_group = match driver {
         crate::types::ability::CastFromZoneDriver::LingeringPermission {
             budget: LingeringCastBudget::SharedSingleCast,
