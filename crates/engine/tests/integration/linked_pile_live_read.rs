@@ -223,7 +223,7 @@ fn vat_board_with_wrath() -> (VatBoard, ObjectId) {
     )
 }
 
-/// CR 603.2d + CR 608.2h + CR 607.2a: two nontoken creatures die at once, so
+/// CR 603.2c + CR 608.2h + CR 607.2a: two nontoken creatures die at once, so
 /// Mimic Vat's imprint triggers twice. The ruling: "You'll wind up with at most
 /// one of those cards exiled, and the rest will be in the appropriate
 /// graveyard." The second instance reads the pile live (it holds the first
