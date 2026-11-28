@@ -476,13 +476,11 @@ export const GALLERY_SCENARIOS: Record<string, GalleryScenario> = {
       (state) => {
         move(state, BEARS, "Exile");
         move(state, ANGEL, "Exile");
-        state.objects[BEARS] = card({
-          id: BEARS,
-          name: "Brisela, Voice of Nightmares",
-          zone: "Battlefield",
-          colors: ["White"],
-          creature: [9, 10],
-        });
+        state.objects[BEARS] = {
+          ...card({ id: BEARS, name: "Brisela, Voice of Nightmares", zone: "Battlefield", creature: [9, 10] }),
+          merge_kind: "Meld",
+          merged_components: [BEARS, ANGEL],
+        };
         move(state, BEARS, "Battlefield");
         return [
           zoneChanged(BEARS, "Battlefield", "Exile"),
@@ -506,8 +504,8 @@ export const GALLERY_SCENARIOS: Record<string, GalleryScenario> = {
     ],
   },
   damageFlurry: {
-    title: "Collapsed combat damage",
-    description: "A run of combat hits on the opponent collapses into one flurry.",
+    title: "Synthetic damage flurry (fallback grouping)",
+    description: "Twelve synthetic one-damage hits on the opponent collapse into one flurry through fallback grouping, without a combat aggregate.",
     batches: [
       (state) => {
         const events: GameEvent[] = [];
