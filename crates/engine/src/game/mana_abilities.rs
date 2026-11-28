@@ -4025,7 +4025,9 @@ fn pay_mana_ability_cost_component(
                     "This permanent is already committed to a spell sacrifice cost".to_string(),
                 ));
             }
-            if super::static_abilities::player_cant_sacrifice_as_cost(
+            // CR 118.3: the general bar was evaluated by
+            // object_cant_be_sacrificed_by; only the CantPayCost half runs here.
+            if super::static_abilities::player_cant_pay_sacrifice_cost(
                 state,
                 pending.player,
                 pending.source_id,
@@ -5655,7 +5657,9 @@ where
                     "This permanent is already committed to a spell sacrifice cost".to_string(),
                 ));
             }
-            if super::static_abilities::player_cant_sacrifice_as_cost(state, player, source_id)
+            // CR 118.3: the general bar was evaluated by
+            // object_cant_be_sacrificed_by; only the CantPayCost half runs here.
+            if super::static_abilities::player_cant_pay_sacrifice_cost(state, player, source_id)
                 || super::static_abilities::object_cant_be_sacrificed_by(state, player, source_id)
             {
                 return Err(EngineError::ActionNotAllowed(
@@ -7040,7 +7044,9 @@ fn sacrifice_selected_permanent_for_mana_cost(
             "Selected permanent does not match the sacrifice cost filter".to_string(),
         ));
     }
-    if super::static_abilities::player_cant_sacrifice_as_cost(state, player, chosen_id)
+    // CR 118.3: the general bar was evaluated by object_cant_be_sacrificed_by;
+    // only the CantPayCost half runs here.
+    if super::static_abilities::player_cant_pay_sacrifice_cost(state, player, chosen_id)
         || super::static_abilities::object_cant_be_sacrificed_by(state, player, chosen_id)
     {
         return Err(EngineError::ActionNotAllowed(
