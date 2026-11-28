@@ -5,7 +5,7 @@
   "icon": "G",
   "format": "standard",
   "version": 1,
-  "updated": "2026-11-27T00:00:00Z",
+  "updated": "2026-11-28T00:00:00Z",
   "source": "https://www.mtggoldfish.com/metagame/standard",
   "decks": [
     {
@@ -704,121 +704,6 @@
       ]
     },
     {
-      "name": "Lifegain",
-      "author": "MTGGoldfish",
-      "colors": [
-        "W",
-        "B"
-      ],
-      "tags": [
-        "metagame"
-      ],
-      "main": [
-        {
-          "count": 4,
-          "name": "Enlightened Confidant"
-        },
-        {
-          "count": 3,
-          "name": "Erode"
-        },
-        {
-          "count": 4,
-          "name": "Concealed Courtyard"
-        },
-        {
-          "count": 1,
-          "name": "Aunt May"
-        },
-        {
-          "count": 4,
-          "name": "Starting Town"
-        },
-        {
-          "count": 4,
-          "name": "Amalia Benavides Aguirre"
-        },
-        {
-          "count": 4,
-          "name": "Haliya, Guided by Light"
-        },
-        {
-          "count": 4,
-          "name": "Case of the Uneaten Feast"
-        },
-        {
-          "count": 4,
-          "name": "Multiversal Passage"
-        },
-        {
-          "count": 3,
-          "name": "Moseo, Vein's New Dean"
-        },
-        {
-          "count": 4,
-          "name": "Lunar Convocation"
-        },
-        {
-          "count": 4,
-          "name": "Hinterland Sanctifier"
-        },
-        {
-          "count": 4,
-          "name": "Plains"
-        },
-        {
-          "count": 2,
-          "name": "Liliana the Faultless"
-        },
-        {
-          "count": 3,
-          "name": "Starscape Cleric"
-        },
-        {
-          "count": 2,
-          "name": "Deep-Cavern Bat"
-        },
-        {
-          "count": 4,
-          "name": "Godless Shrine"
-        },
-        {
-          "count": 2,
-          "name": "Great Arashin City"
-        }
-      ],
-      "sideboard": [
-        {
-          "count": 2,
-          "name": "Shattered Acolyte"
-        },
-        {
-          "count": 3,
-          "name": "Strategic Betrayal"
-        },
-        {
-          "count": 2,
-          "name": "Seam Rip"
-        },
-        {
-          "count": 2,
-          "name": "Pyrrhic Strike"
-        },
-        {
-          "count": 4,
-          "name": "Duress"
-        },
-        {
-          "count": 1,
-          "name": "M.O.D.O.K."
-        },
-        {
-          "count": 1,
-          "name": "Ajani Resolute"
-        }
-      ]
-    },
-    {
       "name": "Izzet Spellementals",
       "author": "MTGGoldfish",
       "colors": [
@@ -934,6 +819,121 @@
         {
           "count": 2,
           "name": "Sunspine Lynx"
+        }
+      ]
+    },
+    {
+      "name": "Lifegain",
+      "author": "MTGGoldfish",
+      "colors": [
+        "W",
+        "B"
+      ],
+      "tags": [
+        "metagame"
+      ],
+      "main": [
+        {
+          "count": 4,
+          "name": "Enlightened Confidant"
+        },
+        {
+          "count": 3,
+          "name": "Erode"
+        },
+        {
+          "count": 4,
+          "name": "Concealed Courtyard"
+        },
+        {
+          "count": 1,
+          "name": "Aunt May"
+        },
+        {
+          "count": 4,
+          "name": "Starting Town"
+        },
+        {
+          "count": 4,
+          "name": "Amalia Benavides Aguirre"
+        },
+        {
+          "count": 4,
+          "name": "Haliya, Guided by Light"
+        },
+        {
+          "count": 4,
+          "name": "Case of the Uneaten Feast"
+        },
+        {
+          "count": 4,
+          "name": "Multiversal Passage"
+        },
+        {
+          "count": 3,
+          "name": "Moseo, Vein's New Dean"
+        },
+        {
+          "count": 4,
+          "name": "Lunar Convocation"
+        },
+        {
+          "count": 4,
+          "name": "Hinterland Sanctifier"
+        },
+        {
+          "count": 4,
+          "name": "Plains"
+        },
+        {
+          "count": 2,
+          "name": "Liliana the Faultless"
+        },
+        {
+          "count": 3,
+          "name": "Starscape Cleric"
+        },
+        {
+          "count": 2,
+          "name": "Deep-Cavern Bat"
+        },
+        {
+          "count": 4,
+          "name": "Godless Shrine"
+        },
+        {
+          "count": 2,
+          "name": "Great Arashin City"
+        }
+      ],
+      "sideboard": [
+        {
+          "count": 2,
+          "name": "Shattered Acolyte"
+        },
+        {
+          "count": 3,
+          "name": "Strategic Betrayal"
+        },
+        {
+          "count": 2,
+          "name": "Seam Rip"
+        },
+        {
+          "count": 2,
+          "name": "Pyrrhic Strike"
+        },
+        {
+          "count": 4,
+          "name": "Duress"
+        },
+        {
+          "count": 1,
+          "name": "M.O.D.O.K."
+        },
+        {
+          "count": 1,
+          "name": "Ajani Resolute"
         }
       ]
     },
@@ -1250,10 +1250,18 @@
       "main": [
         {
           "count": 2,
-          "name": "Braided Net"
+          "name": "Authority of the Consuls"
         },
         {
           "count": 2,
+          "name": "Boomerang Basics"
+        },
+        {
+          "count": 1,
+          "name": "Braided Net"
+        },
+        {
+          "count": 3,
           "name": "Candy Trail"
         },
         {
@@ -1261,12 +1269,16 @@
           "name": "Castle Doom"
         },
         {
-          "count": 2,
+          "count": 1,
           "name": "Clay-Fired Bricks"
         },
         {
-          "count": 3,
+          "count": 2,
           "name": "Cryogen Relic"
+        },
+        {
+          "count": 1,
+          "name": "Day of Judgment"
         },
         {
           "count": 1,
@@ -1285,27 +1297,27 @@
           "name": "Gleaming Bastion"
         },
         {
-          "count": 4,
+          "count": 3,
           "name": "Hallowed Fountain"
         },
         {
-          "count": 2,
+          "count": 4,
           "name": "Island"
         },
         {
-          "count": 4,
-          "name": "Perilous Snare"
+          "count": 1,
+          "name": "Meticulous Archive"
         },
         {
-          "count": 2,
-          "name": "Petrified Hamlet"
+          "count": 3,
+          "name": "Perilous Snare"
         },
         {
           "count": 3,
           "name": "Pinnacle Starcage"
         },
         {
-          "count": 4,
+          "count": 5,
           "name": "Plains"
         },
         {
@@ -1322,23 +1334,15 @@
         },
         {
           "count": 1,
-          "name": "Sunbillow Verge"
-        },
-        {
-          "count": 1,
           "name": "The Fire Crystal"
         },
         {
-          "count": 2,
+          "count": 1,
           "name": "The Irencrag"
         },
         {
           "count": 2,
           "name": "The Mind Stone"
-        },
-        {
-          "count": 1,
-          "name": "Torpor Orb"
         },
         {
           "count": 4,
@@ -1352,6 +1356,10 @@
       "sideboard": [
         {
           "count": 1,
+          "name": "Astelli Reclaimer"
+        },
+        {
+          "count": 2,
           "name": "Authority of the Consuls"
         },
         {
@@ -1359,8 +1367,8 @@
           "name": "Day of Judgment"
         },
         {
-          "count": 1,
-          "name": "Disdainful Stroke"
+          "count": 2,
+          "name": "No More Lies"
         },
         {
           "count": 1,
@@ -1372,19 +1380,15 @@
         },
         {
           "count": 2,
-          "name": "Seam Rip"
-        },
-        {
-          "count": 2,
-          "name": "Spell Pierce"
-        },
-        {
-          "count": 1,
           "name": "Torpor Orb"
         },
         {
-          "count": 3,
+          "count": 2,
           "name": "Voice of Victory"
+        },
+        {
+          "count": 1,
+          "name": "Tony Stark"
         }
       ]
     }
