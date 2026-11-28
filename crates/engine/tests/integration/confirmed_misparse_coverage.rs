@@ -300,8 +300,11 @@ fn compare_population(raw: &Map<String, Value>, populations: &[(&ConfirmedMispar
 /// Syrix, Carrier of the Flame parses its intervening-if gate but is not claimed
 /// (its graveyard-cast trigger keeps `trigger_zones` at the battlefield, so it cannot
 /// fire from the graveyard): the committed row makes it report an honest `Misparse:`
-/// gap with its parse untouched, and the four claimed cards stay supported and
-/// gap-free. Sandstalker Moloch (shared dig path, ticket 359) and Sarevok,
+/// gap with its parse untouched. Krond the Dawn-Clad is fenced the same way: its
+/// `exile target permanent` uses the shared `TypeFilter::Permanent` matcher, which
+/// rejects a battlefield permanent that lost all types; the shared-predicate fix is
+/// a follow-up. The three claimed cards stay supported and gap-free.
+/// Sandstalker Moloch (shared dig path, ticket 359) and Sarevok,
 /// Deathbringer (a typeless permanent leaving is not counted) keep their committed
 /// rows; their gates stay unparsed (`unclaimed_history_gates_stay_unparsed`), so
 /// their triggers fail closed.
@@ -312,19 +315,19 @@ fn intervening_if_unclaimed_cards_stay_unsupported_and_claimed_cards_stay_suppor
         ("sandstalker moloch", MisparseClass::WrongObject),
         ("sarevok, deathbringer", MisparseClass::ConditionWrong),
         ("syrix, carrier of the flame", MisparseClass::WrongZone),
+        ("krond the dawn-clad", MisparseClass::TargetWrong),
     ] {
         assert_eq!(committed.class_of(key), Some(class), "committed row: {key}");
     }
-    let claimed = [
-        "kaito shizuki",
-        "krond the dawn-clad",
-        "warchanter skald",
-        "novice knight",
+    let claimed = ["kaito shizuki", "warchanter skald", "novice knight"];
+    let fenced = [
+        ("syrix, carrier of the flame", MisparseClass::WrongZone),
+        ("krond the dawn-clad", MisparseClass::TargetWrong),
     ];
-    let syrix = "syrix, carrier of the flame";
-    let pool: Map<String, Value> = [syrix]
-        .into_iter()
-        .chain(claimed)
+    let pool: Map<String, Value> = fenced
+        .iter()
+        .map(|(key, _)| *key)
+        .chain(claimed.iter().copied())
         .map(|key| (key.to_string(), fixture()[key].clone()))
         .collect();
     let before = report(&database(&stamped_export(
@@ -332,17 +335,22 @@ fn intervening_if_unclaimed_cards_stay_unsupported_and_claimed_cards_stay_suppor
         &ConfirmedMisparses::empty(),
     )));
     let after = report(&database(&stamped_export(&pool, committed)));
-    assert!(before[syrix].supported, "its gate parses on its own");
-    assert!(!after[syrix].supported, "unclaimed card must report a gap");
-    assert!(
-        handlers(&after[syrix]).contains(&MisparseClass::WrongZone.handler()),
-        "typed Misparse gap"
-    );
-    assert_eq!(
-        serde_json::to_value(&before[syrix].parse_details).unwrap(),
-        serde_json::to_value(&after[syrix].parse_details).unwrap(),
-        "the marker changes support, never the parse"
-    );
+    for (key, class) in fenced {
+        assert!(before[key].supported, "its gate parses on its own: {key}");
+        assert!(
+            !after[key].supported,
+            "unclaimed card must report a gap: {key}"
+        );
+        assert!(
+            handlers(&after[key]).contains(&class.handler()),
+            "typed Misparse gap: {key}"
+        );
+        assert_eq!(
+            serde_json::to_value(&before[key].parse_details).unwrap(),
+            serde_json::to_value(&after[key].parse_details).unwrap(),
+            "the marker changes support, never the parse: {key}"
+        );
+    }
     for key in claimed {
         assert_eq!(
             committed.class_of(key),
