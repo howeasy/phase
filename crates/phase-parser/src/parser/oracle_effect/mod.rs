@@ -5846,8 +5846,15 @@ fn try_parse_next_time_source_damage_replacement(lower: &str) -> Option<Effect> 
     })
 }
 
-/// Parse "that creature enters with an additional [N] +1/+1 counter(s) on it" into
-/// an `AddPendingETBCounters` effect. Returns `None` if the text doesn't match.
+/// CR 400.7 + CR 614.1c + CR 603.7c: Parse "that creature enters with an
+/// additional [N] +1/+1 counter(s) on it" (or "-1/-1") into the pinned entry
+/// rider the next-cast delayed trigger installs. Returns `None` if the text
+/// doesn't match.
+///
+/// The body is the same rider a printed "whenever you cast …, that creature
+/// enters with …" trigger installs (`triggering_spell_entry_rider`): floating,
+/// one-shot, and bound to the spell occurrence named by the resolving
+/// carrier's incarnation pin rather than to the storage id a recast reuses.
 fn try_parse_enters_with_additional_counters(lower: &str) -> Option<AbilityDefinition> {
     // "that creature enters with an additional +1/+1 counter on it"
     // "that creature enters with N additional +1/+1 counters on it"
@@ -5888,15 +5895,21 @@ fn try_parse_enters_with_additional_counters(lower: &str) -> Option<AbilityDefin
     .parse(rest)
     .ok()?;
 
-    Some(AbilityDefinition::new(
-        AbilityKind::Spell,
-        Effect::AddPendingETBCounters {
-            counter_type,
-            count: QuantityExpr::Fixed {
-                value: count as i32,
-            },
-        },
-    ))
+    Some(
+        crate::parser::oracle_replacement::triggering_spell_entry_rider(
+            AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::PutCounter {
+                    counter_type,
+                    count: QuantityExpr::Fixed {
+                        value: count as i32,
+                    },
+                    target: TargetFilter::SelfRef,
+                },
+            ),
+            lower.to_string(),
+        ),
+    )
 }
 
 /// CR 614.1c + CR 122.1 + CR 607.1: Shared recognizer for the linked "if you
@@ -23953,7 +23966,7 @@ fn placement_noun_phrase_is_targeted(input: &str) -> bool {
     }
 }
 
-fn parse_exiled_cards_not_cast_cleanup(input: &str) -> Option<()> {
+fn parse_exiled_cards_not_cast_cleanup(input: &str) -> Option<bool> {
     let (input, _) = tag::<_, _, OracleError<'_>>("put the exiled cards")
         .parse(input)
         .ok()?;
@@ -23977,11 +23990,11 @@ fn parse_exiled_cards_not_cast_cleanup(input: &str) -> Option<()> {
     ))
     .parse(input)
     .ok()?;
-    let (input, _) = opt(tag::<_, _, OracleError<'_>>(" in a random order"))
+    let (input, order) = opt(tag::<_, _, OracleError<'_>>(" in a random order"))
         .parse(input)
         .ok()?;
     let (input, _) = opt(tag::<_, _, OracleError<'_>>(".")).parse(input).ok()?;
-    input.is_empty().then_some(())
+    input.is_empty().then_some(order.is_some())
 }
 
 /// CR 614.1a + CR 608.2n: could a typed owner consume this body in the dropped guard's
@@ -24081,9 +24094,31 @@ fn refine_put_at_library_position(
         ..
     } = clause.effect
     {
-        if parse_exiled_cards_not_cast_cleanup(&text.to_lowercase()).is_some() {
-            *target = TargetFilter::ExiledBySource;
-            *count = QuantityExpr::Fixed { value: 0 };
+        if let Some(random_order) = parse_exiled_cards_not_cast_cleanup(&text.to_lowercase()) {
+            // CR 400.7j + CR 608.2c: the preceding loop owns this population.
+            // The source-linked "all cards exiled with this enchantment"
+            // wording does not enter this branch.
+            if random_order && ctx.chain_prior_exile_until_match.is_some() {
+                clause.effect = Effect::ChangeZoneAll {
+                    actor: crate::types::ability::LibraryInstructionActor::Controller,
+                    origin: Some(Zone::Exile),
+                    destination: Zone::Library,
+                    target: TargetFilter::TrackedSet {
+                        id: TrackedSetId(0),
+                    },
+                    enters_under: None,
+                    enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                    enters_attacking: false,
+                    enter_with_counters: vec![],
+                    face_down_profile: None,
+                    library_position: Some(LibraryPosition::Bottom),
+                    library_shuffle: Default::default(),
+                    random_order,
+                };
+            } else {
+                *target = TargetFilter::ExiledBySource;
+                *count = QuantityExpr::Fixed { value: 0 };
+            }
             return placement_target_set;
         }
         let lower_put = text.to_lowercase();
@@ -33957,6 +33992,47 @@ fn bind_anaphors_across_resolution_choices(clauses: &mut [ClauseIr], body_scope:
                 let group = *clauses[p].declares_chosen_clause.get_or_insert(producer_id);
                 clauses[i].reads_chosen_clause = Some(group);
             }
+        }
+    }
+}
+
+/// CR 608.2c: a plural "the chosen <objects>" reader names the complete
+/// target group announced by an earlier `choose target` instruction. The
+/// ordinary `ParentTarget` lowering is sufficient for a single target, but it
+/// would otherwise inherit only the nearest list slot when the declaration is
+/// a chain of independent target slots.
+fn bind_chosen_target_list_readers(clauses: &mut [ClauseIr]) {
+    fn reads_plural_chosen_object(text: &str) -> bool {
+        let lower = text.to_ascii_lowercase();
+        nom_primitives::scan_at_word_boundaries(&lower, |input| {
+            let (input, _) = tag("the chosen ").parse(input)?;
+            let (input, _) = alt((
+                tag("artifacts"),
+                tag("creatures"),
+                tag("lands"),
+                tag("permanents"),
+            ))
+            .parse(input)?;
+            Ok((input, ()))
+        })
+        .is_some()
+    }
+
+    let mut nearest_declaration = None;
+    for clause in clauses.iter_mut() {
+        let reads_group = clause.reads_chosen_clause.is_none()
+            && clause_refs_parent_target(clause)
+            && reads_plural_chosen_object(clause.source.fragment().unwrap_or_default());
+        if reads_group {
+            if let Some(group) = nearest_declaration {
+                clause.reads_chosen_clause = Some(group);
+            }
+        }
+        // Keep this update after the reader check: a guard-failed declaration
+        // still establishes the nearest group for the following clauses, but
+        // must not bind its own plural reader to itself.
+        if let Some(group) = clause.declares_chosen_clause {
+            nearest_declaration = Some(group);
         }
     }
 }
@@ -58375,6 +58451,7 @@ fn parse_effect_chain_ir_body(
     // CR 608.2c: after player tagging, so a producer's player group is final and
     // the object-group stamp cannot suppress it.
     bind_anaphors_across_resolution_choices(builder.clauses_mut(), ctx.body_scope);
+    bind_chosen_target_list_readers(builder.clauses_mut());
 
     // CR 608.2c + CR 603.7: resolve delayed-payload placement over the finished clause sequence.
     // Must stay ABOVE `builder.finish()`: `try_fold_loses_other_sibling` removes a clause and the

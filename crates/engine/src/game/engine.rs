@@ -2704,6 +2704,9 @@ pub(crate) fn finalize_persisted_restore(
     recovered_terminal_rest: bool,
 ) -> Result<(), PersistedRestoreError> {
     finalize_rules_state(state);
+    super::casting_costs::restore_conspire_payment_origin(state);
+    super::casting_costs::validate_restored_replicate_payment(state)
+        .map_err(PersistedRestoreError::InvalidPaymentTransaction)?;
     restore_engine_derived_retarget_prompts(state)?;
     let recovered_terminal_rest =
         recovered_terminal_rest || recover_terminal_resolution_rest_on_restore(state)?;
@@ -18832,6 +18835,13 @@ pub(crate) fn validate_retarget_submission(
                 .unwrap_or(false)
         })
     };
+    if !crate::game::ability_utils::changed_target_runs_satisfy_shared_qualities(
+        state, &mutated, &derived, &changed,
+    ) {
+        return Err(EngineError::InvalidAction(
+            "Retarget: targets do not satisfy the declaration's shared quality".into(),
+        ));
+    }
     crate::game::ability_utils::unchanged_targets_stay_legal(
         state,
         pre,
