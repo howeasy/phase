@@ -658,6 +658,7 @@
     "onlyForXCosts": "Nur für Kosten ausgeben, die {X} enthalten",
     "onlyForAny": "Nur für eine der aufgeführten Verwendungen ausgeben",
     "onlyForSpecialAction": "Nur für eine bestimmte Sonderaktion ausgeben",
+    "onlyForSpellProperty": "Nur zum Wirken von Zaubersprüchen mit einer bestimmten Eigenschaft ausgeben",
     "impossible": "Dieses Mana kann nicht ausgegeben werden",
     "convokePayment": "Beschwörbeitrag-Bezahlung",
     "grantsProperty": "Verleiht dem Zauberspruch eine Eigenschaft",
@@ -1294,6 +1295,13 @@
       "onlyForFaceDownSpell": "Nur für verdeckte Zaubersprüche.",
       "onlyForAny": "Nur für eine dieser Verwendungen: {{restrictions}}",
       "onlyForSpecialAction": "Nur für die Sonderaktion {{action}}.",
+      "onlyForSpellProperty": "Nur für {{property}}.",
+      "spellProperty": {
+        "commander": "deinen Kommandeur",
+        "notOwnedByCaster": "Zaubersprüche, die du nicht besitzt",
+        "noAbilities": "Zaubersprüche ohne Fähigkeiten",
+        "withoutXInManaCost": "Zaubersprüche ohne {X} in ihren Manakosten"
+      },
       "impossible": "Dieses Mana kann nicht ausgegeben werden.",
       "convokePayment": "Nur für diese Einberufen-Zahlung.",
       "anySpell": "beliebige"

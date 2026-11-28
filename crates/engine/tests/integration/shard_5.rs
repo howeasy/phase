@@ -33,6 +33,7 @@ mod resolved_restriction_ability_removal;
 mod restricted_mana_face_down_and_face_up;
 mod restricted_mana_mv_or_x;
 mod restricted_mana_not_from_zone;
+mod restricted_mana_spell_properties;
 mod restricted_mana_x_cost_only;
 mod retarget_prompt_softlock;
 mod reveal_hand_trailing_conjunct;

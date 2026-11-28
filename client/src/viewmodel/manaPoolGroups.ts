@@ -35,6 +35,7 @@ export const RESTRICTION_LABEL_KEYS = {
   OnlyForSpellFromZone: "manaPool.onlyForSpellFromZone",
   CannotCastSpellFromZone: "manaPool.cannotCastSpellFromZone",
   OnlyForFaceDownSpell: "manaPool.onlyForFaceDownSpell",
+  OnlyForSpellProperty: "manaPool.onlyForSpellProperty",
   OnlyForActivation: "manaPool.onlyForActivation",
   OnlyForXCosts: "manaPool.onlyForXCosts",
   OnlyForAny: "manaPool.onlyForAny",

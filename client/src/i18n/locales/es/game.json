@@ -658,6 +658,7 @@
     "onlyForXCosts": "Gastar solo en costes que incluyan {X}",
     "onlyForAny": "Gastar solo en uno de los usos indicados",
     "onlyForSpecialAction": "Gastar solo en una acción especial específica",
+    "onlyForSpellProperty": "Gastar solo para lanzar hechizos con una propiedad específica",
     "impossible": "Este maná no se puede gastar",
     "convokePayment": "Pago de convocar",
     "grantsProperty": "Otorga una propiedad al hechizo",
@@ -1294,6 +1295,13 @@
       "onlyForFaceDownSpell": "Solo para hechizos boca abajo.",
       "onlyForAny": "Solo para uno de estos usos: {{restrictions}}",
       "onlyForSpecialAction": "Solo para la acción especial {{action}}.",
+      "onlyForSpellProperty": "Solo para {{property}}.",
+      "spellProperty": {
+        "commander": "tu comandante",
+        "notOwnedByCaster": "hechizos que no posees",
+        "noAbilities": "hechizos sin habilidades",
+        "withoutXInManaCost": "hechizos sin {X} en su coste de maná"
+      },
       "impossible": "Este maná no se puede gastar.",
       "convokePayment": "Solo para este pago de convocar.",
       "anySpell": "cualquiera"

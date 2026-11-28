@@ -694,6 +694,7 @@
     "onlyForXCosts": "{X}を含むコストだけに使う",
     "onlyForAny": "列挙された用途のいずれか1つだけに使う",
     "onlyForSpecialAction": "特定の特別な処理だけに使う",
+    "onlyForSpellProperty": "特定の特性を持つ呪文を唱えるためだけに使う",
     "impossible": "このマナは使えません",
     "convokePayment": "召集による支払い",
     "grantsProperty": "呪文に特性を与える",
@@ -1330,6 +1331,13 @@
       "onlyForFaceDownSpell": "裏向きの呪文にのみ使用可能。",
       "onlyForAny": "次のいずれかの用途にのみ使用可能：{{restrictions}}",
       "onlyForSpecialAction": "特別な処理「{{action}}」にのみ使用可能。",
+      "onlyForSpellProperty": "{{property}}にのみ使用可能。",
+      "spellProperty": {
+        "commander": "あなたの統率者",
+        "notOwnedByCaster": "あなたがオーナーでない呪文",
+        "noAbilities": "能力を持たない呪文",
+        "withoutXInManaCost": "マナ・コストに{X}を含まない呪文"
+      },
       "impossible": "このマナは使用できません。",
       "convokePayment": "この召集の支払いにのみ使用可能。",
       "anySpell": "任意の"

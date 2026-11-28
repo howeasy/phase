@@ -658,6 +658,7 @@
     "onlyForXCosts": "Spendi solo su costi che includono {X}",
     "onlyForAny": "Spendi solo per uno degli usi elencati",
     "onlyForSpecialAction": "Spendi solo per un'azione speciale specifica",
+    "onlyForSpellProperty": "Spendi solo per lanciare magie con una proprietà specifica",
     "impossible": "Questo mana non può essere speso",
     "convokePayment": "Pagamento di Convocare",
     "grantsProperty": "Concede una proprietà alla magia",
@@ -1294,6 +1295,13 @@
       "onlyForFaceDownSpell": "Solo per magie a faccia in giù.",
       "onlyForAny": "Solo per uno di questi usi: {{restrictions}}",
       "onlyForSpecialAction": "Solo per l'azione speciale {{action}}.",
+      "onlyForSpellProperty": "Solo per {{property}}.",
+      "spellProperty": {
+        "commander": "il tuo comandante",
+        "notOwnedByCaster": "le magie che non possiedi",
+        "noAbilities": "le magie senza abilità",
+        "withoutXInManaCost": "le magie senza {X} nel loro costo di mana"
+      },
       "impossible": "Questo mana non può essere speso.",
       "convokePayment": "Solo per questo pagamento di convocazione.",
       "anySpell": "qualsiasi"
