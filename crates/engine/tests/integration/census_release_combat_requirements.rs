@@ -671,7 +671,7 @@ fn joraga_invocation_pumps_each_creature_and_requires_the_attacking_ones_to_be_b
                 runner.state().objects[&id].toughness
             ),
             (Some(2), Some(2)),
-            "CR 611.2c: an opponent's creature is outside the affected set"
+            "CR 611.2c: the characteristic-changing +3/+3 locked its set at resolution; an opponent's creature was never in it"
         );
     }
 
@@ -960,6 +960,7 @@ fn khenra_scrapper_declined_exert_leaves_it_unpumped_and_untaps() {
 fn trueheart_twins_exert_pumps_its_controllers_creatures() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
+    stock_libraries(&mut scenario);
     let twins = card(&mut scenario, P0, "Trueheart Twins", Zone::Battlefield);
     let bear = card(&mut scenario, P0, "Grizzly Bears", Zone::Battlefield);
     let mut runner = scenario.build();
@@ -1010,6 +1011,27 @@ fn trueheart_twins_exert_pumps_its_controllers_creatures() {
         runner.state().objects[&bear].power,
         Some(3),
         "CR 701.43d: each creature the controller controls gets +1/+0"
+    );
+
+    // CR 514.2: the +1/+0 lasts until end of turn, so cleanup strips it even
+    // though the exert's no-untap rider is still waiting on P0's next untap.
+    advance_past_end_of_turn(&mut runner);
+    advance_past_end_of_turn(&mut runner);
+    assert_eq!(
+        runner.state().active_player,
+        P0,
+        "reach guard: the round trip returned to P0's turn"
+    );
+    evaluate_layers(runner.state_mut());
+    assert_eq!(
+        runner.state().objects[&twins].power,
+        Some(4),
+        "CR 514.2: the +1/+0 until end of turn expired for the observer"
+    );
+    assert_eq!(
+        runner.state().objects[&bear].power,
+        Some(2),
+        "CR 514.2: the +1/+0 expired for every creature"
     );
 }
 
@@ -1092,6 +1114,46 @@ fn trueheart_twins_observes_only_its_controllers_exerts() {
         runner.state().objects[&p0_bear].power,
         Some(2),
         "CR 109.5: 'you' is the observer's controller, so P0's set is untouched"
+    );
+}
+
+#[test]
+fn trueheart_twins_observes_another_creatures_exert() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let twins = card(&mut scenario, P0, "Trueheart Twins", Zone::Battlefield);
+    let khenra = card(&mut scenario, P0, "Khenra Scrapper", Zone::Battlefield);
+    let bear = card(&mut scenario, P0, "Grizzly Bears", Zone::Battlefield);
+    let mut runner = scenario.build();
+
+    runner.advance_to_combat();
+    runner
+        .declare_attackers(&[(khenra, AttackTarget::Player(P1))])
+        .expect("only the Khenra attacks");
+    assert_eq!(runner.waiting_for_kind(), "ExertChoice");
+
+    let events = runner
+        .act(GameAction::ChooseExert { exert: true })
+        .expect("choose to exert the Khenra")
+        .events;
+    runner.advance_until_stack_empty();
+    evaluate_layers(runner.state_mut());
+
+    assert_eq!(exerted_events(&events), vec![(khenra, P0)]);
+    assert_eq!(
+        runner.state().objects[&khenra].power,
+        Some(5),
+        "CR 701.43d + CR 603.2: the Khenra's own +2/+0 and the observer's +1/+0 both applied"
+    );
+    assert_eq!(
+        runner.state().objects[&twins].power,
+        Some(5),
+        "the nonattacking observer pumps itself when another creature is exerted"
+    );
+    assert_eq!(
+        runner.state().objects[&bear].power,
+        Some(3),
+        "the observer's +1/+0 reaches this controller's other creatures"
     );
 }
 
@@ -1221,6 +1283,60 @@ fn vizier_of_the_true_observes_only_its_controllers_exerts() {
     assert!(
         !runner.state().objects[&p1_bear].tapped,
         "P1's observer targeted P0's creature, not P1's own"
+    );
+}
+
+#[test]
+fn vizier_of_the_true_observes_another_creatures_exert() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let vizier = card(&mut scenario, P0, "Vizier of the True", Zone::Battlefield);
+    let khenra = card(&mut scenario, P0, "Khenra Scrapper", Zone::Battlefield);
+    let p1_bear = card(&mut scenario, P1, "Grizzly Bears", Zone::Battlefield);
+    let p1_other = card(&mut scenario, P1, "Savannah Lions", Zone::Battlefield);
+    let mut runner = scenario.build();
+
+    runner.advance_to_combat();
+    runner
+        .declare_attackers(&[(khenra, AttackTarget::Player(P1))])
+        .expect("only the Khenra attacks");
+    assert_eq!(runner.waiting_for_kind(), "ExertChoice");
+
+    let events = runner
+        .act(GameAction::ChooseExert { exert: true })
+        .expect("choose to exert the Khenra")
+        .events;
+    runner.advance_until_stack_empty();
+
+    let legal = trigger_target_legal_targets(&runner, P0);
+    assert!(
+        legal.contains(&TargetRef::Object(p1_bear)) && legal.contains(&TargetRef::Object(p1_other)),
+        "CR 115.1: the nonattacking observer may tap any creature an opponent controls"
+    );
+    assert!(
+        !legal.contains(&TargetRef::Object(khenra)),
+        "the observer cannot tap its controller's creatures"
+    );
+    assert!(
+        !legal.contains(&TargetRef::Object(vizier)),
+        "the observer cannot tap its controller's creatures"
+    );
+    select_trigger_target(&mut runner, p1_bear);
+    assert_no_trigger_target_prompt(&runner);
+    evaluate_layers(runner.state_mut());
+
+    assert!(runner.state().objects[&p1_bear].tapped);
+    assert!(!runner.state().objects[&p1_other].tapped);
+    assert_eq!(exerted_events(&events), vec![(khenra, P0)]);
+    assert_eq!(
+        runner.state().objects[&khenra].power,
+        Some(4),
+        "CR 701.43d: the Khenra's own +2/+0 still resolved"
+    );
+    assert_eq!(
+        runner.state().objects[&vizier].power,
+        Some(3),
+        "the observer's tap does not pump anything"
     );
 }
 
