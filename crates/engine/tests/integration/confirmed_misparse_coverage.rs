@@ -1308,9 +1308,9 @@ fn deck_compatibility_entry_projection_gap_is_deck_only_and_explained() {
     assert_eq!(
         arcane.gap_details[0].source_text.as_deref(),
         Some(
-            "As this permanent enters, the engine cannot yet apply all the changes its own \
-             static abilities make to its characteristics, so an entry consumer may see \
-             unprojected values (CR 614.12)"
+            "This permanent makes a choice as it enters (such as a creature type) and has \
+             static abilities whose changes to characteristics the engine's entry projection \
+             cannot yet prove, so an entry consumer may see unprojected values (CR 614.12)"
         ),
         "the deck-only gap carries a specific explanation: {:?}",
         arcane.gap_details[0]
@@ -1340,9 +1340,9 @@ fn deck_compatibility_entry_projection_gap_is_deck_only_and_explained() {
     assert_eq!(
         projection.source_text.as_deref(),
         Some(
-            "As this permanent enters, the engine cannot yet apply all the changes its own \
-             static abilities make to its characteristics, so an entry consumer may see \
-             unprojected values (CR 614.12)"
+            "This permanent makes a choice as it enters (such as a creature type) and has \
+             static abilities whose changes to characteristics the engine's entry projection \
+             cannot yet prove, so an entry consumer may see unprojected values (CR 614.12)"
         ),
         "Voice of All carries the entry-projection explanation: {:?}",
         projection

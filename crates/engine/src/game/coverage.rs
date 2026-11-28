@@ -8636,7 +8636,10 @@ fn blank_gap_text(gap: &GapDetail, lines: &[String], dropped: &[&str]) -> String
     // The report never emits these two deck-only labels, so nothing else here
     // has ever described them; say what the projection limit means.
     if gap.handler == ENTRY_PROJECTION_GAP {
-        return "As this permanent enters, the engine cannot yet apply all the changes its own static abilities make to its characteristics, so an entry consumer may see unprojected values (CR 614.12)".to_string();
+        return "This permanent makes a choice as it enters (such as a creature type) and has \
+                static abilities whose changes to characteristics the engine's entry projection \
+                cannot yet prove, so an entry consumer may see unprojected values (CR 614.12)"
+            .to_string();
     }
     if gap.handler == ENTRY_CONSUMER_GAP {
         return "This permanent's entry replacement or enters-with-counters static reads a characteristic of an entering permanent (such as power or toughness) that the engine's entry projection does not yet apply, so an entrant's own static abilities may change it unseen (CR 614.12)".to_string();
