@@ -22025,6 +22025,151 @@ fn mana_spend_restriction_color_count_or_fewer() {
     );
 }
 
+// CR 106.6 + CR 903.3d: Jeweled Lotus / Queen's Diamond — "Spend this mana
+// only to cast your commander."
+#[test]
+fn mana_spend_restriction_your_commander() {
+    use crate::parser::oracle_effect::mana::parse_mana_spend_restriction;
+    use crate::types::mana::SpellProperty;
+    let (restrictions, grants) =
+        parse_mana_spend_restriction("spend this mana only to cast your commander")
+            .expect("commander clause should parse");
+    assert_eq!(
+        restrictions,
+        vec![ManaSpendRestriction::SpellProperty(
+            SpellProperty::Commander
+        )]
+    );
+    assert!(grants.is_empty());
+}
+
+// CR 106.6 + CR 108.3: Thieving Varmint — "spend this mana only to cast spells
+// you don't own".
+#[test]
+fn mana_spend_restriction_not_owned() {
+    use crate::parser::oracle_effect::mana::parse_mana_spend_restriction;
+    use crate::types::mana::SpellProperty;
+    let (restrictions, _) =
+        parse_mana_spend_restriction("spend this mana only to cast spells you don't own")
+            .expect("ownership clause should parse");
+    assert_eq!(
+        restrictions,
+        vec![ManaSpendRestriction::SpellProperty(
+            SpellProperty::NotOwnedByCaster
+        )]
+    );
+}
+
+// MTGJSON Oracle text is not apostrophe-normalized; the curly U+2019 form must
+// lower to the same restriction as the ASCII form.
+#[test]
+fn mana_spend_restriction_not_owned_curly_apostrophe() {
+    use crate::parser::oracle_effect::mana::parse_mana_spend_restriction;
+    use crate::types::mana::SpellProperty;
+    let (restrictions, _) =
+        parse_mana_spend_restriction("spend this mana only to cast spells you don’t own")
+            .expect("curly-apostrophe ownership clause should parse");
+    assert_eq!(
+        restrictions,
+        vec![ManaSpendRestriction::SpellProperty(
+            SpellProperty::NotOwnedByCaster
+        )]
+    );
+}
+
+// CR 106.6 + CR 113.1 + CR 113.3: Jasmine Boreal of the Seven — "creature spells
+// with no abilities" is a type AND an ability census.
+#[test]
+fn mana_spend_restriction_no_abilities() {
+    use crate::parser::oracle_effect::mana::parse_mana_spend_restriction;
+    use crate::types::mana::SpellProperty;
+    let (restrictions, _) = parse_mana_spend_restriction(
+        "spend this mana only to cast creature spells with no abilities",
+    )
+    .expect("no-abilities clause should parse");
+    assert_eq!(
+        restrictions,
+        vec![
+            ManaSpendRestriction::SpellType("Creature".to_string()),
+            ManaSpendRestriction::SpellProperty(SpellProperty::NoAbilities),
+        ]
+    );
+}
+
+// CR 106.6 + CR 702.114a: Corrupted Crossroads — "spend this mana only to cast
+// a spell with devoid".
+#[test]
+fn mana_spend_restriction_devoid() {
+    use crate::parser::oracle_effect::mana::parse_mana_spend_restriction;
+    let (restrictions, _) =
+        parse_mana_spend_restriction("spend this mana only to cast a spell with devoid")
+            .expect("devoid clause should parse");
+    assert_eq!(
+        restrictions,
+        vec![ManaSpendRestriction::SpellWithKeywordKind(
+            KeywordKind::Devoid
+        )]
+    );
+}
+
+// CR 106.6 + CR 105.2 + CR 107.3 + CR 202.1: Titans' Nest — one or more colors
+// AND no {X} in the printed mana cost.
+#[test]
+fn mana_spend_restriction_colors_without_x() {
+    use crate::parser::oracle_effect::mana::parse_mana_spend_restriction;
+    use crate::types::ability::Comparator;
+    use crate::types::mana::SpellProperty;
+    let (restrictions, _) = parse_mana_spend_restriction(
+        "spend this mana only to cast a spell that's one or more colors without {x} in its mana cost",
+    )
+    .expect("colors-without-X clause should parse");
+    assert_eq!(
+        restrictions,
+        vec![
+            ManaSpendRestriction::SpellWithColorCount {
+                comparator: Comparator::GE,
+                count: 1,
+            },
+            ManaSpendRestriction::SpellProperty(SpellProperty::WithoutXInManaCost),
+        ]
+    );
+}
+
+#[test]
+fn mana_spend_restriction_colors_without_x_curly_apostrophe() {
+    use crate::parser::oracle_effect::mana::parse_mana_spend_restriction;
+    use crate::types::ability::Comparator;
+    use crate::types::mana::SpellProperty;
+    let (restrictions, _) = parse_mana_spend_restriction(
+        "spend this mana only to cast a spell that’s one or more colors without {x} in its mana cost",
+    )
+    .expect("curly-apostrophe colors-without-X clause should parse");
+    assert_eq!(
+        restrictions,
+        vec![
+            ManaSpendRestriction::SpellWithColorCount {
+                comparator: Comparator::GE,
+                count: 1,
+            },
+            ManaSpendRestriction::SpellProperty(SpellProperty::WithoutXInManaCost),
+        ]
+    );
+}
+
+// CR 106.6: Volshe Tideturner is deferred with the `Kicked` follow-up — its
+// three-clause disjunction fails on the first fragment ("an instant"), so the
+// clause stays a loud gap rather than silently dropping the kicked branch.
+#[test]
+fn mana_spend_restriction_volshe_trailing_disjunction_stays_gap() {
+    use crate::parser::oracle_effect::mana::parse_mana_spend_restriction;
+    assert_eq!(
+        parse_mana_spend_restriction(
+            "spend this mana only to cast an instant or sorcery spell or a kicked spell"
+        ),
+        None
+    );
+}
+
 #[test]
 fn mana_spend_restriction_from_graveyard() {
     use crate::types::mana::{ZoneSpend, ZoneSpendPolarity};

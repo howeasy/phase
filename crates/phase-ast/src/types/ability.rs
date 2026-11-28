@@ -25,7 +25,8 @@ use super::identifiers::{
 };
 use super::keywords::{Keyword, KeywordKind};
 use super::mana::{
-    AbilityActivationScope, ManaColor, ManaCost, ManaType, SpellCostCriterion, ZoneSpend,
+    AbilityActivationScope, ManaColor, ManaCost, ManaType, SpellCostCriterion, SpellProperty,
+    ZoneSpend,
 };
 use super::phase::{Phase, PhaseGroup, TurnSegment};
 use super::player::{PlayerCounterKind, PlayerId};
@@ -4507,6 +4508,14 @@ pub enum ManaSpendRestriction {
     /// colors" (also "N or more / N or fewer"; colorless = 0). Parameterized over
     /// [`Comparator`] — one variant per color-count reading. `count` is N.
     SpellWithColorCount { comparator: Comparator, count: u32 },
+    /// CR 106.6 + CR 903.3d / CR 108.3 / CR 113.1 + CR 113.3 / CR 202.1 + CR 107.3:
+    /// "Spend this mana only to cast your commander" / "spells you don't own" /
+    /// "creature spells with no abilities" / "a spell that's one or more colors
+    /// without {X} in its mana cost". Lowered to
+    /// [`ManaRestriction::OnlyForSpellProperty`](super::mana::ManaRestriction::OnlyForSpellProperty)
+    /// and evaluated against the payment-time
+    /// [`SpellMeta`](super::mana::SpellMeta) snapshot.
+    SpellProperty(SpellProperty),
     /// CR 105.2 + CR 106.6: "Spend this mana only to cast spells of the
     /// source's chosen color." Resolved when the mana is produced; a missing
     /// choice lowers to `ManaRestriction::Impossible`, never to no restriction.
@@ -4620,6 +4629,9 @@ impl ManaSpendRestriction {
             | ManaSpendRestriction::SpellWithManaValue { .. }
             | ManaSpendRestriction::SpellMatchingCostCriteria { .. }
             | ManaSpendRestriction::SpellWithColorCount { .. }
+            // LIVE — the four leaves read facts `build_spell_meta` populates at
+            // every `PaymentContext::Spell` site.
+            | ManaSpendRestriction::SpellProperty(_)
             | ManaSpendRestriction::SpellOfSourceChosenColor
             | ManaSpendRestriction::SpellFromZone(_)
             | ManaSpendRestriction::CannotCastSpellFromZone(_)
@@ -49685,6 +49697,11 @@ mod tests {
             count: 2,
         }
         .is_coverage_supported());
+        // CR 106.6: the four spell-property leaves are all production-live —
+        // `build_spell_meta` populates the facts at every spell payment site.
+        assert!(
+            ManaSpendRestriction::SpellProperty(SpellProperty::NoAbilities).is_coverage_supported()
+        );
         assert!(ManaSpendRestriction::SpellFromZone(ZoneSpend {
             zone: Zone::Graveyard,
             polarity: ZoneSpendPolarity::From,

@@ -18,7 +18,7 @@ use crate::types::ability::{
 use crate::types::keywords::KeywordKind;
 use crate::types::mana::{
     AbilityActivationScope, ManaColor, ManaRestriction, ManaSpellGrant, SpellCostCriterion,
-    ZoneSpend, ZoneSpendPolarity,
+    SpellProperty, ZoneSpend, ZoneSpendPolarity,
 };
 use crate::types::zones::Zone;
 
@@ -1947,8 +1947,8 @@ pub fn parse_mana_spend_restriction(
     // type union inside one clause ("instant or sorcery spells") stays a single
     // `SpellType` and only genuinely heterogeneous disjunctions fall through to
     // the multi-clause path below.
-    if let Some(restriction) = parse_single_cast_clause(rest) {
-        return Some((vec![restriction], grants));
+    if let Some(restrictions) = parse_single_cast_clause(rest) {
+        return Some((restrictions, grants));
     }
 
     // CR 106.6: Disjunctive spend restriction ("cast X or Y", "cast X, Y, or
@@ -1982,11 +1982,109 @@ fn parse_monocolored_spell_of_source_chosen_color(rest: &str) -> bool {
     .is_some()
 }
 
+/// CR 106.6 + CR 903.3d / CR 108.3 / CR 113.1 + CR 113.3 / CR 202.1 + CR 107.3:
+/// Parse the static spell-property spend clauses:
+/// - "your commander" (Jeweled Lotus, Queen's Diamond)
+/// - "spells you don't own" / "a spell you don't own" (Thieving Varmint)
+/// - "[creature] spells with no abilities" (Jasmine Boreal of the Seven)
+/// - "a spell that's N [or more|or fewer] colors without {X} in its mana cost"
+///   (Titans' Nest)
+///
+/// Returns every restriction the phrase lowers to (`SpellType` + `NoAbilities`,
+/// or `SpellWithColorCount` + `WithoutXInManaCost`), because those clauses name
+/// two independent AND requirements. Every arm is `all_consuming`; the caller
+/// runs this before the type-phrase fallback, so a property phrase is never
+/// lowered to `SpellType`. MTGJSON Oracle text is not apostrophe-normalized, so
+/// the possessive forms accept both `'` (U+0027) and `’` (U+2019).
+fn parse_spell_property_clause(rest: &str) -> Option<Vec<ManaSpendRestriction>> {
+    let rest_lower = rest.to_lowercase();
+
+    // CR 903.3d: "your commander".
+    if nom_on_lower(rest, &rest_lower, |i| {
+        value((), all_consuming(tag("your commander"))).parse(i)
+    })
+    .is_some()
+    {
+        return Some(vec![ManaSpendRestriction::SpellProperty(
+            SpellProperty::Commander,
+        )]);
+    }
+
+    // CR 108.3: "spells you don't own" / "a spell you don't own".
+    if nom_on_lower(rest, &rest_lower, |i| {
+        value(
+            (),
+            all_consuming((
+                alt((tag("spells"), tag("a spell"))),
+                tag(" you don"),
+                alt((tag("'t own"), tag("’t own"))),
+            )),
+        )
+        .parse(i)
+    })
+    .is_some()
+    {
+        return Some(vec![ManaSpendRestriction::SpellProperty(
+            SpellProperty::NotOwnedByCaster,
+        )]);
+    }
+
+    // CR 113.1 + CR 113.3: "[creature] spells with no abilities". The optional
+    // type word reuses the shared "[type] spell(s) with " opener so
+    // "creature spells with no abilities" and "spells with no abilities" both
+    // parse without a bespoke type-phrase grammar.
+    let no_abilities = nom_on_lower(rest, &rest_lower, |i| {
+        map(
+            all_consuming((parse_typed_spells_with_opener, tag("no abilities"))),
+            |(spell_type, _)| spell_type,
+        )
+        .parse(i)
+    });
+    if let Some((spell_type, _)) = no_abilities {
+        let mut restrictions = Vec::with_capacity(2);
+        if let Some(spell_type) = spell_type {
+            restrictions.push(ManaSpendRestriction::SpellType(super::capitalize(
+                spell_type.trim(),
+            )));
+        }
+        restrictions.push(ManaSpendRestriction::SpellProperty(
+            SpellProperty::NoAbilities,
+        ));
+        return Some(restrictions);
+    }
+
+    // CR 105.2 + CR 106.6 + CR 107.3 + CR 202.1: "a spell that's one or more
+    // colors without {X} in its mana cost". The color-count grammar is shared
+    // with `parse_color_count`; the suffix consumes only through "colors", so
+    // the remainder keeps the space before " without …".
+    let (_, after_that) = nom_on_lower(rest, &rest_lower, |i| {
+        value(
+            (),
+            alt((
+                tag("a spell that's "),
+                tag("a spell that’s "),
+                tag("a spell that is "),
+            )),
+        )
+        .parse(i)
+    })?;
+    let (comparator, count, after_count) = parse_color_count_suffix(after_that)?;
+    let after_count_lower = after_count.to_lowercase();
+    nom_on_lower(after_count, &after_count_lower, |i| {
+        value((), all_consuming(tag(" without {x} in its mana cost"))).parse(i)
+    })?;
+    Some(vec![
+        ManaSpendRestriction::SpellWithColorCount { comparator, count },
+        ManaSpendRestriction::SpellProperty(SpellProperty::WithoutXInManaCost),
+    ])
+}
+
 /// CR 106.6: Parse a single post-"to cast " clause (no grant extraction, no
-/// disjunction) into a `ManaSpendRestriction`. This is the body of the legacy
+/// disjunction) into the restrictions it names. This is the body of the legacy
 /// single-clause logic, extracted verbatim so the disjunction path can reuse it
-/// per clause. Returns `None` for any phrase it does not recognize.
-fn parse_single_cast_clause(rest: &str) -> Option<ManaSpendRestriction> {
+/// per clause; a property clause may name two AND requirements, so the result is
+/// a `Vec`. Returns `None` for any phrase it does not recognize.
+fn parse_single_cast_clause(rest: &str) -> Option<Vec<ManaSpendRestriction>> {
     let rest = rest.trim();
     let rest_lower = rest.to_lowercase();
     if nom_on_lower(rest, &rest_lower, |i| {
@@ -1994,7 +2092,14 @@ fn parse_single_cast_clause(rest: &str) -> Option<ManaSpendRestriction> {
     })
     .is_some()
     {
-        return Some(ManaSpendRestriction::SpellOnly);
+        return Some(vec![ManaSpendRestriction::SpellOnly]);
+    }
+
+    // CR 106.6 + CR 903.3d / CR 108.3 / CR 113.1 + CR 113.3 / CR 202.1 +
+    // CR 107.3: static spell properties. Tried before every other arm (and the
+    // type-phrase fallback) so a property word is never lowered as a spell type.
+    if let Some(restrictions) = parse_spell_property_clause(rest) {
+        return Some(restrictions);
     }
 
     // CR 106.6 + CR 107.3 + CR 202.3: "[creature ]spells with mana value N or
@@ -2003,32 +2108,38 @@ fn parse_single_cast_clause(rest: &str) -> Option<ManaSpendRestriction> {
     // MV-threshold arm because it begins with the same "spells with mana value"
     // prefix but continues with the " or … {X} …" disjunct.
     if let Some((spell_type, criteria)) = parse_mv_or_x_cost_criteria(rest) {
-        return Some(ManaSpendRestriction::SpellMatchingCostCriteria {
+        return Some(vec![ManaSpendRestriction::SpellMatchingCostCriteria {
             spell_type,
             criteria,
-        });
+        }]);
     }
 
     // CR 106.6: "spells with mana value N or greater" / "a spell with mana
     // value N or less" — parameterized over Comparator by the threshold suffix.
     if let Some((comparator, value)) = parse_mana_value_threshold(rest) {
-        return Some(ManaSpendRestriction::SpellWithManaValue { comparator, value });
+        return Some(vec![ManaSpendRestriction::SpellWithManaValue {
+            comparator,
+            value,
+        }]);
     }
 
     // CR 105.2 + CR 106.6: "spells with exactly N colors" / "a spell with N or
     // more colors" — parameterized over Comparator by the color-count suffix.
     if let Some((comparator, count)) = parse_color_count(rest) {
-        return Some(ManaSpendRestriction::SpellWithColorCount { comparator, count });
+        return Some(vec![ManaSpendRestriction::SpellWithColorCount {
+            comparator,
+            count,
+        }]);
     }
 
     // CR 106.6 + CR 702: "[a spell|spells] [with|that has|that have] <keyword>"
     // — keyword-gated spend, optionally with a "from <zone>" tail. Parameterized
     // over the keyword name so a single arm covers flashback, freerunning, etc.
     if let Some((kind, zone)) = parse_spell_with_keyword(rest) {
-        return Some(match zone {
+        return Some(vec![match zone {
             Some(zone) => ManaSpendRestriction::SpellWithKeywordKindFromZone { kind, zone },
             None => ManaSpendRestriction::SpellWithKeywordKind(kind),
-        });
+        }]);
     }
 
     // CR 106.6 + CR 400.7: "[a spell|spells] from [your] <zone>" / "from anywhere
@@ -2037,17 +2148,17 @@ fn parse_single_cast_clause(rest: &str) -> Option<ManaSpendRestriction> {
     // polarity (Mm'menon, the Right Hand). Checked before the type-phrase
     // fallback, which does not recognize a "from <zone>" tail.
     if let Some((zone, polarity)) = parse_spell_from_zone(rest) {
-        return Some(ManaSpendRestriction::SpellFromZone(ZoneSpend {
+        return Some(vec![ManaSpendRestriction::SpellFromZone(ZoneSpend {
             zone,
             polarity,
-        }));
+        })]);
     }
 
     // CR 708.4: "face-down spells" — gated on the spell's face-down status.
     // Checked before the type-phrase fallback so "face-down" is not lowered to a
     // `SpellType("Face-down")` reading.
     if let Some(restriction) = parse_face_down_spell_clause(rest, &rest_lower) {
-        return Some(restriction);
+        return Some(vec![restriction]);
     }
 
     // CR 106.6: Check for an "or activate …" ability-activation suffix. If
@@ -2056,7 +2167,7 @@ fn parse_single_cast_clause(rest: &str) -> Option<ManaSpendRestriction> {
     let (spell_part, activation_tail) = split_restricted_spell_and_activation(rest);
 
     if spell_part.contains("of the chosen type") {
-        return Some(ManaSpendRestriction::ChosenCreatureType);
+        return Some(vec![ManaSpendRestriction::ChosenCreatureType]);
     }
 
     // "creature spells" / "a creature spell" / "artifact spells" etc.
@@ -2067,31 +2178,32 @@ fn parse_single_cast_clause(rest: &str) -> Option<ManaSpendRestriction> {
 
     let type_phrase = parse_restricted_spell_type_phrase(spell_part)?;
 
-    match activation_tail {
+    let restriction = match activation_tail {
         ActivationTail::OfType(source_quality)
             if source_quality.eq_ignore_ascii_case(&type_phrase) =>
         {
-            Some(ManaSpendRestriction::SpellTypeOrAbilityActivation {
+            ManaSpendRestriction::SpellTypeOrAbilityActivation {
                 spell_type: type_phrase,
                 ability: AbilityActivationScope::OfSpellType,
-            })
+            }
         }
         // A typed activation suffix whose source quality differs from the spell
         // type is an unsupported compound — gap it rather than guess.
-        ActivationTail::OfType(_) => None,
-        ActivationTail::Any => Some(ManaSpendRestriction::SpellTypeOrAbilityActivation {
+        ActivationTail::OfType(_) => return None,
+        ActivationTail::Any => ManaSpendRestriction::SpellTypeOrAbilityActivation {
             spell_type: type_phrase,
             ability: AbilityActivationScope::Any,
-        }),
+        },
         // CR 702.6a: "cast Equipment spells or activate equip abilities" —
         // disjunction of a spell-type restriction and a keyword-tagged
         // activation restriction. Precise: only equip-tagged abilities qualify.
-        ActivationTail::Tagged(ability_tag) => Some(ManaSpendRestriction::Any(vec![
+        ActivationTail::Tagged(ability_tag) => ManaSpendRestriction::Any(vec![
             ManaSpendRestriction::SpellType(type_phrase),
             ManaSpendRestriction::ActivateTagged(ability_tag),
-        ])),
-        ActivationTail::None => Some(ManaSpendRestriction::SpellType(type_phrase)),
-    }
+        ]),
+        ActivationTail::None => ManaSpendRestriction::SpellType(type_phrase),
+    };
+    Some(vec![restriction])
 }
 
 /// CR 106.6: Parse one clause of a disjunctive spend restriction. A clause is
@@ -2237,7 +2349,15 @@ fn parse_disjunctive_clause(clause: &str) -> Option<ManaSpendRestriction> {
     })
     .map_or(clause, |(_, rest)| rest);
 
-    parse_single_cast_clause(cast_clause)
+    // A disjunction branch must be one self-evaluable restriction; a multi-leaf
+    // clause (spell type + no abilities, colors + no {X}) cannot be represented
+    // inside `Any` without silently changing its AND reading, so drop the whole
+    // disjunction instead.
+    let restrictions = parse_single_cast_clause(cast_clause)?;
+    match restrictions.as_slice() {
+        [restriction] => Some(restriction.clone()),
+        _ => None,
+    }
 }
 
 /// CR 106.6: Split a post-"to cast " remainder into top-level disjunction
@@ -2331,6 +2451,8 @@ fn parse_spell_with_keyword(rest: &str) -> Option<(KeywordKind, Option<Zone>)> {
         alt((
             value(KeywordKind::Flashback, tag("flashback")),
             value(KeywordKind::Freerunning, tag("freerunning")),
+            // CR 702.114a: "a spell with devoid" (Corrupted Crossroads).
+            value(KeywordKind::Devoid, tag("devoid")),
         ))
         .parse(i)
     })?;
@@ -2532,19 +2654,18 @@ fn parse_mv_or_x_cost_criteria_inner(
     Ok((input, (spell_type, criteria)))
 }
 
-/// CR 105.2 + CR 106.6: Parse the "[spells|a spell] with [exactly] N [or more|or
-/// fewer] color(s)" tail of a spend restriction into a `(Comparator, count)`.
-/// "exactly N color(s)" and bare "N color(s)" read as exact (`EQ`); "or more /
-/// or greater color(s)" reads as `GE`; "or fewer / or less color(s)" reads as `LE`.
-/// Colorless spells have a color count of 0, so `count` may be 0.
+/// CR 105.2 + CR 106.6: Parse the "<N> [or more|or greater|or fewer|or less]
+/// color(s)" tail shared by "spells with N color(s)" and "a spell that's N …
+/// colors". "exactly N color(s)" and bare "N color(s)" read as exact (`EQ`); "or
+/// more / or greater color(s)" reads as `GE`; "or fewer / or less color(s)" reads
+/// as `LE`. Colorless spells have a color count of 0, so `count` may be 0.
 ///
-/// This file's `nom_on_lower` returns `(value, remainder)`, so the consumed
-/// remainder is the second tuple element. Mirrors `parse_mana_value_threshold`.
-fn parse_color_count(rest: &str) -> Option<(Comparator, u32)> {
-    let rest_lower = rest.to_lowercase();
-    let (_, after_prefix) = nom_on_lower(rest, &rest_lower, |i| {
-        value((), alt((tag("spells with "), tag("a spell with ")))).parse(i)
-    })?;
+/// Returns the unconsumed remainder (instead of requiring emptiness) so a caller
+/// may continue with a suffix such as " without {X} in its mana cost". The
+/// remainder keeps the space before that suffix because the color word consumes
+/// only through "color(s)". This file's `nom_on_lower` returns
+/// `(value, remainder)`, so consumed text leaves the second tuple element.
+fn parse_color_count_suffix(after_prefix: &str) -> Option<(Comparator, u32, &str)> {
     // Optional "exactly " forces an exact (EQ) reading regardless of suffix.
     let after_prefix_lower = after_prefix.to_lowercase();
     let (exactly, after_exactly) = nom_on_lower(after_prefix, &after_prefix_lower, |i| {
@@ -2561,46 +2682,44 @@ fn parse_color_count(rest: &str) -> Option<(Comparator, u32)> {
     let after_num = after_num.trim();
     let after_num_lower = after_num.to_lowercase();
     // Suffix -> comparator. Bare "color(s)" or "exactly N color(s)" = exact (EQ).
-    let comparator = if exactly {
-        if nom_on_lower(after_num, &after_num_lower, |i| {
-            all_consuming(parse_color_word).parse(i)
-        })
-        .is_some()
-        {
-            Comparator::EQ
-        } else {
-            return None;
-        }
-    } else if nom_on_lower(after_num, &after_num_lower, |i| {
-        all_consuming(parse_color_word).parse(i)
-    })
-    .is_some()
-    {
-        Comparator::EQ
-    } else if nom_on_lower(after_num, &after_num_lower, |i| {
-        all_consuming(alt((
-            value((), (tag("or more "), parse_color_word)),
-            value((), (tag("or greater "), parse_color_word)),
-        )))
-        .parse(i)
-    })
-    .is_some()
-    {
-        Comparator::GE
-    } else if nom_on_lower(after_num, &after_num_lower, |i| {
-        all_consuming(alt((
-            value((), (tag("or fewer "), parse_color_word)),
-            value((), (tag("or less "), parse_color_word)),
-        )))
-        .parse(i)
-    })
-    .is_some()
-    {
-        Comparator::LE
+    let (comparator, rest) = if exactly {
+        let (_, rest) = nom_on_lower(after_num, &after_num_lower, parse_color_word)?;
+        (Comparator::EQ, rest)
+    } else if let Some((_, rest)) = nom_on_lower(after_num, &after_num_lower, |i| {
+        value((), (tag("or more "), parse_color_word)).parse(i)
+    }) {
+        (Comparator::GE, rest)
+    } else if let Some((_, rest)) = nom_on_lower(after_num, &after_num_lower, |i| {
+        value((), (tag("or greater "), parse_color_word)).parse(i)
+    }) {
+        (Comparator::GE, rest)
+    } else if let Some((_, rest)) = nom_on_lower(after_num, &after_num_lower, |i| {
+        value((), (tag("or fewer "), parse_color_word)).parse(i)
+    }) {
+        (Comparator::LE, rest)
+    } else if let Some((_, rest)) = nom_on_lower(after_num, &after_num_lower, |i| {
+        value((), (tag("or less "), parse_color_word)).parse(i)
+    }) {
+        (Comparator::LE, rest)
     } else {
-        return None;
+        let (_, rest) = nom_on_lower(after_num, &after_num_lower, parse_color_word)?;
+        (Comparator::EQ, rest)
     };
-    Some((comparator, count))
+    Some((comparator, count, rest))
+}
+
+/// CR 105.2 + CR 106.6: Parse the "[spells|a spell] with [exactly] N [or more|or
+/// fewer] color(s)" tail of a spend restriction into a `(Comparator, count)`.
+/// Shares the number/comparator grammar with [`parse_color_count_suffix`] and
+/// requires the remainder to be empty. Colorless spells have a color count of 0,
+/// so `count` may be 0. Mirrors `parse_mana_value_threshold`.
+fn parse_color_count(rest: &str) -> Option<(Comparator, u32)> {
+    let rest_lower = rest.to_lowercase();
+    let (_, after_prefix) = nom_on_lower(rest, &rest_lower, |i| {
+        value((), alt((tag("spells with "), tag("a spell with ")))).parse(i)
+    })?;
+    let (comparator, count, remainder) = parse_color_count_suffix(after_prefix)?;
+    remainder.trim().is_empty().then_some((comparator, count))
 }
 
 fn parse_color_word(input: &str) -> OracleResult<'_, ()> {

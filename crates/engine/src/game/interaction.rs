@@ -44,7 +44,7 @@ use crate::types::interaction::{
     InteractionChoiceStatus, InteractionDamageAssignmentMode, InteractionGroupConstraint,
     InteractionId, InteractionIntentCode, InteractionManaAbilityActivationScope,
     InteractionManaColor, InteractionManaComparator, InteractionManaRestriction,
-    InteractionManaSpecialAction, InteractionManaSpellCostCriterion,
+    InteractionManaSpecialAction, InteractionManaSpellCostCriterion, InteractionManaSpellProperty,
     InteractionManaZoneSpendPolarity, InteractionObjectProperty, InteractionOpportunity,
     InteractionOpportunityResponse, InteractionOutcomeCode, InteractionPresentationSurface,
     InteractionPreview, InteractionPreviewRequest, InteractionPreviewStatus, InteractionProgress,
@@ -60,7 +60,7 @@ use crate::types::interaction::{
 };
 use crate::types::mana::{
     AbilityActivationScope, ManaColor, ManaCost, ManaPipId, ManaPool, ManaRestriction, ManaType,
-    SpecialAction, SpellCostCriterion, ZoneSpendPolarity,
+    SpecialAction, SpellCostCriterion, SpellProperty, ZoneSpendPolarity,
 };
 use crate::types::match_config::DeckCardCount;
 use crate::types::player::PlayerId;
@@ -5669,6 +5669,17 @@ fn interaction_keyword_kind_code(keyword: crate::types::keywords::KeywordKind) -
         .to_owned()
 }
 
+/// CR 106.6: Project the runtime spell-property leaf into the viewer DTO. One
+/// arm per variant, no wildcard, so a new property must choose a wire spelling.
+fn interaction_mana_spell_property(property: SpellProperty) -> InteractionManaSpellProperty {
+    match property {
+        SpellProperty::Commander => InteractionManaSpellProperty::Commander,
+        SpellProperty::NotOwnedByCaster => InteractionManaSpellProperty::NotOwnedByCaster,
+        SpellProperty::NoAbilities => InteractionManaSpellProperty::NoAbilities,
+        SpellProperty::WithoutXInManaCost => InteractionManaSpellProperty::WithoutXInManaCost,
+    }
+}
+
 fn interaction_mana_restriction(restriction: &ManaRestriction) -> InteractionManaRestriction {
     match restriction {
         ManaRestriction::OnlyForSpell => InteractionManaRestriction::OnlyForSpell,
@@ -5749,6 +5760,11 @@ fn interaction_mana_restriction(restriction: &ManaRestriction) -> InteractionMan
             }
         }
         ManaRestriction::OnlyForFaceDownSpell => InteractionManaRestriction::OnlyForFaceDownSpell,
+        ManaRestriction::OnlyForSpellProperty(property) => {
+            InteractionManaRestriction::OnlyForSpellProperty {
+                property: interaction_mana_spell_property(*property),
+            }
+        }
         ManaRestriction::OnlyForAny(restrictions) => InteractionManaRestriction::OnlyForAny {
             restrictions: restrictions
                 .iter()
@@ -10002,6 +10018,8 @@ fn bound_outbound_mana_restriction(
         | InteractionManaRestriction::OnlyForActivation
         | InteractionManaRestriction::OnlyForXCosts
         | InteractionManaRestriction::OnlyForFaceDownSpell
+        // CR 106.6: the payload is a fieldless enum, not a variable-length string.
+        | InteractionManaRestriction::OnlyForSpellProperty { .. }
         | InteractionManaRestriction::Impossible
         | InteractionManaRestriction::ConvokePayment => {}
         InteractionManaRestriction::OnlyForSpellType { spell_type }

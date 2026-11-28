@@ -250,6 +250,18 @@ pub struct SpellMeta {
     /// using only the specified `spend_only_on_x_colors`.
     pub spend_only_on_x_colors: Option<Vec<ManaColor>>,
     pub spend_only_on_x_generic_count: u32,
+    /// CR 903.3 + CR 903.3d / CR 108.3: the caster's relation to the spell's
+    /// card (own / own commander / not owned), consulted by
+    /// [`SpellProperty::Commander`] and [`SpellProperty::NotOwnedByCaster`].
+    /// Sourced from the frozen `obj.owner` and `obj.is_commander` facts, so it
+    /// needs no announcement-time carrier.
+    pub caster_relation: SpellCasterRelation,
+    /// CR 113.1 + CR 113.3: the live object has no abilities AND no keyword
+    /// instance is granted to the spell being cast. A plain `bool`, not an
+    /// enum: it is one predicate fact of this non-serialized snapshot with no
+    /// case axis to parameterize, the same shape as `has_x_in_cost`,
+    /// `is_face_down`, and `cant_spend_mana`.
+    pub has_no_abilities: bool,
 }
 
 /// CR 106.6: Context for a mana-payment decision. Distinguishes "paying for a
@@ -510,6 +522,61 @@ impl SpellCostCriterion {
     }
 }
 
+/// CR 903.3 + CR 903.3d / CR 108.3: the caster's relation to the spell's card.
+///
+/// One typed axis rather than two independent booleans (`is_commander` and
+/// `is_owned`): the three readings are mutually exclusive at a payment site and
+/// every spend restriction that asks about either reads this single fact.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum SpellCasterRelation {
+    /// CR 108.3: `obj.owner == caster`, and not the caster's commander. The two
+    /// are mutually exclusive here, so a future ownership leaf must treat
+    /// `Commander` as owned too.
+    #[default]
+    Owned,
+    /// CR 903.1 + CR 903.3 + CR 903.3d: "your commander" —
+    /// `obj.is_commander && obj.owner == caster` (the same predicate
+    /// `game::commander` uses for "whose commander"). `Default` is `Owned`, the
+    /// fail-closed reading at a site with no spell association.
+    Commander,
+    /// CR 108.3: `obj.owner != caster` ("spells you don't own").
+    NotOwned,
+}
+
+/// CR 106.6: A static property of the spell a restricted mana may be spent on.
+///
+/// One leaf per property category, read from the payment-time [`SpellMeta`]
+/// snapshot by [`SpellProperty::matches`]. The variants share a single
+/// categorical axis — "a fact about the spell being cast" — rather than one
+/// sibling restriction variant per Oracle phrase ("OnlyForCommander",
+/// "OnlyForNotOwned", …), so the parser lowers every phrase to
+/// [`ManaRestriction::OnlyForSpellProperty`] and the runtime gate has one arm.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub enum SpellProperty {
+    /// CR 903.3d + CR 108.3: "your commander".
+    Commander,
+    /// CR 108.3: "spells you don't own".
+    NotOwnedByCaster,
+    /// CR 113.1 + CR 113.3: no abilities of any category.
+    NoAbilities,
+    /// CR 202.1 + CR 107.3: printed mana cost has no `{X}`.
+    WithoutXInManaCost,
+}
+
+impl SpellProperty {
+    /// CR 106.6: Whether the spell described by `meta` has this property.
+    pub fn matches(&self, meta: &SpellMeta) -> bool {
+        match self {
+            SpellProperty::Commander => meta.caster_relation == SpellCasterRelation::Commander,
+            SpellProperty::NotOwnedByCaster => {
+                meta.caster_relation == SpellCasterRelation::NotOwned
+            }
+            SpellProperty::NoAbilities => meta.has_no_abilities,
+            SpellProperty::WithoutXInManaCost => !meta.has_x_in_cost,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ManaRestriction {
     /// "Spend this mana only to cast spells."
@@ -603,6 +670,12 @@ pub enum ManaRestriction {
     /// includes this leaf is therefore absorbed at the `Effect::Mana` seam and
     /// coverage-supported via `ManaSpendRestriction::is_coverage_supported`.
     OnlyForFaceDownSpell,
+    /// CR 106.6 + CR 903.3d / CR 108.3 / CR 113.1 + CR 113.3 / CR 202.1 + CR 107.3:
+    /// "Spend this mana only to cast your commander" / "spells you don't own" /
+    /// "creature spells with no abilities" / "a spell that's one or more colors
+    /// without {X} in its mana cost". Gates spending on a static property of the
+    /// spell being cast, read from [`SpellMeta`] by [`SpellProperty::matches`].
+    OnlyForSpellProperty(SpellProperty),
     /// CR 106.6: Disjunctive spend restriction — the mana may be spent on any
     /// payment that satisfies at least one inner restriction. Composition
     /// combinator (each branch is itself a full restriction), not a leaf
@@ -796,6 +869,10 @@ impl ManaRestriction {
             // routes its `{3}` cost through `PaymentContext::Spell` with that flag
             // set, the gate becomes live with no change here. See the variant doc.
             ManaRestriction::OnlyForFaceDownSpell => meta.is_face_down,
+            // CR 106.6: Static-property-gated spend — the spell qualifies when it
+            // satisfies the named property of the payment-time snapshot
+            // (`SpellProperty::matches` is the single leaf authority).
+            ManaRestriction::OnlyForSpellProperty(property) => property.matches(meta),
             // CR 106.6: Disjunction — the spell is payable if it satisfies any branch.
             ManaRestriction::OnlyForAny(subs) => subs.iter().any(|r| r.allows_spell(meta)),
             // CR 116.2: Special-action-only mana never pays for a spell cast.
@@ -829,6 +906,8 @@ impl ManaRestriction {
             | ManaRestriction::OnlyForSpellFromZone(_)
             // CR 708.4: Face-down-spell-only mana never pays for ability activation.
             | ManaRestriction::OnlyForFaceDownSpell
+            // CR 106.6: Spell-property-only mana never pays for ability activation.
+            | ManaRestriction::OnlyForSpellProperty(_)
             // CR 116.2: Special-action-only mana never pays for ability activation.
             | ManaRestriction::OnlyForSpecialAction(_)
             | ManaRestriction::Impossible => false,
@@ -924,6 +1003,7 @@ impl ManaRestriction {
             | ManaRestriction::OnlyForSpellColor(_)
             | ManaRestriction::OnlyForSpellFromZone(_)
             | ManaRestriction::OnlyForFaceDownSpell
+            | ManaRestriction::OnlyForSpellProperty(_)
             | ManaRestriction::Impossible
             | ManaRestriction::ConvokePayment => false,
         }
@@ -2500,6 +2580,8 @@ mod tests {
             cant_spend_mana: false,
             spend_only_on_x_colors: None,
             spend_only_on_x_generic_count: 0,
+            caster_relation: SpellCasterRelation::default(),
+            has_no_abilities: false,
         };
         let instant_spell = SpellMeta {
             types: vec!["Instant".to_string()],
@@ -2514,6 +2596,8 @@ mod tests {
             cant_spend_mana: false,
             spend_only_on_x_colors: None,
             spend_only_on_x_generic_count: 0,
+            caster_relation: SpellCasterRelation::default(),
+            has_no_abilities: false,
         };
         let legendary_spell = SpellMeta {
             types: vec!["Legendary".to_string(), "Creature".to_string()],
@@ -2528,6 +2612,8 @@ mod tests {
             cant_spend_mana: false,
             spend_only_on_x_colors: None,
             spend_only_on_x_generic_count: 0,
+            caster_relation: SpellCasterRelation::default(),
+            has_no_abilities: false,
         };
         assert!(restriction.allows_spell(&creature_spell));
         assert!(!restriction.allows_spell(&instant_spell));
@@ -2558,6 +2644,8 @@ mod tests {
             cant_spend_mana: false,
             spend_only_on_x_colors: None,
             spend_only_on_x_generic_count: 0,
+            caster_relation: SpellCasterRelation::default(),
+            has_no_abilities: false,
         };
         let omen_spell = SpellMeta {
             types: vec!["Enchantment".to_string(), "Omen".to_string()],
@@ -2572,6 +2660,8 @@ mod tests {
             cant_spend_mana: false,
             spend_only_on_x_colors: None,
             spend_only_on_x_generic_count: 0,
+            caster_relation: SpellCasterRelation::default(),
+            has_no_abilities: false,
         };
         let goblin_spell = SpellMeta {
             types: vec!["Creature".to_string()],
@@ -2586,6 +2676,8 @@ mod tests {
             cant_spend_mana: false,
             spend_only_on_x_colors: None,
             spend_only_on_x_generic_count: 0,
+            caster_relation: SpellCasterRelation::default(),
+            has_no_abilities: false,
         };
         // Matches one branch each.
         assert!(restriction.allows_spell(&dragon_spell));
@@ -2638,6 +2730,8 @@ mod tests {
             cant_spend_mana: false,
             spend_only_on_x_colors: None,
             spend_only_on_x_generic_count: 0,
+            caster_relation: SpellCasterRelation::default(),
+            has_no_abilities: false,
         };
         let turtle_creature = SpellMeta {
             types: vec!["Creature".to_string()],
@@ -2652,6 +2746,8 @@ mod tests {
             cant_spend_mana: false,
             spend_only_on_x_colors: None,
             spend_only_on_x_generic_count: 0,
+            caster_relation: SpellCasterRelation::default(),
+            has_no_abilities: false,
         };
         let goblin_creature = SpellMeta {
             types: vec!["Creature".to_string()],
@@ -2666,6 +2762,8 @@ mod tests {
             cant_spend_mana: false,
             spend_only_on_x_colors: None,
             spend_only_on_x_generic_count: 0,
+            caster_relation: SpellCasterRelation::default(),
+            has_no_abilities: false,
         };
         assert!(restriction.allows_spell(&ninja_creature));
         assert!(!restriction.allows_spell(&turtle_creature));
@@ -2688,6 +2786,8 @@ mod tests {
             cant_spend_mana: false,
             spend_only_on_x_colors: None,
             spend_only_on_x_generic_count: 0,
+            caster_relation: SpellCasterRelation::default(),
+            has_no_abilities: false,
         };
         let source_types = vec!["Artifact".to_string()];
         let source_subtypes = Vec::new();
@@ -2718,6 +2818,8 @@ mod tests {
             cant_spend_mana: false,
             spend_only_on_x_colors: None,
             spend_only_on_x_generic_count: 0,
+            caster_relation: SpellCasterRelation::default(),
+            has_no_abilities: false,
         };
         let goblin_creature = SpellMeta {
             types: vec!["Creature".to_string()],
@@ -2732,6 +2834,8 @@ mod tests {
             cant_spend_mana: false,
             spend_only_on_x_colors: None,
             spend_only_on_x_generic_count: 0,
+            caster_relation: SpellCasterRelation::default(),
+            has_no_abilities: false,
         };
         let elf_instant = SpellMeta {
             types: vec!["Instant".to_string()],
@@ -2746,6 +2850,8 @@ mod tests {
             cant_spend_mana: false,
             spend_only_on_x_colors: None,
             spend_only_on_x_generic_count: 0,
+            caster_relation: SpellCasterRelation::default(),
+            has_no_abilities: false,
         };
         assert!(restriction.allows_spell(&elf_creature));
         assert!(!restriction.allows_spell(&goblin_creature));
@@ -2774,6 +2880,8 @@ mod tests {
             cant_spend_mana: false,
             spend_only_on_x_colors: None,
             spend_only_on_x_generic_count: 0,
+            caster_relation: SpellCasterRelation::default(),
+            has_no_abilities: false,
         };
         let tribal_elemental_instant = SpellMeta {
             types: vec!["Tribal".to_string(), "Instant".to_string()],
@@ -2788,6 +2896,8 @@ mod tests {
             cant_spend_mana: false,
             spend_only_on_x_colors: None,
             spend_only_on_x_generic_count: 0,
+            caster_relation: SpellCasterRelation::default(),
+            has_no_abilities: false,
         };
         let goblin_creature = SpellMeta {
             types: vec!["Creature".to_string()],
@@ -2802,6 +2912,8 @@ mod tests {
             cant_spend_mana: false,
             spend_only_on_x_colors: None,
             spend_only_on_x_generic_count: 0,
+            caster_relation: SpellCasterRelation::default(),
+            has_no_abilities: false,
         };
         let plain_instant = SpellMeta {
             types: vec!["Instant".to_string()],
@@ -2816,6 +2928,8 @@ mod tests {
             cant_spend_mana: false,
             spend_only_on_x_colors: None,
             spend_only_on_x_generic_count: 0,
+            caster_relation: SpellCasterRelation::default(),
+            has_no_abilities: false,
         };
         assert!(restriction.allows_spell(&elemental_creature));
         assert!(restriction.allows_spell(&tribal_elemental_instant));
@@ -2844,6 +2958,8 @@ mod tests {
             cant_spend_mana: false,
             spend_only_on_x_colors: None,
             spend_only_on_x_generic_count: 0,
+            caster_relation: SpellCasterRelation::default(),
+            has_no_abilities: false,
         };
         let colored_eldrazi = SpellMeta {
             types: vec!["Creature".to_string()],
@@ -2858,6 +2974,8 @@ mod tests {
             cant_spend_mana: false,
             spend_only_on_x_colors: None,
             spend_only_on_x_generic_count: 0,
+            caster_relation: SpellCasterRelation::default(),
+            has_no_abilities: false,
         };
         let colorless_construct = SpellMeta {
             types: vec!["Artifact".to_string(), "Colorless".to_string()],
@@ -2872,6 +2990,8 @@ mod tests {
             cant_spend_mana: false,
             spend_only_on_x_colors: None,
             spend_only_on_x_generic_count: 0,
+            caster_relation: SpellCasterRelation::default(),
+            has_no_abilities: false,
         };
         assert!(restriction.allows_spell(&colorless_eldrazi));
         assert!(!restriction.allows_spell(&colored_eldrazi));
@@ -2930,6 +3050,8 @@ mod tests {
             cant_spend_mana: false,
             spend_only_on_x_colors: None,
             spend_only_on_x_generic_count: 0,
+            caster_relation: SpellCasterRelation::default(),
+            has_no_abilities: false,
         };
         let colored_spell = SpellMeta {
             types: vec!["Creature".to_string()],
@@ -2944,6 +3066,8 @@ mod tests {
             cant_spend_mana: false,
             spend_only_on_x_colors: None,
             spend_only_on_x_generic_count: 0,
+            caster_relation: SpellCasterRelation::default(),
+            has_no_abilities: false,
         };
         // Spell half: still gated to the named type.
         assert!(restriction.allows_spell(&colorless_spell));
@@ -2987,6 +3111,8 @@ mod tests {
             cant_spend_mana: false,
             spend_only_on_x_colors: None,
             spend_only_on_x_generic_count: 0,
+            caster_relation: SpellCasterRelation::default(),
+            has_no_abilities: false,
         };
         let artifact_creature_spell = SpellMeta {
             types: vec!["Artifact".to_string(), "Creature".to_string()],
@@ -3001,6 +3127,8 @@ mod tests {
             cant_spend_mana: false,
             spend_only_on_x_colors: None,
             spend_only_on_x_generic_count: 0,
+            caster_relation: SpellCasterRelation::default(),
+            has_no_abilities: false,
         };
         let instant_spell = SpellMeta {
             types: vec!["Instant".to_string()],
@@ -3015,6 +3143,8 @@ mod tests {
             cant_spend_mana: false,
             spend_only_on_x_colors: None,
             spend_only_on_x_generic_count: 0,
+            caster_relation: SpellCasterRelation::default(),
+            has_no_abilities: false,
         };
         let creature_spell = SpellMeta {
             types: vec!["Creature".to_string()],
@@ -3029,6 +3159,8 @@ mod tests {
             cant_spend_mana: false,
             spend_only_on_x_colors: None,
             spend_only_on_x_generic_count: 0,
+            caster_relation: SpellCasterRelation::default(),
+            has_no_abilities: false,
         };
         // Permitted: any artifact spell (incl. artifact creatures).
         assert!(restriction.allows(&PaymentContext::Spell(&artifact_spell)));
@@ -3071,6 +3203,8 @@ mod tests {
             cant_spend_mana: false,
             spend_only_on_x_colors: None,
             spend_only_on_x_generic_count: 0,
+            caster_relation: SpellCasterRelation::default(),
+            has_no_abilities: false,
         };
         let creature_spell = SpellMeta {
             types: vec!["Creature".to_string()],
@@ -3085,6 +3219,8 @@ mod tests {
             cant_spend_mana: false,
             spend_only_on_x_colors: None,
             spend_only_on_x_generic_count: 0,
+            caster_relation: SpellCasterRelation::default(),
+            has_no_abilities: false,
         };
         let artifact_types = vec!["Artifact".to_string()];
         let creature_types = vec!["Creature".to_string()];
@@ -3105,6 +3241,64 @@ mod tests {
             mana_color_constraint: ActivationManaColorConstraint::Unrestricted,
         }));
         assert!(!restriction.allows(&PaymentContext::Effect));
+    }
+
+    // CR 106.6 + CR 903.3d / CR 108.3 / CR 113.1 + CR 113.3 / CR 202.1 + CR 107.3:
+    // each `OnlyForSpellProperty` leaf reads exactly one fact of the payment-time
+    // snapshot, and a spell-property-only unit never pays for an activation or a
+    // special action.
+    #[test]
+    fn restriction_only_for_spell_property_matches_each_leaf() {
+        let commander = SpellMeta {
+            caster_relation: SpellCasterRelation::Commander,
+            ..SpellMeta::default()
+        };
+        let owned = SpellMeta {
+            caster_relation: SpellCasterRelation::Owned,
+            ..SpellMeta::default()
+        };
+        let not_owned = SpellMeta {
+            caster_relation: SpellCasterRelation::NotOwned,
+            ..SpellMeta::default()
+        };
+
+        // CR 903.3d: only the caster's own commander spell qualifies.
+        let commander_restriction = ManaRestriction::OnlyForSpellProperty(SpellProperty::Commander);
+        assert!(commander_restriction.allows_spell(&commander));
+        assert!(!commander_restriction.allows_spell(&owned));
+        assert!(!commander_restriction.allows_spell(&not_owned));
+
+        // CR 108.3: "spells you don't own" excludes own (and own-commander) spells.
+        let not_owned_restriction =
+            ManaRestriction::OnlyForSpellProperty(SpellProperty::NotOwnedByCaster);
+        assert!(not_owned_restriction.allows_spell(&not_owned));
+        assert!(!not_owned_restriction.allows_spell(&owned));
+        assert!(!not_owned_restriction.allows_spell(&commander));
+
+        // CR 113.1 + CR 113.3: the ability census decides; a granted keyword also
+        // clears it (that merge happens in `build_spell_meta`).
+        let no_abilities_restriction =
+            ManaRestriction::OnlyForSpellProperty(SpellProperty::NoAbilities);
+        let vanilla = SpellMeta {
+            has_no_abilities: true,
+            ..SpellMeta::default()
+        };
+        assert!(no_abilities_restriction.allows_spell(&vanilla));
+        assert!(!no_abilities_restriction.allows_spell(&SpellMeta::default()));
+
+        // CR 202.1 + CR 107.3: an {X} in the printed cost disqualifies.
+        let without_x_restriction =
+            ManaRestriction::OnlyForSpellProperty(SpellProperty::WithoutXInManaCost);
+        let with_x = SpellMeta {
+            has_x_in_cost: true,
+            ..SpellMeta::default()
+        };
+        assert!(without_x_restriction.allows_spell(&SpellMeta::default()));
+        assert!(!without_x_restriction.allows_spell(&with_x));
+
+        // CR 106.6: a spell property never authorizes a non-spell payment.
+        assert!(!commander_restriction.allows_activation(&[], &[], None));
+        assert!(!commander_restriction.allows_special_action(SpecialAction::UnlockDoor));
     }
 
     // CR 708.4: "Spend this mana only to cast face-down spells" (Tin Street
@@ -3261,6 +3455,8 @@ mod tests {
             cant_spend_mana: false,
             spend_only_on_x_colors: None,
             spend_only_on_x_generic_count: 0,
+            caster_relation: SpellCasterRelation::default(),
+            has_no_abilities: false,
         };
         let sorcery = SpellMeta {
             types: vec!["Sorcery".to_string()],
@@ -3275,6 +3471,8 @@ mod tests {
             cant_spend_mana: false,
             spend_only_on_x_colors: None,
             spend_only_on_x_generic_count: 0,
+            caster_relation: SpellCasterRelation::default(),
+            has_no_abilities: false,
         };
         let creature = SpellMeta {
             types: vec!["Creature".to_string()],
@@ -3289,6 +3487,8 @@ mod tests {
             cant_spend_mana: false,
             spend_only_on_x_colors: None,
             spend_only_on_x_generic_count: 0,
+            caster_relation: SpellCasterRelation::default(),
+            has_no_abilities: false,
         };
         // Manamorphose is an instant — the {R}{R} restricted mana must pay for it.
         assert!(restriction.allows_spell(&instant));
@@ -3335,6 +3535,8 @@ mod tests {
             cant_spend_mana: false,
             spend_only_on_x_colors: None,
             spend_only_on_x_generic_count: 0,
+            caster_relation: SpellCasterRelation::default(),
+            has_no_abilities: false,
         };
         let normal_spell = SpellMeta {
             types: vec!["Instant".to_string()],
@@ -3349,6 +3551,8 @@ mod tests {
             cant_spend_mana: false,
             spend_only_on_x_colors: None,
             spend_only_on_x_generic_count: 0,
+            caster_relation: SpellCasterRelation::default(),
+            has_no_abilities: false,
         };
         assert!(restriction.allows_spell(&flashback_spell));
         assert!(!restriction.allows_spell(&normal_spell));
@@ -3891,6 +4095,8 @@ mod tests {
             cant_spend_mana: false,
             spend_only_on_x_colors: None,
             spend_only_on_x_generic_count: 0,
+            caster_relation: SpellCasterRelation::default(),
+            has_no_abilities: false,
         };
         assert!(restriction.allows_spell(&equipment_spell));
         // Non-Equipment artifact spell: REJECTED.
@@ -3907,6 +4113,8 @@ mod tests {
             cant_spend_mana: false,
             spend_only_on_x_colors: None,
             spend_only_on_x_generic_count: 0,
+            caster_relation: SpellCasterRelation::default(),
+            has_no_abilities: false,
         };
         assert!(!restriction.allows_spell(&artifact_spell));
     }

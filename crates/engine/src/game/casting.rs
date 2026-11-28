@@ -38,7 +38,8 @@ use crate::types::identifiers::{CardId, ObjectId, ObjectIncarnationRef, TrackedS
 use crate::types::keywords::{FlashbackCost, Keyword, KeywordKind};
 use crate::types::mana::{
     ActivationManaColorConstraint, ManaColor, ManaCost, ManaCostShard, ManaSourceOutput,
-    ManaSourceSelection, ManaSpellGrant, ManaType, PaymentContext, SpecialAction, SpellMeta,
+    ManaSourceSelection, ManaSpellGrant, ManaType, PaymentContext, SpecialAction,
+    SpellCasterRelation, SpellMeta,
 };
 use crate::types::player::PlayerId;
 use crate::types::resolved_commands::ManaPaymentRecipient;
@@ -66,6 +67,7 @@ use super::ability_utils::{
 use super::casting_costs::{self, check_additional_cost_or_pay};
 use super::engine::{apply_for_seat_with_mode, PublicFinalizeMode};
 use super::engine::{EngineError, PriorityAnnouncementFacadeAccess, PriorityPrincipal};
+use super::filter::object_has_no_abilities;
 use super::functioning_abilities::{active_static_definitions, static_kind_present};
 use super::game_object::{GameObject, PreparedState, PrototypeFormState};
 use super::layers::remove_core_type;
@@ -3853,16 +3855,24 @@ pub(super) fn build_spell_meta(
 ) -> Option<SpellMeta> {
     let (spend_only_on_x_colors, spend_only_on_x_generic_count) =
         spend_only_on_x_info(state, object_id);
+    // Hoist the effective-keyword scan once so the snapshot's `keyword_kinds`
+    // and its `has_no_abilities` census read the same incarnation (a granted
+    // keyword clears "no abilities").
+    let keyword_kinds = effective_spell_keyword_kinds(state, caster, object_id);
     let obj = state.objects.get(&object_id)?;
     // CR 611.2f: the grant's "is a [type] in addition to its other types"
     // rider (The Tomb of Aclazotz) applies from the moment the spell is put on
     // the stack, so the spell is paid for as that type (Cavern of Souls).
     let with_rider = graveyard_rider_spell_projection(state, object_id, obj);
     let obj = with_rider.as_ref().unwrap_or(obj);
+    // CR 113.1 + CR 113.3: no abilities of any category on the live object AND
+    // no keyword instance granted to this spell cast (Jasmine Boreal of the
+    // Seven's "creature spells with no abilities" reading).
+    let has_no_abilities = object_has_no_abilities(obj) && keyword_kinds.is_empty();
     Some(SpellMeta {
         types: object_type_names(obj),
         subtypes: obj.card_types.subtypes.clone(),
-        keyword_kinds: effective_spell_keyword_kinds(state, caster, object_id),
+        keyword_kinds,
         cast_origin: spell_cast_provenance(state, object_id),
         // CR 202.3d + CR 702.102b: a FUSED split spell's mana value / color count
         // are the COMBINED values of both halves; a non-fused split cast and every
@@ -3892,6 +3902,18 @@ pub(super) fn build_spell_meta(
             .contains(&crate::types::ability::CastingRestriction::CantSpendMana),
         spend_only_on_x_colors,
         spend_only_on_x_generic_count,
+        // CR 903.3 + CR 903.3d / CR 108.3: ownership and commander designation
+        // are frozen object facts, unaffected by the rider projection above.
+        // A non-commander spell the caster owns is `Owned`; any other owner is
+        // `NotOwned` (the fail-closed default when this snapshot is absent).
+        caster_relation: if obj.is_commander && obj.owner == caster {
+            SpellCasterRelation::Commander
+        } else if obj.owner == caster {
+            SpellCasterRelation::Owned
+        } else {
+            SpellCasterRelation::NotOwned
+        },
+        has_no_abilities,
     })
 }
 

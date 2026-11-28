@@ -339,6 +339,24 @@ pub enum InteractionManaSpecialAction {
     Suspend,
 }
 
+/// CR 106.6: Viewer-safe mirror of the runtime `SpellProperty` leaf — a static
+/// property of the spell a restricted mana may be spent on. A fieldless string
+/// enum (not a `String` payload) so the wire cannot carry an unknown property.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "interaction-bindings", derive(ts_rs::TS))]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "interaction-bindings", ts(rename_all = "camelCase"))]
+pub enum InteractionManaSpellProperty {
+    /// CR 903.3d + CR 108.3: "your commander".
+    Commander,
+    /// CR 108.3: "spells you don't own".
+    NotOwnedByCaster,
+    /// CR 113.1 + CR 113.3: no abilities of any category.
+    NoAbilities,
+    /// CR 202.1 + CR 107.3: printed mana cost has no `{X}`.
+    WithoutXInManaCost,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "interaction-bindings", derive(ts_rs::TS))]
 #[serde(
@@ -424,6 +442,9 @@ pub enum InteractionManaRestriction {
         zone: InteractionZoneCode,
     },
     OnlyForFaceDownSpell,
+    OnlyForSpellProperty {
+        property: InteractionManaSpellProperty,
+    },
     OnlyForAny {
         restrictions: Vec<InteractionManaRestriction>,
     },
