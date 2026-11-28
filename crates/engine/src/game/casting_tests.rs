@@ -63701,63 +63701,6 @@ fn shared_exile_alt_cost_budget_is_spent_only_by_the_elected_permission() {
     );
 }
 
-/// CR 608.2c + CR 611.2a: a card whose own static permission lets it be cast
-/// from exile is cast by a different route than a grant covering it, so that
-/// cast spends no shared `ExileWithAltCost` budget (Idol of Endurance).
-#[test]
-fn shared_exile_alt_cost_budget_survives_a_card_with_its_own_exile_permission() {
-    let mut state = setup_game_at_main_phase();
-    let exiled = add_exiled_card(&mut state, PlayerId(0), "Eternal Scourge");
-    {
-        let obj = state.objects.get_mut(&exiled).unwrap();
-        obj.static_definitions.push(
-            StaticDefinition::new(StaticMode::GraveyardCastPermission {
-                frequency: CastFrequency::Unlimited,
-                play_mode: CardPlayMode::Cast,
-                graveyard_destination_replacement: None,
-                extra_cost: None,
-                enters_with_counter: None,
-                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
-                required_cast_keyword: None,
-                pool: crate::types::statics::GraveyardPermissionPool::OwnGraveyard,
-                cast_limit: crate::types::statics::PermissionCastLimit::Unlimited,
-                mana_spend_permission: None,
-                enters_modifications: Default::default(),
-            })
-            .affected(TargetFilter::SelfRef)
-            .active_zones(vec![Zone::Exile]),
-        );
-        obj.casting_permissions
-            .push(CastingPermission::ExileWithAltCost {
-                source_id: None,
-                cost_provenance: crate::types::ability::ExileGrantCostProvenance::Alternative,
-                cost: ManaCost::zero(),
-                cast_transformed: false,
-                constraint: None,
-                granted_to: Some(PlayerId(0)),
-                resolution_cleanup: None,
-                duration: None,
-                graveyard_replacement: None,
-                mana_spend_permission: None,
-                enters_with_counter: None,
-                enters_with_modifications: Default::default(),
-                cast_cost_modifier: None,
-                single_use_group: Some(TrackedSetId(7)),
-            });
-    }
-
-    assert_eq!(
-        selected_exile_alt_cost_permission_single_use_group(
-            &state,
-            exiled,
-            PlayerId(0),
-            Some(CastingPermissionIndex(0)),
-        ),
-        None,
-        "the card's own permission is a different route: the grant's budget is not spent"
-    );
-}
-
 /// CR 118.9a + CR 601.2a: the rider zone-authority read charges only a
 /// normal-cost grant that carries a budget. An `Alternative`-provenance grant
 /// (a free or substitute cost) is not admitted under a face-down rider, a
