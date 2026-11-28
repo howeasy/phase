@@ -29,13 +29,15 @@ use engine::game::scenario_db::GameScenarioDbExt;
 use engine::game::triggers::drain_order_triggers_with_identity;
 use engine::types::ability::{CastingPermission, Duration, Effect, TargetRef};
 use engine::types::actions::{CastChoice, GameAction};
-use engine::types::game_state::{CastPaymentMode, WaitingFor};
+use engine::types::game_state::{CastOfferKind, CastPaymentMode, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::keywords::Keyword;
 use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
 use engine::types::zones::Zone;
+
+use crate::create_card_copy_with_chosen_name::garth_choose;
 
 /// The printed cards from a small raw-MTGJSON fixture, so every witness runs the
 /// production parser on the real Oracle text: reverting the parser fix reverts
@@ -1155,6 +1157,111 @@ fn sage_reduction_never_touches_coloured_mana_dream_twist() {
     assert_settled(&r, P0, "Dream Twist control");
 }
 
+// ===== Sage of the Beyond: commander tax =====
+
+/// Sage of the Beyond ({5}{U}{U} 5/5, Flying, Foretell {4}{U}): "Spells you
+/// cast from anywhere other than your hand cost {2} less to cast." Niv-Mizzet,
+/// Parun ({U}{U}{U}{R}{R}{R}) is P0's commander and has been cast from the
+/// command zone once, so the command-zone origin carries the {2} commander tax.
+///
+/// CR 601.2f: the printed {2} reduction enters the total cost of the recast
+/// from the command zone (CR 601.2a: the cast moves the commander from the
+/// command zone onto the stack), so the tax {2} and the reduction {2} cancel
+/// and the recast costs the six printed coloured mana exactly. Without the Sage
+/// the same recast pays the printed cost plus the {2} tax. The control arm is
+/// what pins the tax: the Sage arm alone would look the same if the tax were
+/// never charged, since the printed generic component is already {0}.
+#[test]
+fn sage_of_the_beyond_reduces_a_commander_recast_after_tax() {
+    let niv_shards = vec![
+        ManaCostShard::Blue,
+        ManaCostShard::Blue,
+        ManaCostShard::Blue,
+        ManaCostShard::Red,
+        ManaCostShard::Red,
+        ManaCostShard::Red,
+    ];
+
+    // With the battlefield Sage: tax {2} plus reduction {2} nets the printed cost.
+    let mut scenario =
+        GameScenario::new_with_format(engine::types::format::FormatConfig::commander(), 2, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_mana_pool(P0, units("UUURRR"));
+    scenario.add_real_card(P0, "Sage of the Beyond", Zone::Battlefield, db());
+    let niv = scenario.add_real_card(P0, "Niv-Mizzet, Parun", Zone::Hand, db());
+    scenario.with_commander(niv);
+    let mut r = scenario.build();
+    engine::game::rehydrate_game_from_card_db(r.state_mut(), db());
+    // One prior cast from the command zone -> the {2} additional cost.
+    r.state_mut().commander_cast_count.insert(niv, 1);
+    assert_eq!(
+        zone_of(&r, niv),
+        Zone::Command,
+        "reach guard: the commander sits in the command zone"
+    );
+    assert_eq!(
+        engine::game::commander::commander_tax(r.state(), niv),
+        2,
+        "reach guard: one prior cast put the {{2}} commander tax on the recast"
+    );
+    assert_eq!(
+        display_spell_cost(r.state(), P0, niv),
+        Some(cost(0, niv_shards.clone())),
+        "the taxed recast {{2}}{{U}}{{U}}{{U}}{{R}}{{R}}{{R}} is reduced back to the printed {{U}}{{U}}{{U}}{{R}}{{R}}{{R}} by the Sage"
+    );
+    let card_id = r.state().objects[&niv].card_id;
+    r.act(GameAction::CastSpell {
+        object_id: niv,
+        card_id,
+        targets: vec![],
+        payment_mode: CastPaymentMode::Auto,
+    })
+    .expect("the commander recast is payable with exactly the six printed coloured mana");
+    assert_eq!(
+        zone_of(&r, niv),
+        Zone::Stack,
+        "Niv-Mizzet was cast from the command zone onto the stack"
+    );
+    assert!(
+        r.stack_names()
+            .iter()
+            .any(|name| name == "Niv-Mizzet, Parun"),
+        "Niv-Mizzet, Parun is on the stack: {:?}",
+        r.stack_names()
+    );
+    assert_eq!(
+        pool_size(&r, P0),
+        0,
+        "the recast charged exactly {{U}}{{U}}{{U}}{{R}}{{R}}{{R}}"
+    );
+    assert!(
+        matches!(&r.state().waiting_for, WaitingFor::Priority { .. }),
+        "the cast completed without a further prompt: {:?}",
+        r.state().waiting_for
+    );
+
+    // Control without the Sage: the same one-prior-cast recast pays the printed
+    // cost plus the {2} tax.
+    let mut scenario =
+        GameScenario::new_with_format(engine::types::format::FormatConfig::commander(), 2, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    let niv = scenario.add_real_card(P0, "Niv-Mizzet, Parun", Zone::Hand, db());
+    scenario.with_commander(niv);
+    let mut r = scenario.build();
+    engine::game::rehydrate_game_from_card_db(r.state_mut(), db());
+    r.state_mut().commander_cast_count.insert(niv, 1);
+    assert_eq!(
+        engine::game::commander::commander_tax(r.state(), niv),
+        2,
+        "reach guard: the control arm carries the same {{2}} commander tax"
+    );
+    assert_eq!(
+        display_spell_cost(r.state(), P0, niv),
+        Some(cost(2, niv_shards)),
+        "without the Sage the same recast costs the printed cost plus the commander tax {{2}}"
+    );
+}
+
 // ===== Fortune Teller's Talent =====
 
 /// Fortune Teller's Talent ({U} Enchantment — Class), level 3 clause: "Spells
@@ -1395,6 +1502,14 @@ fn fortune_tellers_talent_level_2_top_cast_needs_a_spell_cast_this_turn() {
 
 // ===== Advanced Reconstruction =====
 
+/// Which card the level-3 Advanced Reconstruction trigger exiled from the
+/// post-mill graveyard pool.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum AdvancedReconstructionExile {
+    MilledDivination,
+    PreExistingBears,
+}
+
 /// Advanced Reconstruction ({3}{R} Enchantment — Class). Level 1: "At the
 /// beginning of your first main phase, mill a card, then exile a card from your
 /// graveyard at random. You may play the exiled card this turn." Level 2:
@@ -1404,23 +1519,32 @@ fn fortune_tellers_talent_level_2_top_cast_needs_a_spell_cast_this_turn() {
 ///
 /// CR 601.2f: leveled to 3 through the real activation actions, the next P0
 /// precombat main is reached through public turn actions
-/// (`advance_to_next_p0_main`), where the level 1 trigger (CR 608.2c: it exiles
-/// the milled card; CR 601.2a: the cast moves it from exile onto the stack) lets
-/// P0 cast the exiled Divination for {U} ({2}{U} minus {2}) while a Divination
-/// cast from the hand pays the full {2}{U}; the level 2 trigger deals exactly 2
-/// damage to P1 when the milled card leaves the graveyard.
-#[test]
-fn advanced_reconstruction_level_3_reduces_the_exiled_cast_and_level_2_deals_damage() {
-    let mut scenario = GameScenario::new();
+/// (`advance_to_next_p0_main`), where the level 1 trigger (CR 608.2c) mills the
+/// top card of the library and THEN exiles a card from the graveyard at random.
+/// A second real card (Grizzly Bears) already sits in the graveyard, so the
+/// random pool holds two cards: the milled Divination and the pre-existing
+/// Bears. Per seed this helper asserts the sound invariant: exactly one of the
+/// two moved to exile and the other stayed in the graveyard, the exiled card
+/// carries the this-turn play permission, and it is cast from exile (CR 601.2a)
+/// at its reduced cost — {U} for Divination, {G} for Grizzly Bears, both the
+/// printed cost minus {2} — while a Divination cast from the hand pays the full
+/// {2}{U}; the level 2 trigger deals exactly 2 damage to P1 when the exiled card
+/// leaves the graveyard. Returns which of the two the random pick took.
+fn advanced_reconstruction_level_3_outcome(seed: u64) -> AdvancedReconstructionExile {
+    let mut scenario = GameScenario::new_n_player(2, seed);
     scenario.at_phase(Phase::PreCombatMain);
     // Exact funding for the two level bars, {1}{R} each.
     scenario.with_mana_pool(P0, units("RRCC"));
     let ar = scenario.add_real_card(P0, "Advanced Reconstruction", Zone::Battlefield, db());
     let hand_divination = scenario.add_real_card(P0, "Divination", Zone::Hand, db());
     let p1_divination = scenario.add_real_card(P1, "Divination", Zone::Hand, db());
+    // A real card already in the graveyard makes the trigger's pool hold two
+    // cards, so "exile a card from your graveyard at random" cannot be
+    // satisfied by mechanically exiling the milled card alone.
+    let gy_bears = scenario.add_real_card(P0, "Grizzly Bears", Zone::Graveyard, db());
     // Library, top first: the draw step takes the Island, the level 1 trigger
-    // mills and exiles the Divination (the only graveyard card, so the random
-    // exile is deterministic), and the two Divination casts draw the rest.
+    // mills the Divination (appended after the Bears), and the two casts draw
+    // the rest.
     let draw_step_card = scenario.add_real_card(P0, "Island", Zone::Library, db());
     let milled = scenario.add_real_card(P0, "Divination", Zone::Library, db());
     let _exiled_cast_draw_a = scenario.add_real_card(P0, "Forest", Zone::Library, db());
@@ -1482,13 +1606,30 @@ fn advanced_reconstruction_level_3_reduces_the_exiled_cast_and_level_2_deals_dam
         Zone::Hand,
         "the draw step took the top card"
     );
+    // The pick is random over the two cards in P0's graveyard. The scenario's
+    // seed (GameScenario::new -> seed 42) fixes the outcome, but this witness
+    // does not depend on which one it is.
+    let in_exile = [milled, gy_bears]
+        .iter()
+        .filter(|id| zone_of(&r, **id) == Zone::Exile)
+        .count();
+    let in_graveyard = [milled, gy_bears]
+        .iter()
+        .filter(|id| zone_of(&r, **id) == Zone::Graveyard)
+        .count();
     assert_eq!(
-        zone_of(&r, milled),
-        Zone::Exile,
-        "the trigger milled the Divination and exiled it from the graveyard"
+        (in_exile, in_graveyard),
+        (1, 1),
+        "exactly one of the milled card and the pre-existing card moved to exile, the other stayed in the graveyard"
     );
+    let exiled = if zone_of(&r, milled) == Zone::Exile {
+        milled
+    } else {
+        gy_bears
+    };
+    let stayed = if exiled == milled { gy_bears } else { milled };
     assert!(
-        r.state().objects[&milled]
+        r.state().objects[&exiled]
             .casting_permissions
             .iter()
             .any(|permission| matches!(
@@ -1499,8 +1640,8 @@ fn advanced_reconstruction_level_3_reduces_the_exiled_cast_and_level_2_deals_dam
                     ..
                 } if *granted_to == P0
             )),
-        "the exiled Divination carries the this-turn play permission, got {:?}",
-        r.state().objects[&milled].casting_permissions
+        "the randomly exiled card carries the this-turn play permission, got {:?}",
+        r.state().objects[&exiled].casting_permissions
     );
     assert_eq!(
         r.life(P1),
@@ -1508,21 +1649,39 @@ fn advanced_reconstruction_level_3_reduces_the_exiled_cast_and_level_2_deals_dam
         "level 2: the card leaving the graveyard deals exactly 2 damage to P1"
     );
 
-    // Fund this turn's casts exactly: the exiled Divination {U} + the hand
-    // Divination {2}{U}.
-    for unit in units("CCUU") {
+    // Fund this turn's casts exactly for whichever card was exiled: the exiled
+    // Divination {U} or Grizzly Bears {G}, plus the hand Divination {2}{U}.
+    let (reduced_cost, reduced_pool, reduced_zone) = if exiled == milled {
+        (
+            cost(0, vec![ManaCostShard::Blue]),
+            units("CCUU"),
+            Zone::Graveyard,
+        )
+    } else {
+        (
+            cost(0, vec![ManaCostShard::Green]),
+            units("CCUG"),
+            Zone::Battlefield,
+        )
+    };
+    for unit in reduced_pool {
         let _ = r.state_mut().add_mana_to_pool(P0, unit);
     }
     assert_eq!(
-        display_spell_cost(r.state(), P0, milled),
-        Some(cost(0, vec![ManaCostShard::Blue])),
-        "the exiled Divination ({{2}}{{U}}) costs {{U}} at level 3"
+        display_spell_cost(r.state(), P0, exiled),
+        Some(reduced_cost),
+        "the exiled card's printed cost is reduced by {{2}} at level 3"
     );
-    let exiled_cast = r.cast(milled).resolve();
+    let exiled_cast = r.cast(exiled).resolve();
     assert_eq!(
-        exiled_cast.zone_of(milled),
+        exiled_cast.zone_of(exiled),
+        reduced_zone,
+        "the exiled card is castable for exactly its reduced cost"
+    );
+    assert_eq!(
+        zone_of(&r, stayed),
         Zone::Graveyard,
-        "the exiled Divination is castable for exactly {{U}}"
+        "the card the random pick did not take stays in the graveyard"
     );
 
     // Control: the same printed card cast from the hand pays full price.
@@ -1548,10 +1707,42 @@ fn advanced_reconstruction_level_3_reduces_the_exiled_cast_and_level_2_deals_dam
     assert_eq!(
         pool_size(&r, P0),
         0,
-        "this turn's pool funded exactly {{U}} + {{2}}{{U}} and is now empty"
+        "this turn's pool funded exactly the exiled card's reduced cost plus the hand Divination's {{2}}{{U}} and is now empty"
     );
     assert_eq!(r.life(P1), 18, "no further cards left the graveyard");
     assert_settled(&r, P0, "Advanced Reconstruction");
+
+    if exiled == milled {
+        AdvancedReconstructionExile::MilledDivination
+    } else {
+        AdvancedReconstructionExile::PreExistingBears
+    }
+}
+
+/// The level-3 pool is EVERY card in the graveyard after the mill, and the pick
+/// is random over that pool. A single run cannot prove randomness: an "always
+/// exile the milled card" implementation passes whenever the seeded pick heads
+/// that way. So the per-seed witness is swept over a fixed seed set, and the
+/// test requires both outcomes — the pre-existing Grizzly Bears exiled for at
+/// least one seed and the milled Divination for at least one.
+#[test]
+fn advanced_reconstruction_level_3_reduces_the_exiled_cast_and_level_2_deals_damage() {
+    const SEEDS: [u64; 24] = [
+        0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23,
+    ];
+    let mut saw_milled = false;
+    let mut saw_preexisting = false;
+    for seed in SEEDS {
+        match advanced_reconstruction_level_3_outcome(seed) {
+            AdvancedReconstructionExile::MilledDivination => saw_milled = true,
+            AdvancedReconstructionExile::PreExistingBears => saw_preexisting = true,
+        }
+    }
+    assert!(
+        saw_milled && saw_preexisting,
+        "the seed set {:?} produced a single exile outcome (milled: {saw_milled}, pre-existing: {saw_preexisting}); a single outcome means the pick is not random over the post-mill graveyard",
+        SEEDS
+    );
 }
 
 // ===== Advanced Reconstruction: the level gates =====
@@ -1748,51 +1939,75 @@ fn advanced_reconstruction_levels_1_and_2_charge_the_full_exiled_cost() {
 
 // ===== Savvy Trader: a cast from outside the game (Garth One-Eye) =====
 
-/// Activate `garth`'s {T} ability and let it resolve up to the card-name prompt.
-fn activate_to_the_prompt(r: &mut GameRunner, garth: ObjectId) {
-    r.act(GameAction::ActivateAbility {
-        source_id: garth,
-        ability_index: 0,
-        payment_mode: CastPaymentMode::Auto,
-    })
-    .expect("the tap ability is activatable");
-    r.resolve_top();
-}
-
-/// Answer Garth's "choose a card name" prompt with a printed domain name.
-fn garth_choose(r: &mut GameRunner, garth: ObjectId, name: &str) {
-    activate_to_the_prompt(r, garth);
-    r.act(GameAction::ChooseOption {
-        choice: name.to_string(),
-    })
-    .expect("a printed name is a legal answer");
-}
-
 /// Answer every prompt of an accepted copy cast: accept the offer, announce X,
-/// pick the target, pay from the pool.
-fn drive_copy_cast(r: &mut GameRunner, x: u32, target: Option<TargetRef>) {
+/// pick the target, pay from the pool. `offered` is the copy the cast offer
+/// must name; when a target is declared it must be one of the offered legal
+/// targets. Every arm asserts the acting player, and any prompt this driver
+/// does not expect panics with the state instead of silently ending the cast.
+fn drive_copy_cast(r: &mut GameRunner, offered: ObjectId, x: u32, target: Option<TargetRef>) {
     for _ in 0..24 {
         let action = match &r.state().waiting_for {
-            WaitingFor::OptionalEffectChoice { .. } => {
+            WaitingFor::OptionalEffectChoice { player, .. } => {
+                assert_eq!(*player, P0, "P0 answers the copy-cast offer");
                 GameAction::DecideOptionalEffect { accept: true }
             }
-            WaitingFor::CastOffer { .. } => GameAction::GraveyardPaidCastChoice {
-                choice: CastChoice::Cast,
-            },
-            WaitingFor::ChooseXValue { .. } => GameAction::ChooseX { value: x },
-            WaitingFor::TargetSelection { .. } => GameAction::ChooseTarget {
-                target: target.clone(),
-            },
-            WaitingFor::ManaPayment { .. } => GameAction::PassPriority,
-            _ => return,
+            WaitingFor::CastOffer { player, kind } => {
+                assert_eq!(*player, P0, "P0 receives the copy cast offer");
+                match kind {
+                    CastOfferKind::GraveyardPaidCast { hit_card, .. } => assert_eq!(
+                        *hit_card, offered,
+                        "the offer names the copy the witness is driving"
+                    ),
+                    other => panic!("the copy cast is not a paid cast offer: {other:?}"),
+                }
+                GameAction::GraveyardPaidCastChoice {
+                    choice: CastChoice::Cast,
+                }
+            }
+            WaitingFor::ChooseXValue { player, .. } => {
+                assert_eq!(*player, P0, "P0 announces X");
+                GameAction::ChooseX { value: x }
+            }
+            WaitingFor::TargetSelection {
+                player,
+                target_slots,
+                ..
+            } => {
+                assert_eq!(*player, P0, "P0 chooses the copy's target");
+                let wanted = target
+                    .as_ref()
+                    .expect("the copy cast needs a declared target");
+                assert!(
+                    target_slots
+                        .iter()
+                        .any(|slot| slot.legal_targets.contains(wanted)),
+                    "the offered legal targets contain the declared target, got {target_slots:?}"
+                );
+                GameAction::ChooseTarget {
+                    target: Some(wanted.clone()),
+                }
+            }
+            WaitingFor::ManaPayment { player, .. } => {
+                assert_eq!(*player, P0, "P0 pays for the copy cast");
+                GameAction::PassPriority
+            }
+            WaitingFor::Priority { .. } => return,
+            other => panic!("the copy cast stopped at an unexpected prompt: {other:?}"),
         };
         r.act(action).expect("the copy cast proceeds");
     }
+    panic!(
+        "the copy cast did not finish within 24 prompts, stuck at {:?}",
+        r.state().waiting_for
+    );
 }
 
 /// P0's Garth One-Eye (with Savvy Trader when asked) against P1's Black Lotus,
-/// with exactly two white mana units in P0's pool.
-fn garth_disenchant_copy_scenario(with_savvy_trader: bool) -> (GameRunner, ObjectId, ObjectId) {
+/// a real Disenchant in P0's hand for the from-hand control, and exactly two
+/// white mana units in P0's pool.
+fn garth_disenchant_copy_scenario(
+    with_savvy_trader: bool,
+) -> (GameRunner, ObjectId, ObjectId, ObjectId) {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     scenario.with_mana_pool(P0, units("WW"));
@@ -1803,9 +2018,10 @@ fn garth_disenchant_copy_scenario(with_savvy_trader: bool) -> (GameRunner, Objec
         scenario.add_real_card(P0, "Savvy Trader", Zone::Battlefield, db());
     }
     let lotus = scenario.add_real_card(P1, "Black Lotus", Zone::Battlefield, db());
+    let hand_disenchant = scenario.add_real_card(P0, "Disenchant", Zone::Hand, db());
     let mut r = scenario.build();
     engine::game::rehydrate_game_from_card_db(r.state_mut(), db());
-    (r, garth, lotus)
+    (r, garth, lotus, hand_disenchant)
 }
 
 /// Savvy Trader ({3}{G}): "Spells you cast from anywhere other than your hand
@@ -1817,7 +2033,9 @@ fn garth_disenchant_copy_scenario(with_savvy_trader: bool) -> (GameRunner, Objec
 /// CR 601.2f: Savvy Trader's {1} reduction enters the total cost of that cast,
 /// so the Disenchant copy's {1}{W} becomes {W} and a pool of exactly two white
 /// units keeps one. The control scenario without the Trader pays the full
-/// {1}{W} from the same pool.
+/// {1}{W} from the same pool. A real Disenchant cast from P0's hand in the same
+/// scenario shape keeps its full {1}{W}: the static excludes the controller's
+/// own hand, so only the outside-the-game cast is reduced.
 #[test]
 fn savvy_trader_reduces_garths_copy_cast_from_outside_the_game() {
     for (with_savvy_trader, remaining_after_payment) in [(true, 1), (false, 0)] {
@@ -1826,7 +2044,8 @@ fn savvy_trader_reduces_garths_copy_cast_from_outside_the_game() {
         } else {
             "control without Savvy Trader"
         };
-        let (mut r, garth, lotus) = garth_disenchant_copy_scenario(with_savvy_trader);
+        let (mut r, garth, lotus, _hand_disenchant) =
+            garth_disenchant_copy_scenario(with_savvy_trader);
         garth_choose(&mut r, garth, "Disenchant");
         let copy = r
             .state()
@@ -1838,7 +2057,12 @@ fn savvy_trader_reduces_garths_copy_cast_from_outside_the_game() {
             r.state().objects[&copy].created_outside_game,
             "{label}: CR 707.13 + CR 400.11: the copy is created outside the game"
         );
-        drive_copy_cast(&mut r, 0, Some(TargetRef::Object(lotus)));
+        assert_eq!(
+            r.state().objects[&copy].name,
+            "Disenchant",
+            "{label}: the copy the offer names is the chosen Disenchant"
+        );
+        drive_copy_cast(&mut r, copy, 0, Some(TargetRef::Object(lotus)));
         assert!(
             r.stack_names().iter().any(|name| name == "Disenchant"),
             "{label}: the Disenchant copy is on the stack: {:?} / {:?}",
@@ -1856,5 +2080,17 @@ fn savvy_trader_reduces_garths_copy_cast_from_outside_the_game() {
             Zone::Graveyard,
             "{label}: the Disenchant copy destroyed the targeted artifact"
         );
+        // Once the copy resolves, the game returns to P0 with an empty stack —
+        // the cast permission is spent, not left pending.
+        assert_settled(&r, P0, label);
     }
+
+    // From-hand control: the same board with the Trader reduces nothing, so a
+    // real Disenchant cast from P0's hand pays its full printed {1}{W}.
+    let (r, _garth, _lotus, hand_disenchant) = garth_disenchant_copy_scenario(true);
+    assert_eq!(
+        display_spell_cost(r.state(), P0, hand_disenchant),
+        Some(cost(1, vec![ManaCostShard::White])),
+        "a Disenchant cast from P0's hand pays its full printed {{1}}{{W}}, not the reduced {{W}}"
+    );
 }

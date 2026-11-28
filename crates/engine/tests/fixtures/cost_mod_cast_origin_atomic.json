@@ -99,13 +99,44 @@
         "colorIdentity": [],
         "colors": [],
         "convertedManaCost": 0.0,
+        "firstPrinting": "LEA",
         "identifiers": {
-          "scryfallOracleId": "o-black-lotus"
+          "scryfallOracleId": "5089ec1a-f881-4d55-af14-5d996171203b"
         },
+        "isReserved": true,
         "layout": "normal",
+        "legalities": {
+          "commander": "Banned",
+          "duel": "Banned",
+          "legacy": "Banned",
+          "oathbreaker": "Banned",
+          "oldschool": "Restricted",
+          "predh": "Banned",
+          "vintage": "Restricted"
+        },
         "manaCost": "{0}",
         "manaValue": 0.0,
         "name": "Black Lotus",
+        "printings": [
+          "2ED",
+          "30A",
+          "CED",
+          "CEI",
+          "LEA",
+          "LEB",
+          "O90P",
+          "OVNT",
+          "PRM",
+          "VMA",
+          "YDMU"
+        ],
+        "producedMana": [
+          "B",
+          "G",
+          "R",
+          "U",
+          "W"
+        ],
         "subtypes": [],
         "supertypes": [],
         "text": "{T}, Sacrifice this artifact: Add three mana of any one color.",
@@ -124,13 +155,37 @@
           "U"
         ],
         "convertedManaCost": 2.0,
+        "firstPrinting": "LEA",
         "identifiers": {
-          "scryfallOracleId": "o-braingeyser"
+          "scryfallOracleId": "9908e597-9470-4c13-8387-39431b380138"
         },
+        "isReserved": true,
         "layout": "normal",
+        "legalities": {
+          "commander": "Legal",
+          "duel": "Legal",
+          "legacy": "Legal",
+          "oathbreaker": "Legal",
+          "oldschool": "Restricted",
+          "predh": "Legal",
+          "vintage": "Legal"
+        },
         "manaCost": "{X}{U}{U}",
         "manaValue": 2.0,
         "name": "Braingeyser",
+        "printings": [
+          "2ED",
+          "30A",
+          "3ED",
+          "CED",
+          "CEI",
+          "FBB",
+          "LEA",
+          "LEB",
+          "ME4",
+          "PRM",
+          "SUM"
+        ],
         "subtypes": [],
         "supertypes": [],
         "text": "Target player draws X cards.",
@@ -149,13 +204,84 @@
           "W"
         ],
         "convertedManaCost": 2.0,
+        "firstPrinting": "LEA",
         "identifiers": {
-          "scryfallOracleId": "o-disenchant"
+          "scryfallOracleId": "a7e97fa9-4b72-4548-b854-5be5f18a6f1a"
         },
         "layout": "normal",
+        "legalities": {
+          "alchemy": "Legal",
+          "brawl": "Legal",
+          "commander": "Legal",
+          "competitivebrawl": "Legal",
+          "duel": "Legal",
+          "future": "Legal",
+          "gladiator": "Legal",
+          "historic": "Legal",
+          "legacy": "Legal",
+          "modern": "Legal",
+          "oathbreaker": "Legal",
+          "oldschool": "Legal",
+          "pauper": "Legal",
+          "paupercommander": "Legal",
+          "pioneer": "Legal",
+          "predh": "Legal",
+          "premodern": "Legal",
+          "standard": "Legal",
+          "standardbrawl": "Legal",
+          "timeless": "Legal",
+          "vintage": "Legal"
+        },
         "manaCost": "{1}{W}",
         "manaValue": 2.0,
         "name": "Disenchant",
+        "printings": [
+          "2ED",
+          "30A",
+          "3ED",
+          "4BB",
+          "4ED",
+          "5ED",
+          "6ED",
+          "7ED",
+          "A25",
+          "ATH",
+          "BRB",
+          "BRO",
+          "CED",
+          "CEI",
+          "CMR",
+          "CN2",
+          "CST",
+          "F03",
+          "FBB",
+          "FDN",
+          "ICE",
+          "IMA",
+          "LEA",
+          "LEB",
+          "M20",
+          "ME2",
+          "ME3",
+          "MIR",
+          "MMQ",
+          "OLEP",
+          "P07",
+          "PARL",
+          "PLST",
+          "PMEI",
+          "PRM",
+          "PTC",
+          "SCD",
+          "SUM",
+          "TMP",
+          "TPR",
+          "TSB",
+          "USG",
+          "WC97",
+          "WC98",
+          "ZNR"
+        ],
         "subtypes": [],
         "supertypes": [],
         "text": "Destroy target artifact or enchantment.",
@@ -677,28 +803,44 @@
     "Garth One-Eye": [
       {
         "colorIdentity": [
-          "W",
-          "U",
           "B",
+          "G",
           "R",
-          "G"
+          "U",
+          "W"
         ],
         "colors": [
-          "W",
-          "U",
           "B",
+          "G",
           "R",
-          "G"
+          "U",
+          "W"
         ],
         "convertedManaCost": 5.0,
+        "firstPrinting": "MH2",
         "identifiers": {
-          "scryfallOracleId": "o-garth-one-eye"
+          "scryfallOracleId": "d8c4312e-03ae-43f3-b92c-4adb6875534c"
         },
         "layout": "normal",
+        "legalities": {
+          "commander": "Legal",
+          "duel": "Legal",
+          "legacy": "Legal",
+          "modern": "Legal",
+          "oathbreaker": "Legal",
+          "penny": "Legal",
+          "vintage": "Legal"
+        },
         "manaCost": "{W}{U}{B}{R}{G}",
         "manaValue": 5.0,
         "name": "Garth One-Eye",
         "power": "5",
+        "printings": [
+          "MH2",
+          "PLST",
+          "PMH2",
+          "SLZ"
+        ],
         "subtypes": [
           "Human",
           "Wizard"
@@ -1376,6 +1518,68 @@
         ]
       }
     ],
+    "Niv-Mizzet, Parun": [
+      {
+        "colorIdentity": [
+          "R",
+          "U"
+        ],
+        "colors": [
+          "R",
+          "U"
+        ],
+        "convertedManaCost": 6.0,
+        "firstPrinting": "GRN",
+        "identifiers": {
+          "scryfallOracleId": "33666a98-812f-4892-9f8d-33e0cbecc340"
+        },
+        "keywords": [
+          "Flying"
+        ],
+        "layout": "normal",
+        "legalities": {
+          "brawl": "Legal",
+          "commander": "Legal",
+          "competitivebrawl": "Legal",
+          "duel": "Legal",
+          "gladiator": "Legal",
+          "historic": "Legal",
+          "legacy": "Legal",
+          "modern": "Legal",
+          "oathbreaker": "Legal",
+          "penny": "Legal",
+          "pioneer": "Legal",
+          "timeless": "Legal",
+          "vintage": "Legal"
+        },
+        "manaCost": "{U}{U}{U}{R}{R}{R}",
+        "manaValue": 6.0,
+        "name": "Niv-Mizzet, Parun",
+        "power": "5",
+        "printings": [
+          "CLB",
+          "GRN",
+          "OTC",
+          "PGRN",
+          "PLST",
+          "RVR",
+          "SLD"
+        ],
+        "subtypes": [
+          "Dragon",
+          "Wizard"
+        ],
+        "supertypes": [
+          "Legendary"
+        ],
+        "text": "This spell can't be countered.\nFlying\nWhenever you draw a card, Niv-Mizzet deals 1 damage to any target.\nWhenever a player casts an instant or sorcery spell, you draw a card.",
+        "toughness": "5",
+        "type": "Legendary Creature — Dragon Wizard",
+        "types": [
+          "Creature"
+        ]
+      }
+    ],
     "Plains": [
       {
         "colorIdentity": [
@@ -1677,13 +1881,52 @@
           "G"
         ],
         "convertedManaCost": 2.0,
+        "firstPrinting": "LEA",
         "identifiers": {
-          "scryfallOracleId": "o-regrowth"
+          "scryfallOracleId": "e6e4a8bd-5c40-4654-8de1-0da9afed90fd"
         },
         "layout": "normal",
+        "legalities": {
+          "brawl": "Legal",
+          "commander": "Legal",
+          "competitivebrawl": "Legal",
+          "duel": "Legal",
+          "gladiator": "Legal",
+          "historic": "Legal",
+          "legacy": "Legal",
+          "modern": "Legal",
+          "oathbreaker": "Legal",
+          "oldschool": "Restricted",
+          "penny": "Legal",
+          "predh": "Legal",
+          "timeless": "Legal",
+          "vintage": "Legal"
+        },
         "manaCost": "{1}{G}",
         "manaValue": 2.0,
         "name": "Regrowth",
+        "printings": [
+          "2ED",
+          "30A",
+          "3ED",
+          "A25",
+          "CED",
+          "CEI",
+          "DDL",
+          "FBB",
+          "G05",
+          "GN3",
+          "LEA",
+          "LEB",
+          "ME4",
+          "MH1",
+          "PLST",
+          "PRM",
+          "SLD",
+          "STA",
+          "SUM",
+          "VMA"
+        ],
         "subtypes": [],
         "supertypes": [],
         "text": "Return target card from your graveyard to your hand.",
@@ -1789,14 +2032,83 @@
           "R"
         ],
         "convertedManaCost": 6.0,
+        "firstPrinting": "LEA",
         "identifiers": {
-          "scryfallOracleId": "o-shivan-dragon"
+          "scryfallOracleId": "711eea87-0fa3-46e0-a42b-fa5a86455f04"
         },
+        "keywords": [
+          "Flying"
+        ],
         "layout": "normal",
+        "legalities": {
+          "alchemy": "Legal",
+          "brawl": "Legal",
+          "commander": "Legal",
+          "competitivebrawl": "Legal",
+          "duel": "Legal",
+          "future": "Legal",
+          "gladiator": "Legal",
+          "historic": "Legal",
+          "legacy": "Legal",
+          "modern": "Legal",
+          "oathbreaker": "Legal",
+          "oldschool": "Legal",
+          "penny": "Legal",
+          "pioneer": "Legal",
+          "predh": "Legal",
+          "premodern": "Legal",
+          "standard": "Legal",
+          "standardbrawl": "Legal",
+          "timeless": "Legal",
+          "vintage": "Legal"
+        },
         "manaCost": "{4}{R}{R}",
         "manaValue": 6.0,
         "name": "Shivan Dragon",
         "power": "5",
+        "printings": [
+          "10E",
+          "2ED",
+          "30A",
+          "3ED",
+          "4BB",
+          "4ED",
+          "5ED",
+          "7ED",
+          "8ED",
+          "9ED",
+          "BTD",
+          "CED",
+          "CEI",
+          "DMR",
+          "DPA",
+          "DRB",
+          "FBB",
+          "FDN",
+          "GN3",
+          "J21",
+          "LEA",
+          "LEB",
+          "M10",
+          "M14",
+          "M15",
+          "M19",
+          "M20",
+          "ME4",
+          "O90P",
+          "ORI",
+          "P30H",
+          "P30T",
+          "P9ED",
+          "PMEI",
+          "PRM",
+          "PS11",
+          "SLC",
+          "SLD",
+          "SUM",
+          "W16",
+          "W17"
+        ],
         "subtypes": [
           "Dragon"
         ],
@@ -1854,93 +2166,6 @@
         "text": "Ninjutsu {4}{U}{B} ({4}{U}{B}, Return an unblocked attacker you control to hand: Put this card onto the battlefield from your hand tapped and attacking.)\nWhenever this creature deals combat damage to a player, look at that player's hand. You may cast a spell from among those cards without paying its mana cost.",
         "toughness": "5",
         "type": "Creature — Demon Ninja",
-        "types": [
-          "Creature"
-        ]
-      }
-    ],
-    "Terror": [
-      {
-        "colorIdentity": [
-          "B"
-        ],
-        "colors": [
-          "B"
-        ],
-        "convertedManaCost": 2.0,
-        "identifiers": {
-          "scryfallOracleId": "o-terror"
-        },
-        "layout": "normal",
-        "manaCost": "{1}{B}",
-        "manaValue": 2.0,
-        "name": "Terror",
-        "subtypes": [],
-        "supertypes": [],
-        "text": "Destroy target nonartifact, nonblack creature. It can't be regenerated.",
-        "type": "Instant",
-        "types": [
-          "Instant"
-        ]
-      }
-    ],
-    "Thalia, Guardian of Thraben": [
-      {
-        "colorIdentity": [
-          "W"
-        ],
-        "colors": [
-          "W"
-        ],
-        "convertedManaCost": 2.0,
-        "firstPrinting": "DKA",
-        "identifiers": {
-          "scryfallOracleId": "9b7f1d05-707c-4ed3-9f0e-8ced1232c2ee"
-        },
-        "keywords": [
-          "First strike"
-        ],
-        "layout": "normal",
-        "legalities": {
-          "commander": "Legal",
-          "duel": "Legal",
-          "gladiator": "Legal",
-          "historic": "Legal",
-          "legacy": "Legal",
-          "modern": "Legal",
-          "oathbreaker": "Legal",
-          "paupercommander": "Legal",
-          "penny": "Legal",
-          "pioneer": "Legal",
-          "predh": "Legal",
-          "vintage": "Legal"
-        },
-        "manaCost": "{1}{W}",
-        "manaValue": 2.0,
-        "name": "Thalia, Guardian of Thraben",
-        "power": "2",
-        "printings": [
-          "A25",
-          "DBL",
-          "DKA",
-          "HA2",
-          "MUL",
-          "PRM",
-          "PVOW",
-          "SLD",
-          "VOW",
-          "WMC"
-        ],
-        "subtypes": [
-          "Human",
-          "Soldier"
-        ],
-        "supertypes": [
-          "Legendary"
-        ],
-        "text": "First strike\nNoncreature spells cost {1} more to cast.",
-        "toughness": "1",
-        "type": "Legendary Creature — Human Soldier",
         "types": [
           "Creature"
         ]
@@ -2233,6 +2458,140 @@
         "type": "Basic Land — Swamp",
         "types": [
           "Land"
+        ]
+      }
+    ],
+    "Terror": [
+      {
+        "colorIdentity": [
+          "B"
+        ],
+        "colors": [
+          "B"
+        ],
+        "convertedManaCost": 2.0,
+        "firstPrinting": "LEA",
+        "identifiers": {
+          "scryfallOracleId": "b81f041d-98db-4408-9472-c483e4a502bc"
+        },
+        "layout": "normal",
+        "legalities": {
+          "commander": "Legal",
+          "duel": "Legal",
+          "legacy": "Legal",
+          "modern": "Legal",
+          "oathbreaker": "Legal",
+          "oldschool": "Legal",
+          "pauper": "Legal",
+          "paupercommander": "Legal",
+          "penny": "Legal",
+          "predh": "Legal",
+          "premodern": "Legal",
+          "vintage": "Legal"
+        },
+        "manaCost": "{1}{B}",
+        "manaValue": 2.0,
+        "name": "Terror",
+        "printings": [
+          "10E",
+          "2ED",
+          "30A",
+          "3ED",
+          "4BB",
+          "4ED",
+          "5ED",
+          "6ED",
+          "ATH",
+          "BRB",
+          "BTD",
+          "CED",
+          "CEI",
+          "DMR",
+          "DPA",
+          "FBB",
+          "FNM",
+          "ITP",
+          "LEA",
+          "LEB",
+          "ME4",
+          "MRD",
+          "P05",
+          "PLST",
+          "PRM",
+          "PS11",
+          "RQS",
+          "SLD",
+          "SUM",
+          "TD0"
+        ],
+        "subtypes": [],
+        "supertypes": [],
+        "text": "Destroy target nonartifact, nonblack creature. It can't be regenerated.",
+        "type": "Instant",
+        "types": [
+          "Instant"
+        ]
+      }
+    ],
+    "Thalia, Guardian of Thraben": [
+      {
+        "colorIdentity": [
+          "W"
+        ],
+        "colors": [
+          "W"
+        ],
+        "convertedManaCost": 2.0,
+        "firstPrinting": "DKA",
+        "identifiers": {
+          "scryfallOracleId": "9b7f1d05-707c-4ed3-9f0e-8ced1232c2ee"
+        },
+        "keywords": [
+          "First strike"
+        ],
+        "layout": "normal",
+        "legalities": {
+          "commander": "Legal",
+          "duel": "Legal",
+          "gladiator": "Legal",
+          "historic": "Legal",
+          "legacy": "Legal",
+          "modern": "Legal",
+          "oathbreaker": "Legal",
+          "paupercommander": "Legal",
+          "penny": "Legal",
+          "pioneer": "Legal",
+          "predh": "Legal",
+          "vintage": "Legal"
+        },
+        "manaCost": "{1}{W}",
+        "manaValue": 2.0,
+        "name": "Thalia, Guardian of Thraben",
+        "power": "2",
+        "printings": [
+          "A25",
+          "DBL",
+          "DKA",
+          "HA2",
+          "MUL",
+          "PRM",
+          "PVOW",
+          "SLD",
+          "VOW",
+          "WMC"
+        ],
+        "subtypes": [
+          "Human",
+          "Soldier"
+        ],
+        "supertypes": [
+          "Legendary"
+        ],
+        "text": "First strike\nNoncreature spells cost {1} more to cast.",
+        "toughness": "1",
+        "type": "Legendary Creature — Human Soldier",
+        "types": [
+          "Creature"
         ]
       }
     ]
