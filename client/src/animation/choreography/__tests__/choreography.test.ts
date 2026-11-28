@@ -118,9 +118,11 @@ type LayerMode = "accept" | "decline";
 function layerFor(mode: LayerMode) {
   const specs: CardVfxSpec[] = [];
   const handle: CardVfxLayerHandle = {
-    present(spec, classic) {
+    present(spec, classic, onImpact) {
       specs.push(spec);
+      // An accepted effect's impact is the layer's to time; land it at once.
       if (mode === "decline") classic();
+      else onImpact?.();
     },
   };
   return { handle, specs };
@@ -283,7 +285,7 @@ const cases: Case[] = [
       ),
     specKinds: ["damage"],
     none: ["sfx:DamageDealt:1", "float:-3:#ef4444"],
-    accept: [],
+    accept: ["landDamageHit:3:false"],
   },
   {
     name: "DamageDealt (creature-to-creature slam)",
