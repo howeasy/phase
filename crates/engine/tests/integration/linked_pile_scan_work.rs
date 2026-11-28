@@ -31,6 +31,10 @@
 //!   Mirror of Life Trapping, Artifact (fixture m.jsonl): "Whenever a creature enters,
 //!   if it was cast, exile it, then return all other permanent cards exiled with this artifact to
 //!   the battlefield under their owners' control."
+//!
+//! Assimilation Assessor is reported unsupported
+//! (`UNTARGETED_OPPONENT_PILE_ASSIMILATE_GAP`); its text is used here only as
+//! the vehicle for the linked-pile scan work measurement.
 
 use std::sync::OnceLock;
 

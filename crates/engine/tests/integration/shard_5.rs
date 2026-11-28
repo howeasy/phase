@@ -411,6 +411,7 @@ mod unsealing_stat_value_list_cast_triggers;
 mod untap_response_mana_window;
 mod untap_upkeep_draw_created_steps;
 mod untargeted_damage_recipient_chooser;
+mod untargeted_opponent_pile_assimilate_gap;
 mod until_next_step_deadline_durations;
 mod until_self_cast_land_grant;
 mod until_source_leaves_cr610_3a;

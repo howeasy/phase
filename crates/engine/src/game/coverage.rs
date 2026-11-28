@@ -8387,6 +8387,7 @@ pub fn compute_card_face_coverage(
     );
     check_shared_source_graveyard_slot(face, &mut missing);
     check_shared_budget_pile_election(face, &mut missing);
+    check_untargeted_opponent_pile_assimilate(face, &mut missing);
     check_confirmed_misparse(face, &mut missing);
     check_unrun_card_type(face, &mut missing);
     match entry_projection {
@@ -8921,6 +8922,26 @@ fn push_shared_budget_pile_election_gap(missing: &mut Vec<String>) {
     }
 }
 
+/// `ChangeZoneAll:untargeted_opponent_pile_assimilate`: a face that exiles one
+/// opponent's graveyard and later reads that pile with a linked "exiled with
+/// it" clause.
+///
+/// CR 115.1d: the opponent in "exile target opponent's graveyard" is a target
+/// chosen as the ability is put on the stack; CR 607.2a: the later read refers
+/// only to cards the exile instruction put there. The lowering carries the
+/// chosen opponent only as an opponent-scoped `Typed` filter with no player
+/// slot, so a resolver that scans every opponent's graveyard widens the move to
+/// each opponent in a multiplayer game, and the linked read then ranges over
+/// cards from graveyards the ability never chose. The face fails closed until
+/// the mass move declares the chosen player. Keyed on the PAIR of typed shapes —
+/// the opponent graveyard mass exile AND the assimilate read — because the label
+/// is about that read: the same mass-move shape with no reader (Release to
+/// Memory, Hedonist's Trove) is not reported for this. Over-approximating only
+/// withholds a support claim: a face that says "each opponent's graveyard" and
+/// reads the pile also carries the label.
+pub const UNTARGETED_OPPONENT_PILE_ASSIMILATE_GAP: &str =
+    "ChangeZoneAll:untargeted_opponent_pile_assimilate";
+
 /// The cast/play routes one face writes over source-linked exiled cards.
 #[derive(Default)]
 struct PileCastRoutes {
@@ -9029,6 +9050,69 @@ impl PileCastRoutes {
 fn check_shared_budget_pile_election(face: &CardFace, missing: &mut Vec<String>) {
     if PileCastRoutes::of_face(face).needs_player_election() {
         push_shared_budget_pile_election_gap(missing);
+    }
+}
+
+/// Is this the "exile target opponent's graveyard" mass move lowered with no
+/// player slot for the chosen opponent?
+fn is_opponent_graveyard_mass_exile(effect: &Effect) -> bool {
+    matches!(
+        effect,
+        Effect::ChangeZoneAll {
+            origin: Some(Zone::Graveyard),
+            destination: Zone::Exile,
+            target:
+                TargetFilter::Typed(TypedFilter {
+                    controller: Some(ControllerRef::Opponent),
+                    type_filters,
+                    ..
+                }),
+            ..
+        } if type_filters.is_empty()
+    )
+}
+
+/// Is this the "assimilate a creature card exiled with it" read: a linked-pile
+/// (CR 607.2a) move from exile to the battlefield under the ability's
+/// controller, with an entry counter?
+fn is_linked_pile_assimilate_read(effect: &Effect) -> bool {
+    matches!(
+        effect,
+        Effect::ChangeZone {
+            origin: Some(Zone::Exile),
+            destination: Zone::Battlefield,
+            target,
+            enters_under: Some(ControllerRef::You),
+            enter_with_counters,
+            ..
+        } if !enter_with_counters.is_empty() && target.references_exiled_by_source()
+    )
+}
+
+/// See `UNTARGETED_OPPONENT_PILE_ASSIMILATE_GAP`. The two halves live on
+/// separate triggers, so both are collected face-wide: `collect_effects` walks
+/// one `AbilityDefinition`, and the face's ability list and trigger bodies are
+/// its two entry points here.
+fn check_untargeted_opponent_pile_assimilate(face: &CardFace, missing: &mut Vec<String>) {
+    let mut effects = Vec::new();
+    for ability in &face.abilities {
+        crate::analysis::ability_graph::collect_effects(ability, &mut effects);
+    }
+    for execute in face
+        .triggers
+        .iter()
+        .filter_map(|trigger| trigger.execute.as_deref())
+    {
+        crate::analysis::ability_graph::collect_effects(execute, &mut effects);
+    }
+    let mut has_mass_exile = false;
+    let mut has_assimilate_read = false;
+    for (effect, _) in effects {
+        has_mass_exile |= is_opponent_graveyard_mass_exile(effect);
+        has_assimilate_read |= is_linked_pile_assimilate_read(effect);
+    }
+    if has_mass_exile && has_assimilate_read {
+        missing.push(UNTARGETED_OPPONENT_PILE_ASSIMILATE_GAP.to_string());
     }
 }
 

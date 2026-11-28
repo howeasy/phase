@@ -16,6 +16,10 @@
 //! chosen from the cards exiled with Borg Cube
 //! (CR 607.2a); when there is none, the fallback exile runs and that card
 //! becomes linked to Borg Cube (CR 406.6).
+//!
+//! Assimilation Assessor is reported unsupported
+//! (`UNTARGETED_OPPONENT_PILE_ASSIMILATE_GAP`); its text is used here only as
+//! the vehicle for the assimilate keyword action and its linked-pile read.
 
 use engine::game::combat::AttackTarget;
 use engine::game::layers::evaluate_layers;

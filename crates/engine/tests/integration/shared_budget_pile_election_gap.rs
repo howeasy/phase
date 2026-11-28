@@ -7,7 +7,9 @@
 //! spent to cast it. If you're the monarch, until end of turn, you may cast a spell from among
 //! cards exiled with this enchantment without paying its mana cost"); it is reported unsupported.
 //! Idol of Endurance and Serpent's Soul-Jar have one route over the pile and stay gap-free for
-//! this reason. The remaining cards claimed alongside them write no cast route at all.
+//! this reason. The remaining cards write no cast route at all, so they carry no election gap —
+//! a no-election result, not a support claim: Assimilation Assessor is withdrawn and reported
+//! unsupported by `UNTARGETED_OPPONENT_PILE_ASSIMILATE_GAP`.
 
 use engine::database::CardDatabase;
 use engine::game::coverage::{card_face_coverage, card_face_gaps, SHARED_BUDGET_PILE_ELECTION_GAP};
@@ -103,6 +105,10 @@ fn single_route_shared_budget_faces_do_not_carry_the_election_gap() {
     }
 }
 
+/// These faces write no cast route over exiled cards, so the election gap cannot apply. Absence
+/// of this gap is not a support claim: Assimilation Assessor is reported unsupported by
+/// `UNTARGETED_OPPONENT_PILE_ASSIMILATE_GAP`, and its presence here only pins that it does not
+/// also write two cast routes.
 #[test]
 fn claimed_pile_readers_write_no_cast_route_and_carry_no_election_gap() {
     for name in [

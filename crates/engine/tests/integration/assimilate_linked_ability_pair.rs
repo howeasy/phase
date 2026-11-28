@@ -32,6 +32,10 @@
 //!   creature. If you cast a spell this way, that creature enters with a
 //!   finality counter on it. (If a creature with a finality counter on it would
 //!   die, exile it instead.)"
+//!
+//! Assimilation Assessor is reported unsupported
+//! (`UNTARGETED_OPPONENT_PILE_ASSIMILATE_GAP`); its text is used here only as
+//! the vehicle for the CR 607.5 copiable-set distinction on a linked-pile read.
 
 use engine::game::combat::AttackTarget;
 use engine::game::game_object::ExileSupplier;
