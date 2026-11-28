@@ -29533,6 +29533,18 @@ fn resolve_chain_body(
             // read an action that never happened.
             | Effect::CollectEvidence { .. }
     );
+    // CR 608.2d + CR 118.12: an optional sacrifice with no legal full selection
+    // is a declined option. Falling through would let the resolver sacrifice the
+    // short pool and run the "If you do" rider on a cost never paid in full
+    // ("you may sacrifice two Blood tokens" with one Blood on the battlefield).
+    // CR 608.2d + CR 101.4: an "any player may" sacrifice is judged per seat by
+    // the APNAP fan-out below, which binds each seat's own pool
+    // (`opponent_may_selection_pool`). This probe reads only the ability
+    // controller's pool, so it must not decline the whole fan-out on that
+    // single-seat answer (Prowling Pangolin: P0's lone creature must not hide
+    // P1's three).
+    let auto_decline_short_sacrifice =
+        ability.optional_for.is_none() && matches!(&ability.effect, Effect::Sacrifice { .. });
     // CR 608.2d + CR 603.5: an optional instruction on a source's host with no
     // live host is likewise a declined option ("you may have that player gain
     // control of equipped creature. If you do, untap it." — no rider runs).
@@ -29542,6 +29554,7 @@ fn resolve_chain_body(
     // its "If you do" rider stays gated.
     if optional_is_infeasible
         && (auto_decline_infeasible_optional
+            || auto_decline_short_sacrifice
             || host_effect_impossible
             || optional_infeasibility == Some(OptionalInfeasibility::Conjunction))
     {

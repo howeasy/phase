@@ -3228,6 +3228,98 @@ mod tests {
         assert!(!state.cost_payment_failed_flag);
     }
 
+    /// CR 608.2d + CR 118.12: "You may sacrifice two nonland permanents. If you
+    /// do, you gain 1 life." with ONE legal permanent is an impossible option.
+    /// The printed cost cannot be paid in full, so no prompt opens, the short
+    /// pool is left untouched, and the gated "If you do" rider does not run.
+    /// Two legal permanents keep the ordinary offer: the choice window opens
+    /// and nothing is sacrificed before it is answered.
+    #[test]
+    fn optional_sacrifice_short_pool_auto_declines_without_prompt_or_rider() {
+        let filter = TargetFilter::Typed(
+            TypedFilter::permanent()
+                .with_type(TypeFilter::Non(Box::new(TypeFilter::Land)))
+                .controller(ControllerRef::You),
+        );
+        let chain = || {
+            let mut rider = ResolvedAbility::new(
+                Effect::GainLife {
+                    amount: QuantityExpr::Fixed { value: 1 },
+                    player: TargetFilter::Controller,
+                },
+                vec![],
+                ObjectId(100),
+                PlayerId(0),
+            )
+            .condition(AbilityCondition::effect_performed());
+            rider.sub_link = SubAbilityLink::SequentialSibling;
+
+            let mut ability = ResolvedAbility::new(
+                Effect::Sacrifice {
+                    target: filter.clone(),
+                    count: QuantityExpr::Fixed { value: 2 }.into(),
+                    min_count: 0,
+                },
+                vec![],
+                ObjectId(100),
+                PlayerId(0),
+            );
+            ability.optional = true;
+            ability.sub_ability = Some(Box::new(rider));
+            ability
+        };
+        let add_nonland = |state: &mut GameState, card: u64| {
+            let id = create_object(
+                state,
+                CardId(card),
+                PlayerId(0),
+                format!("Nonland Permanent {card}"),
+                Zone::Battlefield,
+            );
+            state.objects.get_mut(&id).unwrap().card_types.core_types = vec![CoreType::Artifact];
+            id
+        };
+
+        // One matching permanent: "sacrifice two" cannot be paid in full.
+        let mut short = GameState::new_two_player(42);
+        let only = add_nonland(&mut short, 1);
+        let life_before = short.players[0].life;
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut short, &chain(), &mut events, 0).unwrap();
+
+        assert!(
+            short.battlefield.contains(&only),
+            "an infeasible exact sacrifice must leave the short pool untouched"
+        );
+        assert!(
+            !matches!(short.waiting_for, WaitingFor::OptionalEffectChoice { .. }),
+            "an impossible short-pool sacrifice must not offer an accept prompt"
+        );
+        assert_eq!(
+            short.players[0].life, life_before,
+            "the If-you-do rider must not run off a declined sacrifice"
+        );
+
+        // Control: two matching permanents make the option feasible, so the
+        // ordinary "you may" choice opens and nothing happens before it does.
+        let mut full = GameState::new_two_player(42);
+        let first = add_nonland(&mut full, 1);
+        let second = add_nonland(&mut full, 2);
+        let life_before = full.players[0].life;
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut full, &chain(), &mut events, 0).unwrap();
+
+        assert!(
+            matches!(full.waiting_for, WaitingFor::OptionalEffectChoice { .. }),
+            "a feasible optional sacrifice must still offer the choice"
+        );
+        assert!(
+            full.battlefield.contains(&first) && full.battlefield.contains(&second),
+            "nothing may be sacrificed before the optional choice is answered"
+        );
+        assert_eq!(full.players[0].life, life_before);
+    }
+
     /// CR 701.21a + CR 608.2d: "you may sacrifice it" naming a Treasure token
     /// Quark bars is an impossible option. The targeted path must leave the
     /// token on the battlefield AND signal that nothing happened, so an "If you
