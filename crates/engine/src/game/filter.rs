@@ -13384,8 +13384,9 @@ pub(crate) fn phased_in_attachments<'a>(
 }
 
 /// CR 303.4b + CR 301.5a: the attachment's own subtype decides the relation — an
-/// Aura enchants, an Equipment equips. Single authority for every reader that asks
-/// "is this attachment of kind K", replacing the duplicated subtype comparisons.
+/// Aura enchants, an Equipment equips. Shared predicate for the attachment-of-host
+/// readers in this file and `layers.rs`; other subtype checks elsewhere (e.g.
+/// `zones.rs`) are untouched.
 pub(crate) fn attachment_kind_matches(att: &GameObject, kind: &AttachmentKind) -> bool {
     let subtype = match kind {
         AttachmentKind::Aura => "Aura",

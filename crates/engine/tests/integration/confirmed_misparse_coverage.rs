@@ -303,12 +303,12 @@ fn compare_population(raw: &Map<String, Value>, populations: &[(&ConfirmedMispar
 /// gap with its parse untouched. Krond the Dawn-Clad is fenced the same way: its
 /// `exile target permanent` uses the shared `TypeFilter::Permanent` matcher, which
 /// rejects a battlefield permanent that lost all types; the shared-predicate fix is
-/// a follow-up. Warchanter Skald is fenced on an unmeasured timing concern from a
-/// review finding (F1): the worry is that "if it's enchanted or equipped" is
-/// evaluated at trigger collection, after Croaking Curse's Role attaches, rather
-/// than when the tap happens (CR 603.4). That collection timing is a separate
-/// engine gap; a follow-up ticket carries it. The remaining claimed cards (Kaito
-/// Shizuki, Novice Knight) stay supported and gap-free.
+/// a follow-up. Warchanter Skald is fenced because its "if it's enchanted or
+/// equipped" gate may be checked at trigger collection (after an effect such as
+/// Croaking Curse attaches a Role) rather than when the tap happens (CR 603.4);
+/// this is not measured here, and a follow-up ticket owns the timing check. The
+/// remaining claimed cards (Kaito Shizuki, Novice Knight) stay supported and
+/// gap-free.
 /// Sandstalker Moloch (shared dig path, ticket 359) and Sarevok,
 /// Deathbringer (a typeless permanent leaving is not counted) keep their committed
 /// rows; their gates stay unparsed (`unclaimed_history_gates_stay_unparsed`), so

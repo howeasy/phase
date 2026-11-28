@@ -11,6 +11,10 @@
 //!   - Kaito Shizuki: "At the beginning of your end step, if Kaito entered
 //!     this turn, he phases out."
 //!
+//! Krond the Dawn-Clad and Warchanter Skald are also fenced by confirmed-misparse
+//! rows; these tests only prove their parse and runtime behaviour in the covered
+//! scenarios, not the broader support the rows withhold.
+//!
 //! CR references (all verified against docs/MagicCompRules.txt):
 //!   - CR 603.4: an intervening "if" clause after a trigger condition is
 //!     checked when the trigger event occurs — the ability triggers only if
