@@ -493,34 +493,36 @@ fn pair_compatible(supplier: Option<ExileSupplier>, reader: Option<ExileSupplier
     }
 }
 
-/// CR 607.2a + CR 400.7 + CR 607.5: every entry of the pile of a trigger bound to
-/// `source`, in order, possibly repeating a card: its latched snapshot, then —
-/// while the bound incarnation is still the current object in its observed
-/// zone — the links that object has made since, then the linked-exile LKI
-/// recorded for that incarnation (its departure pile and what it exiled after
-/// departing). The one admission rule behind both [`linked_exile_pile`] and
-/// [`linked_exile_pile_holds`].
-fn pile_entries<'a>(
-    state: &'a GameState,
+/// CR 607.2a + CR 607.5: the latched half of a bound trigger's pile — the
+/// snapshot taken when the trigger latched, admitted by the pair rule.
+fn latched_pile_entries<'a>(
     source: &'a TriggerSourceContext,
+    reader: Option<ExileSupplier>,
 ) -> impl Iterator<Item = LinkedExileSnapshot> + 'a {
-    let bound = source.identity.reference;
-    let reader = pile_reader_pair(state, source);
-    let latched = source
+    source
         .linked_exile_snapshot
         .iter()
         .filter(move |snap| pair_compatible(snap.supplier, reader))
-        .cloned();
-    // CR 608.2h + CR 607.2a: the pile is read when the effect is applied, so a
-    // card exiled with the source after the trigger latched (by an earlier
-    // instance of the same doubled trigger, CR 603.2d) belongs to it. CR 400.7: only while the bound incarnation is
-    // still current in the zone it was observed in; a source that changed zones
-    // is a new object whose links are not this trigger's. CR 607.5: and only a
-    // card exiled by an ability of the reading ability's own pair; with no known
-    // reading pair no later link is admitted. The read is the latch's own
-    // surface (`live_linked_exile_snapshots`), so an off-battlefield source
-    // still reads no live links.
-    let live = source
+        .cloned()
+}
+
+/// CR 608.2h + CR 607.2a + CR 400.7 + CR 607.5: the links the bound incarnation
+/// has made since the latch. A card exiled with the source after the trigger
+/// latched (by an earlier instance of the same doubled trigger, CR 603.2d)
+/// belongs to a resolving read. It is read only while the bound incarnation is
+/// still the current object in the zone it was observed in — a source that
+/// changed zones is a new object whose links are not this trigger's — and only
+/// for a card exiled by an ability of the reading ability's own pair; with no
+/// known reading pair no later link is admitted. The read is the latch's own
+/// surface (`live_linked_exile_snapshots`), so an off-battlefield source reads
+/// no live links.
+fn live_pile_entries<'a>(
+    state: &'a GameState,
+    source: &'a TriggerSourceContext,
+    reader: Option<ExileSupplier>,
+) -> impl Iterator<Item = LinkedExileSnapshot> + 'a {
+    let bound = source.identity.reference;
+    source
         .identity
         .is_current(state)
         .then(|| {
@@ -536,10 +538,20 @@ fn pile_entries<'a>(
             snap.supplier
                 .zip(reader)
                 .is_some_and(|(supplier, reader)| supplier.pairs_with(reader))
-        });
-    // `departed`, not `admits`: an entry whose successor is this incarnation
-    // belongs to an earlier departure, a different object.
-    let later = state
+        })
+}
+
+/// CR 607.2a + CR 400.7 + CR 607.5: the linked-exile LKI recorded for the bound
+/// incarnation — its departure pile and what it exiled after departing.
+/// `departed`, not `admits`: an entry whose successor is this incarnation
+/// belongs to an earlier departure, a different object.
+fn later_pile_entries<'a>(
+    state: &'a GameState,
+    source: &'a TriggerSourceContext,
+    reader: Option<ExileSupplier>,
+) -> impl Iterator<Item = LinkedExileSnapshot> + 'a {
+    let bound = source.identity.reference;
+    state
         .linked_exile_lki
         .get(&bound.object_id)
         .into_iter()
@@ -547,8 +559,33 @@ fn pile_entries<'a>(
         .filter(move |lki| lki.departed == bound.incarnation)
         .flat_map(|lki| &lki.snapshot)
         .filter(move |snap| pair_compatible(snap.supplier, reader))
-        .cloned();
-    latched.chain(live).chain(later)
+        .cloned()
+}
+
+/// CR 607.2a + CR 400.7 + CR 607.5: every entry of the pile of a trigger bound to
+/// `source`, in order, possibly repeating a card: its latched snapshot, then —
+/// while the bound incarnation is still the current object in its observed
+/// zone — the links that object has made since, then the linked-exile LKI
+/// recorded for that incarnation. The one admission rule behind
+/// [`linked_exile_pile`], [`linked_exile_pile_holds`] and
+/// [`linked_exile_pile_as_latched`].
+fn pile_entries<'a>(
+    state: &'a GameState,
+    source: &'a TriggerSourceContext,
+) -> impl Iterator<Item = LinkedExileSnapshot> + 'a {
+    let reader = pile_reader_pair(state, source);
+    latched_pile_entries(source, reader)
+        .chain(live_pile_entries(state, source, reader))
+        .chain(later_pile_entries(state, source, reader))
+}
+
+/// CR 400.7: one entry per card incarnation, first occurrence wins — the same
+/// card exiled again is a new object and keeps its own entry.
+fn de_duplicated(entries: impl Iterator<Item = LinkedExileSnapshot>) -> Vec<LinkedExileSnapshot> {
+    let mut seen = std::collections::HashSet::new();
+    entries
+        .filter(|snap| seen.insert((snap.exiled_id, snap.incarnation)))
+        .collect()
 }
 
 /// CR 607.2a + CR 400.7 + CR 607.5: The cards linked to a trigger bound to
@@ -557,10 +594,25 @@ pub fn linked_exile_pile(
     state: &GameState,
     source: &TriggerSourceContext,
 ) -> Vec<LinkedExileSnapshot> {
-    let mut seen = std::collections::HashSet::new();
-    pile_entries(state, source)
-        .filter(|snap| seen.insert((snap.exiled_id, snap.incarnation)))
-        .collect()
+    de_duplicated(pile_entries(state, source))
+}
+
+/// CR 608.2h + CR 607.2a: the cards a free grant made by a resolving trigger
+/// reads — the latch plus the linked-exile LKI of its bound incarnation, the
+/// same admission rule as [`linked_exile_pile`] and de-duplicated the same way.
+/// A free grant is made from the pile as the trigger latched it; the cards the
+/// same resolution exiles are live links, not part of that pool. The engine has
+/// no election seam between a free grant and a card's own cast-from-exile
+/// permission, so this read preserves the grant's own pool rather than growing
+/// it.
+pub(crate) fn linked_exile_pile_as_latched(
+    state: &GameState,
+    source: &TriggerSourceContext,
+) -> Vec<LinkedExileSnapshot> {
+    let reader = pile_reader_pair(state, source);
+    de_duplicated(
+        latched_pile_entries(source, reader).chain(later_pile_entries(state, source, reader)),
+    )
 }
 
 /// CR 607.2a + CR 400.7: whether `exiled_id` is a card of the pile of a trigger

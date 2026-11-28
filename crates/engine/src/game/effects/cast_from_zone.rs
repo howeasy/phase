@@ -1604,6 +1604,32 @@ pub(crate) fn exiled_by_source_fallback_binding(
                 && crate::game::filter::matches_target_filter(state, *id, target_filter, &ctx)
         })
         .collect();
+    // CR 608.2h + CR 607.2a: a free grant made by a resolving triggered ability
+    // is applied from the pile as that trigger latched it. Cards the same
+    // resolution exiles are live links, not part of that pool, and the engine
+    // has no election seam between a free grant and a card's own
+    // cast-from-exile permission. Paid grants and non-trigger sources keep the
+    // live read.
+    let linked_ids: Vec<_> = match (&ability.effect, ability.trigger_source.as_ref()) {
+        (
+            Effect::CastFromZone {
+                without_paying_mana_cost: true,
+                ..
+            },
+            Some(source),
+        ) => {
+            let latched: HashSet<_> =
+                crate::game::players::linked_exile_pile_as_latched(state, source)
+                    .into_iter()
+                    .map(|snap| snap.exiled_id)
+                    .collect();
+            linked_ids
+                .into_iter()
+                .filter(|id| latched.contains(id))
+                .collect()
+        }
+        _ => linked_ids,
+    };
     // CR 701.20e + CR 608.2c: Look-then-cast chains (Kiora, Sovereign of
     // the Deep) leave the looked-at cards in the library. `Dig { keep_count:
     // 0 }` publishes them via `last_revealed_ids`, not exile links, but the
