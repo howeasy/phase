@@ -2688,7 +2688,19 @@ fn a_caster_who_concedes_while_paying_leaves_the_choosers_dilemma_in_the_history
     );
     only_the_announcement_is_on_the_stack(&runner, lore);
 
-    concede(&mut runner, P1);
+    // The concession goes through the narration capture too, so the zero-narration
+    // claim below covers the entries the concession itself publishes.
+    let before_concession = log.entries.len();
+    log.act(&mut runner, GameAction::Concede { player_id: P1 })
+        .expect("the caster concedes");
+    assert!(
+        runner.state().players[P1.0 as usize].is_eliminated,
+        "REACH: the caster is eliminated"
+    );
+    assert!(
+        log.entries.len() > before_concession,
+        "REACH: the concession's log entries were captured"
+    );
     assert!(!runner.state().players[0].is_eliminated);
     assert!(!runner.state().players[2].is_eliminated);
     assert!(
