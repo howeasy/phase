@@ -600,11 +600,12 @@ pub fn linked_exile_pile(
 /// CR 608.2h + CR 607.2a: the cards a free grant made by a resolving trigger
 /// reads — the latch plus the linked-exile LKI of its bound incarnation, the
 /// same admission rule as [`linked_exile_pile`] and de-duplicated the same way.
-/// A free grant is made from the pile as the trigger latched it; the cards the
-/// same resolution exiles are live links, not part of that pool. The engine has
-/// no election seam between a free grant and a card's own cast-from-exile
-/// permission, so this read preserves the grant's own pool rather than growing
-/// it.
+/// A free grant keeps the pool main gives it, the pile as the trigger latched
+/// it. This deliberately does not widen the pool to cards the same resolution
+/// exiles: that is main's behaviour, a pre-existing gap relative to CR 607.2a,
+/// not a reading the rules require. The engine has no election seam between a
+/// free grant and a card's own cast-from-exile permission, so this read
+/// preserves the grant's own pool rather than growing it.
 pub(crate) fn linked_exile_pile_as_latched(
     state: &GameState,
     source: &TriggerSourceContext,

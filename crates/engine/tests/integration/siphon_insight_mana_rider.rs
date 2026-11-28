@@ -567,10 +567,11 @@ fn court_of_locthwain_with_older_link(monarch: bool, older_link: bool) {
     );
     assert_eq!(runner.state().objects[&deeper].zone, Zone::Library);
 
-    // The paid permission carries the concession in both cases; the monarch's
-    // free grant is a per-object permission on the cards the trigger latched
-    // before this resolution, so the newly exiled card carries only the paid
-    // permission here. The free cast shows in the casts below, where no land is
+    // The paid permission carries the concession in both cases. As on main, the
+    // monarch's free grant is a per-object permission on the cards the trigger
+    // latched before this resolution, so the newly exiled card carries only the
+    // paid permission here — a pre-existing gap relative to CR 607.2a, not a
+    // rules claim. The free cast shows in the casts below, where no land is
     // tapped.
     assert_eq!(
         recorded_concessions(&runner, green),
@@ -621,10 +622,12 @@ fn court_of_locthwains_exiled_card_is_free_for_the_monarch() {
     court_of_locthwain(true);
 }
 
-/// CR 608.2h + CR 607.2a: a free grant reads the pile as the trigger latched it.
-/// With an older linked card and the newly exiled card both in reach, one
+/// As on main, a free grant reads the pile as the trigger latched it
+/// (CR 608.2h and CR 607.2a). With an older linked card and the newly exiled card both in reach, one
 /// resolution of Court's upkeep trigger frees only the older card; the newly
-/// exiled card is still offered at its normal cost. `pass_priority_to` leaves
+/// exiled card is still offered at its normal cost. That is main's behaviour —
+/// a pre-existing gap relative to CR 607.2a, with Court of Locthwain
+/// unsupported and unclaimed — not a rules claim. `pass_priority_to` leaves
 /// the upkeep without re-entering it, so exactly one trigger resolves (the
 /// `court_of_locthwains_*` tests above use `advance_to_phase`, whose re-entry
 /// resolves a second trigger and frees the newly exiled card through that
@@ -732,7 +735,8 @@ fn court_of_locthwains_one_resolution_frees_only_the_older_linked_card() {
     );
     assert_eq!(
         green_tapped, 1,
-        "the card this resolution exiled is cast at its normal cost"
+        "as on main, the card this resolution exiled is cast at its normal cost \
+         (pre-existing gap vs CR 607.2a)"
     );
 }
 

@@ -14587,15 +14587,21 @@ fn apply_single_replacement(
                 // CR 614.1c: Applied branch carries ETB counter data; add to the zone change.
                 if !modifiers.etb_counters.is_empty() {
                     match &mut new_event {
-                        // CR 614.6 + CR 122.6a: these are entry counters, so an
-                        // event this same replacement redirected away from the
-                        // battlefield never receives them — it never enters.
+                        // CR 614.6 + CR 122.6a: an event this replacement redirected
+                        // away from the battlefield never enters, so the entry
+                        // counters another replacement supplied for that abandoned
+                        // entry are never placed. CR 122.1 + CR 614.1c: counters a
+                        // redirecting replacement itself puts on the new
+                        // destination (Dauthi Voidwalker: "instead exile it with a
+                        // void counter on it") are not entry counters of the
+                        // abandoned battlefield entry; they ride the event this
+                        // replacement substituted.
                         ProposedEvent::ZoneChange {
                             to,
                             enter_with_counters,
                             ..
                         } => {
-                            if *to == Zone::Battlefield {
+                            if *to == Zone::Battlefield || modifiers.redirect_zone.is_some() {
                                 enter_with_counters.extend(modifiers.etb_counters.iter().cloned());
                             }
                         }

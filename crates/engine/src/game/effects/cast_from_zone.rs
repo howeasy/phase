@@ -1604,12 +1604,13 @@ pub(crate) fn exiled_by_source_fallback_binding(
                 && crate::game::filter::matches_target_filter(state, *id, target_filter, &ctx)
         })
         .collect();
-    // CR 608.2h + CR 607.2a: a free grant made by a resolving triggered ability
-    // is applied from the pile as that trigger latched it. Cards the same
-    // resolution exiles are live links, not part of that pool, and the engine
-    // has no election seam between a free grant and a card's own
-    // cast-from-exile permission. Paid grants and non-trigger sources keep the
-    // live read.
+    // CR 607.2a + CR 608.2h: a free grant made by a resolving triggered ability
+    // keeps the pool main gives it — the pile as that trigger latched it. This
+    // deliberately does not widen the pool to cards the same resolution exiles:
+    // that is main's behaviour, a pre-existing gap relative to CR 607.2a, not a
+    // reading the rules require. The engine has no election seam between a free
+    // grant and a card's own cast-from-exile permission. Paid grants and
+    // non-trigger sources keep the live read.
     let linked_ids: Vec<_> = match (&ability.effect, ability.trigger_source.as_ref()) {
         (
             Effect::CastFromZone {
