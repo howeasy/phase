@@ -246,12 +246,15 @@ pub(crate) fn can_sacrifice_for_ability(
 /// count or a count that resolves to zero keeps the pre-existing rule:
 /// infeasible only when the pool is empty.
 ///
-/// The candidate pool is consulted only for filters whose subject is a class of
-/// battlefield permanents. Referent filters (`TriggeringSource`, `ParentTarget`,
-/// `CostPaidObject`, …) name one bound object and are resolved by
-/// [`resolve`]'s targeted path, not the pool; enumerating the battlefield under
-/// them matches nothing, so treating an empty pool as infeasible would suppress
-/// a sacrifice the resolver would perform (Foot Chopper, Ogre-Head Helm).
+/// The candidate pool is consulted only for filters [`sacrifice_candidates`]
+/// can enumerate correctly: classes of battlefield permanents (`Any`, `Typed`,
+/// `SelfRef`) and a `SpecificObject` bound by a tracked-set / combat-damage
+/// anaphor (CR 510.2), which the pool admits by identity. The remaining referent
+/// filters (`TriggeringSource`, `ParentTarget`, `CostPaidObject`, …) name one
+/// bound object and are resolved by [`resolve`]'s targeted path, not the pool;
+/// enumerating the battlefield under them matches nothing, so treating an empty
+/// pool as infeasible would suppress a sacrifice the resolver would perform
+/// (Foot Chopper, Ogre-Head Helm).
 pub(crate) fn optional_sacrifice_is_infeasible(
     state: &GameState,
     ability: &ResolvedAbility,
@@ -352,19 +355,62 @@ pub(crate) fn optional_sacrifice_is_infeasible(
     }
 }
 
-/// CR 608.2d: True when `filter`'s subject is a class of permanents on the
-/// battlefield — the shape [`sacrifice_candidates`] enumerates — rather than a
-/// referent to one already-bound object. Every leg of a conjunction/disjunction
-/// must be a class so a referent anywhere in the tree keeps the option offered
-/// (failing open, never suppressing a legal sacrifice).
+/// CR 608.2d: True when a pool built by [`sacrifice_candidates`] is the right
+/// answer for `filter`, so an empty pool means "no legal sacrifice" rather than
+/// an enumeration mismatch. Every leg of a conjunction/disjunction must
+/// qualify, and a `Not` inherits its operand's shape. This is the
+/// pool-enumerability axis; [`sacrifice_filter_names_bound_object`] answers the
+/// distinct referent-vs-class question.
+///
+/// * `Any` / `SelfRef` / `Typed` name a class of battlefield permanents.
+/// * `SpecificObject` names one already-bound object. [`sacrifice_candidates`]
+///   still walks the live battlefield and admits that object by identity, plus
+///   the chooser's control and [`can_sacrifice_for_ability`], which is exactly
+///   the pool `resolve` consults for the tracked-set / combat-damage anaphor
+///   CR 510.2 feeds it (Descendants' Fury's "one of them" binds to a
+///   `SpecificObject`, or an `Or` of them, from the damage event's source set).
+///   A bound object its chooser is barred from sacrificing must therefore read
+///   as infeasible instead of offering a dead option.
+///
+/// Other referents (`TriggeringSource`, `ParentTarget`, `CostPaidObject`, …)
+/// stay `false`: `resolve` handles them through its targeted path, and a pool
+/// built for them matches nothing, so treating the empty pool as infeasible
+/// would suppress a sacrifice the resolver would perform (Foot Chopper,
+/// Ogre-Head Helm) — those keep failing open.
 pub(crate) fn sacrifice_filter_is_battlefield_population(filter: &TargetFilter) -> bool {
     match filter {
-        TargetFilter::Any | TargetFilter::SelfRef | TargetFilter::Typed(_) => true,
+        TargetFilter::Any
+        | TargetFilter::SelfRef
+        | TargetFilter::Typed(_)
+        | TargetFilter::SpecificObject { .. } => true,
         TargetFilter::Or { filters } | TargetFilter::And { filters } => filters
             .iter()
             .all(sacrifice_filter_is_battlefield_population),
         TargetFilter::Not { filter } => sacrifice_filter_is_battlefield_population(filter),
         _ => false,
+    }
+}
+
+/// CR 608.2d + CR 701.21a: True when `filter` names an already-bound object — a
+/// referent whose refusal means the "sacrifice it" instruction did not happen —
+/// rather than a class of battlefield permanents.
+///
+/// This is the REFERENT axis and is deliberately NOT the same question as
+/// [`sacrifice_filter_is_battlefield_population`]: a `SpecificObject` is both
+/// pool-enumerable (the candidate pool admits it by identity) and a bound
+/// referent, so the `WhenYouDo` refusal gate must still read it as one named
+/// object. `Or`/`And` name a referent when ANY leg does (the inverse of the
+/// population predicate's all-legs rule); `Not` inherits its operand's shape.
+/// Every other referent filter names a bound object; `Any`/`SelfRef`/`Typed`
+/// are classes.
+pub(crate) fn sacrifice_filter_names_bound_object(filter: &TargetFilter) -> bool {
+    match filter {
+        TargetFilter::Any | TargetFilter::SelfRef | TargetFilter::Typed(_) => false,
+        TargetFilter::Or { filters } | TargetFilter::And { filters } => {
+            filters.iter().any(sacrifice_filter_names_bound_object)
+        }
+        TargetFilter::Not { filter } => sacrifice_filter_names_bound_object(filter),
+        _ => true,
     }
 }
 

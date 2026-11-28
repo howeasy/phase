@@ -35402,11 +35402,14 @@ pub(crate) fn evaluate_condition(
             let optional_action_not_taken =
                 ability.optional && !ability.context.optional_effect_performed;
             // CR 608.2d + CR 701.21a: a refused sacrifice of a named referent
-            // is the action's non-occurrence, not a performed sacrifice.
+            // is the action's non-occurrence, not a performed sacrifice. This is
+            // the REFERENT axis, not pool-enumerability: a `SpecificObject` is
+            // enumerable by the candidate pool but is still one bound object
+            // whose refusal means the instruction did not happen.
             let refused_named_referent_sacrifice = matches!(
                 &ability.effect,
                 Effect::Sacrifice { target, .. }
-                    if !sacrifice::sacrifice_filter_is_battlefield_population(target)
+                    if sacrifice::sacrifice_filter_names_bound_object(target)
             ) && ability.context.optional_effect_performed;
             let payment_failed = (matches!(
                 ability.effect,
