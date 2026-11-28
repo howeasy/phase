@@ -11937,7 +11937,7 @@ fn matches_filter_prop(
                 false
             } else {
                 phased_in_attachments(state, obj)
-                    .any(|att| att.card_types.subtypes.iter().any(|s| s == "Aura"))
+                    .any(|att| attachment_kind_matches(att, &AttachmentKind::Aura))
             }
         }
         // CR 301.5 + CR 301.5f: Same reasoning as `EnchantedBy` — source-relative
@@ -11955,7 +11955,7 @@ fn matches_filter_prop(
                 false
             } else {
                 phased_in_attachments(state, obj)
-                    .any(|att| att.card_types.subtypes.iter().any(|s| s == "Equipment"))
+                    .any(|att| attachment_kind_matches(att, &AttachmentKind::Equipment))
             }
         }
         // CR 301.5 + CR 303.4: Inverse of `EnchantedBy`/`EquippedBy` — matches
@@ -12036,42 +12036,21 @@ fn matches_filter_prop(
             kind,
             controller,
             exclude_source,
-        } => phased_in_attachments(state, obj).any(|att| {
+        } => phased_in_attachment_of_kinds(state, obj, std::slice::from_ref(kind)).any(|att| {
             if exclude_source.is_exclude() && att.id == source.id {
-                return false;
-            }
-            let kind_matches = match kind {
-                crate::types::ability::AttachmentKind::Aura => {
-                    att.card_types.subtypes.iter().any(|s| s == "Aura")
-                }
-                crate::types::ability::AttachmentKind::Equipment => {
-                    att.card_types.subtypes.iter().any(|s| s == "Equipment")
-                }
-            };
-            if !kind_matches {
                 return false;
             }
             attachment_controller_matches(controller.as_ref(), att.controller, state, source)
         }),
         // CR 303.4 + CR 301.5: Disjunctive attachment predicate — matches when the
-        // object has at least one attachment whose subtype is in `kinds` and whose
+        // object has at least one attachment whose kind is in `kinds` and whose
         // controller satisfies the optional `ControllerRef`. Generalization of
         // `HasAttachment` to the "enchanted or equipped" compound-subject class.
-        FilterProp::HasAnyAttachmentOf { kinds, controller } => phased_in_attachments(state, obj)
-            .any(|att| {
-                let kind_matches = kinds.iter().any(|kind| match kind {
-                    crate::types::ability::AttachmentKind::Aura => {
-                        att.card_types.subtypes.iter().any(|s| s == "Aura")
-                    }
-                    crate::types::ability::AttachmentKind::Equipment => {
-                        att.card_types.subtypes.iter().any(|s| s == "Equipment")
-                    }
-                });
-                if !kind_matches {
-                    return false;
-                }
+        FilterProp::HasAnyAttachmentOf { kinds, controller } => {
+            phased_in_attachment_of_kinds(state, obj, kinds).any(|att| {
                 attachment_controller_matches(controller.as_ref(), att.controller, state, source)
-            }),
+            })
+        }
         // CR 613.4c: In per-recipient layer contexts, "other" is relative to
         // the affected object. Outside those contexts, it remains source-relative.
         // A shared-quality reference scan binds the compared object as the
@@ -12259,9 +12238,9 @@ fn matches_filter_prop(
         FilterProp::Modified => {
             let has_counter = obj.counters.values().any(|&n| n > 0);
             let has_qualifying_attachment = phased_in_attachments(state, obj).any(|att| {
-                let kind = if att.card_types.subtypes.iter().any(|s| s == "Equipment") {
+                let kind = if attachment_kind_matches(att, &AttachmentKind::Equipment) {
                     AttachmentKind::Equipment
-                } else if att.card_types.subtypes.iter().any(|s| s == "Aura") {
+                } else if attachment_kind_matches(att, &AttachmentKind::Aura) {
                     AttachmentKind::Aura
                 } else {
                     return false;
@@ -13402,6 +13381,29 @@ pub(crate) fn phased_in_attachments<'a>(
         .iter()
         .filter_map(|id| state.objects.get(id))
         .filter(|att| !att.is_phased_out())
+}
+
+/// CR 303.4b + CR 301.5a: the attachment's own subtype decides the relation — an
+/// Aura enchants, an Equipment equips. Single authority for every reader that asks
+/// "is this attachment of kind K", replacing the duplicated subtype comparisons.
+pub(crate) fn attachment_kind_matches(att: &GameObject, kind: &AttachmentKind) -> bool {
+    let subtype = match kind {
+        AttachmentKind::Aura => "Aura",
+        AttachmentKind::Equipment => "Equipment",
+    };
+    att.card_types.subtypes.iter().any(|s| s == subtype)
+}
+
+/// CR 702.26b: the phased-in attachments of any of `kinds`, the disjunctive form
+/// of [`phased_in_attachments`]. Back-pointer and controller checks stay with the
+/// caller, which owns the predicate's remaining axes.
+pub(crate) fn phased_in_attachment_of_kinds<'a>(
+    state: &'a GameState,
+    host: &'a GameObject,
+    kinds: &'a [AttachmentKind],
+) -> impl Iterator<Item = &'a GameObject> + 'a {
+    phased_in_attachments(state, host)
+        .filter(move |att| kinds.iter().any(|kind| attachment_kind_matches(att, kind)))
 }
 
 /// CR 700.9: Equipment qualifies under any controller (CR 301.5).

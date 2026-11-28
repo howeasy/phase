@@ -34,11 +34,12 @@ use crate::game::quantity::{
 use crate::game::speed::{effective_speed, has_max_speed};
 use crate::types::ability::{
     quantity_expr_uses_recipient, AbilityCost, AbilityDefinition, AbilityKind,
-    ActivationRestriction, AttachmentReferent, AttackedYouScope, BasicLandType, CardTypeSetSource,
-    CastingPermission, ChosenSubtypeKind, CommanderOwnership, ContinuousModification,
-    CopiableValues, DefinitionOrigin, Designation, Duration, Effect, FilterProp, ManaContribution,
-    ManaProduction, PlayerFilter, PlayerScope, QuantityExpr, QuantityRef, StaticCondition,
-    StaticDefinition, TargetFilter, TriggerGrantProducerKey, TriggerProducerOrigin, TypedFilter,
+    ActivationRestriction, AttachmentKind, AttachmentReferent, AttackedYouScope, BasicLandType,
+    CardTypeSetSource, CastingPermission, ChosenSubtypeKind, CommanderOwnership,
+    ContinuousModification, CopiableValues, DefinitionOrigin, Designation, Duration, Effect,
+    FilterProp, ManaContribution, ManaProduction, PlayerFilter, PlayerScope, QuantityExpr,
+    QuantityRef, StaticCondition, StaticDefinition, TargetFilter, TriggerGrantProducerKey,
+    TriggerProducerOrigin, TypedFilter,
 };
 use crate::types::ability_visit::{
     each_granter_symbol, granter_symbols_mut, names_unbound_granter, own_fields_name_granter,
@@ -2788,14 +2789,16 @@ pub(crate) fn evaluate_condition_with_context(
     evaluate_condition_inner(state, condition, controller, source_id, context)
 }
 
-fn source_has_attachment_subtype(state: &GameState, source_id: ObjectId, subtype: &str) -> bool {
+fn source_has_attachment_subtype(
+    state: &GameState,
+    source_id: ObjectId,
+    kind: &AttachmentKind,
+) -> bool {
     state.objects.get(&source_id).is_some_and(|host| {
         // CR 702.26b: phased-out attachments do not exist for this check;
-        // `phased_in_attachments` excludes them while their links persist.
-        crate::game::filter::phased_in_attachments(state, host).any(|att| {
-            att.attached_to.and_then(|target| target.as_object()) == Some(source_id)
-                && att.card_types.subtypes.iter().any(|s| s == subtype)
-        })
+        // `phased_in_attachment_of_kinds` excludes them while their links persist.
+        crate::game::filter::phased_in_attachment_of_kinds(state, host, std::slice::from_ref(kind))
+            .any(|att| att.attached_to.and_then(|target| target.as_object()) == Some(source_id))
     })
 }
 
@@ -3164,11 +3167,11 @@ fn evaluate_condition_inner(
             .is_some_and(|obj| obj.controller == *player),
         // CR 301.5a: True when at least one Equipment is attached to the source object.
         StaticCondition::SourceIsEquipped => {
-            source_has_attachment_subtype(state, source_id, "Equipment")
+            source_has_attachment_subtype(state, source_id, &AttachmentKind::Equipment)
         }
         // CR 303.4b: True when at least one Aura is attached to the source object.
         StaticCondition::SourceIsEnchanted => {
-            source_has_attachment_subtype(state, source_id, "Aura")
+            source_has_attachment_subtype(state, source_id, &AttachmentKind::Aura)
         }
         // CR 701.37: True when the source permanent is monstrous.
         StaticCondition::SourceIsMonstrous => state
